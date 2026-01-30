@@ -93,32 +93,97 @@ Discovers and creates relationships within each data source family:
 - Connects temporal sequences of weather events
 - Associates alerts with affected geographic areas
 
-**Example Pattern** (generalized across all sources):
+**Example Patterns** (from actual ontologies):
+
 ```turtle
-# Hierarchical relationships (captured in raw RDF)
-source:ParentEntity a source:ParentClass ;
-    rdfs:label "Parent Category" .
+# ============================================
+# Pattern 1: Hierarchical Relationships
+# ============================================
+# Captured in raw RDF by mappers
 
-source:ChildEntity a source:ChildClass ;
-    rdfs:label "Child Category" ;
-    source:hasParent source:ParentEntity .
+# CPI category hierarchy
+cpi:AllItems_Entity a cpi:AllItems ;
+    rdfs:label "All items" .
 
-# Temporal sequences
-source:Entity_November2024_Measurement a source:MeasurementType ;
-    source:measurementValue "X"^^xsd:decimal ;
-    source:hasMonth source:November ;
-    source:hasYear source:2024 .
+cpi:AllItems_Food_Entity a cpi:Food ;
+    rdfs:label "Food" ;
+    cpi:hasParent cpi:AllItems_Entity .
 
-source:Entity_December2024_Measurement a source:MeasurementType ;
-    source:measurementValue "Y"^^xsd:decimal ;
-    source:hasMonth source:December ;
-    source:hasYear source:2024 .
+cpi:AllItems_Food_FoodAtHome_Entity a cpi:FoodAtHome ;
+    rdfs:label "Food at home" ;
+    cpi:hasParent cpi:AllItems_Food_Entity .
 
-# Enrichment adds temporal sequence
-source:Entity_November2024_Measurement bls:precedes source:Entity_December2024_Measurement .
+# PPI commodity hierarchy
+ppi:FinalDemand_Section a ppi:Section ;
+    rdfs:label "Final Demand" .
 
-# Intra-source correlations
-source:EntityA bls:correlatesWith source:EntityB .
+ppi:FinalDemand_FoodManufacturing_12345_Entity a ppi:FoodManufacturing ;
+    rdfs:label "Food manufacturing" ;
+    ppi:belongsToSection ppi:FinalDemand_Section ;
+    ppi:hasItemCode "12345" .
+
+# JOLTS industry hierarchy
+jolts:Industry_LeisureAndHospitality_Industry a jolts:Industry ;
+    rdfs:label "Leisure and hospitality" .
+
+jolts:Industry_LeisureAndHospitality_FoodServices_Industry a jolts:Industry ;
+    rdfs:label "Food services and drinking places" ;
+    jolts:hasParent jolts:Industry_LeisureAndHospitality_Industry .
+
+# ============================================
+# Pattern 2: Temporal Sequences
+# ============================================
+# Enrichment adds temporal ordering
+
+# CPI measurements across consecutive months
+cpi:AllItems_Food_November2024_Index a cpi:Index ;
+    cpi:indexValue "295.8"^^xsd:decimal ;
+    cpi:hasCategory cpi:AllItems_Food_Entity ;
+    cpi:hasMonth cpi:November ;
+    cpi:hasYear cpi:2024 .
+
+cpi:AllItems_Food_December2024_Index a cpi:Index ;
+    cpi:indexValue "296.2"^^xsd:decimal ;
+    cpi:hasCategory cpi:AllItems_Food_Entity ;
+    cpi:hasMonth cpi:December ;
+    cpi:hasYear cpi:2024 .
+
+# Enrichment adds: temporal sequence
+cpi:AllItems_Food_November2024_Index bls:precedes cpi:AllItems_Food_December2024_Index .
+
+# PPI measurements across consecutive months
+ppi:FinalDemand_FoodManufacturing_12345_October2024ToNovember2024_MonthlyChange 
+    a ppi:MonthlyChange ;
+    ppi:changeValue "0.5"^^xsd:decimal ;
+    ppi:hasCommodityGrouping ppi:FinalDemand_FoodManufacturing_12345_Entity ;
+    ppi:hasStartMonth ppi:October ;
+    ppi:hasEndMonth ppi:November .
+
+ppi:FinalDemand_FoodManufacturing_12345_November2024ToDecember2024_MonthlyChange 
+    a ppi:MonthlyChange ;
+    ppi:changeValue "0.3"^^xsd:decimal ;
+    ppi:hasCommodityGrouping ppi:FinalDemand_FoodManufacturing_12345_Entity ;
+    ppi:hasStartMonth ppi:November ;
+    ppi:hasEndMonth ppi:December .
+
+# Enrichment adds: temporal sequence
+ppi:FinalDemand_FoodManufacturing_12345_October2024ToNovember2024_MonthlyChange 
+    bls:precedes ppi:FinalDemand_FoodManufacturing_12345_November2024ToDecember2024_MonthlyChange .
+
+# ============================================
+# Pattern 3: Intra-Source Correlations
+# ============================================
+# Enrichment discovers relationships within BLS data
+
+# CPI Food consumption correlates with PPI Food production
+cpi:AllItems_Food_Entity bls:correlatesWith ppi:FinalDemand_FoodManufacturing_12345_Entity .
+
+# JOLTS job openings correlates with EMPSIT employment levels
+jolts:Industry_LeisureAndHospitality_FoodServices_Industry 
+    bls:correlatesWith empsit:LeisureAndHospitality_Employment_Entity .
+
+# CPI Energy prices correlate with PPI Energy goods
+cpi:AllItems_Energy_Entity bls:correlatesWith ppi:FinalDemand_EnergyGoods_67890_Entity .
 ```
 
 #### Cross-Source Linking
