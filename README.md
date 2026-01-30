@@ -58,3 +58,36 @@ The pipeline supports three execution modes to optimize for different workflows:
 │ └── PyTorch Geometric HeteroData (.pt files) - GNN ready   │
 └────────────────────────────────────────────────────────────┘
 ```
+
+## Project Structure
+
+```
+pyg-knowledge-graph-builder/
+├── glue_jobs/
+│   ├── build_graph.py              # Main Glue job entry point
+│   ├── enrichment/                 # RDF enrichment modules
+│   │   ├── pipeline.py
+│   │   ├── temporal_unifier.py
+│   │   ├── cross_source_linker.py
+│   │   └── ontology_mapper.py
+│   ├── pyg_builder/                # PyG construction modules
+│   │   ├── constructor.py          # Main PyG builder
+│   │   ├── node_mapper.py          # RDF → PyG nodes
+│   │   ├── edge_mapper.py          # RDF → PyG edges
+│   │   └── feature_extractor.py    # RDF → PyG features
+│   └── utils/
+│       ├── s3_utils.py
+│       └── rdf_utils.py
+├── notebooks/
+│   ├── utils/
+│   │   └── invoke_helpers.py       # Helper functions
+│   ├── quick_experiment.ipynb      # Quick start
+│   ├── multi_experiment.ipynb      # Multi-graph workflow
+│   └── experiments/
+│       ├── node_types.ipynb        # Experiment with node types
+│       ├── edge_types.ipynb        # Experiment with edge types
+│       └── features.ipynb          # Experiment with features
+├── lambda/                         # Production triggers
+├── tests/                          # Unit and integration tests
+└── deployment/                     # Deployment scripts
+```
