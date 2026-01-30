@@ -37,10 +37,10 @@ The pipeline supports three execution modes to optimize for different workflows:
 ```
 ┌────────────────────────────────────────────────────────────┐
 │ Raw Data Sources (S3)                                      │
-│ ├── BLS Economic Data (10 categories, ~50 mappers) - RDF   │
-│ ├── SEC Data (4 categories, ~30 mappers) - RDF             │
-│ ├── Market Data (~20 mappers) - RDF                        │
-│ └── NOAA Weather Alerts (~10 mappers) - RDF                │
+│ ├── BLS Economic Data (10 categories, ~100 mappers) - RDF  │
+│ ├── SEC Data (4 categories, 4 mappers) - RDF               │
+│ ├── Market Data (1 mapper) - RDF                           │
+│ └── NOAA Weather Alerts (1 mapper) - RDF                   │
 │                                                            │
 │ Total: 100+ mappers and ontologies                         │
 └────────────────────────────────────────────────────────────┘
@@ -72,23 +72,23 @@ The enrichment pipeline creates a unified knowledge graph by establishing relati
 #### Intra-Source Linking
 Discovers and creates relationships within each data source family:
 
-**Within BLS Economic Data** (10 categories, ~50 mappers)
+**Within BLS Economic Data** (10 categories, ~100 mappers)
 - Links related indicators across CPI, PPI, ECI, EMPSIT, JOLTS, LAUS, METRO, REALER, WKYENG, XIMPIM
 - Connects hierarchical category structures (e.g., All Items → Food → Food at Home)
 - Establishes temporal sequences within each indicator
 - Correlates related measurements (e.g., CPI Food ↔ PPI Food Manufacturing)
 
-**Within SEC Data** (4 categories, ~30 mappers)
+**Within SEC Data** (4 categories, 4 mappers)
 - Links company filings to related proceedings and suspensions
 - Connects filings across time for same company
 - Associates different filing types (10-K, 10-Q, 8-K) for same entity
 
-**Within Market Data** (~20 mappers)
+**Within Market Data** (1 mapper)
 - Links stock prices to corresponding options chains
 - Connects historical price sequences
 - Associates related tickers (e.g., company stock ↔ sector ETF)
 
-**Within NOAA Weather Data** (~10 mappers)
+**Within NOAA Weather Data** (1 mapper)
 - Links related weather alerts by region
 - Connects temporal sequences of weather events
 - Associates alerts with affected geographic areas
@@ -259,7 +259,7 @@ The pipeline ingests RDF data from multiple heterogeneous sources:
 - WKYENG (Weekly Earnings) - 6 tables
 - XIMPIM (Import/Export Price Indexes) - 11 tables
 
-**SEC Data** (4 categories, ~4 mappers)
+**SEC Data** (4 categories, 4 mappers)
 - Company filings (10-K, 10-Q, 8-K, etc.)
 - Administrative proceedings
 - Litigation releases
