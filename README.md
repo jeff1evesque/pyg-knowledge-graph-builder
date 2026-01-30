@@ -1,6 +1,3 @@
-# Complete Integrated README.md
-
-```markdown
 # PyTorch Geometric Knowledge Graph Builder
 
 > Serverless pipeline for constructing PyTorch Geometric heterogeneous graphs from enriched RDF knowledge graphs
@@ -14,7 +11,7 @@
 
 PyTorch Geometric Knowledge Graph Builder is a flexible, serverless pipeline that transforms raw RDF data from multiple heterogeneous sources into enriched knowledge graphs and constructs PyTorch Geometric `HeteroData` objects ready for Graph Neural Network (GNN) training.
 
-The pipeline processes data from **120+ domain-specific ontologies** spanning economic indicators, financial filings, market data, and environmental alerts, creating a unified knowledge graph with rich intra-source and cross-source relationships.
+The pipeline processes data from **100+ domain-specific ontologies** spanning economic indicators, financial filings, market data, and environmental alerts, creating a unified knowledge graph with rich intra-source and cross-source relationships.
 
 The pipeline supports three execution modes to optimize for different workflows:
 
@@ -24,7 +21,7 @@ The pipeline supports three execution modes to optimize for different workflows:
 
 ### Key Features
 
-- **Large-Scale Integration**: Processes 120+ ontologies with millions of triples per time period
+- **Large-Scale Integration**: Processes 100+ ontologies with millions of triples per time period
 - **Temporal Unification**: Unified temporal entities across all data sources
 - **Intra-Source Linking**: Automatic relationship discovery within data source families
 - **Cross-Source Linking**: Automatic relationship discovery across heterogeneous datasets
@@ -45,7 +42,7 @@ The pipeline supports three execution modes to optimize for different workflows:
 │ ├── Market Data (~20 mappers) - RDF                        │
 │ └── NOAA Weather Alerts (~10 mappers) - RDF                │
 │                                                            │
-│ Total: 120+ mappers and ontologies                         │
+│ Total: 100+ mappers and ontologies                         │
 └────────────────────────────────────────────────────────────┘
                             ↓
 ┌────────────────────────────────────────────────────────────┐
@@ -310,7 +307,6 @@ pyg-knowledge-graph-builder/
 ├── lambda/                         # Production triggers
 ├── tests/                          # Unit and integration tests
 └── deployment/                     # Deployment scripts
-```
 ```
 
 ---
