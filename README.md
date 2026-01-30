@@ -1,6 +1,3 @@
-# Complete Integrated README.md
-
-```markdown
 # PyTorch Geometric Knowledge Graph Builder
 
 > Serverless pipeline for constructing PyTorch Geometric heterogeneous graphs from enriched RDF knowledge graphs
@@ -310,7 +307,6 @@ pyg-knowledge-graph-builder/
 ├── lambda/                         # Production triggers
 ├── tests/                          # Unit and integration tests
 └── deployment/                     # Deployment scripts
-```
 ```
 
 ---
