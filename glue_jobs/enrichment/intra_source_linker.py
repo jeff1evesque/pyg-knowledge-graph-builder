@@ -5,7 +5,7 @@ Links entities within the BLS family (CPI, PPI, ECI, JOLTS, etc.)
 This module encodes domain knowledge about BLS data relationships.
 Patterns are only defined for datasets whose ontologies have been analyzed.
 
-Currently supported datasets: CPI, PPI
+Currently supported datasets: CPI, PPI, JOLTS
 TODO: Add EMPSIT, ECI, LAUS, METRO, REALER, WKYENG, XIMPIM as ontologies are provided
 """
 
