@@ -6,7 +6,7 @@ This module encodes domain knowledge about BLS data relationships.
 Patterns are only defined for datasets whose ontologies have been analyzed.
 
 Currently supported datasets: CPI, PPI
-TODO: Add JOLTS, EMPSIT, ECI, LAUS, METRO, REALER, WKYENG, XIMPIM as ontologies are provided
+TODO: Add EMPSIT, ECI, LAUS, METRO, REALER, WKYENG, XIMPIM as ontologies are provided
 """
 
 from rdflib import Graph, URIRef, Literal, Namespace
@@ -33,21 +33,11 @@ BLS_SECTOR_PATTERNS = {
         'description': 'Food production, distribution, and consumption chain',
         'sector_uri': BLS_ENRICHMENT.FoodSector,
         'keywords': {
-            # CPI: Consumer food prices (from CPI ontology analysis)
-            # Categories: Food, Food at home, Food away from home, etc.
             'cpi': ['Food', 'Grocery', 'Restaurant', 'Dining', 'Meals', 'Beverages'],
-
-            # PPI: Producer food costs (from PPI ontology analysis)
-            # Categories: Food manufacturing, Foodstuffs, Finished consumer foods, etc.
             'ppi': ['Food', 'Manufacturing', 'Foodstuffs', 'Feeds', 'Finished Consumer Foods'],
-
-            # JOLTS: TODO - Add when JOLTS ontology is provided
-            # Expected: Food services, restaurants, etc.
-            # 'jolts': [],
-
-            # EMPSIT: TODO - Add when EMPSIT ontology is provided
-            # Expected: Food services employment, leisure and hospitality, etc.
-            # 'empsit': [],
+            # JOLTS: Food services and drinking places
+            'jolts': ['Food services', 'Accommodation and food services', 'Restaurants',
+                      'Drinking places', 'Food service'],
         },
         'relationship': BLS_ENRICHMENT.foodSectorCorrelation
     },
@@ -55,21 +45,11 @@ BLS_SECTOR_PATTERNS = {
         'description': 'Energy production, distribution, and consumption',
         'sector_uri': BLS_ENRICHMENT.EnergySector,
         'keywords': {
-            # CPI: Consumer energy prices
-            # Categories: Energy, Gasoline, Fuel oil, Electricity, Natural gas, etc.
             'cpi': ['Energy', 'Gasoline', 'Fuel', 'Electricity', 'Gas', 'Utility'],
-
-            # PPI: Producer energy costs
-            # Categories: Energy goods, Petroleum, etc.
             'ppi': ['Energy', 'Goods', 'Materials', 'Fuel', 'Petroleum'],
-
-            # JOLTS: TODO
-            # Expected: Mining, oil and gas extraction, utilities, etc.
-            # 'jolts': [],
-
-            # EMPSIT: TODO
-            # Expected: Mining, utilities employment, etc.
-            # 'empsit': [],
+            # JOLTS: Mining, oil and gas extraction, utilities
+            'jolts': ['Mining', 'Oil and gas extraction', 'Utilities', 'Electric power',
+                      'Natural gas', 'Coal mining'],
         },
         'relationship': BLS_ENRICHMENT.energySectorCorrelation
     },
@@ -77,21 +57,11 @@ BLS_SECTOR_PATTERNS = {
         'description': 'Housing, construction, and shelter',
         'sector_uri': BLS_ENRICHMENT.HousingSector,
         'keywords': {
-            # CPI: Consumer housing costs
-            # Categories: Housing, Shelter, Rent, Owners' equivalent rent, etc.
             'cpi': ['Housing', 'Shelter', 'Rent', 'Owners', 'Lodging'],
-
-            # PPI: Construction and building materials
-            # Categories: Construction, Building materials, Residential construction, etc.
             'ppi': ['Construction', 'Building', 'Materials', 'Residential'],
-
-            # JOLTS: TODO
-            # Expected: Construction industry, etc.
-            # 'jolts': [],
-
-            # EMPSIT: TODO
-            # Expected: Construction employment, etc.
-            # 'empsit': [],
+            # JOLTS: Construction industry
+            'jolts': ['Construction', 'Building construction', 'Heavy construction',
+                      'Specialty trade contractors', 'Residential construction'],
         },
         'relationship': BLS_ENRICHMENT.housingSectorCorrelation
     },
@@ -99,21 +69,11 @@ BLS_SECTOR_PATTERNS = {
         'description': 'Transportation and warehousing',
         'sector_uri': BLS_ENRICHMENT.TransportationSector,
         'keywords': {
-            # CPI: Consumer transportation costs
-            # Categories: Transportation, Motor vehicles, Gasoline, Public transportation, etc.
             'cpi': ['Transportation', 'Vehicle', 'Automobile', 'Transit', 'Airfare'],
-
-            # PPI: Transportation services and trade
-            # Categories: Transportation and warehousing, Trade services, etc.
             'ppi': ['Transportation', 'Warehousing', 'Trade', 'Shipping'],
-
-            # JOLTS: TODO
-            # Expected: Transportation and warehousing industry, etc.
-            # 'jolts': [],
-
-            # EMPSIT: TODO
-            # Expected: Transportation employment, etc.
-            # 'empsit': [],
+            # JOLTS: Transportation and warehousing
+            'jolts': ['Transportation', 'Warehousing', 'Truck transportation',
+                      'Couriers and messengers', 'Transit', 'Air transportation'],
         },
         'relationship': BLS_ENRICHMENT.transportationSectorCorrelation
     },
@@ -121,24 +81,74 @@ BLS_SECTOR_PATTERNS = {
         'description': 'Goods vs Services distinction across datasets',
         'sector_uri': BLS_ENRICHMENT.GoodsServicesSector,
         'keywords': {
-            # CPI: Goods and services categories
-            # Categories: Commodities, Services, Durables, Nondurables, etc.
             'cpi': ['Goods', 'Services', 'Commodities'],
-
-            # PPI: Final/Intermediate demand split
-            # Categories: Final demand goods, Final demand services, Processed goods, etc.
             'ppi': ['Goods', 'Services', 'Final Demand', 'Intermediate Demand',
                     'Processed', 'Unprocessed'],
-
-            # JOLTS: TODO
-            # Expected: Goods-producing, Service-providing industries, etc.
-            # 'jolts': [],
-
-            # EMPSIT: TODO
-            # Expected: Goods-producing, Service-providing employment, etc.
-            # 'empsit': [],
+            # JOLTS: Goods-producing vs Service-providing
+            'jolts': ['Goods-producing', 'Service-providing', 'Manufacturing',
+                      'Trade, transportation, and utilities', 'Professional and business services'],
         },
         'relationship': BLS_ENRICHMENT.goodsServicesRelation
+    },
+    'manufacturing_sector': {
+        'description': 'Manufacturing and production',
+        'sector_uri': BLS_ENRICHMENT.ManufacturingSector,
+        'keywords': {
+            'cpi': [],  # CPI doesn't have manufacturing categories
+            'ppi': ['Manufacturing', 'Production', 'Fabrication', 'Processing'],
+            # JOLTS: Manufacturing industries
+            'jolts': ['Manufacturing', 'Durable goods', 'Nondurable goods',
+                      'Fabricated metal', 'Machinery', 'Computer and electronic'],
+        },
+        'relationship': BLS_ENRICHMENT.manufacturingSectorCorrelation
+    },
+    'retail_sector': {
+        'description': 'Retail trade and sales',
+        'sector_uri': BLS_ENRICHMENT.RetailSector,
+        'keywords': {
+            'cpi': [],  # CPI measures prices, not retail activity
+            'ppi': ['Trade', 'Wholesale', 'Retail'],
+            # JOLTS: Retail trade
+            'jolts': ['Retail trade', 'Motor vehicle dealers', 'Furniture stores',
+                      'Electronics stores', 'Food and beverage stores', 'General merchandise'],
+        },
+        'relationship': BLS_ENRICHMENT.retailSectorCorrelation
+    },
+    'healthcare_sector': {
+        'description': 'Healthcare and social assistance',
+        'sector_uri': BLS_ENRICHMENT.HealthcareSector,
+        'keywords': {
+            'cpi': ['Medical', 'Healthcare', 'Hospital', 'Physician', 'Prescription'],
+            'ppi': ['Healthcare', 'Medical', 'Hospital'],
+            # JOLTS: Healthcare and social assistance
+            'jolts': ['Health care', 'Social assistance', 'Hospitals',
+                      'Nursing', 'Ambulatory health care', 'Medical'],
+        },
+        'relationship': BLS_ENRICHMENT.healthcareSectorCorrelation
+    },
+    'professional_services_sector': {
+        'description': 'Professional and business services',
+        'sector_uri': BLS_ENRICHMENT.ProfessionalServicesSector,
+        'keywords': {
+            'cpi': [],  # CPI doesn't have professional services categories
+            'ppi': ['Professional services', 'Business services', 'Consulting'],
+            # JOLTS: Professional and business services
+            'jolts': ['Professional and business services', 'Professional and technical services',
+                      'Management', 'Administrative', 'Waste services'],
+        },
+        'relationship': BLS_ENRICHMENT.professionalServicesSectorCorrelation
+    },
+    'leisure_hospitality_sector': {
+        'description': 'Leisure, hospitality, and entertainment',
+        'sector_uri': BLS_ENRICHMENT.LeisureHospitalitySector,
+        'keywords': {
+            'cpi': ['Recreation', 'Entertainment', 'Lodging', 'Hotel'],
+            'ppi': [],  # PPI doesn't have leisure/hospitality categories
+            # JOLTS: Leisure and hospitality
+            'jolts': ['Leisure and hospitality', 'Arts and entertainment',
+                      'Accommodation', 'Recreation', 'Amusement'],
+        },
+        'relationship': BLS_ENRICHMENT.leisureHospitalitySectorCorrelation
     }
 }
 
@@ -189,14 +199,100 @@ KNOWN_CORRELATIONS = [
         'direction': 'upstream',
         'strength': 'medium'
     },
-    # TODO: Add CPI-JOLTS correlations when JOLTS ontology is provided
-    # Example: Employment in food services (JOLTS) affects food away from home prices (CPI)
 
-    # TODO: Add PPI-JOLTS correlations when JOLTS ontology is provided
-    # Example: Job openings in manufacturing (JOLTS) correlate with production costs (PPI)
+    # JOLTS-CPI Correlations
+    {
+        'name': 'jolts_cpi_food_services',
+        'source_dataset': 'jolts',
+        'target_dataset': 'cpi',
+        'source_pattern': 'Food services',
+        'target_pattern': 'Food away from home',
+        'description': 'Job openings in food services affect restaurant prices',
+        'relationship': BLS_ENRICHMENT.employmentPriceLink,
+        'lag_months': 2,
+        'strength': 'medium'
+    },
+    {
+        'name': 'jolts_cpi_retail',
+        'source_dataset': 'jolts',
+        'target_dataset': 'cpi',
+        'source_pattern': 'Retail trade',
+        'target_pattern': 'All items',
+        'description': 'Retail employment affects consumer prices',
+        'relationship': BLS_ENRICHMENT.employmentPriceLink,
+        'lag_months': 1,
+        'strength': 'medium'
+    },
+    {
+        'name': 'jolts_cpi_healthcare',
+        'source_dataset': 'jolts',
+        'target_dataset': 'cpi',
+        'source_pattern': 'Health care',
+        'target_pattern': 'Medical',
+        'description': 'Healthcare employment affects medical service prices',
+        'relationship': BLS_ENRICHMENT.employmentPriceLink,
+        'lag_months': 3,
+        'strength': 'strong'
+    },
 
-    # TODO: Add JOLTS-EMPSIT correlations when both ontologies are provided
-    # Example: Job openings (JOLTS) lead employment changes (EMPSIT)
+    # JOLTS-PPI Correlations
+    {
+        'name': 'jolts_ppi_manufacturing',
+        'source_dataset': 'jolts',
+        'target_dataset': 'ppi',
+        'source_pattern': 'Manufacturing',
+        'target_pattern': 'Manufacturing',
+        'description': 'Manufacturing job openings correlate with production costs',
+        'relationship': BLS_ENRICHMENT.employmentProductionLink,
+        'lag_months': 1,
+        'strength': 'strong'
+    },
+    {
+        'name': 'jolts_ppi_construction',
+        'source_dataset': 'jolts',
+        'target_dataset': 'ppi',
+        'source_pattern': 'Construction',
+        'target_pattern': 'Construction',
+        'description': 'Construction employment affects building costs',
+        'relationship': BLS_ENRICHMENT.employmentProductionLink,
+        'lag_months': 2,
+        'strength': 'medium'
+    },
+    {
+        'name': 'jolts_ppi_transportation',
+        'source_dataset': 'jolts',
+        'target_dataset': 'ppi',
+        'source_pattern': 'Transportation',
+        'target_pattern': 'Transportation',
+        'description': 'Transportation employment affects shipping costs',
+        'relationship': BLS_ENRICHMENT.employmentProductionLink,
+        'lag_months': 1,
+        'strength': 'medium'
+    },
+
+    # JOLTS Internal Correlations
+    {
+        'name': 'jolts_openings_hires',
+        'source_dataset': 'jolts',
+        'target_dataset': 'jolts',
+        'source_pattern': 'JobOpenings',
+        'target_pattern': 'Hires',
+        'description': 'Job openings lead to hires',
+        'relationship': BLS_ENRICHMENT.laborMarketFlow,
+        'lag_months': 1,
+        'strength': 'strong'
+    },
+    {
+        'name': 'jolts_quits_openings',
+        'source_dataset': 'jolts',
+        'target_dataset': 'jolts',
+        'source_pattern': 'Quits',
+        'target_pattern': 'JobOpenings',
+        'description': 'Quits create job openings',
+        'relationship': BLS_ENRICHMENT.laborMarketFlow,
+        'lag_months': 0,
+        'strength': 'strong'
+    }
 ]
 
 # Measurement type mappings for temporal linking
@@ -248,19 +344,81 @@ MEASUREMENT_TYPES = {
             'year_property': PPI.hasYear
         }
     },
-    # TODO: Add JOLTS measurement types when ontology is provided
-    # Expected measurement types: JobOpenings, Hires, Separations, Quits, Layoffs, etc.
-    # 'jolts': {
-    #     'JobOpenings': {
-    #         'class': JOLTS.JobOpenings,
-    #         'category_property': JOLTS.hasIndustry,
-    #         'month_property': JOLTS.hasMonth,
-    #         'year_property': JOLTS.hasYear
-    #     },
-    #     'Hires': {...},
-    #     'Separations': {...},
-    #     etc.
-    # },
+
+    'jolts': {
+        'JobOpeningsLevel': {
+            'class': JOLTS.JobOpeningsLevel,
+            'category_property': JOLTS.hasIndustry,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'JobOpeningsRate': {
+            'class': JOLTS.JobOpeningsRate,
+            'category_property': JOLTS.hasIndustry,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'HiresLevel': {
+            'class': JOLTS.HiresLevel,
+            'category_property': JOLTS.hasIndustry,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'HiresRate': {
+            'class': JOLTS.HiresRate,
+            'category_property': JOLTS.hasIndustry,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'TotalSeparationsLevel': {
+            'class': JOLTS.TotalSeparationsLevel,
+            'category_property': JOLTS.hasIndustry,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'TotalSeparationsRate': {
+            'class': JOLTS.TotalSeparationsRate,
+            'category_property': JOLTS.hasIndustry,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'QuitsLevel': {
+            'class': JOLTS.QuitsLevel,
+            'category_property': JOLTS.hasIndustry,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'QuitsRate': {
+            'class': JOLTS.QuitsRate,
+            'category_property': JOLTS.hasIndustry,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'LayoffsDischargesLevel': {
+            'class': JOLTS.LayoffsDischargesLevel,
+            'category_property': JOLTS.hasIndustry,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'LayoffsDischargesRate': {
+            'class': JOLTS.LayoffsDischargesRate,
+            'category_property': JOLTS.hasIndustry,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'OtherSeparationsLevel': {
+            'class': JOLTS.OtherSeparationsLevel,
+            'category_property': JOLTS.hasIndustry,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'OtherSeparationsRate': {
+            'class': JOLTS.OtherSeparationsRate,
+            'category_property': JOLTS.hasIndustry,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        }
+    },
 
     # TODO: Add EMPSIT measurement types when ontology is provided
     # Expected measurement types: Employment, Unemployment, LaborForce, etc.
