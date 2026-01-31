@@ -1,24 +1,42 @@
 """
-Test BLS Intra-Source Linker with CPI + PPI data
+Unified BLS Dataset Test Suite
 
-This test demonstrates:
-1. Loading CPI and PPI RDF data
-2. Running BLS intra-source enrichment
-3. Validating enrichment results
-4. Saving enriched graph
+This comprehensive test suite validates:
+1. Individual dataset enrichment (CPI, PPI, JOLTS)
+2. Pairwise dataset integration (CPI+PPI, JOLTS+CPI, JOLTS+PPI)
+3. Full multi-dataset integration (CPI+PPI+JOLTS)
+
+Usage:
+    # Test individual datasets
+    python tests/test_all_bls_datasets.py --dataset cpi
+    python tests/test_all_bls_datasets.py --dataset ppi
+    python tests/test_all_bls_datasets.py --dataset jolts
+
+    # Test dataset pairs
+    python tests/test_all_bls_datasets.py --combination cpi-ppi
+    python tests/test_all_bls_datasets.py --combination jolts-cpi
+    python tests/test_all_bls_datasets.py --combination jolts-ppi
+
+    # Test all datasets together
+    python tests/test_all_bls_datasets.py --combination all
+
+    # Run all tests
+    python tests/test_all_bls_datasets.py --run-all
 """
 
 import sys
 import os
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rdflib import Graph
 from glue_jobs.utils.rdf_utils import RDFGraphLoader, RDFGraphWriter
 from glue_jobs.enrichment.intra_source_linker import BLSIntraSourceLinker
 import logging
+import argparse
+from dataclasses import dataclass
+from enum import Enum
 
-# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -27,15 +45,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# ============================================
+# TEST DATA GENERATORS
+# ============================================
+
 def create_sample_cpi_data() -> str:
-    """
-    Create sample CPI RDF data for testing.
-    
-    Based on actual CPI ontology structure:
-    - Categories with hierarchies (hasParent, hasFullPath)
-    - Index measurements (hasCategory, hasMonth, hasYear)
-    - Temporal entities (Month, Year)
-    """
+    """Generate sample CPI RDF data"""
     return """
     @prefix cpi: <https://www.bls.gov/cpi/> .
     @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
@@ -62,6 +77,11 @@ def create_sample_cpi_data() -> str:
         cpi:hasFullPath "AllItems_Food_FoodAtHome" ;
         cpi:hasParent cpi:AllItems_Food_Entity .
     
+    cpi:AllItems_Food_FoodAwayFromHome_Entity rdf:type cpi:FoodAwayFromHome ;
+        rdfs:label "Food away from home" ;
+        cpi:hasFullPath "AllItems_Food_FoodAwayFromHome" ;
+        cpi:hasParent cpi:AllItems_Food_Entity .
+    
     # Energy category
     cpi:AllItems_Energy_Entity rdf:type cpi:Energy ;
         rdfs:label "Energy" ;
@@ -80,6 +100,12 @@ def create_sample_cpi_data() -> str:
         cpi:hasFullPath "AllItems_Transportation" ;
         cpi:hasParent cpi:AllItems_Entity .
     
+    # Medical care category
+    cpi:AllItems_Medical_care_Entity rdf:type cpi:MedicalCare ;
+        rdfs:label "Medical care" ;
+        cpi:hasFullPath "AllItems_Medical_care" ;
+        cpi:hasParent cpi:AllItems_Entity .
+    
     # Index measurements for Food (November 2024)
     cpi:AllItems_Food_November2024_Index rdf:type cpi:Index ;
         cpi:indexValue 295.8 ;
@@ -91,6 +117,20 @@ def create_sample_cpi_data() -> str:
     cpi:AllItems_Food_December2024_Index rdf:type cpi:Index ;
         cpi:indexValue 296.2 ;
         cpi:hasCategory cpi:AllItems_Food_Entity ;
+        cpi:hasMonth cpi:December ;
+        cpi:hasYear cpi:2024 .
+    
+    # Index measurements for Food Away From Home (November 2024)
+    cpi:AllItems_Food_FoodAwayFromHome_November2024_Index rdf:type cpi:Index ;
+        cpi:indexValue 320.5 ;
+        cpi:hasCategory cpi:AllItems_Food_FoodAwayFromHome_Entity ;
+        cpi:hasMonth cpi:November ;
+        cpi:hasYear cpi:2024 .
+    
+    # Index measurements for Food Away From Home (December 2024)
+    cpi:AllItems_Food_FoodAwayFromHome_December2024_Index rdf:type cpi:Index ;
+        cpi:indexValue 321.2 ;
+        cpi:hasCategory cpi:AllItems_Food_FoodAwayFromHome_Entity ;
         cpi:hasMonth cpi:December ;
         cpi:hasYear cpi:2024 .
     
@@ -128,14 +168,7 @@ def create_sample_cpi_data() -> str:
 
 
 def create_sample_ppi_data() -> str:
-    """
-    Create sample PPI RDF data for testing.
-    
-    Based on actual PPI ontology structure:
-    - Commodity groupings with hierarchies (hasParent, hasFullPath, belongsToSection)
-    - Price changes (hasCommodityGrouping, hasMonth, hasYear)
-    - Temporal entities (Month, Year)
-    """
+    """Generate sample PPI RDF data"""
     return """
     @prefix ppi: <https://www.bls.gov/ppi/> .
     @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
@@ -247,338 +280,823 @@ def create_sample_ppi_data() -> str:
     """
 
 
-def validate_enrichment_results(graph: Graph, stats: Dict[str, int]) -> bool:
+def create_sample_jolts_data() -> str:
+    """Generate sample JOLTS RDF data"""
+    return """
+    @prefix jolts: <https://www.bls.gov/jolts/> .
+    @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+    @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+    @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+    
+    # Temporal entities
+    jolts:November rdf:type jolts:Month .
+    jolts:December rdf:type jolts:Month .
+    jolts:2024 rdf:type jolts:Year .
+    
+    # Industry hierarchy: Total nonfarm > Service-providing > Leisure and hospitality > Food services
+    jolts:Total_nonfarm_Industry rdf:type jolts:Industry ;
+        rdfs:label "Total nonfarm" ;
+        jolts:hasFullPath "Total_nonfarm" .
+    
+    jolts:Total_nonfarm_Service_providing_Industry rdf:type jolts:Industry ;
+        rdfs:label "Service-providing" ;
+        jolts:hasFullPath "Total_nonfarm_Service_providing" ;
+        jolts:hasParent jolts:Total_nonfarm_Industry .
+    
+    jolts:Total_nonfarm_Service_providing_Leisure_and_hospitality_Industry rdf:type jolts:Industry ;
+        rdfs:label "Leisure and hospitality" ;
+        jolts:hasFullPath "Total_nonfarm_Service_providing_Leisure_and_hospitality" ;
+        jolts:hasParent jolts:Total_nonfarm_Service_providing_Industry .
+    
+    jolts:Total_nonfarm_Service_providing_Leisure_and_hospitality_Accommodation_and_food_services_Industry rdf:type jolts:Industry ;
+        rdfs:label "Accommodation and food services" ;
+        jolts:hasFullPath "Total_nonfarm_Service_providing_Leisure_and_hospitality_Accommodation_and_food_services" ;
+        jolts:hasParent jolts:Total_nonfarm_Service_providing_Leisure_and_hospitality_Industry .
+    
+    # Manufacturing hierarchy
+    jolts:Total_nonfarm_Goods_producing_Industry rdf:type jolts:Industry ;
+        rdfs:label "Goods-producing" ;
+        jolts:hasFullPath "Total_nonfarm_Goods_producing" ;
+        jolts:hasParent jolts:Total_nonfarm_Industry .
+    
+    jolts:Total_nonfarm_Goods_producing_Manufacturing_Industry rdf:type jolts:Industry ;
+        rdfs:label "Manufacturing" ;
+        jolts:hasFullPath "Total_nonfarm_Goods_producing_Manufacturing" ;
+        jolts:hasParent jolts:Total_nonfarm_Goods_producing_Industry .
+    
+    # Retail trade
+    jolts:Total_nonfarm_Service_providing_Retail_trade_Industry rdf:type jolts:Industry ;
+        rdfs:label "Retail trade" ;
+        jolts:hasFullPath "Total_nonfarm_Service_providing_Retail_trade" ;
+        jolts:hasParent jolts:Total_nonfarm_Service_providing_Industry .
+    
+    # Healthcare
+    jolts:Total_nonfarm_Service_providing_Health_care_and_social_assistance_Industry rdf:type jolts:Industry ;
+        rdfs:label "Health care and social assistance" ;
+        jolts:hasFullPath "Total_nonfarm_Service_providing_Health_care_and_social_assistance" ;
+        jolts:hasParent jolts:Total_nonfarm_Service_providing_Industry .
+    
+    # Construction
+    jolts:Total_nonfarm_Goods_producing_Construction_Industry rdf:type jolts:Industry ;
+        rdfs:label "Construction" ;
+        jolts:hasFullPath "Total_nonfarm_Goods_producing_Construction" ;
+        jolts:hasParent jolts:Total_nonfarm_Goods_producing_Industry .
+    
+    # Transportation
+    jolts:Total_nonfarm_Service_providing_Transportation_warehousing_and_utilities_Industry rdf:type jolts:Industry ;
+        rdfs:label "Transportation, warehousing, and utilities" ;
+        jolts:hasFullPath "Total_nonfarm_Service_providing_Transportation_warehousing_and_utilities" ;
+        jolts:hasParent jolts:Total_nonfarm_Service_providing_Industry .
+    
+    # Job Openings measurements (November 2024)
+    jolts:Total_nonfarm_November2024_JobOpeningsLevel rdf:type jolts:JobOpeningsLevel ;
+        jolts:levelValue 7839 ;
+        jolts:hasIndustry jolts:Total_nonfarm_Industry ;
+        jolts:hasMonth jolts:November ;
+        jolts:hasYear jolts:2024 ;
+        jolts:isSeasonallyAdjusted true .
+    
+    jolts:Total_nonfarm_Service_providing_Leisure_and_hospitality_Accommodation_and_food_services_November2024_JobOpeningsLevel rdf:type jolts:JobOpeningsLevel ;
+        jolts:levelValue 1234 ;
+        jolts:hasIndustry jolts:Total_nonfarm_Service_providing_Leisure_and_hospitality_Accommodation_and_food_services_Industry ;
+        jolts:hasMonth jolts:November ;
+        jolts:hasYear jolts:2024 ;
+        jolts:isSeasonallyAdjusted true .
+    
+    jolts:Total_nonfarm_Goods_producing_Manufacturing_November2024_JobOpeningsLevel rdf:type jolts:JobOpeningsLevel ;
+        jolts:levelValue 567 ;
+        jolts:hasIndustry jolts:Total_nonfarm_Goods_producing_Manufacturing_Industry ;
+        jolts:hasMonth jolts:November ;
+        jolts:hasYear jolts:2024 ;
+        jolts:isSeasonallyAdjusted true .
+    
+    # Job Openings measurements (December 2024)
+    jolts:Total_nonfarm_December2024_JobOpeningsLevel rdf:type jolts:JobOpeningsLevel ;
+        jolts:levelValue 8098 ;
+        jolts:hasIndustry jolts:Total_nonfarm_Industry ;
+        jolts:hasMonth jolts:December ;
+        jolts:hasYear jolts:2024 ;
+        jolts:isSeasonallyAdjusted true .
+    
+    jolts:Total_nonfarm_Service_providing_Leisure_and_hospitality_Accommodation_and_food_services_December2024_JobOpeningsLevel rdf:type jolts:JobOpeningsLevel ;
+        jolts:levelValue 1289 ;
+        jolts:hasIndustry jolts:Total_nonfarm_Service_providing_Leisure_and_hospitality_Accommodation_and_food_services_Industry ;
+        jolts:hasMonth jolts:December ;
+        jolts:hasYear jolts:2024 ;
+        jolts:isSeasonallyAdjusted true .
+    
+    # Hires measurements
+    jolts:Total_nonfarm_November2024_HiresLevel rdf:type jolts:HiresLevel ;
+        jolts:levelValue 5270 ;
+        jolts:hasIndustry jolts:Total_nonfarm_Industry ;
+        jolts:hasMonth jolts:November ;
+        jolts:hasYear jolts:2024 ;
+        jolts:isSeasonallyAdjusted true .
+    
+    jolts:Total_nonfarm_December2024_HiresLevel rdf:type jolts:HiresLevel ;
+        jolts:levelValue 5350 ;
+        jolts:hasIndustry jolts:Total_nonfarm_Industry ;
+        jolts:hasMonth jolts:December ;
+        jolts:hasYear jolts:2024 ;
+        jolts:isSeasonallyAdjusted true .
+    
+    # Separations measurements
+    jolts:Total_nonfarm_November2024_TotalSeparationsLevel rdf:type jolts:TotalSeparationsLevel ;
+        jolts:levelValue 5076 ;
+        jolts:hasIndustry jolts:Total_nonfarm_Industry ;
+        jolts:hasMonth jolts:November ;
+        jolts:hasYear jolts:2024 ;
+        jolts:isSeasonallyAdjusted true .
+    
+    jolts:Total_nonfarm_November2024_QuitsLevel rdf:type jolts:QuitsLevel ;
+        jolts:levelValue 3098 ;
+        jolts:hasIndustry jolts:Total_nonfarm_Industry ;
+        jolts:hasMonth jolts:November ;
+        jolts:hasYear jolts:2024 ;
+        jolts:isSeasonallyAdjusted true .
+    
+    jolts:Total_nonfarm_December2024_QuitsLevel rdf:type jolts:QuitsLevel ;
+        jolts:levelValue 3150 ;
+        jolts:hasIndustry jolts:Total_nonfarm_Industry ;
+        jolts:hasMonth jolts:December ;
+        jolts:hasYear jolts:2024 ;
+        jolts:isSeasonallyAdjusted true .
+    
+    # Rates
+    jolts:Total_nonfarm_November2024_JobOpeningsRate rdf:type jolts:JobOpeningsRate ;
+        jolts:rateValue 4.8 ;
+        jolts:hasIndustry jolts:Total_nonfarm_Industry ;
+        jolts:hasMonth jolts:November ;
+        jolts:hasYear jolts:2024 ;
+        jolts:isSeasonallyAdjusted true .
+    
+    jolts:Total_nonfarm_December2024_JobOpeningsRate rdf:type jolts:JobOpeningsRate ;
+        jolts:rateValue 4.9 ;
+        jolts:hasIndustry jolts:Total_nonfarm_Industry ;
+        jolts:hasMonth jolts:December ;
+        jolts:hasYear jolts:2024 ;
+        jolts:isSeasonallyAdjusted true .
+    
+    # Region data
+    jolts:Northeast_Region rdf:type jolts:Region ;
+        rdfs:label "Northeast" ;
+        jolts:hasFullPath "Northeast" .
+    
+    jolts:Northeast_November2024_JobOpeningsLevel rdf:type jolts:JobOpeningsLevel ;
+        jolts:levelValue 1500 ;
+        jolts:hasRegion jolts:Northeast_Region ;
+        jolts:hasMonth jolts:November ;
+        jolts:hasYear jolts:2024 ;
+        jolts:isSeasonallyAdjusted true .
     """
-    Validate that enrichment produced expected results.
-    
-    Args:
-        graph: Enriched RDF graph
-        stats: Enrichment statistics
-    
-    Returns:
-        True if validation passes, False otherwise
-    """
-    logger.info("\n" + "="*80)
-    logger.info("Validating Enrichment Results")
-    logger.info("="*80)
-    
-    validation_passed = True
-    
-    # Test 1: Check temporal unification
-    logger.info("\n[Test 1] Checking temporal unification...")
-    unified_months_query = """
-    SELECT (COUNT(DISTINCT ?unifiedMonth) as ?count) WHERE {
-        ?month <https://www.bls.gov/enrichment/unifiedAs> ?unifiedMonth .
-        ?unifiedMonth a <https://www.bls.gov/enrichment/UnifiedMonth> .
-    }
-    """
-    result = list(graph.query(unified_months_query))
-    unified_month_count = int(result[0].count)
-    
-    if unified_month_count > 0:
-        logger.info(f"  ✓ Found {unified_month_count} unified months")
-    else:
-        logger.error(f"  ✗ Expected unified months, found {unified_month_count}")
-        validation_passed = False
-    
-    # Test 2: Check temporal sequences
-    logger.info("\n[Test 2] Checking temporal sequences...")
-    precedes_query = """
-    SELECT (COUNT(*) as ?count) WHERE {
-        ?measurement1 <https://www.bls.gov/enrichment/precedes> ?measurement2 .
-    }
-    """
-    result = list(graph.query(precedes_query))
-    precedes_count = int(result[0].count)
-    
-    if precedes_count > 0:
-        logger.info(f"  ✓ Found {precedes_count} temporal sequence links")
-    else:
-        logger.error(f"  ✗ Expected temporal sequences, found {precedes_count}")
-        validation_passed = False
-    
-    # Test 3: Check sector links
-    logger.info("\n[Test 3] Checking sector links...")
-    sector_query = """
-    SELECT (COUNT(DISTINCT ?sector) as ?count) WHERE {
-        ?sector a <https://www.bls.gov/enrichment/EconomicSector> .
-    }
-    """
-    result = list(graph.query(sector_query))
-    sector_count = int(result[0].count)
-    
-    if sector_count > 0:
-        logger.info(f"  ✓ Found {sector_count} economic sectors")
-        
-        # Check entities linked to sectors
-        sector_entities_query = """
-        SELECT (COUNT(*) as ?count) WHERE {
-            ?entity <https://www.bls.gov/enrichment/belongsToSector> ?sector .
-        }
+
+
+# ============================================
+# TEST RESULT CLASSES
+# ============================================
+
+@dataclass
+class TestResult:
+    """Test result container"""
+    test_name: str
+    passed: bool
+    graph: Optional[Graph]
+    stats: Optional[Dict[str, int]]
+    output_file: str
+    error_message: Optional[str] = None
+
+
+class TestSuite:
+    """Unified test suite for all BLS datasets"""
+
+    def __init__(self):
+        self.results: List[TestResult] = []
+
+    # ============================================
+    # INDIVIDUAL DATASET TESTS
+    # ============================================
+
+    def test_cpi_only(self) -> TestResult:
+        """Test CPI enrichment alone"""
+        test_name = "CPI Only"
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Running Test: {test_name}")
+        logger.info(f"{'='*80}")
+
+        try:
+            loader = RDFGraphLoader()
+
+            logger.info("[1] Loading CPI RDF data...")
+            cpi_ttl = create_sample_cpi_data()
+            loader.load_from_string(cpi_ttl, format='turtle')
+            logger.info(f"   Loaded {len(loader.graph)} CPI triples")
+
+            logger.info("[2] Running enrichment...")
+            linker = BLSIntraSourceLinker(loader.graph)
+            stats = linker.enrich()
+
+            logger.info("[3] Validation...")
+            passed = (
+                'cpi' in stats['available_datasets'] and
+                stats['temporal_sequences'] > 0
+            )
+
+            output_file = 'enriched_cpi_only.ttl'
+            writer = RDFGraphWriter()
+            writer.save_to_file(loader.graph, output_file, format='turtle')
+            logger.info(f"[4] Saved to: {output_file}")
+
+            result = TestResult(
+                test_name=test_name,
+                passed=passed,
+                graph=loader.graph,
+                stats=stats,
+                output_file=output_file
+            )
+
+        except Exception as e:
+            logger.error(f"Test failed with error: {e}")
+            result = TestResult(
+                test_name=test_name,
+                passed=False,
+                graph=None,
+                stats=None,
+                output_file="",
+                error_message=str(e)
+            )
+
+        self.results.append(result)
+        return result
+
+    def test_ppi_only(self) -> TestResult:
+        """Test PPI enrichment alone"""
+        test_name = "PPI Only"
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Running Test: {test_name}")
+        logger.info(f"{'='*80}")
+
+        try:
+            loader = RDFGraphLoader()
+
+            logger.info("[1] Loading PPI RDF data...")
+            ppi_ttl = create_sample_ppi_data()
+            loader.load_from_string(ppi_ttl, format='turtle')
+            logger.info(f"   Loaded {len(loader.graph)} PPI triples")
+
+            logger.info("[2] Running enrichment...")
+            linker = BLSIntraSourceLinker(loader.graph)
+            stats = linker.enrich()
+
+            logger.info("[3] Validation...")
+            passed = (
+                'ppi' in stats['available_datasets'] and
+                stats['temporal_sequences'] > 0
+            )
+
+            output_file = 'enriched_ppi_only.ttl'
+            writer = RDFGraphWriter()
+            writer.save_to_file(loader.graph, output_file, format='turtle')
+            logger.info(f"[4] Saved to: {output_file}")
+
+            result = TestResult(
+                test_name=test_name,
+                passed=passed,
+                graph=loader.graph,
+                stats=stats,
+                output_file=output_file
+            )
+
+        except Exception as e:
+            logger.error(f"Test failed with error: {e}")
+            result = TestResult(
+                test_name=test_name,
+                passed=False,
+                graph=None,
+                stats=None,
+                output_file="",
+                error_message=str(e)
+            )
+
+        self.results.append(result)
+        return result
+
+    def test_jolts_only(self) -> TestResult:
+        """Test JOLTS enrichment alone"""
+        test_name = "JOLTS Only"
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Running Test: {test_name}")
+        logger.info(f"{'='*80}")
+
+        try:
+            loader = RDFGraphLoader()
+
+            logger.info("[1] Loading JOLTS RDF data...")
+            jolts_ttl = create_sample_jolts_data()
+            loader.load_from_string(jolts_ttl, format='turtle')
+            logger.info(f"   Loaded {len(loader.graph)} JOLTS triples")
+
+            logger.info("[2] Running enrichment...")
+            linker = BLSIntraSourceLinker(loader.graph)
+            stats = linker.enrich()
+
+            logger.info("[3] Validation...")
+            passed = (
+                'jolts' in stats['available_datasets'] and
+                stats['temporal_sequences'] > 0
+            )
+
+            output_file = 'enriched_jolts_only.ttl'
+            writer = RDFGraphWriter()
+            writer.save_to_file(loader.graph, output_file, format='turtle')
+            logger.info(f"[4] Saved to: {output_file}")
+
+            result = TestResult(
+                test_name=test_name,
+                passed=passed,
+                graph=loader.graph,
+                stats=stats,
+                output_file=output_file
+            )
+
+        except Exception as e:
+            logger.error(f"Test failed with error: {e}")
+            result = TestResult(
+                test_name=test_name,
+                passed=False,
+                graph=None,
+                stats=None,
+                output_file="",
+                error_message=str(e)
+            )
+
+        self.results.append(result)
+        return result
+
+    # ============================================
+    # PAIRWISE DATASET TESTS
+    # ============================================
+
+    def test_cpi_ppi(self) -> TestResult:
+        """Test CPI + PPI integration"""
+        test_name = "CPI + PPI"
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Running Test: {test_name}")
+        logger.info(f"{'='*80}")
+
+        try:
+            loader = RDFGraphLoader()
+
+            logger.info("[1] Loading CPI RDF data...")
+            cpi_ttl = create_sample_cpi_data()
+            loader.load_from_string(cpi_ttl, format='turtle')
+            logger.info(f"   Loaded {len(loader.graph)} CPI triples")
+
+            logger.info("[2] Loading PPI RDF data...")
+            ppi_ttl = create_sample_ppi_data()
+            loader.load_from_string(ppi_ttl, format='turtle')
+            logger.info(f"   Total graph size: {len(loader.graph)} triples")
+
+            logger.info("[3] Running enrichment...")
+            linker = BLSIntraSourceLinker(loader.graph)
+            stats = linker.enrich()
+
+            logger.info("[4] Validation...")
+            # Check for CPI-PPI food sector correlation
+            food_sector_query = """
+            SELECT (COUNT(*) as ?count) WHERE {
+                ?cpiEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/FoodSector> .
+                ?ppiEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/FoodSector> .
+                FILTER(STRSTARTS(STR(?cpiEntity), "https://www.bls.gov/cpi/"))
+                FILTER(STRSTARTS(STR(?ppiEntity), "https://www.bls.gov/ppi/"))
+            }
+            """
+            result_query = list(loader.graph.query(food_sector_query))
+            food_sector_count = int(result_query[0].count)
+            logger.info(f"   Found {food_sector_count} CPI-PPI food sector entities")
+
+            passed = (
+                'cpi' in stats['available_datasets'] and
+                'ppi' in stats['available_datasets'] and
+                stats['temporal_sequences'] > 0 and
+                stats['sector_links'] > 0 and
+                food_sector_count > 0
+            )
+
+            output_file = 'enriched_cpi_ppi.ttl'
+            writer = RDFGraphWriter()
+            writer.save_to_file(loader.graph, output_file, format='turtle')
+            logger.info(f"[5] Saved to: {output_file}")
+
+            result = TestResult(
+                test_name=test_name,
+                passed=passed,
+                graph=loader.graph,
+                stats=stats,
+                output_file=output_file
+            )
+
+        except Exception as e:
+            logger.error(f"Test failed with error: {e}")
+            result = TestResult(
+                test_name=test_name,
+                passed=False,
+                graph=None,
+                stats=None,
+                output_file="",
+                error_message=str(e)
+            )
+
+        self.results.append(result)
+        return result
+
+    def test_jolts_cpi(self) -> TestResult:
+        """Test JOLTS + CPI integration"""
+        test_name = "JOLTS + CPI"
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Running Test: {test_name}")
+        logger.info(f"{'='*80}")
+
+        try:
+            loader = RDFGraphLoader()
+
+            logger.info("[1] Loading JOLTS RDF data...")
+            jolts_ttl = create_sample_jolts_data()
+            loader.load_from_string(jolts_ttl, format='turtle')
+            logger.info(f"   Loaded {len(loader.graph)} JOLTS triples")
+
+            logger.info("[2] Loading CPI RDF data...")
+            cpi_ttl = create_sample_cpi_data()
+            loader.load_from_string(cpi_ttl, format='turtle')
+            logger.info(f"   Total graph size: {len(loader.graph)} triples")
+
+            logger.info("[3] Running enrichment...")
+            linker = BLSIntraSourceLinker(loader.graph)
+            stats = linker.enrich()
+
+            logger.info("[4] Validation...")
+            # Check for JOLTS-CPI food sector correlation
+            food_sector_query = """
+            SELECT (COUNT(*) as ?count) WHERE {
+                ?joltsEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/FoodSector> .
+                ?cpiEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/FoodSector> .
+                FILTER(STRSTARTS(STR(?joltsEntity), "https://www.bls.gov/jolts/"))
+                FILTER(STRSTARTS(STR(?cpiEntity), "https://www.bls.gov/cpi/"))
+            }
+            """
+            result_query = list(loader.graph.query(food_sector_query))
+            food_sector_count = int(result_query[0].count)
+            logger.info(f"   Found {food_sector_count} JOLTS-CPI food sector entities")
+
+            passed = (
+                'jolts' in stats['available_datasets'] and
+                'cpi' in stats['available_datasets'] and
+                stats['temporal_sequences'] > 0 and
+                stats['sector_links'] > 0 and
+                food_sector_count > 0
+            )
+
+            output_file = 'enriched_jolts_cpi.ttl'
+            writer = RDFGraphWriter()
+            writer.save_to_file(loader.graph, output_file, format='turtle')
+            logger.info(f"[5] Saved to: {output_file}")
+
+            result = TestResult(
+                test_name=test_name,
+                passed=passed,
+                graph=loader.graph,
+                stats=stats,
+                output_file=output_file
+            )
+
+        except Exception as e:
+            logger.error(f"Test failed with error: {e}")
+            result = TestResult(
+                test_name=test_name,
+                passed=False,
+                graph=None,
+                stats=None,
+                output_file="",
+                error_message=str(e)
+            )
+
+        self.results.append(result)
+        return result
+
+    def test_jolts_ppi(self) -> TestResult:
+        """Test JOLTS + PPI integration"""
+        test_name = "JOLTS + PPI"
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Running Test: {test_name}")
+        logger.info(f"{'='*80}")
+
+        try:
+            loader = RDFGraphLoader()
+
+            logger.info("[1] Loading JOLTS RDF data...")
+            jolts_ttl = create_sample_jolts_data()
+            loader.load_from_string(jolts_ttl, format='turtle')
+            logger.info(f"   Loaded {len(loader.graph)} JOLTS triples")
+
+            logger.info("[2] Loading PPI RDF data...")
+            ppi_ttl = create_sample_ppi_data()
+            loader.load_from_string(ppi_ttl, format='turtle')
+            logger.info(f"   Total graph size: {len(loader.graph)} triples")
+
+            logger.info("[3] Running enrichment...")
+            linker = BLSIntraSourceLinker(loader.graph)
+            stats = linker.enrich()
+
+            logger.info("[4] Validation...")
+            # Check for JOLTS-PPI manufacturing sector correlation
+            manufacturing_sector_query = """
+            SELECT (COUNT(*) as ?count) WHERE {
+                ?joltsEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/ManufacturingSector> .
+                ?ppiEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/ManufacturingSector> .
+                FILTER(STRSTARTS(STR(?joltsEntity), "https://www.bls.gov/jolts/"))
+                FILTER(STRSTARTS(STR(?ppiEntity), "https://www.bls.gov/ppi/"))
+            }
+            """
+            result_query = list(loader.graph.query(manufacturing_sector_query))
+            manufacturing_sector_count = int(result_query[0].count)
+            logger.info(f"   Found {manufacturing_sector_count} JOLTS-PPI manufacturing sector entities")
+
+            passed = (
+                'jolts' in stats['available_datasets'] and
+                'ppi' in stats['available_datasets'] and
+                stats['temporal_sequences'] > 0 and
+                stats['sector_links'] > 0
+            )
+
+            output_file = 'enriched_jolts_ppi.ttl'
+            writer = RDFGraphWriter()
+            writer.save_to_file(loader.graph, output_file, format='turtle')
+            logger.info(f"[5] Saved to: {output_file}")
+
+            result = TestResult(
+                test_name=test_name,
+                passed=passed,
+                graph=loader.graph,
+                stats=stats,
+                output_file=output_file
+            )
+
+        except Exception as e:
+            logger.error(f"Test failed with error: {e}")
+            result = TestResult(
+                test_name=test_name,
+                passed=False,
+                graph=None,
+                stats=None,
+                output_file="",
+                error_message=str(e)
+            )
+
+        self.results.append(result)
+        return result
+
+    # ============================================
+    # FULL INTEGRATION TEST
+    # ============================================
+
+    def test_all_datasets(self) -> TestResult:
+        """Test CPI + PPI + JOLTS full integration"""
+        test_name = "CPI + PPI + JOLTS (Full Integration)"
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Running Test: {test_name}")
+        logger.info(f"{'='*80}")
+
+        try:
+            loader = RDFGraphLoader()
+
+            logger.info("[1] Loading CPI RDF data...")
+            cpi_ttl = create_sample_cpi_data()
+            loader.load_from_string(cpi_ttl, format='turtle')
+            logger.info(f"   Loaded {len(loader.graph)} CPI triples")
+
+            logger.info("[2] Loading PPI RDF data...")
+            ppi_ttl = create_sample_ppi_data()
+            loader.load_from_string(ppi_ttl, format='turtle')
+            logger.info(f"   Total: {len(loader.graph)} triples")
+
+            logger.info("[3] Loading JOLTS RDF data...")
+            jolts_ttl = create_sample_jolts_data()
+            loader.load_from_string(jolts_ttl, format='turtle')
+            logger.info(f"   Total graph size: {len(loader.graph)} triples")
+
+            logger.info("[4] Running enrichment...")
+            linker = BLSIntraSourceLinker(loader.graph)
+            stats = linker.enrich()
+
+            logger.info("[5] Validation...")
+
+            # Check CPI-PPI food sector
+            cpi_ppi_food_query = """
+            SELECT (COUNT(*) as ?count) WHERE {
+                ?cpiEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/FoodSector> .
+                ?ppiEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/FoodSector> .
+                FILTER(STRSTARTS(STR(?cpiEntity), "https://www.bls.gov/cpi/"))
+                FILTER(STRSTARTS(STR(?ppiEntity), "https://www.bls.gov/ppi/"))
+            }
+            """
+            result_query = list(loader.graph.query(cpi_ppi_food_query))
+            cpi_ppi_food_count = int(result_query[0].count)
+            logger.info(f"   CPI-PPI food sector entities: {cpi_ppi_food_count}")
+
+            # Check JOLTS-CPI food sector
+            jolts_cpi_food_query = """
+            SELECT (COUNT(*) as ?count) WHERE {
+                ?joltsEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/FoodSector> .
+                ?cpiEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/FoodSector> .
+                FILTER(STRSTARTS(STR(?joltsEntity), "https://www.bls.gov/jolts/"))
+                FILTER(STRSTARTS(STR(?cpiEntity), "https://www.bls.gov/cpi/"))
+            }
+            """
+            result_query = list(loader.graph.query(jolts_cpi_food_query))
+            jolts_cpi_food_count = int(result_query[0].count)
+            logger.info(f"   JOLTS-CPI food sector entities: {jolts_cpi_food_count}")
+
+            # Check unified temporal entities
+            unified_temporal_query = """
+            SELECT (COUNT(DISTINCT ?unified) as ?count) WHERE {
+                ?entity <https://www.bls.gov/enrichment/unifiedAs> ?unified .
+            }
+            """
+            result_query = list(loader.graph.query(unified_temporal_query))
+            unified_temporal_count = int(result_query[0].count)
+            logger.info(f"   Unified temporal entities: {unified_temporal_count}")
+
+            passed = (
+                'cpi' in stats['available_datasets'] and
+                'ppi' in stats['available_datasets'] and
+                'jolts' in stats['available_datasets'] and
+                stats['temporal_sequences'] > 0 and
+                stats['sector_links'] > 0 and
+                stats['temporal_unified'] > 0 and
+                cpi_ppi_food_count > 0 and
+                jolts_cpi_food_count > 0 and
+                unified_temporal_count > 0
+            )
+
+            output_file = 'enriched_all_datasets.ttl'
+            writer = RDFGraphWriter()
+            writer.save_to_file(loader.graph, output_file, format='turtle')
+            logger.info(f"[6] Saved to: {output_file}")
+
+            result = TestResult(
+                test_name=test_name,
+                passed=passed,
+                graph=loader.graph,
+                stats=stats,
+                output_file=output_file
+            )
+
+        except Exception as e:
+            logger.error(f"Test failed with error: {e}")
+            result = TestResult(
+                test_name=test_name,
+                passed=False,
+                graph=None,
+                stats=None,
+                output_file="",
+                error_message=str(e)
+            )
+
+        self.results.append(result)
+        return result
+
+    # ============================================
+    # SUMMARY REPORTING
+    # ============================================
+
+    def print_summary(self):
+        """Print summary of all test results"""
+        logger.info("\n" + "="*80)
+        logger.info("TEST SUITE SUMMARY")
+        logger.info("="*80)
+
+        total_tests = len(self.results)
+        passed_tests = sum(1 for r in self.results if r.passed)
+        failed_tests = total_tests - passed_tests
+
+        logger.info(f"\nTotal Tests: {total_tests}")
+        logger.info(f"Passed: {passed_tests}")
+        logger.info(f"Failed: {failed_tests}")
+        logger.info(f"Success Rate: {(passed_tests/total_tests)*100:.1f}%")
+
+        logger.info("\nDetailed Results:")
+        logger.info("-" * 80)
+
+        for result in self.results:
+            status = "✅ PASS" if result.passed else "❌ FAIL"
+            logger.info(f"{status} | {result.test_name}")
+
+            if result.stats:
+                logger.info(f"       Datasets: {', '.join(result.stats['available_datasets'])}")
+                logger.info(f"       Triples added: {result.stats['total_triples_added']}")
+                logger.info(f"       Output: {result.output_file}")
+
+            if result.error_message:
+                logger.info(f"       Error: {result.error_message}")
+
+            logger.info("")
+
+        logger.info("="*80)
+
+        return passed_tests == total_tests
+
+
+# ============================================
+# MAIN ENTRY POINT
+# ============================================
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Unified BLS Dataset Test Suite',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Test individual datasets
+  python tests/test_all_bls_datasets.py --dataset cpi
+  python tests/test_all_bls_datasets.py --dataset ppi
+  python tests/test_all_bls_datasets.py --dataset jolts
+  
+  # Test dataset pairs
+  python tests/test_all_bls_datasets.py --combination cpi-ppi
+  python tests/test_all_bls_datasets.py --combination jolts-cpi
+  python tests/test_all_bls_datasets.py --combination jolts-ppi
+  
+  # Test all datasets together
+  python tests/test_all_bls_datasets.py --combination all
+  
+  # Run all tests
+  python tests/test_all_bls_datasets.py --run-all
         """
-        result = list(graph.query(sector_entities_query))
-        sector_entity_count = int(result[0].count)
-        logger.info(f"  ✓ Found {sector_entity_count} entities linked to sectors")
-    else:
-        logger.error(f"  ✗ Expected economic sectors, found {sector_count}")
-        validation_passed = False
-    
-    # Test 4: Check CPI-PPI correlations
-    logger.info("\n[Test 4] Checking CPI-PPI correlations...")
-    correlation_query = """
-    SELECT (COUNT(*) as ?count) WHERE {
-        ?cpiEntity <https://www.bls.gov/enrichment/producerConsumerLink> ?ppiEntity .
-        FILTER(STRSTARTS(STR(?cpiEntity), "https://www.bls.gov/cpi/"))
-        FILTER(STRSTARTS(STR(?ppiEntity), "https://www.bls.gov/ppi/"))
-    }
-    """
-    result = list(graph.query(correlation_query))
-    correlation_count = int(result[0].count)
-    
-    if correlation_count > 0:
-        logger.info(f"  ✓ Found {correlation_count} CPI-PPI correlation links")
-    else:
-        logger.warning(f"  ⚠ Expected CPI-PPI correlations, found {correlation_count}")
-        # Not a failure - might not have matching entities
-    
-    # Test 5: Check hierarchy links
-    logger.info("\n[Test 5] Checking cross-dataset hierarchy links...")
-    hierarchy_query = """
-    SELECT (COUNT(*) as ?count) WHERE {
-        ?entity1 <https://www.bls.gov/enrichment/relatedHierarchy> ?entity2 .
-    }
-    """
-    result = list(graph.query(hierarchy_query))
-    hierarchy_count = int(result[0].count)
-    
-    if hierarchy_count > 0:
-        logger.info(f"  ✓ Found {hierarchy_count} cross-hierarchy links")
-    else:
-        logger.warning(f"  ⚠ Expected hierarchy links, found {hierarchy_count}")
-        # Not a failure - might not have matching hierarchies
-    
-    # Test 6: Verify stats match actual graph
-    logger.info("\n[Test 6] Verifying statistics...")
-    if stats['temporal_unified'] > 0:
-        logger.info(f"  ✓ Temporal unification: {stats['temporal_unified']} links")
-    else:
-        logger.error(f"  ✗ No temporal unification links")
-        validation_passed = False
-    
-    if stats['temporal_sequences'] > 0:
-        logger.info(f"  ✓ Temporal sequences: {stats['temporal_sequences']} links")
-    else:
-        logger.error(f"  ✗ No temporal sequence links")
-        validation_passed = False
-    
-    if stats['sector_links'] > 0:
-        logger.info(f"  ✓ Sector links: {stats['sector_links']} links")
-    else:
-        logger.error(f"  ✗ No sector links")
-        validation_passed = False
-    
-    logger.info("\n" + "="*80)
-    if validation_passed:
-        logger.info("✓ All validation tests passed!")
-    else:
-        logger.error("✗ Some validation tests failed")
-    logger.info("="*80)
-    
-    return validation_passed
+    )
 
+    parser.add_argument('--dataset',
+                       choices=['cpi', 'ppi', 'jolts'],
+                       help='Test a single dataset')
 
-def test_cpi_ppi_linking() -> Tuple[Graph, Dict[str, int], bool]:
-    """
-    Main test function for CPI + PPI linking.
-    
-    Tests:
-    1. Loading CPI and PPI RDF data
-    2. Running BLS intra-source enrichment
-    3. Validating enrichment results
-    4. Saving enriched graph
-    
-    Returns:
-        Tuple of (enriched_graph, stats, validation_passed)
-    """
-    
-    print("\n" + "="*80)
-    print("Testing BLS Intra-Source Linker: CPI + PPI")
-    print("="*80)
-    
-    # Initialize loader
-    loader = RDFGraphLoader()
-    
-    # Load CPI data
-    print("\n[1] Loading CPI RDF data...")
-    cpi_ttl = create_sample_cpi_data()
-    loader.load_from_string(cpi_ttl, format='turtle')
-    print(f"   Loaded {len(loader.graph)} CPI triples")
-    
-    # Load PPI data
-    print("\n[2] Loading PPI RDF data...")
-    ppi_ttl = create_sample_ppi_data()
-    loader.load_from_string(ppi_ttl, format='turtle')
-    print(f"   Total graph size: {len(loader.graph)} triples")
-    
-    # Print initial graph statistics
-    print("\n[3] Initial graph statistics:")
-    print(f"   Total triples: {len(loader.graph)}")
-    
-    # Count CPI entities
-    cpi_count_query = """
-    SELECT (COUNT(DISTINCT ?s) as ?count) WHERE {
-        ?s ?p ?o .
-        FILTER(STRSTARTS(STR(?s), "https://www.bls.gov/cpi/"))
-    }
-    """
-    result = list(loader.graph.query(cpi_count_query))
-    print(f"   CPI entities: {result[0].count}")
-    
-    # Count PPI entities
-    ppi_count_query = """
-    SELECT (COUNT(DISTINCT ?s) as ?count) WHERE {
-        ?s ?p ?o .
-        FILTER(STRSTARTS(STR(?s), "https://www.bls.gov/ppi/"))
-    }
-    """
-    result = list(loader.graph.query(ppi_count_query))
-    print(f"   PPI entities: {result[0].count}")
-    
-    # Run enrichment
-    print("\n[4] Running BLS Intra-Source Enrichment...")
-    linker = BLSIntraSourceLinker(loader.graph)
-    stats = linker.enrich()
-    
-    # Validate results
-    print("\n[5] Validating enrichment results...")
-    validation_passed = validate_enrichment_results(loader.graph, stats)
-    
-    # Save enriched graph
-    print("\n[6] Saving enriched graph...")
-    writer = RDFGraphWriter()
-    
-    # Save to file
-    output_file = 'enriched_bls_cpi_ppi.ttl'
-    writer.save_to_file(loader.graph, output_file, format='turtle')
-    print(f"   Saved to: {output_file}")
-    
-    # Print final statistics
-    print("\n" + "="*80)
-    print("Final Statistics:")
-    print("="*80)
-    print(f"  Initial triples: {len(loader.graph) - stats['total_triples_added']}")
-    print(f"  Enrichment triples: {stats['total_triples_added']}")
-    print(f"  Final triples: {len(loader.graph)}")
-    print(f"  Datasets detected: {', '.join(stats['available_datasets'])}")
-    print("="*80)
-    
-    # Print sample enriched triples
-    print("\n[7] Sample enriched triples:")
-    print("\n  Temporal unification:")
-    unified_sample_query = """
-    SELECT ?month ?unified WHERE {
-        ?month <https://www.bls.gov/enrichment/unifiedAs> ?unified .
-    } LIMIT 3
-    """
-    for row in loader.graph.query(unified_sample_query):
-        print(f"    {row.month} → {row.unified}")
-    
-    print("\n  Temporal sequences:")
-    precedes_sample_query = """
-    SELECT ?m1 ?m2 WHERE {
-        ?m1 <https://www.bls.gov/enrichment/precedes> ?m2 .
-    } LIMIT 3
-    """
-    for row in loader.graph.query(precedes_sample_query):
-        print(f"    {row.m1}")
-        print(f"      precedes → {row.m2}")
-    
-    print("\n  Sector links:")
-    sector_sample_query = """
-    SELECT ?entity ?sector WHERE {
-        ?entity <https://www.bls.gov/enrichment/belongsToSector> ?sector .
-    } LIMIT 5
-    """
-    for row in loader.graph.query(sector_sample_query):
-        print(f"    {row.entity}")
-        print(f"      belongsTo → {row.sector}")
-    
-    print("\n" + "="*80)
-    if validation_passed:
-        print("✅ Test PASSED - All validations successful!")
+    parser.add_argument('--combination',
+                       choices=['cpi-ppi', 'jolts-cpi', 'jolts-ppi', 'all'],
+                       help='Test dataset combinations')
+
+    parser.add_argument('--run-all',
+                       action='store_true',
+                       help='Run all tests (individual + combinations)')
+
+    args = parser.parse_args()
+
+    suite = TestSuite()
+
+    if args.run_all:
+        # Run all tests
+        logger.info("Running ALL tests...")
+        suite.test_cpi_only()
+        suite.test_ppi_only()
+        suite.test_jolts_only()
+        suite.test_cpi_ppi()
+        suite.test_jolts_cpi()
+        suite.test_jolts_ppi()
+        suite.test_all_datasets()
+
+    elif args.dataset:
+        # Run single dataset test
+        if args.dataset == 'cpi':
+            suite.test_cpi_only()
+        elif args.dataset == 'ppi':
+            suite.test_ppi_only()
+        elif args.dataset == 'jolts':
+            suite.test_jolts_only()
+
+    elif args.combination:
+        # Run combination test
+        if args.combination == 'cpi-ppi':
+            suite.test_cpi_ppi()
+        elif args.combination == 'jolts-cpi':
+            suite.test_jolts_cpi()
+        elif args.combination == 'jolts-ppi':
+            suite.test_jolts_ppi()
+        elif args.combination == 'all':
+            suite.test_all_datasets()
+
     else:
-        print("❌ Test FAILED - Some validations failed")
-    print("="*80)
-    
-    return loader.graph, stats, validation_passed
+        # Default: run all tests
+        logger.info("No arguments provided. Running ALL tests...")
+        suite.test_cpi_only()
+        suite.test_ppi_only()
+        suite.test_jolts_only()
+        suite.test_cpi_ppi()
+        suite.test_jolts_cpi()
+        suite.test_jolts_ppi()
+        suite.test_all_datasets()
 
+    # Print summary
+    all_passed = suite.print_summary()
 
-def test_with_real_data() -> Tuple[Optional[Graph], Optional[Dict[str, int]], bool]:
-    """
-    Test with real CPI and PPI RDF files (if available).
-    
-    This function can be used when you have actual RDF files from your mappers.
-    
-    Returns:
-        Tuple of (enriched_graph, stats, validation_passed) or (None, None, False) if files not found
-    """
-    print("\n" + "="*80)
-    print("Testing with Real CPI + PPI Data")
-    print("="*80)
-    
-    # Check if real data files exist
-    cpi_file = 'data/cpi_table1_november2024.ttl'
-    ppi_file = 'data/ppi_table1_november2024.ttl'
-    
-    if not os.path.exists(cpi_file) or not os.path.exists(ppi_file):
-        print(f"\n⚠ Real data files not found:")
-        print(f"  Expected: {cpi_file}")
-        print(f"  Expected: {ppi_file}")
-        print(f"\nSkipping real data test. Use test_cpi_ppi_linking() for sample data test.")
-        return None, None, False
-    
-    # Load real data
-    loader = RDFGraphLoader()
-    
-    print(f"\n[1] Loading CPI data from {cpi_file}...")
-    loader.load_from_file(cpi_file, format='turtle')
-    print(f"   Loaded {len(loader.graph)} triples")
-    
-    print(f"\n[2] Loading PPI data from {ppi_file}...")
-    loader.load_from_file(ppi_file, format='turtle')
-    print(f"   Total graph size: {len(loader.graph)} triples")
-    
-    # Run enrichment
-    print("\n[3] Running BLS Intra-Source Enrichment...")
-    linker = BLSIntraSourceLinker(loader.graph)
-    stats = linker.enrich()
-    
-    # Validate results
-    print("\n[4] Validating enrichment results...")
-    validation_passed = validate_enrichment_results(loader.graph, stats)
-    
-    # Save enriched graph
-    print("\n[5] Saving enriched graph...")
-    writer = RDFGraphWriter()
-    output_file = 'enriched_bls_real_data.ttl'
-    writer.save_to_file(loader.graph, output_file, format='turtle')
-    print(f"   Saved to: {output_file}")
-    
-    return loader.graph, stats, validation_passed
+    # Exit with appropriate code
+    sys.exit(0 if all_passed else 1)
 
 
 if __name__ == '__main__':
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='Test BLS Intra-Source Linker')
-    parser.add_argument('--real-data', action='store_true', 
-                       help='Test with real CPI/PPI data files instead of sample data')
-    args = parser.parse_args()
-    
-    if args.real_data:
-        graph, stats, passed = test_with_real_data()
-    else:
-        graph, stats, passed = test_cpi_ppi_linking()
-    
-    # Exit with appropriate code
-    sys.exit(0 if passed else 1)
+    main()
