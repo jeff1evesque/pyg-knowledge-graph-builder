@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # ============================================
 # IMPORTANT: Only include datasets whose ontologies have been analyzed!
 # Currently includes: CPI, PPI
-# TODO: Add JOLTS, EMPSIT, etc. as their ontologies are provided
+# TODO: Add EMPSIT, etc. as their ontologies are provided
 
 BLS_SECTOR_PATTERNS = {
     'food_sector': {
