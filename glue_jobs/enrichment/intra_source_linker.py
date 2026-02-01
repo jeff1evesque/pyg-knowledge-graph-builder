@@ -126,6 +126,8 @@ BLS_SECTOR_PATTERNS = {
                 'Warehousing and storage',
                 'Transportation equipment manufacturing',
                 'Motor vehicles and parts',
+                # From Table A-14 (combined category)
+                'Transportation and utilities',
             ],
         },
         'relationship': BLS_ENRICHMENT.transportationSectorCorrelation
@@ -170,6 +172,11 @@ BLS_SECTOR_PATTERNS = {
                 'Fabricated metal product manufacturing',
                 'Machinery manufacturing',
                 'Computer and electronic product manufacturing',
+                'Computer and peripheral equipment manufacturing',
+                'Communications equipment manufacturing',
+                'Semiconductor and other electronic component manufacturing',
+                'Navigational, measuring, electromedical, and control instruments manufacturing',
+                'Manufacturing and reproducing magnetic and optical media and audio and video equipment manufacturing',
                 'Electrical equipment, appliance, and component manufacturing',
                 'Transportation equipment manufacturing',
                 'Furniture and related product manufacturing',
@@ -224,6 +231,8 @@ BLS_SECTOR_PATTERNS = {
                 # From Table A-13
                 'Sales and office occupations',
                 'Sales and related occupations',
+                # From Table A-14 (combined category)
+                'Wholesale and retail trade',
             ],
         },
         'relationship': BLS_ENRICHMENT.retailSectorCorrelation
@@ -261,6 +270,8 @@ BLS_SECTOR_PATTERNS = {
                 'Vocational rehabilitation services',
                 'Child care services',
                 'Private education and health services',
+                # From Table A-14 (combined category)
+                'Education and health services',
             ],
         },
         'relationship': BLS_ENRICHMENT.healthcareSectorCorrelation
@@ -352,6 +363,8 @@ BLS_SECTOR_PATTERNS = {
                 'Local government',
                 'Local government education',
                 'Local government, excluding education',
+                # From Table A-14
+                'Government workers',
             ],
         },
         'relationship': BLS_ENRICHMENT.governmentSectorCorrelation
@@ -418,6 +431,8 @@ BLS_SECTOR_PATTERNS = {
                 'Private education and health services',
                 'State government education',
                 'Local government education',
+                # From Table A-14 (combined category)
+                'Education and health services',
             ],
         },
         'relationship': BLS_ENRICHMENT.educationSectorCorrelation
@@ -457,6 +472,10 @@ BLS_SECTOR_PATTERNS = {
                 # From Table A-13
                 'Natural resources, construction, and maintenance occupations',
                 'Farming, fishing, and forestry occupations',
+                # From Table A-8
+                'Agriculture and related industries',
+                # From Table A-14
+                'Agriculture and related private wage and salary workers',
             ],
         },
         'relationship': BLS_ENRICHMENT.naturalResourcesSectorCorrelation
