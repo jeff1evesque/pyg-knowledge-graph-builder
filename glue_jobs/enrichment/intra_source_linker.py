@@ -1,12 +1,12 @@
 """
 BLS Intra-Source Enrichment
-Links entities within the BLS family (CPI, PPI, ECI, JOLTS, etc.)
+Links entities within the BLS family (CPI, PPI, ECI, JOLTS, EMPSIT, etc.)
 
 This module encodes domain knowledge about BLS data relationships.
 Patterns are only defined for datasets whose ontologies have been analyzed.
 
-Currently supported datasets: CPI, PPI, JOLTS
-TODO: Add EMPSIT, ECI, LAUS, METRO, REALER, WKYENG, XIMPIM as ontologies are provided
+Currently supported datasets: CPI, PPI, JOLTS, EMPSIT (27 tables)
+TODO: Add ECI, LAUS, METRO, REALER, WKYENG, XIMPIM as ontologies are provided
 """
 
 from rdflib import Graph, URIRef, Literal, Namespace
@@ -14,7 +14,7 @@ from rdflib.namespace import RDF, RDFS, XSD
 from glue_jobs.utils.rdf_utils import (
     CPI, PPI, JOLTS, EMPSIT, ECI, LAUS, METRO, REALER, WKYENG, XIMPIM,
     BLS_ENRICHMENT, UNIFIED,
-    get_month_name, get_year_value, get_namespace_from_uri
+    get_month_name, get_year_value
 )
 from typing import Dict, List, Set, Optional
 import logging
@@ -25,8 +25,8 @@ logger = logging.getLogger(__name__)
 # DOMAIN KNOWLEDGE: BLS LINKING PATTERNS
 # ============================================
 # IMPORTANT: Only include datasets whose ontologies have been analyzed!
-# Currently includes: CPI, PPI
-# TODO: Add EMPSIT, etc. as their ontologies are provided
+# Currently includes: CPI, PPI, JOLTS, EMPSIT
+# TODO: Add ECI, LAUS, METRO, REALER, WKYENG, XIMPIM as their ontologies are provided
 
 BLS_SECTOR_PATTERNS = {
     'food_sector': {
@@ -35,9 +35,10 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': ['Food', 'Grocery', 'Restaurant', 'Dining', 'Meals', 'Beverages'],
             'ppi': ['Food', 'Manufacturing', 'Foodstuffs', 'Feeds', 'Finished Consumer Foods'],
-            # JOLTS: Food services and drinking places
             'jolts': ['Food services', 'Accommodation and food services', 'Restaurants',
                       'Drinking places', 'Food service'],
+            'empsit': ['Food services', 'Accommodation and food services', 'Food manufacturing',
+                       'Food and beverage stores', 'Restaurants'],
         },
         'relationship': BLS_ENRICHMENT.foodSectorCorrelation
     },
@@ -47,9 +48,10 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': ['Energy', 'Gasoline', 'Fuel', 'Electricity', 'Gas', 'Utility'],
             'ppi': ['Energy', 'Goods', 'Materials', 'Fuel', 'Petroleum'],
-            # JOLTS: Mining, oil and gas extraction, utilities
             'jolts': ['Mining', 'Oil and gas extraction', 'Utilities', 'Electric power',
                       'Natural gas', 'Coal mining'],
+            'empsit': ['Mining', 'Oil and gas extraction', 'Utilities', 'Electric power',
+                       'Natural gas', 'Coal mining', 'Petroleum'],
         },
         'relationship': BLS_ENRICHMENT.energySectorCorrelation
     },
@@ -59,9 +61,10 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': ['Housing', 'Shelter', 'Rent', 'Owners', 'Lodging'],
             'ppi': ['Construction', 'Building', 'Materials', 'Residential'],
-            # JOLTS: Construction industry
             'jolts': ['Construction', 'Building construction', 'Heavy construction',
                       'Specialty trade contractors', 'Residential construction'],
+            'empsit': ['Construction', 'Building construction', 'Heavy construction',
+                       'Specialty trade contractors', 'Residential'],
         },
         'relationship': BLS_ENRICHMENT.housingSectorCorrelation
     },
@@ -71,9 +74,10 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': ['Transportation', 'Vehicle', 'Automobile', 'Transit', 'Airfare'],
             'ppi': ['Transportation', 'Warehousing', 'Trade', 'Shipping'],
-            # JOLTS: Transportation and warehousing
             'jolts': ['Transportation', 'Warehousing', 'Truck transportation',
                       'Couriers and messengers', 'Transit', 'Air transportation'],
+            'empsit': ['Transportation', 'Warehousing', 'Truck transportation',
+                       'Couriers and messengers', 'Transit', 'Air transportation'],
         },
         'relationship': BLS_ENRICHMENT.transportationSectorCorrelation
     },
@@ -84,9 +88,10 @@ BLS_SECTOR_PATTERNS = {
             'cpi': ['Goods', 'Services', 'Commodities'],
             'ppi': ['Goods', 'Services', 'Final Demand', 'Intermediate Demand',
                     'Processed', 'Unprocessed'],
-            # JOLTS: Goods-producing vs Service-providing
             'jolts': ['Goods-producing', 'Service-providing', 'Manufacturing',
                       'Trade, transportation, and utilities', 'Professional and business services'],
+            'empsit': ['Goods-producing', 'Service-providing', 'Manufacturing',
+                       'Private service-providing'],
         },
         'relationship': BLS_ENRICHMENT.goodsServicesRelation
     },
@@ -96,9 +101,10 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': [],  # CPI doesn't have manufacturing categories
             'ppi': ['Manufacturing', 'Production', 'Fabrication', 'Processing'],
-            # JOLTS: Manufacturing industries
             'jolts': ['Manufacturing', 'Durable goods', 'Nondurable goods',
                       'Fabricated metal', 'Machinery', 'Computer and electronic'],
+            'empsit': ['Manufacturing', 'Durable goods', 'Nondurable goods',
+                       'Fabricated metal', 'Machinery', 'Production', 'Nonsupervisory'],
         },
         'relationship': BLS_ENRICHMENT.manufacturingSectorCorrelation
     },
@@ -108,9 +114,10 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': [],  # CPI measures prices, not retail activity
             'ppi': ['Trade', 'Wholesale', 'Retail'],
-            # JOLTS: Retail trade
             'jolts': ['Retail trade', 'Motor vehicle dealers', 'Furniture stores',
                       'Electronics stores', 'Food and beverage stores', 'General merchandise'],
+            'empsit': ['Retail trade', 'Wholesale trade', 'vehicle dealers', ‘Automobile dealers’,
+                       'Furniture stores', 'Electronics stores', 'Food and beverage stores'],
         },
         'relationship': BLS_ENRICHMENT.retailSectorCorrelation
     },
@@ -120,9 +127,10 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': ['Medical', 'Healthcare', 'Hospital', 'Physician', 'Prescription'],
             'ppi': ['Healthcare', 'Medical', 'Hospital'],
-            # JOLTS: Healthcare and social assistance
             'jolts': ['Health care', 'Social assistance', 'Hospitals',
                       'Nursing', 'Ambulatory health care', 'Medical'],
+            'empsit': ['Health care', 'Social assistance', 'Hospitals',
+                       'Nursing', 'Ambulatory health care', 'Medical', 'Private education and health'],
         },
         'relationship': BLS_ENRICHMENT.healthcareSectorCorrelation
     },
@@ -132,9 +140,10 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': [],  # CPI doesn't have professional services categories
             'ppi': ['Professional services', 'Business services', 'Consulting'],
-            # JOLTS: Professional and business services
             'jolts': ['Professional and business services', 'Professional and technical services',
                       'Management', 'Administrative', 'Waste services'],
+            'empsit': ['Professional and business services', 'Professional and technical services',
+                       'Management', 'Administrative', 'Waste services', 'Temporary help'],
         },
         'relationship': BLS_ENRICHMENT.professionalServicesSectorCorrelation
     },
@@ -144,17 +153,52 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': ['Recreation', 'Entertainment', 'Lodging', 'Hotel'],
             'ppi': [],  # PPI doesn't have leisure/hospitality categories
-            # JOLTS: Leisure and hospitality
             'jolts': ['Leisure and hospitality', 'Arts and entertainment',
                       'Accommodation', 'Recreation', 'Amusement'],
+            'empsit': ['Leisure and hospitality', 'Arts and entertainment',
+                       'Accommodation', 'Recreation', 'Amusement'],
         },
         'relationship': BLS_ENRICHMENT.leisureHospitalitySectorCorrelation
+    },
+    'government_sector': {
+        'description': 'Government employment',
+        'sector_uri': BLS_ENRICHMENT.GovernmentSector,
+        'keywords': {
+            'cpi': [],
+            'ppi': [],
+            'jolts': ['Government', 'Federal', 'State', 'Local'],
+            'empsit': ['Government', 'Federal', 'State', 'Local government'],
+        },
+        'relationship': BLS_ENRICHMENT.governmentSectorCorrelation
+    },
+    'information_sector': {
+        'description': 'Information and communications',
+        'sector_uri': BLS_ENRICHMENT.InformationSector,
+        'keywords': {
+            'cpi': ['Information', 'Communication'],
+            'ppi': ['Information'],
+            'jolts': ['Information', 'Publishing', 'Broadcasting', 'Telecommunications'],
+            'empsit': ['Information', 'Publishing', 'Broadcasting', 'Telecommunications'],
+        },
+        'relationship': BLS_ENRICHMENT.informationSectorCorrelation
+    },
+    'financial_sector': {
+        'description': 'Financial activities and services',
+        'sector_uri': BLS_ENRICHMENT.FinancialSector,
+        'keywords': {
+            'cpi': ['Financial'],
+            'ppi': ['Financial'],
+            'jolts': ['Financial activities', 'Finance', 'Insurance', 'Real estate'],
+            'empsit': ['Financial activities', 'Finance', 'Insurance', 'Real estate'],
+        },
+        'relationship': BLS_ENRICHMENT.financialSectorCorrelation
     }
 }
 
 # Specific known correlations based on economic theory
 # IMPORTANT: Only include correlations between datasets we've analyzed!
 KNOWN_CORRELATIONS = [
+    # CPI-PPI Correlations
     {
         'name': 'cpi_ppi_food_chain',
         'source_dataset': 'ppi',
@@ -292,6 +336,146 @@ KNOWN_CORRELATIONS = [
         'relationship': BLS_ENRICHMENT.laborMarketFlow,
         'lag_months': 0,
         'strength': 'strong'
+    },
+
+    # EMPSIT-CPI Correlations
+    {
+        'name': 'empsit_cpi_employment_spending',
+        'source_dataset': 'empsit',
+        'target_dataset': 'cpi',
+        'source_pattern': 'Employed',
+        'target_pattern': 'All items',
+        'description': 'Employment levels affect consumer spending and prices',
+        'relationship': BLS_ENRICHMENT.employmentConsumptionLink,
+        'lag_months': 1,
+        'strength': 'medium'
+    },
+    {
+        'name': 'empsit_cpi_earnings_spending',
+        'source_dataset': 'empsit',
+        'target_dataset': 'cpi',
+        'source_pattern': 'Average hourly earnings',
+        'target_pattern': 'All items',
+        'description': 'Wage growth affects consumer price inflation',
+        'relationship': BLS_ENRICHMENT.wageInflationLink,
+        'lag_months': 2,
+        'strength': 'strong'
+    },
+    {
+        'name': 'empsit_cpi_healthcare_employment',
+        'source_dataset': 'empsit',
+        'target_dataset': 'cpi',
+        'source_pattern': 'Health care',
+        'target_pattern': 'Medical',
+        'description': 'Healthcare employment affects medical service prices',
+        'relationship': BLS_ENRICHMENT.employmentPriceLink,
+        'lag_months': 3,
+        'strength': 'strong'
+    },
+
+    # EMPSIT-JOLTS Correlations
+    {
+        'name': 'empsit_jolts_unemployment_openings',
+        'source_dataset': 'empsit',
+        'target_dataset': 'jolts',
+        'source_pattern': 'Unemployed',
+        'target_pattern': 'Job openings',
+        'description': 'Unemployment levels inversely correlate with job openings',
+        'relationship': BLS_ENRICHMENT.unemploymentJobOpeningsLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'empsit_jolts_labor_force_participation',
+        'source_dataset': 'empsit',
+        'target_dataset': 'jolts',
+        'source_pattern': 'Civilian labor force',
+        'target_pattern': 'Total nonfarm',
+        'description': 'Labor force participation affects job market dynamics',
+        'relationship': BLS_ENRICHMENT.laborForceJobMarketLink,
+        'lag_months': 0,
+        'strength': 'medium'
+    },
+    {
+        'name': 'empsit_jolts_manufacturing_employment',
+        'source_dataset': 'empsit',
+        'target_dataset': 'jolts',
+        'source_pattern': 'Manufacturing',
+        'target_pattern': 'Manufacturing',
+        'description': 'Manufacturing employment correlates with job openings',
+        'relationship': BLS_ENRICHMENT.employmentJobOpeningsLink,
+        'lag_months': 1,
+        'strength': 'strong'
+    },
+
+    # EMPSIT-PPI Correlations
+    {
+        'name': 'empsit_ppi_manufacturing_employment',
+        'source_dataset': 'empsit',
+        'target_dataset': 'ppi',
+        'source_pattern': 'Manufacturing',
+        'target_pattern': 'Manufacturing',
+        'description': 'Manufacturing employment affects production costs',
+        'relationship': BLS_ENRICHMENT.employmentProductionLink,
+        'lag_months': 1,
+        'strength': 'medium'
+    },
+    {
+        'name': 'empsit_ppi_construction_employment',
+        'source_dataset': 'empsit',
+        'target_dataset': 'ppi',
+        'source_pattern': 'Construction',
+        'target_pattern': 'Construction',
+        'description': 'Construction employment affects building costs',
+        'relationship': BLS_ENRICHMENT.employmentProductionLink,
+        'lag_months': 2,
+        'strength': 'medium'
+    },
+    {
+        'name': 'empsit_ppi_wages_costs',
+        'source_dataset': 'empsit',
+        'target_dataset': 'ppi',
+        'source_pattern': 'Average hourly earnings',
+        'target_pattern': 'Final Demand',
+        'description': 'Wage growth affects producer costs',
+        'relationship': BLS_ENRICHMENT.wageCostLink,
+        'lag_months': 1,
+        'strength': 'strong'
+    },
+
+    # EMPSIT Internal Correlations
+    {
+        'name': 'empsit_establishment_household',
+        'source_dataset': 'empsit',
+        'target_dataset': 'empsit',
+        'source_pattern': 'Total nonfarm',
+        'target_pattern': 'Employed',
+        'description': 'Establishment and household employment measures',
+        'relationship': BLS_ENRICHMENT.surveyCorrelation,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'empsit_unemployment_duration',
+        'source_dataset': 'empsit',
+        'target_dataset': 'empsit',
+        'source_pattern': 'Unemployed',
+        'target_pattern': 'Average duration',
+        'description': 'Unemployment levels affect average duration',
+        'relationship': BLS_ENRICHMENT.unemploymentDurationLink,
+        'lag_months': 0,
+        'strength': 'medium'
+    },
+    {
+        'name': 'empsit_hours_earnings',
+        'source_dataset': 'empsit',
+        'target_dataset': 'empsit',
+        'source_pattern': 'Average weekly hours',
+        'target_pattern': 'Average weekly earnings',
+        'description': 'Hours worked directly affect weekly earnings',
+        'relationship': BLS_ENRICHMENT.hoursEarningsLink,
+        'lag_months': 0,
+        'strength': 'strong'
     }
 ]
 
@@ -344,7 +528,6 @@ MEASUREMENT_TYPES = {
             'year_property': PPI.hasYear
         }
     },
-
     'jolts': {
         'JobOpeningsLevel': {
             'class': JOLTS.JobOpeningsLevel,
@@ -419,19 +602,191 @@ MEASUREMENT_TYPES = {
             'year_property': JOLTS.hasYear
         }
     },
+    'empsit': {
+        # Establishment Survey Tables (9 tables)
+        'EstablishmentData': {
+            'class': EMPSIT.EstablishmentData,
+            'category_property': EMPSIT.hasCategory,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'EmployeeCount': {
+            'class': EMPSIT.EmployeeCount,
+            'category_property': EMPSIT.hasIndustry,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'WeeklyHoursData': {
+            'class': EMPSIT.WeeklyHoursData,
+            'category_property': EMPSIT.hasIndustry,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'EarningsData': {
+            'class': EMPSIT.EarningsData,
+            'category_property': EMPSIT.hasIndustry,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'IndexData': {
+            'class': EMPSIT.IndexData,
+            'category_property': EMPSIT.hasIndustry,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'WomenEmploymentData': {
+            'class': EMPSIT.WomenEmploymentData,
+            'category_property': EMPSIT.hasIndustry,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'ProductionNonsupervisoryEmploymentData': {
+            'class': EMPSIT.ProductionNonsupervisoryEmploymentData,
+            'category_property': EMPSIT.hasIndustry,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'AverageWeeklyHoursData': {
+            'class': EMPSIT.AverageWeeklyHoursData,
+            'category_property': EMPSIT.hasIndustry,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'AverageOvertimeHoursData': {
+            'class': EMPSIT.AverageOvertimeHoursData,
+            'category_property': EMPSIT.hasIndustry,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'AverageHourlyEarningsData': {
+            'class': EMPSIT.AverageHourlyEarningsData,
+            'category_property': EMPSIT.hasIndustry,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'AverageWeeklyEarningsData': {
+            'class': EMPSIT.AverageWeeklyEarningsData,
+            'category_property': EMPSIT.hasIndustry,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'IndexOfAggregateWeeklyHoursData': {
+            'class': EMPSIT.IndexOfAggregateWeeklyHoursData,
+            'category_property': EMPSIT.hasIndustry,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'IndexOfAggregateWeeklyPayrollsData': {
+            'class': EMPSIT.IndexOfAggregateWeeklyPayrollsData,
+            'category_property': EMPSIT.hasIndustry,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
 
-    # TODO: Add EMPSIT measurement types when ontology is provided
-    # Expected measurement types: Employment, Unemployment, LaborForce, etc.
-    # 'empsit': {
-    #     'Employment': {
-    #         'class': EMPSIT.Employment,
-    #         'category_property': EMPSIT.hasIndustry,
-    #         'month_property': EMPSIT.hasMonth,
-    #         'year_property': EMPSIT.hasYear
-    #     },
-    #     'Unemployment': {...},
-    #     etc.
-    # }
+        # Household Survey Tables (18 tables)
+        'HouseholdData': {
+            'class': EMPSIT.HouseholdData,
+            'category_property': EMPSIT.hasCategory,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'EmploymentStatusData': {
+            'class': EMPSIT.EmploymentStatusData,
+            'category_property': EMPSIT.hasStatusCategory,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'EmploymentStatusByRaceData': {
+            'class': EMPSIT.EmploymentStatusByRaceData,
+            'category_property': EMPSIT.hasStatusCategory,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'EmploymentStatusByEthnicityData': {
+            'class': EMPSIT.EmploymentStatusByEthnicityData,
+            'category_property': EMPSIT.hasStatusCategory,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'EmploymentStatusByEducationData': {
+            'class': EMPSIT.EmploymentStatusByEducationData,
+            'category_property': EMPSIT.hasStatusCategory,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'EmploymentStatusByVeteranData': {
+            'class': EMPSIT.EmploymentStatusByVeteranData,
+            'category_property': EMPSIT.hasStatusCategory,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'EmploymentStatusByDisabilityData': {
+            'class': EMPSIT.EmploymentStatusByDisabilityData,
+            'category_property': EMPSIT.hasStatusCategory,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'EmploymentStatusByNativityData': {
+            'class': EMPSIT.EmploymentStatusByNativityData,
+            'category_property': EMPSIT.hasStatusCategory,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'ClassOfWorkerData': {
+            'class': EMPSIT.ClassOfWorkerData,
+            'category_property': EMPSIT.hasCategory,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'EmploymentIndicatorData': {
+            'class': EMPSIT.EmploymentIndicatorData,
+            'category_property': EMPSIT.hasCategory,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'UnemploymentIndicatorData': {
+            'class': EMPSIT.UnemploymentIndicatorData,
+            'category_property': EMPSIT.hasCategory,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'UnemploymentReasonData': {
+            'class': EMPSIT.UnemploymentReasonData,
+            'category_property': EMPSIT.hasReason,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'UnemploymentDurationData': {
+            'class': EMPSIT.UnemploymentDurationData,
+            'category_property': EMPSIT.hasDuration,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'OccupationData': {
+            'class': EMPSIT.OccupationData,
+            'category_property': EMPSIT.hasOccupation,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'IndustryClassOfWorkerData': {
+            'class': EMPSIT.IndustryClassOfWorkerData,
+            'category_property': EMPSIT.hasIndustryClassOfWorker,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'UnderutilizationData': {
+            'class': EMPSIT.UnderutilizationData,
+            'category_property': EMPSIT.hasUnderutilizationMeasure,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        },
+        'LaborForceCategoryData': {
+            'class': EMPSIT.LaborForceCategoryData,
+            'category_property': EMPSIT.hasLaborForceCategory,
+            'month_property': EMPSIT.hasMonth,
+            'year_property': EMPSIT.hasYear
+        }
+    }
 }
 
 
@@ -440,9 +795,9 @@ class BLSIntraSourceLinker:
     Enriches BLS data with intra-source relationships across all BLS datasets.
 
     Uses encoded domain knowledge to create links. Patterns are only defined
-    for datasets whose ontologies have been analyzed (currently: CPI, PPI).
+    for datasets whose ontologies have been analyzed (currently: CPI, PPI, JOLTS, EMPSIT).
 
-    When new datasets are added (e.g., JOLTS), update:
+    When new datasets are added, update:
     1. BLS_SECTOR_PATTERNS - Add keywords for the new dataset
     2. KNOWN_CORRELATIONS - Add correlations involving the new dataset
     3. MEASUREMENT_TYPES - Add measurement type mappings
@@ -477,7 +832,7 @@ class BLSIntraSourceLinker:
         Detect which BLS datasets are present in the graph.
 
         Returns:
-            Set of dataset names (e.g., {'cpi', 'ppi'})
+            Set of dataset names (e.g., {'cpi', 'ppi', 'empsit'})
         """
         datasets = set()
 
@@ -569,7 +924,7 @@ class BLSIntraSourceLinker:
         Unify temporal entities across all BLS datasets.
 
         Creates unified Month and Year entities that link to dataset-specific temporal entities.
-        Example: cpi:January, ppi:January → bls:January
+        Example: cpi:January, ppi:January, empsit:January → bls:January
 
         This works for any BLS dataset that uses Month and Year classes.
         """
@@ -735,8 +1090,9 @@ class BLSIntraSourceLinker:
                 ))
                 links_added += 1
 
-        logger.info(
-            f"  {dataset_name}.{measurement_name}: {links_added} sequence links across {len(by_category)} categories")
+        if links_added > 0:
+            logger.info(
+                f"  {dataset_name}.{measurement_name}: {links_added} sequence links across {len(by_category)} categories")
         return links_added
 
     def apply_sector_patterns(self):
@@ -763,11 +1119,9 @@ class BLSIntraSourceLinker:
             for dataset, keywords in pattern['keywords'].items():
                 # Only process if dataset is available AND configured
                 if dataset not in self.available_datasets:
-                    logger.info(f"    Skipping {dataset} (not in graph)")
                     continue
 
                 if not keywords:
-                    logger.info(f"    Skipping {dataset} (no keywords configured)")
                     continue
 
                 namespace = self._get_namespace_for_dataset(dataset)
@@ -793,7 +1147,8 @@ class BLSIntraSourceLinker:
                             self.graph.add((entity1, pattern['relationship'], entity2))
                             self.stats['sector_links'] += 1
 
-            logger.info(f"    Found {total_entities} entities across {len(dataset_entities)} datasets")
+            if total_entities > 0:
+                logger.info(f"    Found {total_entities} entities across {len(dataset_entities)} datasets")
 
     def apply_known_correlations(self):
         """
@@ -808,11 +1163,9 @@ class BLSIntraSourceLinker:
 
             # Check if both datasets are available
             if source_dataset not in self.available_datasets:
-                logger.info(f"  Skipping {correlation['name']}: {source_dataset} not available")
                 continue
 
             if target_dataset not in self.available_datasets:
-                logger.info(f"  Skipping {correlation['name']}: {target_dataset} not available")
                 continue
 
             logger.info(f"  Applying: {correlation['name']}")
@@ -842,63 +1195,108 @@ class BLSIntraSourceLinker:
                                         Literal(correlation['strength'], datatype=XSD.string)))
 
             self.stats['correlation_links'] += links_added
-            logger.info(f"    Created {links_added} correlation links")
+            if links_added > 0:
+                logger.info(f"    Created {links_added} correlation links")
 
     def link_cross_dataset_hierarchies(self):
         """
         Link hierarchies across datasets based on similar paths.
 
-        Currently only implemented for CPI and PPI (the datasets we've analyzed).
+        Currently implemented for:
+        - CPI ↔ PPI
+        - CPI ↔ EMPSIT
+        - PPI ↔ EMPSIT
+        - JOLTS ↔ EMPSIT
+
         This method can be extended as more datasets with hierarchies are added.
         """
-        if 'cpi' not in self.available_datasets or 'ppi' not in self.available_datasets:
-            logger.info("  Skipping: Requires both CPI and PPI")
+        # CPI ↔ PPI hierarchies
+        if 'cpi' in self.available_datasets and 'ppi' in self.available_datasets:
+            self._link_hierarchies_between_datasets(
+                'cpi', 'ppi',
+                CPI.hasParent, PPI.hasParent,
+                CPI.hasFullPath, PPI.hasFullPath
+            )
+
+        # CPI ↔ EMPSIT hierarchies
+        if 'cpi' in self.available_datasets and 'empsit' in self.available_datasets:
+            self._link_hierarchies_between_datasets(
+                'cpi', 'empsit',
+                CPI.hasParent, EMPSIT.hasParentCategory,
+                CPI.hasFullPath, EMPSIT.hasFullPath
+            )
+
+        # PPI ↔ EMPSIT hierarchies
+        if 'ppi' in self.available_datasets and 'empsit' in self.available_datasets:
+            self._link_hierarchies_between_datasets(
+                'ppi', 'empsit',
+                PPI.hasParent, EMPSIT.hasParentIndustry,
+                PPI.hasFullPath, EMPSIT.hasFullPath
+            )
+
+        # JOLTS ↔ EMPSIT hierarchies
+        if 'jolts' in self.available_datasets and 'empsit' in self.available_datasets:
+            self._link_hierarchies_between_datasets(
+                'jolts', 'empsit',
+                JOLTS.hasParent, EMPSIT.hasParentIndustry,
+                JOLTS.hasFullPath, EMPSIT.hasFullPath
+            )
+
+    def _link_hierarchies_between_datasets(self,
+                                          dataset1: str,
+                                          dataset2: str,
+                                          parent_prop1: URIRef,
+                                          parent_prop2: URIRef,
+                                          path_prop1: URIRef,
+                                          path_prop2: URIRef):
+        """Helper to link hierarchies between two datasets"""
+
+        query1 = f"""
+        SELECT ?category ?parent ?fullPath ?label WHERE {{
+            ?category <{parent_prop1}> ?parent ;
+                     <{path_prop1}> ?fullPath .
+            OPTIONAL {{ ?category rdfs:label ?label }}
+        }}
+        """
+
+        query2 = f"""
+        SELECT ?category ?parent ?fullPath ?label WHERE {{
+            ?category <{parent_prop2}> ?parent ;
+                     <{path_prop2}> ?fullPath .
+            OPTIONAL {{ ?category rdfs:label ?label }}
+        }}
+        """
+
+        hierarchies1 = list(self.graph.query(query1))
+        hierarchies2 = list(self.graph.query(query2))
+
+        if not hierarchies1 or not hierarchies2:
             return
 
-        # Find CPI categories with hierarchies
-        cpi_hierarchy_query = """
-        SELECT ?category ?parent ?fullPath ?label WHERE {
-            ?category <https://www.bls.gov/cpi/hasParent> ?parent ;
-                     <https://www.bls.gov/cpi/hasFullPath> ?fullPath .
-            OPTIONAL { ?category rdfs:label ?label }
-        }
-        """
-
-        # Find PPI groupings with hierarchies
-        ppi_hierarchy_query = """
-        SELECT ?grouping ?parent ?fullPath ?label WHERE {
-            ?grouping <https://www.bls.gov/ppi/hasParent> ?parent ;
-                     <https://www.bls.gov/ppi/hasFullPath> ?fullPath .
-            OPTIONAL { ?grouping rdfs:label ?label }
-        }
-        """
-
-        cpi_hierarchies = list(self.graph.query(cpi_hierarchy_query))
-        ppi_hierarchies = list(self.graph.query(ppi_hierarchy_query))
-
-        logger.info(f"  Analyzing {len(cpi_hierarchies)} CPI and {len(ppi_hierarchies)} PPI hierarchies")
+        logger.info(f"  Analyzing {len(hierarchies1)} {dataset1} and {len(hierarchies2)} {dataset2} hierarchies")
 
         links_added = 0
-        for cpi_row in cpi_hierarchies:
-            cpi_path = str(cpi_row.fullPath).lower()
-            cpi_label = str(cpi_row.label).lower() if cpi_row.label else ""
+        for row1 in hierarchies1:
+            path1 = str(row1.fullPath).lower()
+            label1 = str(row1.label).lower() if row1.label else ""
 
-            for ppi_row in ppi_hierarchies:
-                ppi_path = str(ppi_row.fullPath).lower()
-                ppi_label = str(ppi_row.label).lower() if ppi_row.label else ""
+            for row2 in hierarchies2:
+                path2 = str(row2.fullPath).lower()
+                label2 = str(row2.label).lower() if row2.label else ""
 
                 # Check for keyword overlap in paths or labels
-                if self._paths_are_related(cpi_path, ppi_path) or \
-                        self._labels_are_related(cpi_label, ppi_label):
+                if self._paths_are_related(path1, path2) or \
+                        self._labels_are_related(label1, label2):
                     self.graph.add((
-                        cpi_row.category,
+                        row1.category,
                         BLS_ENRICHMENT.relatedHierarchy,
-                        ppi_row.grouping
+                        row2.category
                     ))
                     links_added += 1
 
-        self.stats['hierarchy_links'] = links_added
-        logger.info(f"  Created {links_added} cross-hierarchy links")
+        self.stats['hierarchy_links'] += links_added
+        if links_added > 0:
+            logger.info(f"  Created {links_added} {dataset1}↔{dataset2} hierarchy links")
 
     # ============================================
     # HELPER METHODS
@@ -958,7 +1356,9 @@ class BLSIntraSourceLinker:
         """Check if two hierarchical paths are related"""
         # Keywords that indicate related concepts
         keywords = ['food', 'energy', 'housing', 'transportation', 'goods', 'services',
-                    'manufacturing', 'construction', 'trade', 'warehousing']
+                    'manufacturing', 'construction', 'trade', 'warehousing', 'healthcare',
+                    'retail', 'wholesale', 'professional', 'leisure', 'hospitality',
+                    'information', 'financial', 'government', 'education']
 
         for keyword in keywords:
             if keyword in path1 and keyword in path2:
@@ -976,7 +1376,7 @@ class BLSIntraSourceLinker:
         words2 = set(label2.split())
 
         # Remove common words
-        common_words = {'the', 'and', 'or', 'for', 'of', 'in', 'to', 'a', 'an'}
+        common_words = {'the', 'and', 'or', 'for', 'of', 'in', 'to', 'a', 'an', 'by', 'with'}
         words1 -= common_words
         words2 -= common_words
 
