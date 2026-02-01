@@ -668,9 +668,23 @@ class TestResult:
     test_name: str
     passed: bool
     graph: Optional[Graph]
-    stats: Optional[Dict[str, int]]
+    stats: Optional[Dict[str, any]]  # Changed from implicit to explicit
     output_file: str
     error_message: Optional[str] = None
+
+    def get_datasets(self) -> List[str]:
+        """Safely get available datasets list"""
+        if self.stats and 'available_datasets' in self.stats:
+            datasets = self.stats['available_datasets']
+            if isinstance(datasets, list):
+                return datasets
+        return []
+
+    def get_triples_added(self) -> int:
+        """Safely get triples added count"""
+        if self.stats and 'total_triples_added' in self.stats:
+            return self.stats['total_triples_added']
+        return 0
 
 
 class TestSuite:
@@ -1468,9 +1482,9 @@ class TestSuite:
 
     def print_summary(self):
         """Print summary of all test results"""
-        logger.info("\n" + "="*80)
+        logger.info("\n" + "=" * 80)
         logger.info("TEST SUITE SUMMARY")
-        logger.info("="*80)
+        logger.info("=" * 80)
 
         total_tests = len(self.results)
         passed_tests = sum(1 for r in self.results if r.passed)
@@ -1479,7 +1493,7 @@ class TestSuite:
         logger.info(f"\nTotal Tests: {total_tests}")
         logger.info(f"Passed: {passed_tests}")
         logger.info(f"Failed: {failed_tests}")
-        logger.info(f"Success Rate: {(passed_tests/total_tests)*100:.1f}%")
+        logger.info(f"Success Rate: {(passed_tests / total_tests) * 100:.1f}%")
 
         logger.info("\nDetailed Results:")
         logger.info("-" * 80)
@@ -1488,9 +1502,15 @@ class TestSuite:
             status = "✅ PASS" if result.passed else "❌ FAIL"
             logger.info(f"{status} | {result.test_name}")
 
-            if result.stats:
-                logger.info(f"       Datasets: {', '.join(result.stats['available_datasets'])}")
-                logger.info(f"       Triples added: {result.stats['total_triples_added']}")
+            # Use helper methods for type-safe access
+            datasets = result.get_datasets()
+            if datasets:
+                logger.info(f"       Datasets: {', '.join(datasets)}")
+
+            triples_added = result.get_triples_added()
+            logger.info(f"       Triples added: {triples_added}")
+
+            if result.output_file:
                 logger.info(f"       Output: {result.output_file}")
 
             if result.error_message:
@@ -1498,7 +1518,7 @@ class TestSuite:
 
             logger.info("")
 
-        logger.info("="*80)
+        logger.info("=" * 80)
 
         return passed_tests == total_tests
 
