@@ -2,26 +2,30 @@
 Unified BLS Dataset Test Suite
 
 This comprehensive test suite validates:
-1. Individual dataset enrichment (CPI, PPI, JOLTS)
-2. Pairwise dataset integration (CPI+PPI, JOLTS+CPI, JOLTS+PPI)
-3. Full multi-dataset integration (CPI+PPI+JOLTS)
+1. Individual dataset enrichment (CPI, PPI, JOLTS, EMPSIT)
+2. Pairwise dataset integration (CPI+PPI, JOLTS+CPI, JOLTS+PPI, EMPSIT+CPI, EMPSIT+PPI, EMPSIT+JOLTS)
+3. Full multi-dataset integration (CPI+PPI+JOLTS+EMPSIT)
 
 Usage:
     # Test individual datasets
-    python tests/test_all_bls_datasets.py --dataset cpi
-    python tests/test_all_bls_datasets.py --dataset ppi
-    python tests/test_all_bls_datasets.py --dataset jolts
+    python tests/test_bls_dataset.py --dataset cpi
+    python tests/test_bls_dataset.py --dataset ppi
+    python tests/test_bls_dataset.py --dataset jolts
+    python tests/test_bls_dataset.py --dataset empsit
 
     # Test dataset pairs
-    python tests/test_all_bls_datasets.py --combination cpi-ppi
-    python tests/test_all_bls_datasets.py --combination jolts-cpi
-    python tests/test_all_bls_datasets.py --combination jolts-ppi
+    python tests/test_bls_dataset.py --combination cpi-ppi
+    python tests/test_bls_dataset.py --combination jolts-cpi
+    python tests/test_bls_dataset.py --combination jolts-ppi
+    python tests/test_bls_dataset.py --combination empsit-cpi
+    python tests/test_bls_dataset.py --combination empsit-ppi
+    python tests/test_bls_dataset.py --combination empsit-jolts
 
     # Test all datasets together
-    python tests/test_all_bls_datasets.py --combination all
+    python tests/test_bls_dataset.py --combination all
 
     # Run all tests
-    python tests/test_all_bls_datasets.py --run-all
+    python tests/test_bls_dataset.py --run-all
 """
 
 import sys
@@ -451,6 +455,209 @@ def create_sample_jolts_data() -> str:
     """
 
 
+def create_sample_empsit_data() -> str:
+    """Generate sample EMPSIT RDF data (Establishment + Household)"""
+    return """
+    @prefix empsit: <https://www.bls.gov/empsit/> .
+    @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+    @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+    @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+    
+    # Temporal entities
+    empsit:November rdf:type empsit:Month .
+    empsit:December rdf:type empsit:Month .
+    empsit:2024 rdf:type empsit:Year .
+    
+    # ============================================
+    # ESTABLISHMENT DATA (Table B-1)
+    # ============================================
+    
+    # Industry hierarchy
+    empsit:total_nonfarm rdf:type empsit:Industry ;
+        rdfs:label "Total nonfarm" ;
+        empsit:hasFullPath "total_nonfarm" .
+    
+    empsit:total_private rdf:type empsit:Industry ;
+        rdfs:label "Total private" ;
+        empsit:hasFullPath "total_private" ;
+        empsit:hasParentIndustry empsit:total_nonfarm .
+    
+    empsit:goods_producing rdf:type empsit:Industry ;
+        rdfs:label "Goods-producing" ;
+        empsit:hasFullPath "goods_producing" ;
+        empsit:hasParentIndustry empsit:total_private .
+    
+    empsit:manufacturing rdf:type empsit:Industry ;
+        rdfs:label "Manufacturing" ;
+        empsit:hasFullPath "manufacturing" ;
+        empsit:hasParentIndustry empsit:goods_producing .
+    
+    empsit:food_manufacturing rdf:type empsit:Industry ;
+        rdfs:label "Food manufacturing" ;
+        empsit:hasFullPath "food_manufacturing" ;
+        empsit:hasParentIndustry empsit:manufacturing .
+    
+    empsit:private_service empsit:type empsit:Industry ;
+        rdfs:label "Private service-providing" ;
+        empsit:hasFullPath "private_service" ;
+        empsit:hasParentIndustry empsit:total_private .
+    
+    empsit:retail rdf:type empsit:Industry ;
+        rdfs:label "Retail trade" ;
+        empsit:hasFullPath "retail" ;
+        empsit:hasParentIndustry empsit:private_service .
+    
+    empsit:healthcare_social rdf:type empsit:Industry ;
+        rdfs:label "Health care and social assistance" ;
+        empsit:hasFullPath "healthcare_social" ;
+        empsit:hasParentIndustry empsit:private_service .
+    
+    empsit:leisure_hospitality rdf:type empsit:Industry ;
+        rdfs:label "Leisure and hospitality" ;
+        empsit:hasFullPath "leisure_hospitality" ;
+        empsit:hasParentIndustry empsit:private_service .
+    
+    empsit:food_services rdf:type empsit:Industry ;
+        rdfs:label "Food services and drinking places" ;
+        empsit:hasFullPath "food_services" ;
+        empsit:hasParentIndustry empsit:leisure_hospitality .
+    
+    empsit:construction rdf:type empsit:Industry ;
+        rdfs:label "Construction" ;
+        empsit:hasFullPath "construction" ;
+        empsit:hasParentIndustry empsit:goods_producing .
+    
+    # Employee counts (November 2024)
+    empsit:total_nonfarm_November2024_EmployeeCount rdf:type empsit:EmployeeCount ;
+        empsit:employeeCount 159358 ;
+        empsit:hasIndustry empsit:total_nonfarm ;
+        empsit:hasMonth empsit:November ;
+        empsit:hasYear empsit:2024 ;
+        empsit:isPreliminary false .
+    
+    empsit:manufacturing_November2024_EmployeeCount rdf:type empsit:EmployeeCount ;
+        empsit:employeeCount 12987 ;
+        empsit:hasIndustry empsit:manufacturing ;
+        empsit:hasMonth empsit:November ;
+        empsit:hasYear empsit:2024 ;
+        empsit:isPreliminary false .
+    
+    empsit:food_services_November2024_EmployeeCount rdf:type empsit:EmployeeCount ;
+        empsit:employeeCount 12456 ;
+        empsit:hasIndustry empsit:food_services ;
+        empsit:hasMonth empsit:November ;
+        empsit:hasYear empsit:2024 ;
+        empsit:isPreliminary false .
+    
+    # Employee counts (December 2024)
+    empsit:total_nonfarm_December2024_EmployeeCount rdf:type empsit:EmployeeCount ;
+        empsit:employeeCount 159568 ;
+        empsit:hasIndustry empsit:total_nonfarm ;
+        empsit:hasMonth empsit:December ;
+        empsit:hasYear empsit:2024 ;
+        empsit:isPreliminary true .
+    
+    empsit:manufacturing_December2024_EmployeeCount rdf:type empsit:EmployeeCount ;
+        empsit:employeeCount 13012 ;
+        empsit:hasIndustry empsit:manufacturing ;
+        empsit:hasMonth empsit:December ;
+        empsit:hasYear empsit:2024 ;
+        empsit:isPreliminary true .
+    
+    # Average hourly earnings (November 2024)
+    empsit:total_private_November2024_AverageHourlyEarnings rdf:type empsit:EarningsData ;
+        empsit:value 35.46 ;
+        empsit:unit "Dollars" ;
+        empsit:hasIndustry empsit:total_private ;
+        empsit:hasMonth empsit:November ;
+        empsit:hasYear empsit:2024 ;
+        empsit:isPreliminary false .
+    
+    # Average hourly earnings (December 2024)
+    empsit:total_private_December2024_AverageHourlyEarnings rdf:type empsit:EarningsData ;
+        empsit:value 35.69 ;
+        empsit:unit "Dollars" ;
+        empsit:hasIndustry empsit:total_private ;
+        empsit:hasMonth empsit:December ;
+        empsit:hasYear empsit:2024 ;
+        empsit:isPreliminary true .
+    
+    # ============================================
+    # HOUSEHOLD DATA (Table A)
+    # ============================================
+    
+    # Employment status categories
+    empsit:civilian_labor_force rdf:type empsit:Category ;
+        rdfs:label "Civilian labor force" ;
+        empsit:fullPath "Civilian_noninstitutional_population_Civilian_labor_force" .
+    
+    empsit:employed rdf:type empsit:Category ;
+        rdfs:label "Employed" ;
+        empsit:fullPath "Civilian_noninstitutional_population_Civilian_labor_force_Employed" ;
+        empsit:hasParentCategory empsit:civilian_labor_force .
+    
+    empsit:unemployed rdf:type empsit:Category ;
+        rdfs:label "Unemployed" ;
+        empsit:fullPath "Civilian_noninstitutional_population_Civilian_labor_force_Unemployed" ;
+        empsit:hasParentCategory empsit:civilian_labor_force .
+    
+    empsit:not_in_lf rdf:type empsit:Category ;
+        rdfs:label "Not in labor force" ;
+        empsit:fullPath "Civilian_noninstitutional_population_Not_in_labor_force" .
+    
+    # Household data measurements (November 2024)
+    empsit:employed_November2024_HouseholdData rdf:type empsit:HouseholdData ;
+        empsit:value 161861 ;
+        empsit:metricType "Count" ;
+        empsit:unit "Thousands" ;
+        empsit:hasCategory empsit:employed ;
+        empsit:hasMonth empsit:November ;
+        empsit:hasYear empsit:2024 .
+    
+    empsit:unemployed_November2024_HouseholdData rdf:type empsit:HouseholdData ;
+        empsit:value 6728 ;
+        empsit:metricType "Count" ;
+        empsit:unit "Thousands" ;
+        empsit:hasCategory empsit:unemployed ;
+        empsit:hasMonth empsit:November ;
+        empsit:hasYear empsit:2024 .
+    
+    # Household data measurements (December 2024)
+    empsit:employed_December2024_HouseholdData rdf:type empsit:HouseholdData ;
+        empsit:value 162098 ;
+        empsit:metricType "Count" ;
+        empsit:unit "Thousands" ;
+        empsit:hasCategory empsit:employed ;
+        empsit:hasMonth empsit:December ;
+        empsit:hasYear empsit:2024 .
+    
+    empsit:unemployed_December2024_HouseholdData rdf:type empsit:HouseholdData ;
+        empsit:value 6456 ;
+        empsit:metricType "Count" ;
+        empsit:unit "Thousands" ;
+        empsit:hasCategory empsit:unemployed ;
+        empsit:hasMonth empsit:December ;
+        empsit:hasYear empsit:2024 .
+    
+    # Unemployment rate
+    empsit:unemployment_rate_November2024_HouseholdData rdf:type empsit:HouseholdData ;
+        empsit:value 4.0 ;
+        empsit:metricType "Rate" ;
+        empsit:unit "Percent" ;
+        empsit:hasCategory empsit:unemployed ;
+        empsit:hasMonth empsit:November ;
+        empsit:hasYear empsit:2024 .
+    
+    empsit:unemployment_rate_December2024_HouseholdData rdf:type empsit:HouseholdData ;
+        empsit:value 3.8 ;
+        empsit:metricType "Rate" ;
+        empsit:unit "Percent" ;
+        empsit:hasCategory empsit:unemployed ;
+        empsit:hasMonth empsit:December ;
+        empsit:hasYear empsit:2024 .
+    """
+
+
 # ============================================
 # TEST RESULT CLASSES
 # ============================================
@@ -606,6 +813,58 @@ class TestSuite:
             )
 
             output_file = 'enriched_jolts_only.ttl'
+            writer = RDFGraphWriter()
+            writer.save_to_file(loader.graph, output_file, format='turtle')
+            logger.info(f"[4] Saved to: {output_file}")
+
+            result = TestResult(
+                test_name=test_name,
+                passed=passed,
+                graph=loader.graph,
+                stats=stats,
+                output_file=output_file
+            )
+
+        except Exception as e:
+            logger.error(f"Test failed with error: {e}")
+            result = TestResult(
+                test_name=test_name,
+                passed=False,
+                graph=None,
+                stats=None,
+                output_file="",
+                error_message=str(e)
+            )
+
+        self.results.append(result)
+        return result
+
+    def test_empsit_only(self) -> TestResult:
+        """Test EMPSIT enrichment alone"""
+        test_name = "EMPSIT Only"
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Running Test: {test_name}")
+        logger.info(f"{'='*80}")
+
+        try:
+            loader = RDFGraphLoader()
+
+            logger.info("[1] Loading EMPSIT RDF data...")
+            empsit_ttl = create_sample_empsit_data()
+            loader.load_from_string(empsit_ttl, format='turtle')
+            logger.info(f"   Loaded {len(loader.graph)} EMPSIT triples")
+
+            logger.info("[2] Running enrichment...")
+            linker = BLSIntraSourceLinker(loader.graph)
+            stats = linker.enrich()
+
+            logger.info("[3] Validation...")
+            passed = (
+                'empsit' in stats['available_datasets'] and
+                stats['temporal_sequences'] > 0
+            )
+
+            output_file = 'enriched_empsit_only.ttl'
             writer = RDFGraphWriter()
             writer.save_to_file(loader.graph, output_file, format='turtle')
             logger.info(f"[4] Saved to: {output_file}")
@@ -854,13 +1113,232 @@ class TestSuite:
         self.results.append(result)
         return result
 
+    def test_empsit_cpi(self) -> TestResult:
+        """Test EMPSIT + CPI integration"""
+        test_name = "EMPSIT + CPI"
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Running Test: {test_name}")
+        logger.info(f"{'='*80}")
+
+        try:
+            loader = RDFGraphLoader()
+
+            logger.info("[1] Loading EMPSIT RDF data...")
+            empsit_ttl = create_sample_empsit_data()
+            loader.load_from_string(empsit_ttl, format='turtle')
+            logger.info(f"   Loaded {len(loader.graph)} EMPSIT triples")
+
+            logger.info("[2] Loading CPI RDF data...")
+            cpi_ttl = create_sample_cpi_data()
+            loader.load_from_string(cpi_ttl, format='turtle')
+            logger.info(f"   Total graph size: {len(loader.graph)} triples")
+
+            logger.info("[3] Running enrichment...")
+            linker = BLSIntraSourceLinker(loader.graph)
+            stats = linker.enrich()
+
+            logger.info("[4] Validation...")
+            # Check for EMPSIT-CPI food sector correlation
+            food_sector_query = """
+            SELECT (COUNT(*) as ?count) WHERE {
+                ?empsitEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/FoodSector> .
+                ?cpiEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/FoodSector> .
+                FILTER(STRSTARTS(STR(?empsitEntity), "https://www.bls.gov/empsit/"))
+                FILTER(STRSTARTS(STR(?cpiEntity), "https://www.bls.gov/cpi/"))
+            }
+            """
+            result_query = list(loader.graph.query(food_sector_query))
+            food_sector_count = int(result_query[0].count)
+            logger.info(f"   Found {food_sector_count} EMPSIT-CPI food sector entities")
+
+            passed = (
+                'empsit' in stats['available_datasets'] and
+                'cpi' in stats['available_datasets'] and
+                stats['temporal_sequences'] > 0 and
+                stats['sector_links'] > 0 and
+                food_sector_count > 0
+            )
+
+            output_file = 'enriched_empsit_cpi.ttl'
+            writer = RDFGraphWriter()
+            writer.save_to_file(loader.graph, output_file, format='turtle')
+            logger.info(f"[5] Saved to: {output_file}")
+
+            result = TestResult(
+                test_name=test_name,
+                passed=passed,
+                graph=loader.graph,
+                stats=stats,
+                output_file=output_file
+            )
+
+        except Exception as e:
+            logger.error(f"Test failed with error: {e}")
+            result = TestResult(
+                test_name=test_name,
+                passed=False,
+                graph=None,
+                stats=None,
+                output_file="",
+                error_message=str(e)
+            )
+
+        self.results.append(result)
+        return result
+
+    def test_empsit_ppi(self) -> TestResult:
+        """Test EMPSIT + PPI integration"""
+        test_name = "EMPSIT + PPI"
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Running Test: {test_name}")
+        logger.info(f"{'='*80}")
+
+        try:
+            loader = RDFGraphLoader()
+
+            logger.info("[1] Loading EMPSIT RDF data...")
+            empsit_ttl = create_sample_empsit_data()
+            loader.load_from_string(empsit_ttl, format='turtle')
+            logger.info(f"   Loaded {len(loader.graph)} EMPSIT triples")
+
+            logger.info("[2] Loading PPI RDF data...")
+            ppi_ttl = create_sample_ppi_data()
+            loader.load_from_string(ppi_ttl, format='turtle')
+            logger.info(f"   Total graph size: {len(loader.graph)} triples")
+
+            logger.info("[3] Running enrichment...")
+            linker = BLSIntraSourceLinker(loader.graph)
+            stats = linker.enrich()
+
+            logger.info("[4] Validation...")
+            # Check for EMPSIT-PPI manufacturing sector correlation
+            manufacturing_sector_query = """
+            SELECT (COUNT(*) as ?count) WHERE {
+                ?empsitEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/ManufacturingSector> .
+                ?ppiEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/ManufacturingSector> .
+                FILTER(STRSTARTS(STR(?empsitEntity), "https://www.bls.gov/empsit/"))
+                FILTER(STRSTARTS(STR(?ppiEntity), "https://www.bls.gov/ppi/"))
+            }
+            """
+            result_query = list(loader.graph.query(manufacturing_sector_query))
+            manufacturing_sector_count = int(result_query[0].count)
+            logger.info(f"   Found {manufacturing_sector_count} EMPSIT-PPI manufacturing sector entities")
+
+            passed = (
+                'empsit' in stats['available_datasets'] and
+                'ppi' in stats['available_datasets'] and
+                stats['temporal_sequences'] > 0 and
+                stats['sector_links'] > 0 and
+                manufacturing_sector_count > 0
+            )
+
+            output_file = 'enriched_empsit_ppi.ttl'
+            writer = RDFGraphWriter()
+            writer.save_to_file(loader.graph, output_file, format='turtle')
+            logger.info(f"[5] Saved to: {output_file}")
+
+            result = TestResult(
+                test_name=test_name,
+                passed=passed,
+                graph=loader.graph,
+                stats=stats,
+                output_file=output_file
+            )
+
+        except Exception as e:
+            logger.error(f"Test failed with error: {e}")
+            result = TestResult(
+                test_name=test_name,
+                passed=False,
+                graph=None,
+                stats=None,
+                output_file="",
+                error_message=str(e)
+            )
+
+        self.results.append(result)
+        return result
+
+    def test_empsit_jolts(self) -> TestResult:
+        """Test EMPSIT + JOLTS integration"""
+        test_name = "EMPSIT + JOLTS"
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Running Test: {test_name}")
+        logger.info(f"{'='*80}")
+
+        try:
+            loader = RDFGraphLoader()
+
+            logger.info("[1] Loading EMPSIT RDF data...")
+            empsit_ttl = create_sample_empsit_data()
+            loader.load_from_string(empsit_ttl, format='turtle')
+            logger.info(f"   Loaded {len(loader.graph)} EMPSIT triples")
+
+            logger.info("[2] Loading JOLTS RDF data...")
+            jolts_ttl = create_sample_jolts_data()
+            loader.load_from_string(jolts_ttl, format='turtle')
+            logger.info(f"   Total graph size: {len(loader.graph)} triples")
+
+            logger.info("[3] Running enrichment...")
+            linker = BLSIntraSourceLinker(loader.graph)
+            stats = linker.enrich()
+
+            logger.info("[4] Validation...")
+            # Check for EMPSIT-JOLTS food sector correlation
+            food_sector_query = """
+            SELECT (COUNT(*) as ?count) WHERE {
+                ?empsitEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/FoodSector> .
+                ?joltsEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/FoodSector> .
+                FILTER(STRSTARTS(STR(?empsitEntity), "https://www.bls.gov/empsit/"))
+                FILTER(STRSTARTS(STR(?joltsEntity), "https://www.bls.gov/jolts/"))
+            }
+            """
+            result_query = list(loader.graph.query(food_sector_query))
+            food_sector_count = int(result_query[0].count)
+            logger.info(f"   Found {food_sector_count} EMPSIT-JOLTS food sector entities")
+
+            passed = (
+                'empsit' in stats['available_datasets'] and
+                'jolts' in stats['available_datasets'] and
+                stats['temporal_sequences'] > 0 and
+                stats['sector_links'] > 0 and
+                food_sector_count > 0
+            )
+
+            output_file = 'enriched_empsit_jolts.ttl'
+            writer = RDFGraphWriter()
+            writer.save_to_file(loader.graph, output_file, format='turtle')
+            logger.info(f"[5] Saved to: {output_file}")
+
+            result = TestResult(
+                test_name=test_name,
+                passed=passed,
+                graph=loader.graph,
+                stats=stats,
+                output_file=output_file
+            )
+
+        except Exception as e:
+            logger.error(f"Test failed with error: {e}")
+            result = TestResult(
+                test_name=test_name,
+                passed=False,
+                graph=None,
+                stats=None,
+                output_file="",
+                error_message=str(e)
+            )
+
+        self.results.append(result)
+        return result
+
     # ============================================
     # FULL INTEGRATION TEST
     # ============================================
 
     def test_all_datasets(self) -> TestResult:
-        """Test CPI + PPI + JOLTS full integration"""
-        test_name = "CPI + PPI + JOLTS (Full Integration)"
+        """Test CPI + PPI + JOLTS + EMPSIT full integration"""
+        test_name = "CPI + PPI + JOLTS + EMPSIT (Full Integration)"
         logger.info(f"\n{'='*80}")
         logger.info(f"Running Test: {test_name}")
         logger.info(f"{'='*80}")
@@ -881,13 +1359,18 @@ class TestSuite:
             logger.info("[3] Loading JOLTS RDF data...")
             jolts_ttl = create_sample_jolts_data()
             loader.load_from_string(jolts_ttl, format='turtle')
+            logger.info(f"   Total: {len(loader.graph)} triples")
+
+            logger.info("[4] Loading EMPSIT RDF data...")
+            empsit_ttl = create_sample_empsit_data()
+            loader.load_from_string(empsit_ttl, format='turtle')
             logger.info(f"   Total graph size: {len(loader.graph)} triples")
 
-            logger.info("[4] Running enrichment...")
+            logger.info("[5] Running enrichment...")
             linker = BLSIntraSourceLinker(loader.graph)
             stats = linker.enrich()
 
-            logger.info("[5] Validation...")
+            logger.info("[6] Validation...")
 
             # Check CPI-PPI food sector
             cpi_ppi_food_query = """
@@ -915,6 +1398,19 @@ class TestSuite:
             jolts_cpi_food_count = int(result_query[0].count)
             logger.info(f"   JOLTS-CPI food sector entities: {jolts_cpi_food_count}")
 
+            # Check EMPSIT-CPI food sector
+            empsit_cpi_food_query = """
+            SELECT (COUNT(*) as ?count) WHERE {
+                ?empsitEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/FoodSector> .
+                ?cpiEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/FoodSector> .
+                FILTER(STRSTARTS(STR(?empsitEntity), "https://www.bls.gov/empsit/"))
+                FILTER(STRSTARTS(STR(?cpiEntity), "https://www.bls.gov/cpi/"))
+            }
+            """
+            result_query = list(loader.graph.query(empsit_cpi_food_query))
+            empsit_cpi_food_count = int(result_query[0].count)
+            logger.info(f"   EMPSIT-CPI food sector entities: {empsit_cpi_food_count}")
+
             # Check unified temporal entities
             unified_temporal_query = """
             SELECT (COUNT(DISTINCT ?unified) as ?count) WHERE {
@@ -929,18 +1425,20 @@ class TestSuite:
                 'cpi' in stats['available_datasets'] and
                 'ppi' in stats['available_datasets'] and
                 'jolts' in stats['available_datasets'] and
+                'empsit' in stats['available_datasets'] and
                 stats['temporal_sequences'] > 0 and
                 stats['sector_links'] > 0 and
                 stats['temporal_unified'] > 0 and
                 cpi_ppi_food_count > 0 and
                 jolts_cpi_food_count > 0 and
+                empsit_cpi_food_count > 0 and
                 unified_temporal_count > 0
             )
 
             output_file = 'enriched_all_datasets.ttl'
             writer = RDFGraphWriter()
             writer.save_to_file(loader.graph, output_file, format='turtle')
-            logger.info(f"[6] Saved to: {output_file}")
+            logger.info(f"[7] Saved to: {output_file}")
 
             result = TestResult(
                 test_name=test_name,
@@ -1016,29 +1514,34 @@ def main():
         epilog="""
 Examples:
   # Test individual datasets
-  python tests/test_all_bls_datasets.py --dataset cpi
-  python tests/test_all_bls_datasets.py --dataset ppi
-  python tests/test_all_bls_datasets.py --dataset jolts
+  python tests/test_bls_dataset.py --dataset cpi
+  python tests/test_bls_dataset.py --dataset ppi
+  python tests/test_bls_dataset.py --dataset jolts
+  python tests/test_bls_dataset.py --dataset empsit
   
   # Test dataset pairs
-  python tests/test_all_bls_datasets.py --combination cpi-ppi
-  python tests/test_all_bls_datasets.py --combination jolts-cpi
-  python tests/test_all_bls_datasets.py --combination jolts-ppi
+  python tests/test_bls_dataset.py --combination cpi-ppi
+  python tests/test_bls_dataset.py --combination jolts-cpi
+  python tests/test_bls_dataset.py --combination jolts-ppi
+  python tests/test_bls_dataset.py --combination empsit-cpi
+  python tests/test_bls_dataset.py --combination empsit-ppi
+  python tests/test_bls_dataset.py --combination empsit-jolts
   
   # Test all datasets together
-  python tests/test_all_bls_datasets.py --combination all
+  python tests/test_bls_dataset.py --combination all
   
   # Run all tests
-  python tests/test_all_bls_datasets.py --run-all
+  python tests/test_bls_dataset.py --run-all
         """
     )
 
     parser.add_argument('--dataset',
-                       choices=['cpi', 'ppi', 'jolts'],
+                       choices=['cpi', 'ppi', 'jolts', 'empsit'],
                        help='Test a single dataset')
 
     parser.add_argument('--combination',
-                       choices=['cpi-ppi', 'jolts-cpi', 'jolts-ppi', 'all'],
+                       choices=['cpi-ppi', 'jolts-cpi', 'jolts-ppi',
+                               'empsit-cpi', 'empsit-ppi', 'empsit-jolts', 'all'],
                        help='Test dataset combinations')
 
     parser.add_argument('--run-all',
@@ -1055,9 +1558,13 @@ Examples:
         suite.test_cpi_only()
         suite.test_ppi_only()
         suite.test_jolts_only()
+        suite.test_empsit_only()
         suite.test_cpi_ppi()
         suite.test_jolts_cpi()
         suite.test_jolts_ppi()
+        suite.test_empsit_cpi()
+        suite.test_empsit_ppi()
+        suite.test_empsit_jolts()
         suite.test_all_datasets()
 
     elif args.dataset:
@@ -1068,6 +1575,8 @@ Examples:
             suite.test_ppi_only()
         elif args.dataset == 'jolts':
             suite.test_jolts_only()
+        elif args.dataset == 'empsit':
+            suite.test_empsit_only()
 
     elif args.combination:
         # Run combination test
@@ -1077,6 +1586,12 @@ Examples:
             suite.test_jolts_cpi()
         elif args.combination == 'jolts-ppi':
             suite.test_jolts_ppi()
+        elif args.combination == 'empsit-cpi':
+            suite.test_empsit_cpi()
+        elif args.combination == 'empsit-ppi':
+            suite.test_empsit_ppi()
+        elif args.combination == 'empsit-jolts':
+            suite.test_empsit_jolts()
         elif args.combination == 'all':
             suite.test_all_datasets()
 
@@ -1086,9 +1601,13 @@ Examples:
         suite.test_cpi_only()
         suite.test_ppi_only()
         suite.test_jolts_only()
+        suite.test_empsit_only()
         suite.test_cpi_ppi()
         suite.test_jolts_cpi()
         suite.test_jolts_ppi()
+        suite.test_empsit_cpi()
+        suite.test_empsit_ppi()
+        suite.test_empsit_jolts()
         suite.test_all_datasets()
 
     # Print summary
