@@ -1,0 +1,12 @@
+##
+## ignore directories
+##
+**/.DS_Store
+**/__pycache__
+**/.ipynb_checkpoints
+
+##
+## ignore files
+##
+output.md
+extract_*.py
