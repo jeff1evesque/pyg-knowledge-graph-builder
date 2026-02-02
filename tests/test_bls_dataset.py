@@ -2,19 +2,24 @@
 Unified BLS Dataset Test Suite
 
 This comprehensive test suite validates:
-1. Individual dataset enrichment (CPI, PPI, JOLTS, EMPSIT)
-2. Pairwise dataset integration (CPI+PPI, JOLTS+CPI, JOLTS+PPI, EMPSIT+CPI, EMPSIT+PPI, EMPSIT+JOLTS)
-3. Full multi-dataset integration (CPI+PPI+JOLTS+EMPSIT)
+1. Individual dataset enrichment (CPI, PPI, ECI, JOLTS, EMPSIT)
+2. Pairwise dataset integration (CPI+PPI, ECI+CPI, ECI+PPI, ECI+JOLTS, ECI+EMPSIT, JOLTS+CPI, JOLTS+PPI, EMPSIT+CPI, EMPSIT+PPI, EMPSIT+JOLTS)
+3. Full multi-dataset integration (CPI+PPI+ECI+JOLTS+EMPSIT)
 
 Usage:
     # Test individual datasets
     python tests/test_bls_dataset.py --dataset cpi
     python tests/test_bls_dataset.py --dataset ppi
+    python tests/test_bls_dataset.py --dataset eci
     python tests/test_bls_dataset.py --dataset jolts
     python tests/test_bls_dataset.py --dataset empsit
 
     # Test dataset pairs
     python tests/test_bls_dataset.py --combination cpi-ppi
+    python tests/test_bls_dataset.py --combination eci-cpi
+    python tests/test_bls_dataset.py --combination eci-ppi
+    python tests/test_bls_dataset.py --combination eci-jolts
+    python tests/test_bls_dataset.py --combination eci-empsit
     python tests/test_bls_dataset.py --combination jolts-cpi
     python tests/test_bls_dataset.py --combination jolts-ppi
     python tests/test_bls_dataset.py --combination empsit-cpi
@@ -39,7 +44,6 @@ from glue_jobs.enrichment.intra_source_linker import BLSIntraSourceLinker
 import logging
 import argparse
 from dataclasses import dataclass
-from enum import Enum
 
 logging.basicConfig(
     level=logging.INFO,
@@ -108,6 +112,12 @@ def create_sample_cpi_data() -> str:
     cpi:AllItems_Medical_care_Entity rdf:type cpi:MedicalCare ;
         rdfs:label "Medical care" ;
         cpi:hasFullPath "AllItems_Medical_care" ;
+        cpi:hasParent cpi:AllItems_Entity .
+    
+    # Education category
+    cpi:AllItems_Education_Entity rdf:type cpi:Education ;
+        rdfs:label "Education" ;
+        cpi:hasFullPath "AllItems_Education" ;
         cpi:hasParent cpi:AllItems_Entity .
     
     # Index measurements for Food (November 2024)
@@ -281,6 +291,302 @@ def create_sample_ppi_data() -> str:
         ppi:hasCommodityGrouping ppi:FinalDemand_FoodManufacturing_12345_Entity ;
         ppi:hasMonth ppi:November ;
         ppi:hasYear ppi:2024 .
+    """
+
+
+def create_sample_eci_data() -> str:
+    """Generate sample ECI RDF data (Tables 1, 2, 3, 5, 9, 10, 12)"""
+    return """
+    @prefix eci: <https://www.bls.gov/eci/> .
+    @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+    @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+    @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+    
+    # Temporal entities
+    eci:September rdf:type eci:Month .
+    eci:December rdf:type eci:Month .
+    eci:2024 rdf:type eci:Year .
+    
+    # ============================================
+    # TABLE 1: Total Compensation (Seasonally Adjusted)
+    # ============================================
+    
+    # Worker categories
+    eci:civilian rdf:type eci:WorkerCategory ;
+        rdfs:label "Civilian workers" .
+    
+    eci:private_industry rdf:type eci:WorkerCategory ;
+        rdfs:label "Private industry workers" .
+    
+    eci:state_local_govt rdf:type eci:WorkerCategory ;
+        rdfs:label "State and local government workers" .
+    
+    # Occupational groups
+    eci:all_workers rdf:type eci:OccupationalGroup ;
+        rdfs:label "All workers" ;
+        eci:hasFullPath "private_industry_all_workers" ;
+        eci:hasWorkerCategory eci:private_industry .
+    
+    eci:mgmt_prof_related rdf:type eci:OccupationalGroup ;
+        rdfs:label "Management, professional, and related" ;
+        eci:hasFullPath "private_industry_occupational_group_mgmt_prof_related" ;
+        eci:hasWorkerCategory eci:private_industry .
+    
+    eci:sales_office rdf:type eci:OccupationalGroup ;
+        rdfs:label "Sales and office" ;
+        eci:hasFullPath "private_industry_occupational_group_sales_office" ;
+        eci:hasWorkerCategory eci:private_industry .
+    
+    eci:service_occ rdf:type eci:OccupationalGroup ;
+        rdfs:label "Service occupations" ;
+        eci:hasFullPath "private_industry_occupational_group_service_occ" ;
+        eci:hasWorkerCategory eci:private_industry .
+    
+    # Industries
+    eci:goods_producing rdf:type eci:Industry ;
+        rdfs:label "Goods-producing industries" ;
+        eci:hasFullPath "private_industry_industry_goods_producing" ;
+        eci:hasWorkerCategory eci:private_industry .
+    
+    eci:manufacturing rdf:type eci:Industry ;
+        rdfs:label "Manufacturing" ;
+        eci:hasFullPath "private_industry_industry_goods_producing_manufacturing" ;
+        eci:hasWorkerCategory eci:private_industry ;
+        eci:hasParentIndustry eci:goods_producing .
+    
+    eci:service_providing rdf:type eci:Industry ;
+        rdfs:label "Service-providing industries" ;
+        eci:hasFullPath "private_industry_industry_service_providing" ;
+        eci:hasWorkerCategory eci:private_industry .
+    
+    eci:edu_health rdf:type eci:Industry ;
+        rdfs:label "Education and health services" ;
+        eci:hasFullPath "private_industry_industry_service_providing_edu_health" ;
+        eci:hasWorkerCategory eci:private_industry ;
+        eci:hasParentIndustry eci:service_providing .
+    
+    eci:healthcare_social rdf:type eci:Industry ;
+        rdfs:label "Health care and social assistance" ;
+        eci:hasFullPath "private_industry_industry_service_providing_edu_health_healthcare_social" ;
+        eci:hasWorkerCategory eci:private_industry ;
+        eci:hasParentIndustry eci:edu_health .
+    
+    eci:educational rdf:type eci:Industry ;
+        rdfs:label "Educational services" ;
+        eci:hasFullPath "private_industry_industry_service_providing_edu_health_educational" ;
+        eci:hasWorkerCategory eci:private_industry ;
+        eci:hasParentIndustry eci:edu_health .
+    
+    eci:leisure_hospitality rdf:type eci:Industry ;
+        rdfs:label "Leisure and hospitality" ;
+        eci:hasFullPath "private_industry_industry_service_providing_leisure_hospitality" ;
+        eci:hasWorkerCategory eci:private_industry ;
+        eci:hasParentIndustry eci:service_providing .
+    
+    eci:accommodation_food rdf:type eci:Industry ;
+        rdfs:label "Accommodation and food services" ;
+        eci:hasFullPath "private_industry_industry_service_providing_leisure_hospitality_accommodation_food" ;
+        eci:hasWorkerCategory eci:private_industry ;
+        eci:hasParentIndustry eci:leisure_hospitality .
+    
+    # Table 1: Total Compensation Index (September 2024)
+    eci:2024_September_index_private_industry_all_workers rdf:type eci:EmploymentCostIndexData ;
+        eci:indexValue 158.2 ;
+        eci:baseYear "2005" ;
+        eci:baseMonth "December" ;
+        eci:hasOccupationalGroup eci:all_workers ;
+        eci:hasWorkerCategory eci:private_industry ;
+        eci:hasMonth eci:September ;
+        eci:hasYear eci:2024 .
+    
+    # Table 1: Total Compensation Index (December 2024)
+    eci:2024_December_index_private_industry_all_workers rdf:type eci:EmploymentCostIndexData ;
+        eci:indexValue 159.1 ;
+        eci:baseYear "2005" ;
+        eci:baseMonth "December" ;
+        eci:hasOccupationalGroup eci:all_workers ;
+        eci:hasWorkerCategory eci:private_industry ;
+        eci:hasMonth eci:December ;
+        eci:hasYear eci:2024 .
+    
+    # Table 1: Percent Change (3-month)
+    eci:2024_December_pct_change_private_industry_all_workers rdf:type eci:PercentChangeData ;
+        eci:percentChange 0.9 ;
+        eci:changeDescription "3-months ended December 2024" ;
+        eci:hasOccupationalGroup eci:all_workers ;
+        eci:hasWorkerCategory eci:private_industry ;
+        eci:hasMonth eci:December ;
+        eci:hasYear eci:2024 .
+    
+    # ============================================
+    # TABLE 2: Wages and Salaries (Seasonally Adjusted)
+    # ============================================
+    
+    # Table 2: Wages and Salaries Index (September 2024)
+    eci:2024_September_wages_index_private_industry_all_workers rdf:type eci:WagesAndSalariesIndexData ;
+        eci:wagesAndSalariesIndexValue 156.8 ;
+        eci:baseYear "2005" ;
+        eci:baseMonth "December" ;
+        eci:hasOccupationalGroup eci:all_workers ;
+        eci:hasWorkerCategory eci:private_industry ;
+        eci:hasMonth eci:September ;
+        eci:hasYear eci:2024 .
+    
+    # Table 2: Wages and Salaries Index (December 2024)
+    eci:2024_December_wages_index_private_industry_all_workers rdf:type eci:WagesAndSalariesIndexData ;
+        eci:wagesAndSalariesIndexValue 157.6 ;
+        eci:baseYear "2005" ;
+        eci:baseMonth "December" ;
+        eci:hasOccupationalGroup eci:all_workers ;
+        eci:hasWorkerCategory eci:private_industry ;
+        eci:hasMonth eci:December ;
+        eci:hasYear eci:2024 .
+    
+    # Table 2: Wages Percent Change
+    eci:2024_December_wages_pct_change_private_industry_all_workers rdf:type eci:WagesAndSalariesPercentChangeData ;
+        eci:wagesAndSalariesPercentChange 0.8 ;
+        eci:changeDescription "3-months ended December 2024" ;
+        eci:hasOccupationalGroup eci:all_workers ;
+        eci:hasWorkerCategory eci:private_industry ;
+        eci:hasMonth eci:December ;
+        eci:hasYear eci:2024 .
+    
+    # ============================================
+    # TABLE 3: Benefits (Seasonally Adjusted)
+    # ============================================
+    
+    # Table 3: Benefits Index (September 2024)
+    eci:2024_September_benefits_index_private_industry_all_workers rdf:type eci:BenefitsIndexData ;
+        eci:benefitsIndexValue 162.5 ;
+        eci:baseYear "2005" ;
+        eci:baseMonth "December" ;
+        eci:hasOccupationalGroup eci:all_workers ;
+        eci:hasWorkerCategory eci:private_industry ;
+        eci:hasMonth eci:September ;
+        eci:hasYear eci:2024 .
+    
+    # Table 3: Benefits Index (December 2024)
+    eci:2024_December_benefits_index_private_industry_all_workers rdf:type eci:BenefitsIndexData ;
+        eci:benefitsIndexValue 163.8 ;
+        eci:baseYear "2005" ;
+        eci:baseMonth "December" ;
+        eci:hasOccupationalGroup eci:all_workers ;
+        eci:hasWorkerCategory eci:private_industry ;
+        eci:hasMonth eci:December ;
+        eci:hasYear eci:2024 .
+    
+    # Table 3: Benefits Percent Change
+    eci:2024_December_benefits_pct_change_private_industry_all_workers rdf:type eci:BenefitsPercentChangeData ;
+        eci:benefitsPercentChange 1.2 ;
+        eci:changeDescription "3-months ended December 2024" ;
+        eci:hasOccupationalGroup eci:all_workers ;
+        eci:hasWorkerCategory eci:private_industry ;
+        eci:hasMonth eci:December ;
+        eci:hasYear eci:2024 .
+    
+    # ============================================
+    # TABLE 9: Private Industry Wages by Occupation/Industry
+    # ============================================
+    
+    # Manufacturing wages
+    eci:2024_December_wages_index_private_industry_manufacturing rdf:type eci:PrivateIndustryWorkerWagesSalariesIndexData ;
+        eci:indexValue 155.2 ;
+        eci:baseYear "2005" ;
+        eci:baseMonth "December" ;
+        eci:hasPrivateIndustry eci:manufacturing ;
+        eci:hasMonth eci:December ;
+        eci:hasYear eci:2024 .
+    
+    # Healthcare wages
+    eci:2024_December_wages_index_private_industry_healthcare rdf:type eci:PrivateIndustryWorkerWagesSalariesIndexData ;
+        eci:indexValue 162.8 ;
+        eci:baseYear "2005" ;
+        eci:baseMonth "December" ;
+        eci:hasPrivateIndustry eci:healthcare_social ;
+        eci:hasMonth eci:December ;
+        eci:hasYear eci:2024 .
+    
+    # Food services wages
+    eci:2024_December_wages_index_private_industry_food_services rdf:type eci:PrivateIndustryWorkerWagesSalariesIndexData ;
+        eci:indexValue 148.5 ;
+        eci:baseYear "2005" ;
+        eci:baseMonth "December" ;
+        eci:hasPrivateIndustry eci:accommodation_food ;
+        eci:hasMonth eci:December ;
+        eci:hasYear eci:2024 .
+    
+    # ============================================
+    # TABLE 10: Bargaining Status and Region
+    # ============================================
+    
+    # Bargaining status
+    eci:union rdf:type eci:BargainingStatus ;
+        rdfs:label "Union" ;
+        eci:hasFullPath "union" .
+    
+    eci:nonunion rdf:type eci:BargainingStatus ;
+        rdfs:label "Nonunion" ;
+        eci:hasFullPath "nonunion" .
+    
+    # Census regions
+    eci:northeast rdf:type eci:CensusRegion ;
+        rdfs:label "Northeast" ;
+        eci:hasFullPath "northeast" .
+    
+    eci:south rdf:type eci:CensusRegion ;
+        rdfs:label "South" ;
+        eci:hasFullPath "south" .
+    
+    # Union wages by region
+    eci:2024_December_wages_index_union_northeast rdf:type eci:PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionIndexData ;
+        eci:indexValue 165.2 ;
+        eci:baseYear "2005" ;
+        eci:baseMonth "December" ;
+        eci:hasBargainingStatus eci:union ;
+        eci:hasCensusRegion eci:northeast ;
+        eci:hasMonth eci:December ;
+        eci:hasYear eci:2024 .
+    
+    # Nonunion wages by region
+    eci:2024_December_wages_index_nonunion_south rdf:type eci:PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionIndexData ;
+        eci:indexValue 152.8 ;
+        eci:baseYear "2005" ;
+        eci:baseMonth "December" ;
+        eci:hasBargainingStatus eci:nonunion ;
+        eci:hasCensusRegion eci:south ;
+        eci:hasMonth eci:December ;
+        eci:hasYear eci:2024 .
+    
+    # ============================================
+    # TABLE 12: Benefits by Occupation/Industry/Bargaining
+    # ============================================
+    
+    # Worker sectors
+    eci:civilian_workers rdf:type eci:WorkerSector ;
+        rdfs:label "Civilian workers" .
+    
+    eci:private_industry_workers rdf:type eci:WorkerSector ;
+        rdfs:label "Private industry workers" .
+    
+    # Benefits by occupation
+    eci:2024_December_benefits_index_mgmt_prof rdf:type eci:BenefitsByOccupationIndustryBargainingStatusIndexData ;
+        eci:indexValue 168.5 ;
+        eci:baseYear "2005" ;
+        eci:baseMonth "December" ;
+        eci:hasBenefitsOccupationalGroup eci:mgmt_prof_related ;
+        eci:hasWorkerSector eci:private_industry_workers ;
+        eci:hasMonth eci:December ;
+        eci:hasYear eci:2024 .
+    
+    # Benefits by bargaining status
+    eci:2024_December_benefits_index_union rdf:type eci:BenefitsByOccupationIndustryBargainingStatusIndexData ;
+        eci:indexValue 172.3 ;
+        eci:baseYear "2005" ;
+        eci:baseMonth "December" ;
+        eci:hasBenefitsBargainingStatus eci:union ;
+        eci:hasWorkerSector eci:private_industry_workers ;
+        eci:hasMonth eci:December ;
+        eci:hasYear eci:2024 .
     """
 
 
@@ -497,7 +803,7 @@ def create_sample_empsit_data() -> str:
         empsit:hasFullPath "food_manufacturing" ;
         empsit:hasParentIndustry empsit:manufacturing .
     
-    empsit:private_service empsit:type empsit:Industry ;
+    empsit:private_service rdf:type empsit:Industry ;
         rdfs:label "Private service-providing" ;
         empsit:hasFullPath "private_service" ;
         empsit:hasParentIndustry empsit:total_private .
@@ -668,7 +974,7 @@ class TestResult:
     test_name: str
     passed: bool
     graph: Optional[Graph]
-    stats: Optional[Dict[str, any]]  # Changed from implicit to explicit
+    stats: Optional[Dict[str, any]]
     output_file: str
     error_message: Optional[str] = None
 
@@ -801,6 +1107,58 @@ class TestSuite:
         self.results.append(result)
         return result
 
+    def test_eci_only(self) -> TestResult:
+        """Test ECI enrichment alone"""
+        test_name = "ECI Only"
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Running Test: {test_name}")
+        logger.info(f"{'='*80}")
+
+        try:
+            loader = RDFGraphLoader()
+
+            logger.info("[1] Loading ECI RDF data...")
+            eci_ttl = create_sample_eci_data()
+            loader.load_from_string(eci_ttl, format='turtle')
+            logger.info(f"   Loaded {len(loader.graph)} ECI triples")
+
+            logger.info("[2] Running enrichment...")
+            linker = BLSIntraSourceLinker(loader.graph)
+            stats = linker.enrich()
+
+            logger.info("[3] Validation...")
+            passed = (
+                'eci' in stats['available_datasets'] and
+                stats['temporal_sequences'] > 0
+            )
+
+            output_file = 'enriched_eci_only.ttl'
+            writer = RDFGraphWriter()
+            writer.save_to_file(loader.graph, output_file, format='turtle')
+            logger.info(f"[4] Saved to: {output_file}")
+
+            result = TestResult(
+                test_name=test_name,
+                passed=passed,
+                graph=loader.graph,
+                stats=stats,
+                output_file=output_file
+            )
+
+        except Exception as e:
+            logger.error(f"Test failed with error: {e}")
+            result = TestResult(
+                test_name=test_name,
+                passed=False,
+                graph=None,
+                stats=None,
+                output_file="",
+                error_message=str(e)
+            )
+
+        self.results.append(result)
+        return result
+
     def test_jolts_only(self) -> TestResult:
         """Test JOLTS enrichment alone"""
         test_name = "JOLTS Only"
@@ -906,7 +1264,7 @@ class TestSuite:
         return result
 
     # ============================================
-    # PAIRWISE DATASET TESTS
+    # PAIRWISE DATASET TESTS (including ECI)
     # ============================================
 
     def test_cpi_ppi(self) -> TestResult:
@@ -956,6 +1314,337 @@ class TestSuite:
             )
 
             output_file = 'enriched_cpi_ppi.ttl'
+            writer = RDFGraphWriter()
+            writer.save_to_file(loader.graph, output_file, format='turtle')
+            logger.info(f"[5] Saved to: {output_file}")
+
+            result = TestResult(
+                test_name=test_name,
+                passed=passed,
+                graph=loader.graph,
+                stats=stats,
+                output_file=output_file
+            )
+
+        except Exception as e:
+            logger.error(f"Test failed with error: {e}")
+            result = TestResult(
+                test_name=test_name,
+                passed=False,
+                graph=None,
+                stats=None,
+                output_file="",
+                error_message=str(e)
+            )
+
+        self.results.append(result)
+        return result
+
+    def test_eci_cpi(self) -> TestResult:
+        """Test ECI + CPI integration"""
+        test_name = "ECI + CPI"
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Running Test: {test_name}")
+        logger.info(f"{'='*80}")
+
+        try:
+            loader = RDFGraphLoader()
+
+            logger.info("[1] Loading ECI RDF data...")
+            eci_ttl = create_sample_eci_data()
+            loader.load_from_string(eci_ttl, format='turtle')
+            logger.info(f"   Loaded {len(loader.graph)} ECI triples")
+
+            logger.info("[2] Loading CPI RDF data...")
+            cpi_ttl = create_sample_cpi_data()
+            loader.load_from_string(cpi_ttl, format='turtle')
+            logger.info(f"   Total graph size: {len(loader.graph)} triples")
+
+            logger.info("[3] Running enrichment...")
+            linker = BLSIntraSourceLinker(loader.graph)
+            stats = linker.enrich()
+
+            logger.info("[4] Validation...")
+            # Check for ECI-CPI healthcare sector correlation
+            healthcare_sector_query = """
+            SELECT (COUNT(*) as ?count) WHERE {
+                ?eciEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/HealthcareSector> .
+                ?cpiEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/HealthcareSector> .
+                FILTER(STRSTARTS(STR(?eciEntity), "https://www.bls.gov/eci/"))
+                FILTER(STRSTARTS(STR(?cpiEntity), "https://www.bls.gov/cpi/"))
+            }
+            """
+            result_query = list(loader.graph.query(healthcare_sector_query))
+            healthcare_sector_count = int(result_query[0].count)
+            logger.info(f"   Found {healthcare_sector_count} ECI-CPI healthcare sector entities")
+
+            # Check for ECI-CPI education sector correlation
+            education_sector_query = """
+            SELECT (COUNT(*) as ?count) WHERE {
+                ?eciEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/EducationSector> .
+                ?cpiEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/EducationSector> .
+                FILTER(STRSTARTS(STR(?eciEntity), "https://www.bls.gov/eci/"))
+                FILTER(STRSTARTS(STR(?cpiEntity), "https://www.bls.gov/cpi/"))
+            }
+            """
+            result_query = list(loader.graph.query(education_sector_query))
+            education_sector_count = int(result_query[0].count)
+            logger.info(f"   Found {education_sector_count} ECI-CPI education sector entities")
+
+            passed = (
+                'eci' in stats['available_datasets'] and
+                'cpi' in stats['available_datasets'] and
+                stats['temporal_sequences'] > 0 and
+                stats['sector_links'] > 0 and
+                (healthcare_sector_count > 0 or education_sector_count > 0)
+            )
+
+            output_file = 'enriched_eci_cpi.ttl'
+            writer = RDFGraphWriter()
+            writer.save_to_file(loader.graph, output_file, format='turtle')
+            logger.info(f"[5] Saved to: {output_file}")
+
+            result = TestResult(
+                test_name=test_name,
+                passed=passed,
+                graph=loader.graph,
+                stats=stats,
+                output_file=output_file
+            )
+
+        except Exception as e:
+            logger.error(f"Test failed with error: {e}")
+            result = TestResult(
+                test_name=test_name,
+                passed=False,
+                graph=None,
+                stats=None,
+                output_file="",
+                error_message=str(e)
+            )
+
+        self.results.append(result)
+        return result
+
+    def test_eci_ppi(self) -> TestResult:
+        """Test ECI + PPI integration"""
+        test_name = "ECI + PPI"
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Running Test: {test_name}")
+        logger.info(f"{'='*80}")
+
+        try:
+            loader = RDFGraphLoader()
+
+            logger.info("[1] Loading ECI RDF data...")
+            eci_ttl = create_sample_eci_data()
+            loader.load_from_string(eci_ttl, format='turtle')
+            logger.info(f"   Loaded {len(loader.graph)} ECI triples")
+
+            logger.info("[2] Loading PPI RDF data...")
+            ppi_ttl = create_sample_ppi_data()
+            loader.load_from_string(ppi_ttl, format='turtle')
+            logger.info(f"   Total graph size: {len(loader.graph)} triples")
+
+            logger.info("[3] Running enrichment...")
+            linker = BLSIntraSourceLinker(loader.graph)
+            stats = linker.enrich()
+
+            logger.info("[4] Validation...")
+            # Check for ECI-PPI manufacturing sector correlation
+            manufacturing_sector_query = """
+            SELECT (COUNT(*) as ?count) WHERE {
+                ?eciEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/ManufacturingSector> .
+                ?ppiEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/ManufacturingSector> .
+                FILTER(STRSTARTS(STR(?eciEntity), "https://www.bls.gov/eci/"))
+                FILTER(STRSTARTS(STR(?ppiEntity), "https://www.bls.gov/ppi/"))
+            }
+            """
+            result_query = list(loader.graph.query(manufacturing_sector_query))
+            manufacturing_sector_count = int(result_query[0].count)
+            logger.info(f"   Found {manufacturing_sector_count} ECI-PPI manufacturing sector entities")
+
+            passed = (
+                'eci' in stats['available_datasets'] and
+                'ppi' in stats['available_datasets'] and
+                stats['temporal_sequences'] > 0 and
+                stats['sector_links'] > 0 and
+                manufacturing_sector_count > 0
+            )
+
+            output_file = 'enriched_eci_ppi.ttl'
+            writer = RDFGraphWriter()
+            writer.save_to_file(loader.graph, output_file, format='turtle')
+            logger.info(f"[5] Saved to: {output_file}")
+
+            result = TestResult(
+                test_name=test_name,
+                passed=passed,
+                graph=loader.graph,
+                stats=stats,
+                output_file=output_file
+            )
+
+        except Exception as e:
+            logger.error(f"Test failed with error: {e}")
+            result = TestResult(
+                test_name=test_name,
+                passed=False,
+                graph=None,
+                stats=None,
+                output_file="",
+                error_message=str(e)
+            )
+
+        self.results.append(result)
+        return result
+
+    def test_eci_jolts(self) -> TestResult:
+        """Test ECI + JOLTS integration"""
+        test_name = "ECI + JOLTS"
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Running Test: {test_name}")
+        logger.info(f"{'='*80}")
+
+        try:
+            loader = RDFGraphLoader()
+
+            logger.info("[1] Loading ECI RDF data...")
+            eci_ttl = create_sample_eci_data()
+            loader.load_from_string(eci_ttl, format='turtle')
+            logger.info(f"   Loaded {len(loader.graph)} ECI triples")
+
+            logger.info("[2] Loading JOLTS RDF data...")
+            jolts_ttl = create_sample_jolts_data()
+            loader.load_from_string(jolts_ttl, format='turtle')
+            logger.info(f"   Total graph size: {len(loader.graph)} triples")
+
+            logger.info("[3] Running enrichment...")
+            linker = BLSIntraSourceLinker(loader.graph)
+            stats = linker.enrich()
+
+            logger.info("[4] Validation...")
+            # Check for ECI-JOLTS food sector correlation
+            food_sector_query = """
+            SELECT (COUNT(*) as ?count) WHERE {
+                ?eciEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/FoodSector> .
+                ?joltsEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/FoodSector> .
+                FILTER(STRSTARTS(STR(?eciEntity), "https://www.bls.gov/eci/"))
+                FILTER(STRSTARTS(STR(?joltsEntity), "https://www.bls.gov/jolts/"))
+            }
+            """
+            result_query = list(loader.graph.query(food_sector_query))
+            food_sector_count = int(result_query[0].count)
+            logger.info(f"   Found {food_sector_count} ECI-JOLTS food sector entities")
+
+            # Check for ECI-JOLTS healthcare sector correlation
+            healthcare_sector_query = """
+            SELECT (COUNT(*) as ?count) WHERE {
+                ?eciEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/HealthcareSector> .
+                ?joltsEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/HealthcareSector> .
+                FILTER(STRSTARTS(STR(?eciEntity), "https://www.bls.gov/eci/"))
+                FILTER(STRSTARTS(STR(?joltsEntity), "https://www.bls.gov/jolts/"))
+            }
+            """
+            result_query = list(loader.graph.query(healthcare_sector_query))
+            healthcare_sector_count = int(result_query[0].count)
+            logger.info(f"   Found {healthcare_sector_count} ECI-JOLTS healthcare sector entities")
+
+            passed = (
+                'eci' in stats['available_datasets'] and
+                'jolts' in stats['available_datasets'] and
+                stats['temporal_sequences'] > 0 and
+                stats['sector_links'] > 0 and
+                (food_sector_count > 0 or healthcare_sector_count > 0)
+            )
+
+            output_file = 'enriched_eci_jolts.ttl'
+            writer = RDFGraphWriter()
+            writer.save_to_file(loader.graph, output_file, format='turtle')
+            logger.info(f"[5] Saved to: {output_file}")
+
+            result = TestResult(
+                test_name=test_name,
+                passed=passed,
+                graph=loader.graph,
+                stats=stats,
+                output_file=output_file
+            )
+
+        except Exception as e:
+            logger.error(f"Test failed with error: {e}")
+            result = TestResult(
+                test_name=test_name,
+                passed=False,
+                graph=None,
+                stats=None,
+                output_file="",
+                error_message=str(e)
+            )
+
+        self.results.append(result)
+        return result
+
+    def test_eci_empsit(self) -> TestResult:
+        """Test ECI + EMPSIT integration"""
+        test_name = "ECI + EMPSIT"
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Running Test: {test_name}")
+        logger.info(f"{'='*80}")
+
+        try:
+            loader = RDFGraphLoader()
+
+            logger.info("[1] Loading ECI RDF data...")
+            eci_ttl = create_sample_eci_data()
+            loader.load_from_string(eci_ttl, format='turtle')
+            logger.info(f"   Loaded {len(loader.graph)} ECI triples")
+
+            logger.info("[2] Loading EMPSIT RDF data...")
+            empsit_ttl = create_sample_empsit_data()
+            loader.load_from_string(empsit_ttl, format='turtle')
+            logger.info(f"   Total graph size: {len(loader.graph)} triples")
+
+            logger.info("[3] Running enrichment...")
+            linker = BLSIntraSourceLinker(loader.graph)
+            stats = linker.enrich()
+
+            logger.info("[4] Validation...")
+            # Check for ECI-EMPSIT manufacturing sector correlation
+            manufacturing_sector_query = """
+            SELECT (COUNT(*) as ?count) WHERE {
+                ?eciEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/ManufacturingSector> .
+                ?empsitEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/ManufacturingSector> .
+                FILTER(STRSTARTS(STR(?eciEntity), "https://www.bls.gov/eci/"))
+                FILTER(STRSTARTS(STR(?empsitEntity), "https://www.bls.gov/empsit/"))
+            }
+            """
+            result_query = list(loader.graph.query(manufacturing_sector_query))
+            manufacturing_sector_count = int(result_query[0].count)
+            logger.info(f"   Found {manufacturing_sector_count} ECI-EMPSIT manufacturing sector entities")
+
+            # Check for ECI-EMPSIT food sector correlation
+            food_sector_query = """
+            SELECT (COUNT(*) as ?count) WHERE {
+                ?eciEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/FoodSector> .
+                ?empsitEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/FoodSector> .
+                FILTER(STRSTARTS(STR(?eciEntity), "https://www.bls.gov/eci/"))
+                FILTER(STRSTARTS(STR(?empsitEntity), "https://www.bls.gov/empsit/"))
+            }
+            """
+            result_query = list(loader.graph.query(food_sector_query))
+            food_sector_count = int(result_query[0].count)
+            logger.info(f"   Found {food_sector_count} ECI-EMPSIT food sector entities")
+
+            passed = (
+                'eci' in stats['available_datasets'] and
+                'empsit' in stats['available_datasets'] and
+                stats['temporal_sequences'] > 0 and
+                stats['sector_links'] > 0 and
+                (manufacturing_sector_count > 0 or food_sector_count > 0)
+            )
+
+            output_file = 'enriched_eci_empsit.ttl'
             writer = RDFGraphWriter()
             writer.save_to_file(loader.graph, output_file, format='turtle')
             logger.info(f"[5] Saved to: {output_file}")
@@ -1351,8 +2040,8 @@ class TestSuite:
     # ============================================
 
     def test_all_datasets(self) -> TestResult:
-        """Test CPI + PPI + JOLTS + EMPSIT full integration"""
-        test_name = "CPI + PPI + JOLTS + EMPSIT (Full Integration)"
+        """Test CPI + PPI + ECI + JOLTS + EMPSIT full integration"""
+        test_name = "CPI + PPI + ECI + JOLTS + EMPSIT (Full Integration)"
         logger.info(f"\n{'='*80}")
         logger.info(f"Running Test: {test_name}")
         logger.info(f"{'='*80}")
@@ -1370,21 +2059,26 @@ class TestSuite:
             loader.load_from_string(ppi_ttl, format='turtle')
             logger.info(f"   Total: {len(loader.graph)} triples")
 
-            logger.info("[3] Loading JOLTS RDF data...")
+            logger.info("[3] Loading ECI RDF data...")
+            eci_ttl = create_sample_eci_data()
+            loader.load_from_string(eci_ttl, format='turtle')
+            logger.info(f"   Total: {len(loader.graph)} triples")
+
+            logger.info("[4] Loading JOLTS RDF data...")
             jolts_ttl = create_sample_jolts_data()
             loader.load_from_string(jolts_ttl, format='turtle')
             logger.info(f"   Total: {len(loader.graph)} triples")
 
-            logger.info("[4] Loading EMPSIT RDF data...")
+            logger.info("[5] Loading EMPSIT RDF data...")
             empsit_ttl = create_sample_empsit_data()
             loader.load_from_string(empsit_ttl, format='turtle')
             logger.info(f"   Total graph size: {len(loader.graph)} triples")
 
-            logger.info("[5] Running enrichment...")
+            logger.info("[6] Running enrichment...")
             linker = BLSIntraSourceLinker(loader.graph)
             stats = linker.enrich()
 
-            logger.info("[6] Validation...")
+            logger.info("[7] Validation...")
 
             # Check CPI-PPI food sector
             cpi_ppi_food_query = """
@@ -1398,6 +2092,45 @@ class TestSuite:
             result_query = list(loader.graph.query(cpi_ppi_food_query))
             cpi_ppi_food_count = int(result_query[0].count)
             logger.info(f"   CPI-PPI food sector entities: {cpi_ppi_food_count}")
+
+            # Check ECI-CPI healthcare sector
+            eci_cpi_healthcare_query = """
+            SELECT (COUNT(*) as ?count) WHERE {
+                ?eciEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/HealthcareSector> .
+                ?cpiEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/HealthcareSector> .
+                FILTER(STRSTARTS(STR(?eciEntity), "https://www.bls.gov/eci/"))
+                FILTER(STRSTARTS(STR(?cpiEntity), "https://www.bls.gov/cpi/"))
+            }
+            """
+            result_query = list(loader.graph.query(eci_cpi_healthcare_query))
+            eci_cpi_healthcare_count = int(result_query[0].count)
+            logger.info(f"   ECI-CPI healthcare sector entities: {eci_cpi_healthcare_count}")
+
+            # Check ECI-JOLTS food sector
+            eci_jolts_food_query = """
+            SELECT (COUNT(*) as ?count) WHERE {
+                ?eciEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/FoodSector> .
+                ?joltsEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/FoodSector> .
+                FILTER(STRSTARTS(STR(?eciEntity), "https://www.bls.gov/eci/"))
+                FILTER(STRSTARTS(STR(?joltsEntity), "https://www.bls.gov/jolts/"))
+            }
+            """
+            result_query = list(loader.graph.query(eci_jolts_food_query))
+            eci_jolts_food_count = int(result_query[0].count)
+            logger.info(f"   ECI-JOLTS food sector entities: {eci_jolts_food_count}")
+
+            # Check ECI-EMPSIT manufacturing sector
+            eci_empsit_manufacturing_query = """
+            SELECT (COUNT(*) as ?count) WHERE {
+                ?eciEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/ManufacturingSector> .
+                ?empsitEntity <https://www.bls.gov/enrichment/belongsToSector> <https://www.bls.gov/enrichment/ManufacturingSector> .
+                FILTER(STRSTARTS(STR(?eciEntity), "https://www.bls.gov/eci/"))
+                FILTER(STRSTARTS(STR(?empsitEntity), "https://www.bls.gov/empsit/"))
+            }
+            """
+            result_query = list(loader.graph.query(eci_empsit_manufacturing_query))
+            eci_empsit_manufacturing_count = int(result_query[0].count)
+            logger.info(f"   ECI-EMPSIT manufacturing sector entities: {eci_empsit_manufacturing_count}")
 
             # Check JOLTS-CPI food sector
             jolts_cpi_food_query = """
@@ -1438,6 +2171,7 @@ class TestSuite:
             passed = (
                 'cpi' in stats['available_datasets'] and
                 'ppi' in stats['available_datasets'] and
+                'eci' in stats['available_datasets'] and
                 'jolts' in stats['available_datasets'] and
                 'empsit' in stats['available_datasets'] and
                 stats['temporal_sequences'] > 0 and
@@ -1452,7 +2186,7 @@ class TestSuite:
             output_file = 'enriched_all_datasets.ttl'
             writer = RDFGraphWriter()
             writer.save_to_file(loader.graph, output_file, format='turtle')
-            logger.info(f"[7] Saved to: {output_file}")
+            logger.info(f"[8] Saved to: {output_file}")
 
             result = TestResult(
                 test_name=test_name,
@@ -1536,11 +2270,16 @@ Examples:
   # Test individual datasets
   python tests/test_bls_dataset.py --dataset cpi
   python tests/test_bls_dataset.py --dataset ppi
+  python tests/test_bls_dataset.py --dataset eci
   python tests/test_bls_dataset.py --dataset jolts
   python tests/test_bls_dataset.py --dataset empsit
   
   # Test dataset pairs
   python tests/test_bls_dataset.py --combination cpi-ppi
+  python tests/test_bls_dataset.py --combination eci-cpi
+  python tests/test_bls_dataset.py --combination eci-ppi
+  python tests/test_bls_dataset.py --combination eci-jolts
+  python tests/test_bls_dataset.py --combination eci-empsit
   python tests/test_bls_dataset.py --combination jolts-cpi
   python tests/test_bls_dataset.py --combination jolts-ppi
   python tests/test_bls_dataset.py --combination empsit-cpi
@@ -1556,11 +2295,12 @@ Examples:
     )
 
     parser.add_argument('--dataset',
-                       choices=['cpi', 'ppi', 'jolts', 'empsit'],
+                       choices=['cpi', 'ppi', 'eci', 'jolts', 'empsit'],
                        help='Test a single dataset')
 
     parser.add_argument('--combination',
-                       choices=['cpi-ppi', 'jolts-cpi', 'jolts-ppi',
+                       choices=['cpi-ppi', 'eci-cpi', 'eci-ppi', 'eci-jolts', 'eci-empsit',
+                               'jolts-cpi', 'jolts-ppi',
                                'empsit-cpi', 'empsit-ppi', 'empsit-jolts', 'all'],
                        help='Test dataset combinations')
 
@@ -1577,9 +2317,14 @@ Examples:
         logger.info("Running ALL tests...")
         suite.test_cpi_only()
         suite.test_ppi_only()
+        suite.test_eci_only()
         suite.test_jolts_only()
         suite.test_empsit_only()
         suite.test_cpi_ppi()
+        suite.test_eci_cpi()
+        suite.test_eci_ppi()
+        suite.test_eci_jolts()
+        suite.test_eci_empsit()
         suite.test_jolts_cpi()
         suite.test_jolts_ppi()
         suite.test_empsit_cpi()
@@ -1593,6 +2338,8 @@ Examples:
             suite.test_cpi_only()
         elif args.dataset == 'ppi':
             suite.test_ppi_only()
+        elif args.dataset == 'eci':
+            suite.test_eci_only()
         elif args.dataset == 'jolts':
             suite.test_jolts_only()
         elif args.dataset == 'empsit':
@@ -1602,6 +2349,14 @@ Examples:
         # Run combination test
         if args.combination == 'cpi-ppi':
             suite.test_cpi_ppi()
+        elif args.combination == 'eci-cpi':
+            suite.test_eci_cpi()
+        elif args.combination == 'eci-ppi':
+            suite.test_eci_ppi()
+        elif args.combination == 'eci-jolts':
+            suite.test_eci_jolts()
+        elif args.combination == 'eci-empsit':
+            suite.test_eci_empsit()
         elif args.combination == 'jolts-cpi':
             suite.test_jolts_cpi()
         elif args.combination == 'jolts-ppi':
@@ -1620,9 +2375,14 @@ Examples:
         logger.info("No arguments provided. Running ALL tests...")
         suite.test_cpi_only()
         suite.test_ppi_only()
+        suite.test_eci_only()
         suite.test_jolts_only()
         suite.test_empsit_only()
         suite.test_cpi_ppi()
+        suite.test_eci_cpi()
+        suite.test_eci_ppi()
+        suite.test_eci_jolts()
+        suite.test_eci_empsit()
         suite.test_jolts_cpi()
         suite.test_jolts_ppi()
         suite.test_empsit_cpi()
