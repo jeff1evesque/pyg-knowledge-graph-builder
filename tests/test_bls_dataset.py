@@ -44,7 +44,6 @@ from glue_jobs.enrichment.intra_source_linker import BLSIntraSourceLinker
 import logging
 import argparse
 from dataclasses import dataclass
-from enum import Enum
 
 logging.basicConfig(
     level=logging.INFO,
