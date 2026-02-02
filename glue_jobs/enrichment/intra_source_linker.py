@@ -5,8 +5,8 @@ Links entities within the BLS family (CPI, PPI, ECI, JOLTS, EMPSIT, etc.)
 This module encodes domain knowledge about BLS data relationships.
 Patterns are only defined for datasets whose ontologies have been analyzed.
 
-Currently supported datasets: CPI, PPI, JOLTS, EMPSIT (27 tables)
-TODO: Add ECI, LAUS, METRO, REALER, WKYENG, XIMPIM as ontologies are provided
+Currently supported datasets: CPI, PPI, ECI, JOLTS, EMPSIT (27 tables)
+TODO: Add LAUS, METRO, REALER, WKYENG, XIMPIM as ontologies are provided
 """
 
 from rdflib import Graph, URIRef, Literal, Namespace
@@ -25,8 +25,8 @@ logger = logging.getLogger(__name__)
 # DOMAIN KNOWLEDGE: BLS LINKING PATTERNS
 # ============================================
 # IMPORTANT: Only include datasets whose ontologies have been analyzed!
-# Currently includes: CPI, PPI, JOLTS, EMPSIT
-# TODO: Add ECI, LAUS, METRO, REALER, WKYENG, XIMPIM as their ontologies are provided
+# Currently includes: CPI, PPI, ECI, JOLTS, EMPSIT
+# TODO: Add LAUS, METRO, REALER, WKYENG, XIMPIM as their ontologies are provided
 
 BLS_SECTOR_PATTERNS = {
     'food_sector': {
@@ -35,6 +35,7 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': ['Food', 'Grocery', 'Restaurant', 'Dining', 'Meals', 'Beverages'],
             'ppi': ['Food', 'Manufacturing', 'Foodstuffs', 'Feeds', 'Finished Consumer Foods'],
+            'eci': ['Food services', 'Accommodation and food', 'Food service'],
             'jolts': ['Food services', 'Accommodation and food services', 'Restaurants',
                       'Drinking places', 'Food service'],
             'empsit': [
@@ -56,6 +57,7 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': ['Energy', 'Gasoline', 'Fuel', 'Electricity', 'Gas', 'Utility'],
             'ppi': ['Energy', 'Goods', 'Materials', 'Fuel', 'Petroleum'],
+            'eci': ['Utilities', 'Mining', 'Oil and gas'],
             'jolts': ['Mining', 'Oil and gas extraction', 'Utilities', 'Electric power',
                       'Natural gas', 'Coal mining'],
             'empsit': [
@@ -83,6 +85,7 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': ['Housing', 'Shelter', 'Rent', 'Owners', 'Lodging'],
             'ppi': ['Construction', 'Building', 'Materials', 'Residential'],
+            'eci': ['Construction', 'Real estate', 'Rental', 'Leasing'],
             'jolts': ['Construction', 'Building construction', 'Heavy construction',
                       'Specialty trade contractors', 'Residential construction'],
             'empsit': [
@@ -110,6 +113,7 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': ['Transportation', 'Vehicle', 'Automobile', 'Transit', 'Airfare'],
             'ppi': ['Transportation', 'Warehousing', 'Trade', 'Shipping'],
+            'eci': ['Transportation', 'Warehousing', 'Trade, transportation'],
             'jolts': ['Transportation', 'Warehousing', 'Truck transportation',
                       'Couriers and messengers', 'Transit', 'Air transportation'],
             'empsit': [
@@ -140,6 +144,7 @@ BLS_SECTOR_PATTERNS = {
             'cpi': ['Goods', 'Services', 'Commodities'],
             'ppi': ['Goods', 'Services', 'Final Demand', 'Intermediate Demand',
                     'Processed', 'Unprocessed'],
+            'eci': ['Goods-producing', 'Service-providing'],
             'jolts': ['Goods-producing', 'Service-providing', 'Manufacturing',
                       'Trade, transportation, and utilities', 'Professional and business services'],
             'empsit': [
@@ -159,6 +164,7 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': [],  # CPI doesn't have manufacturing categories
             'ppi': ['Manufacturing', 'Production', 'Fabrication', 'Processing'],
+            'eci': ['Manufacturing', 'Aircraft manufacturing', 'Production'],
             'jolts': ['Manufacturing', 'Durable goods', 'Nondurable goods',
                       'Fabricated metal', 'Machinery', 'Computer and electronic'],
             'empsit': [
@@ -203,6 +209,7 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': [],  # CPI measures prices, not retail activity
             'ppi': ['Trade', 'Wholesale', 'Retail'],
+            'eci': ['Retail trade', 'Wholesale trade', 'Trade, transportation'],
             'jolts': ['Retail trade', 'Motor vehicle dealers', 'Furniture stores',
                       'Electronics stores', 'Food and beverage stores', 'General merchandise'],
             'empsit': [
@@ -244,6 +251,7 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': ['Medical', 'Healthcare', 'Hospital', 'Physician', 'Prescription'],
             'ppi': ['Healthcare', 'Medical', 'Hospital'],
+            'eci': ['Health care', 'Healthcare', 'Hospitals', 'Nursing', 'Social assistance'],
             'jolts': ['Health care', 'Social assistance', 'Hospitals',
                       'Nursing', 'Ambulatory health care', 'Medical'],
             'empsit': [
@@ -283,6 +291,8 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': [],  # CPI doesn't have professional services categories
             'ppi': ['Professional services', 'Business services', 'Consulting'],
+            'eci': ['Professional and business services', 'Professional, scientific, and technical',
+                    'Administrative and support'],
             'jolts': ['Professional and business services', 'Professional and technical services',
                       'Management', 'Administrative', 'Waste services'],
             'empsit': [
@@ -327,6 +337,7 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': ['Recreation', 'Entertainment', 'Lodging', 'Hotel'],
             'ppi': [],  # PPI doesn't have leisure/hospitality categories
+            'eci': ['Leisure and hospitality', 'Accommodation and food'],
             'jolts': ['Leisure and hospitality', 'Arts and entertainment',
                       'Accommodation', 'Recreation', 'Amusement'],
             'empsit': [
@@ -350,6 +361,7 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': [],
             'ppi': [],
+            'eci': ['State and local government', 'Public administration'],
             'jolts': ['Government', 'Federal', 'State', 'Local'],
             'empsit': [
                 # From Table B-1
@@ -376,6 +388,7 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': ['Information', 'Communication'],
             'ppi': ['Information'],
+            'eci': ['Information'],
             'jolts': ['Information', 'Publishing', 'Broadcasting', 'Telecommunications'],
             'empsit': [
                 # From Table B-1
@@ -397,6 +410,8 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': ['Financial'],
             'ppi': ['Financial'],
+            'eci': ['Financial activities', 'Finance and insurance', 'Credit intermediation',
+                    'Insurance carriers', 'Real estate'],
             'jolts': ['Financial activities', 'Finance', 'Insurance', 'Real estate'],
             'empsit': [
                 # From Table B-1
@@ -424,6 +439,8 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': ['Education'],
             'ppi': [],
+            'eci': ['Educational services', 'Education and health services', 'Elementary and secondary schools',
+                    'Junior colleges', 'Colleges', 'Universities', 'Schools'],
             'jolts': ['Educational services'],
             'empsit': [
                 # From Table B-1
@@ -444,6 +461,7 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': [],
             'ppi': [],
+            'eci': ['Other services'],
             'jolts': ['Other services', 'Repair', 'Personal services'],
             'empsit': [
                 # From Table B-1
@@ -465,6 +483,8 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': [],
             'ppi': ['Agriculture', 'Forestry', 'Fishing'],
+            'eci': ['Natural resources, construction, and maintenance',
+                    'Construction, extraction, farming, fishing, and forestry'],
             'jolts': ['Agriculture', 'Forestry', 'Fishing'],
             'empsit': [
                 # From Table B-1
@@ -487,6 +507,7 @@ BLS_SECTOR_PATTERNS = {
         'keywords': {
             'cpi': [],
             'ppi': ['Construction'],
+            'eci': ['Construction', 'Installation, maintenance, and repair'],
             'jolts': ['Construction'],
             'empsit': [
                 # From Table A-13
@@ -545,6 +566,225 @@ KNOWN_CORRELATIONS = [
         'relationship': BLS_ENRICHMENT.processingChainLink,
         'direction': 'upstream',
         'strength': 'medium'
+    },
+
+    # ECI-CPI Correlations
+    {
+        'name': 'eci_cpi_wage_inflation',
+        'source_dataset': 'eci',
+        'target_dataset': 'cpi',
+        'source_pattern': 'Wages and salaries',
+        'target_pattern': 'All items',
+        'description': 'Wage growth leads to consumer price inflation',
+        'relationship': BLS_ENRICHMENT.wageInflationLink,
+        'lag_months': 2,
+        'strength': 'strong'
+    },
+    {
+        'name': 'eci_cpi_compensation_inflation',
+        'source_dataset': 'eci',
+        'target_dataset': 'cpi',
+        'source_pattern': 'Total compensation',
+        'target_pattern': 'All items',
+        'description': 'Total compensation growth affects consumer prices',
+        'relationship': BLS_ENRICHMENT.compensationInflationLink,
+        'lag_months': 3,
+        'strength': 'strong'
+    },
+    {
+        'name': 'eci_cpi_healthcare_costs',
+        'source_dataset': 'eci',
+        'target_dataset': 'cpi',
+        'source_pattern': 'Health care',
+        'target_pattern': 'Medical',
+        'description': 'Healthcare employment costs affect medical service prices',
+        'relationship': BLS_ENRICHMENT.employmentPriceLink,
+        'lag_months': 3,
+        'strength': 'strong'
+    },
+    {
+        'name': 'eci_cpi_education_costs',
+        'source_dataset': 'eci',
+        'target_dataset': 'cpi',
+        'source_pattern': 'Educational services',
+        'target_pattern': 'Education',
+        'description': 'Education employment costs affect education prices',
+        'relationship': BLS_ENRICHMENT.employmentPriceLink,
+        'lag_months': 6,
+        'strength': 'medium'
+    },
+
+    # ECI-PPI Correlations
+    {
+        'name': 'eci_ppi_manufacturing_costs',
+        'source_dataset': 'eci',
+        'target_dataset': 'ppi',
+        'source_pattern': 'Manufacturing',
+        'target_pattern': 'Manufacturing',
+        'description': 'Manufacturing employment costs affect production costs',
+        'relationship': BLS_ENRICHMENT.employmentProductionLink,
+        'lag_months': 1,
+        'strength': 'strong'
+    },
+    {
+        'name': 'eci_ppi_construction_costs',
+        'source_dataset': 'eci',
+        'target_dataset': 'ppi',
+        'source_pattern': 'Construction',
+        'target_pattern': 'Construction',
+        'description': 'Construction employment costs affect building costs',
+        'relationship': BLS_ENRICHMENT.employmentProductionLink,
+        'lag_months': 2,
+        'strength': 'medium'
+    },
+    {
+        'name': 'eci_ppi_wage_costs',
+        'source_dataset': 'eci',
+        'target_dataset': 'ppi',
+        'source_pattern': 'Wages and salaries',
+        'target_pattern': 'Final Demand',
+        'description': 'Wage growth affects producer costs',
+        'relationship': BLS_ENRICHMENT.wageCostLink,
+        'lag_months': 1,
+        'strength': 'strong'
+    },
+
+    # ECI-JOLTS Correlations
+    {
+        'name': 'eci_jolts_wage_job_openings',
+        'source_dataset': 'eci',
+        'target_dataset': 'jolts',
+        'source_pattern': 'Wages and salaries',
+        'target_pattern': 'Job openings',
+        'description': 'Wage growth correlates with job openings (tight labor market)',
+        'relationship': BLS_ENRICHMENT.wageJobOpeningsLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'eci_jolts_benefits_quits',
+        'source_dataset': 'eci',
+        'target_dataset': 'jolts',
+        'source_pattern': 'Benefits',
+        'target_pattern': 'Quits',
+        'description': 'Benefits growth correlates with voluntary quits',
+        'relationship': BLS_ENRICHMENT.benefitsQuitsLink,
+        'lag_months': 1,
+        'strength': 'medium'
+    },
+    {
+        'name': 'eci_jolts_manufacturing_employment',
+        'source_dataset': 'eci',
+        'target_dataset': 'jolts',
+        'source_pattern': 'Manufacturing',
+        'target_pattern': 'Manufacturing',
+        'description': 'Manufacturing employment costs correlate with job market dynamics',
+        'relationship': BLS_ENRICHMENT.employmentJobMarketLink,
+        'lag_months': 1,
+        'strength': 'strong'
+    },
+    {
+        'name': 'eci_jolts_healthcare_employment',
+        'source_dataset': 'eci',
+        'target_dataset': 'jolts',
+        'source_pattern': 'Health care',
+        'target_pattern': 'Health care',
+        'description': 'Healthcare employment costs correlate with job openings',
+        'relationship': BLS_ENRICHMENT.employmentJobOpeningsLink,
+        'lag_months': 2,
+        'strength': 'strong'
+    },
+
+    # ECI-EMPSIT Correlations
+    {
+        'name': 'eci_empsit_wage_earnings',
+        'source_dataset': 'eci',
+        'target_dataset': 'empsit',
+        'source_pattern': 'Wages and salaries',
+        'target_pattern': 'Average hourly earnings',
+        'description': 'ECI wage index correlates with average hourly earnings',
+        'relationship': BLS_ENRICHMENT.wageEarningsLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'eci_empsit_compensation_earnings',
+        'source_dataset': 'eci',
+        'target_dataset': 'empsit',
+        'source_pattern': 'Total compensation',
+        'target_pattern': 'Average weekly earnings',
+        'description': 'Total compensation correlates with weekly earnings',
+        'relationship': BLS_ENRICHMENT.compensationEarningsLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'eci_empsit_manufacturing_wages',
+        'source_dataset': 'eci',
+        'target_dataset': 'empsit',
+        'source_pattern': 'Manufacturing',
+        'target_pattern': 'Manufacturing',
+        'description': 'Manufacturing employment costs correlate with manufacturing earnings',
+        'relationship': BLS_ENRICHMENT.employmentEarningsLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'eci_empsit_government_wages',
+        'source_dataset': 'eci',
+        'target_dataset': 'empsit',
+        'source_pattern': 'State and local government',
+        'target_pattern': 'State government',
+        'description': 'State/local government employment costs correlate with government employment',
+        'relationship': BLS_ENRICHMENT.governmentEmploymentLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+
+    # ECI Internal Correlations
+    {
+        'name': 'eci_wages_benefits',
+        'source_dataset': 'eci',
+        'target_dataset': 'eci',
+        'source_pattern': 'Wages and salaries',
+        'target_pattern': 'Benefits',
+        'description': 'Wages and benefits move together as total compensation',
+        'relationship': BLS_ENRICHMENT.compensationComponentLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'eci_union_nonunion',
+        'source_dataset': 'eci',
+        'target_dataset': 'eci',
+        'source_pattern': 'Union',
+        'target_pattern': 'Nonunion',
+        'description': 'Union and nonunion wage patterns influence each other',
+        'relationship': BLS_ENRICHMENT.bargainingStatusLink,
+        'lag_months': 1,
+        'strength': 'medium'
+    },
+    {
+        'name': 'eci_private_government',
+        'source_dataset': 'eci',
+        'target_dataset': 'eci',
+        'source_pattern': 'Private industry',
+        'target_pattern': 'State and local government',
+        'description': 'Private and government sector wages influence each other',
+        'relationship': BLS_ENRICHMENT.sectorWageLink,
+        'lag_months': 2,
+        'strength': 'medium'
+    },
+    {
+        'name': 'eci_regional_patterns',
+        'source_dataset': 'eci',
+        'target_dataset': 'eci',
+        'source_pattern': 'Northeast',
+        'target_pattern': 'South',
+        'description': 'Regional wage patterns show geographic wage competition',
+        'relationship': BLS_ENRICHMENT.regionalWageLink,
+        'lag_months': 1,
+        'strength': 'weak'
     },
 
     # JOLTS-CPI Correlations
@@ -831,6 +1071,231 @@ MEASUREMENT_TYPES = {
             'year_property': PPI.hasYear
         }
     },
+    'eci': {
+        # Table 1: Total Compensation (seasonally adjusted)
+        'EmploymentCostIndexData': {
+            'class': ECI.EmploymentCostIndexData,
+            'category_property': ECI.hasOccupationalGroup,  # or hasIndustry
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PercentChangeData': {
+            'class': ECI.PercentChangeData,
+            'category_property': ECI.hasOccupationalGroup,  # or hasIndustry
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        # Table 2: Wages and Salaries (seasonally adjusted)
+        'WagesAndSalariesIndexData': {
+            'class': ECI.WagesAndSalariesIndexData,
+            'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'WagesAndSalariesPercentChangeData': {
+            'class': ECI.WagesAndSalariesPercentChangeData,
+            'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        # Table 3: Benefits (seasonally adjusted)
+        'BenefitsIndexData': {
+            'class': ECI.BenefitsIndexData,
+            'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'BenefitsPercentChangeData': {
+            'class': ECI.BenefitsPercentChangeData,
+            'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        # Table 4: Civilian Workers (not seasonally adjusted)
+        'CivilianWorkerIndexData': {
+            'class': ECI.CivilianWorkerIndexData,
+            'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'ThreeMonthPercentChangeData': {
+            'class': ECI.ThreeMonthPercentChangeData,
+            'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'TwelveMonthPercentChangeData': {
+            'class': ECI.TwelveMonthPercentChangeData,
+            'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        # Table 5: Private Industry Workers
+        'PrivateIndustryWorkerIndexData': {
+            'class': ECI.PrivateIndustryWorkerIndexData,
+            'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryThreeMonthPercentChangeData': {
+            'class': ECI.PrivateIndustryThreeMonthPercentChangeData,
+            'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryTwelveMonthPercentChangeData': {
+            'class': ECI.PrivateIndustryTwelveMonthPercentChangeData,
+            'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        # Table 7: State and Local Government Workers
+        'StateLocalGovernmentWorkerIndexData': {
+            'class': ECI.StateLocalGovernmentWorkerIndexData,
+            'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'StateLocalGovernmentThreeMonthPercentChangeData': {
+            'class': ECI.StateLocalGovernmentThreeMonthPercentChangeData,
+            'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'StateLocalGovernmentTwelveMonthPercentChangeData': {
+            'class': ECI.StateLocalGovernmentTwelveMonthPercentChangeData,
+            'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        # Table 8: Civilian Workers Wages and Salaries
+        'CivilianWorkerWagesSalariesIndexData': {
+            'class': ECI.CivilianWorkerWagesSalariesIndexData,
+            'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'CivilianWorkerWagesSalariesThreeMonthPercentChangeData': {
+            'class': ECI.CivilianWorkerWagesSalariesThreeMonthPercentChangeData,
+            'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'CivilianWorkerWagesSalariesTwelveMonthPercentChangeData': {
+            'class': ECI.CivilianWorkerWagesSalariesTwelveMonthPercentChangeData,
+            'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        # Table 9: Private Industry Workers Wages and Salaries
+        'PrivateIndustryWorkerWagesSalariesIndexData': {
+            'class': ECI.PrivateIndustryWorkerWagesSalariesIndexData,
+            'category_property': ECI.hasPrivateIndustryOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryWorkerWagesSalariesThreeMonthPercentChangeData': {
+            'class': ECI.PrivateIndustryWorkerWagesSalariesThreeMonthPercentChangeData,
+            'category_property': ECI.hasPrivateIndustryOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryWorkerWagesSalariesTwelveMonthPercentChangeData': {
+            'class': ECI.PrivateIndustryWorkerWagesSalariesTwelveMonthPercentChangeData,
+            'category_property': ECI.hasPrivateIndustryOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        # Table 10: Private Industry by Bargaining Status and Region (Wages and Salaries)
+        'PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionIndexData': {
+            'class': ECI.PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionIndexData,
+            'category_property': ECI.hasBargainingStatus,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionThreeMonthPercentChangeData': {
+            'class': ECI.PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionThreeMonthPercentChangeData,
+            'category_property': ECI.hasBargainingStatus,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionTwelveMonthPercentChangeData': {
+            'class': ECI.PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionTwelveMonthPercentChangeData,
+            'category_property': ECI.hasBargainingStatus,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        # Table 11: State and Local Government Workers Wages and Salaries
+        'StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryIndexData': {
+            'class': ECI.StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryIndexData,
+            'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryThreeMonthPercentChangeData': {
+            'class': ECI.StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryThreeMonthPercentChangeData,
+            'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryTwelveMonthPercentChangeData': {
+            'class': ECI.StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryTwelveMonthPercentChangeData,
+            'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        # Table 12: Benefits by Occupation, Industry, and Bargaining Status
+        'BenefitsByOccupationIndustryBargainingStatusIndexData': {
+            'class': ECI.BenefitsByOccupationIndustryBargainingStatusIndexData,
+            'category_property': ECI.hasBenefitsOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'BenefitsByOccupationIndustryBargainingStatusThreeMonthPercentChangeData': {
+            'class': ECI.BenefitsByOccupationIndustryBargainingStatusThreeMonthPercentChangeData,
+            'category_property': ECI.hasBenefitsOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'BenefitsByOccupationIndustryBargainingStatusTwelveMonthPercentChangeData': {
+            'class': ECI.BenefitsByOccupationIndustryBargainingStatusTwelveMonthPercentChangeData,
+            'category_property': ECI.hasBenefitsOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        # Table 13: Private Industry by Area (12-month only)
+        'PrivateIndustryWorkerTotalCompensationByAreaTwelveMonthPercentChangeData': {
+            'class': ECI.PrivateIndustryWorkerTotalCompensationByAreaTwelveMonthPercentChangeData,
+            'category_property': ECI.hasMetropolitanArea,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryWorkerWagesSalariesByAreaTwelveMonthPercentChangeData': {
+            'class': ECI.PrivateIndustryWorkerWagesSalariesByAreaTwelveMonthPercentChangeData,
+            'category_property': ECI.hasMetropolitanArea,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        # Table A: Major Series
+        'ThreeMonthSeasonallyAdjustedPercentChangeData': {
+            'class': ECI.ThreeMonthSeasonallyAdjustedPercentChangeData,
+            'category_property': ECI.hasMajorSeriesWorkerCategory,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'TwelveMonthNotSeasonallyAdjustedCurrentDollarPercentChangeData': {
+            'class': ECI.TwelveMonthNotSeasonallyAdjustedCurrentDollarPercentChangeData,
+            'category_property': ECI.hasMajorSeriesWorkerCategory,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'TwelveMonthNotSeasonallyAdjustedConstantDollarPercentChangeData': {
+            'class': ECI.TwelveMonthNotSeasonallyAdjustedConstantDollarPercentChangeData,
+            'category_property': ECI.hasMajorSeriesWorkerCategory,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        }
+    },
     'jolts': {
         'JobOpeningsLevel': {
             'class': JOLTS.JobOpeningsLevel,
@@ -1098,7 +1563,7 @@ class BLSIntraSourceLinker:
     Enriches BLS data with intra-source relationships across all BLS datasets.
 
     Uses encoded domain knowledge to create links. Patterns are only defined
-    for datasets whose ontologies have been analyzed (currently: CPI, PPI, JOLTS, EMPSIT).
+    for datasets whose ontologies have been analyzed (currently: CPI, PPI, ECI, JOLTS, EMPSIT).
 
     When new datasets are added, update:
     1. BLS_SECTOR_PATTERNS - Add keywords for the new dataset
@@ -1135,7 +1600,7 @@ class BLSIntraSourceLinker:
         Detect which BLS datasets are present in the graph.
 
         Returns:
-            Set of dataset names (e.g., {'cpi', 'ppi', 'empsit'})
+            Set of dataset names (e.g., {'cpi', 'ppi', 'eci', 'empsit'})
         """
         datasets = set()
 
@@ -1143,9 +1608,9 @@ class BLSIntraSourceLinker:
         dataset_checks = {
             'cpi': CPI,
             'ppi': PPI,
+            'eci': ECI,
             'jolts': JOLTS,
             'empsit': EMPSIT,
-            'eci': ECI,
             'laus': LAUS,
             'metro': METRO,
             'realer': REALER,
@@ -1227,7 +1692,7 @@ class BLSIntraSourceLinker:
         Unify temporal entities across all BLS datasets.
 
         Creates unified Month and Year entities that link to dataset-specific temporal entities.
-        Example: cpi:January, ppi:January, empsit:January → bls:January
+        Example: cpi:January, ppi:January, eci:January, empsit:January → bls:January
 
         This works for any BLS dataset that uses Month and Year classes.
         """
@@ -1238,9 +1703,9 @@ class BLSIntraSourceLinker:
             FILTER(
                 ?monthClass = <https://www.bls.gov/cpi/Month> ||
                 ?monthClass = <https://www.bls.gov/ppi/Month> ||
+                ?monthClass = <https://www.bls.gov/eci/Month> ||
                 ?monthClass = <https://www.bls.gov/jolts/Month> ||
                 ?monthClass = <https://www.bls.gov/empsit/Month> ||
-                ?monthClass = <https://www.bls.gov/eci/Month> ||
                 ?monthClass = <https://www.bls.gov/laus/Month> ||
                 ?monthClass = <https://www.bls.gov/metro/Month> ||
                 ?monthClass = <https://www.bls.gov/realer/Month> ||
@@ -1257,9 +1722,9 @@ class BLSIntraSourceLinker:
             FILTER(
                 ?yearClass = <https://www.bls.gov/cpi/Year> ||
                 ?yearClass = <https://www.bls.gov/ppi/Year> ||
+                ?yearClass = <https://www.bls.gov/eci/Year> ||
                 ?yearClass = <https://www.bls.gov/jolts/Year> ||
                 ?yearClass = <https://www.bls.gov/empsit/Year> ||
-                ?yearClass = <https://www.bls.gov/eci/Year> ||
                 ?yearClass = <https://www.bls.gov/laus/Year> ||
                 ?yearClass = <https://www.bls.gov/metro/Year> ||
                 ?yearClass = <https://www.bls.gov/realer/Year> ||
@@ -1507,8 +1972,12 @@ class BLSIntraSourceLinker:
 
         Currently implemented for:
         - CPI ↔ PPI
+        - CPI ↔ ECI
         - CPI ↔ EMPSIT
+        - PPI ↔ ECI
         - PPI ↔ EMPSIT
+        - ECI ↔ JOLTS
+        - ECI ↔ EMPSIT
         - JOLTS ↔ EMPSIT
 
         This method can be extended as more datasets with hierarchies are added.
@@ -1521,6 +1990,14 @@ class BLSIntraSourceLinker:
                 CPI.hasFullPath, PPI.hasFullPath
             )
 
+        # CPI ↔ ECI hierarchies
+        if 'cpi' in self.available_datasets and 'eci' in self.available_datasets:
+            self._link_hierarchies_between_datasets(
+                'cpi', 'eci',
+                CPI.hasParent, ECI.hasParentIndustry,
+                CPI.hasFullPath, ECI.hasFullPath
+            )
+
         # CPI ↔ EMPSIT hierarchies
         if 'cpi' in self.available_datasets and 'empsit' in self.available_datasets:
             self._link_hierarchies_between_datasets(
@@ -1529,12 +2006,36 @@ class BLSIntraSourceLinker:
                 CPI.hasFullPath, EMPSIT.hasFullPath
             )
 
+        # PPI ↔ ECI hierarchies
+        if 'ppi' in self.available_datasets and 'eci' in self.available_datasets:
+            self._link_hierarchies_between_datasets(
+                'ppi', 'eci',
+                PPI.hasParent, ECI.hasParentIndustry,
+                PPI.hasFullPath, ECI.hasFullPath
+            )
+
         # PPI ↔ EMPSIT hierarchies
         if 'ppi' in self.available_datasets and 'empsit' in self.available_datasets:
             self._link_hierarchies_between_datasets(
                 'ppi', 'empsit',
                 PPI.hasParent, EMPSIT.hasParentIndustry,
                 PPI.hasFullPath, EMPSIT.hasFullPath
+            )
+
+        # ECI ↔ JOLTS hierarchies
+        if 'eci' in self.available_datasets and 'jolts' in self.available_datasets:
+            self._link_hierarchies_between_datasets(
+                'eci', 'jolts',
+                ECI.hasParentIndustry, JOLTS.hasParent,
+                ECI.hasFullPath, JOLTS.hasFullPath
+            )
+
+        # ECI ↔ EMPSIT hierarchies
+        if 'eci' in self.available_datasets and 'empsit' in self.available_datasets:
+            self._link_hierarchies_between_datasets(
+                'eci', 'empsit',
+                ECI.hasParentIndustry, EMPSIT.hasParentIndustry,
+                ECI.hasFullPath, EMPSIT.hasFullPath
             )
 
         # JOLTS ↔ EMPSIT hierarchies
@@ -1610,9 +2111,9 @@ class BLSIntraSourceLinker:
         mapping = {
             'cpi': CPI,
             'ppi': PPI,
+            'eci': ECI,
             'jolts': JOLTS,
             'empsit': EMPSIT,
-            'eci': ECI,
             'laus': LAUS,
             'metro': METRO,
             'realer': REALER,
@@ -1661,7 +2162,8 @@ class BLSIntraSourceLinker:
         keywords = ['food', 'energy', 'housing', 'transportation', 'goods', 'services',
                     'manufacturing', 'construction', 'trade', 'warehousing', 'healthcare',
                     'retail', 'wholesale', 'professional', 'leisure', 'hospitality',
-                    'information', 'financial', 'government', 'education']
+                    'information', 'financial', 'government', 'education', 'wages',
+                    'salaries', 'compensation', 'benefits', 'union', 'nonunion']
 
         for keyword in keywords:
             if keyword in path1 and keyword in path2:
