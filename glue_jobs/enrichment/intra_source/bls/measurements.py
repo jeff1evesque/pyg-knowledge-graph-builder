@@ -1,10 +1,9 @@
 """
 BLS Measurement Types - Temporal linking configurations
 """
-from glue_jobs.utils.rdf_utils import CPI, PPI, ECI, JOLTS, EMPSIT
+from glue_jobs.utils.rdf_utils import CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM
 
-MEASUREMENT_TYPES# Measurement type mappings for temporal linking
-# IMPORTANT: Only include datasets we've analyzed!
+
 MEASUREMENT_TYPES = {
     'cpi': {
         'Index': {
@@ -535,5 +534,118 @@ MEASUREMENT_TYPES = {
             'month_property': EMPSIT.hasMonth,
             'year_property': EMPSIT.hasYear
         }
+    },
+    'ximpim': {
+        # Table 1: Import Price Index by End Use
+        'ImportPriceIndex_EndUse': {
+            'class': XIMPIM.ImportPriceIndex,
+            'category_property': XIMPIM.hasEndUseCategory,
+            'month_property': XIMPIM.hasMonth,
+            'year_property': XIMPIM.hasYear
+        },
+
+        # Table 2: Export Price Index by End Use
+        'ExportPriceIndex_EndUse': {
+            'class': XIMPIM.ExportPriceIndex,
+            'category_property': XIMPIM.hasEndUseCategory,
+            'month_property': XIMPIM.hasMonth,
+            'year_property': XIMPIM.hasYear
+        },
+
+        # Table 3: Import Price Index by NAICS
+        'ImportPriceIndex_NAICS': {
+            'class': XIMPIM.ImportPriceIndex,
+            'category_property': XIMPIM.hasNAICSIndustry,
+            'month_property': XIMPIM.hasMonth,
+            'year_property': XIMPIM.hasYear
+        },
+
+        # Table 4: Export Price Index by NAICS
+        'ExportPriceIndex_NAICS': {
+            'class': XIMPIM.ExportPriceIndex,
+            'category_property': XIMPIM.hasNAICSIndustry,
+            'month_property': XIMPIM.hasMonth,
+            'year_property': XIMPIM.hasYear
+        },
+
+        # Table 5: Import Price Index by Harmonized System
+        'ImportPriceIndex_Harmonized': {
+            'class': XIMPIM.ImportPriceIndex,
+            'category_property': XIMPIM.hasHarmonizedCategory,
+            'month_property': XIMPIM.hasMonth,
+            'year_property': XIMPIM.hasYear
+        },
+
+        # Table 6: Export Price Index by Harmonized System
+        'ExportPriceIndex_Harmonized': {
+            'class': XIMPIM.ExportPriceIndex,
+            'category_property': XIMPIM.hasHarmonizedCategory,
+            'month_property': XIMPIM.hasMonth,
+            'year_property': XIMPIM.hasYear
+        },
+
+        # Table 7: Import Price Index by Locality of Origin
+        'ImportPriceIndex_Locality': {
+            'class': XIMPIM.ImportPriceIndex,
+            'category_property': XIMPIM.hasLocalityOfOrigin,
+            'month_property': XIMPIM.hasMonth,
+            'year_property': XIMPIM.hasYear
+        },
+
+        # Table 8: Export Price Index by Locality of Destination
+        'ExportPriceIndex_Destination': {
+            'class': XIMPIM.ExportPriceIndex,
+            'category_property': XIMPIM.hasLocalityOfDestination,
+            'month_property': XIMPIM.hasMonth,
+            'year_property': XIMPIM.hasYear
+        },
+
+        # Table 9: Terms of Trade Index
+        'TermsOfTradeIndex': {
+            'class': XIMPIM.TermsOfTradeIndex,
+            'category_property': XIMPIM.hasLocality,
+            'month_property': XIMPIM.hasMonth,
+            'year_property': XIMPIM.hasYear
+        },
+
+        # Table 10: Transportation Price Index
+        'TransportationPriceIndex': {
+            'class': XIMPIM.TransportationPriceIndex,
+            'category_property': XIMPIM.hasTransportationService,
+            'month_property': XIMPIM.hasMonth,
+            'year_property': XIMPIM.hasYear
+        },
+
+        # Relative Importance (all tables)
+        'RelativeImportance': {
+            'class': XIMPIM.RelativeImportance,
+            'category_property': None,  # Multiple possible properties
+            'month_property': XIMPIM.hasMonth,
+            'year_property': XIMPIM.hasYear
+        },
+
+        # Percent Changes (all tables)
+        'PercentChange': {
+            'class': XIMPIM.PercentChange,
+            'category_property': None,  # Multiple possible properties
+            'month_property': XIMPIM.hasEndMonth,
+            'year_property': XIMPIM.hasEndYear
+        },
+
+        # Table A: Monthly Percent Change
+        'MonthlyPercentChange': {
+            'class': XIMPIM.MonthlyPercentChange,
+            'category_property': XIMPIM.hasTradeCategory,
+            'month_property': XIMPIM.hasMonth,
+            'year_property': XIMPIM.hasYear
+        },
+
+        # Table A: Annual Percent Change
+        'AnnualPercentChange': {
+            'class': XIMPIM.AnnualPercentChange,
+            'category_property': XIMPIM.hasTradeCategory,
+            'month_property': XIMPIM.hasEndMonth,
+            'year_property': XIMPIM.hasEndYear
+        },
     }
 }
