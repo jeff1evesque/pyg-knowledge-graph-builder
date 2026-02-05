@@ -345,21 +345,48 @@ The pipeline ingests RDF data from multiple heterogeneous sources:
 ```
 pyg-knowledge-graph-builder/
 ├── glue_jobs/
-│   ├── build_graph.py              # Main Glue job entry point
-│   ├── enrichment/                 # RDF enrichment modules
-│   │   ├── pipeline.py
-│   │   ├── temporal_unifier.py
-│   │   ├── cross_source_linker.py
-│   │   ├── intra_source_linker.py
-│   │   └── ontology_mapper.py
-│   ├── pyg_builder/                # PyG construction modules
-│   │   ├── constructor.py          # Main PyG builder
-│   │   ├── node_mapper.py          # RDF → PyG nodes
-│   │   ├── edge_mapper.py          # RDF → PyG edges
-│   │   └── feature_extractor.py    # RDF → PyG features
+│   ├── build_graph.py                      # Main Glue job entry point
+│   ├── enrichment/                         # RDF enrichment modules
+│   │   ├── __init__.py
+│   │   ├── pipeline.py                     # Main enrichment orchestrator
+│   │   ├── temporal_unifier.py             # Temporal entity unification
+│   │   ├── cross_source_linker.py          # Cross-source linking (BLS↔SEC↔Market↔NOAA)
+│   │   ├── intra_source_linker.py          # Main intra-source entry point
+│   │   ├── ontology_mapper.py              # Ontology mapping utilities
+│   │   └── intra_source/                   # Intra-source enrichment modules
+│   │       ├── __init__.py
+│   │       ├── base.py                     # Base classes/interfaces (~100 lines)
+│   │       ├── bls_linker.py               # BLS orchestrator (~300 lines)
+│   │       ├── sec_linker.py               # SEC orchestrator (future)
+│   │       ├── market_linker.py            # Market orchestrator (future)
+│   │       ├── noaa_linker.py              # NOAA orchestrator (future)
+│   │       └── bls/                        # BLS-specific components
+│   │           ├── __init__.py
+│   │           ├── patterns.py             # BLS_SECTOR_PATTERNS (~500 lines)
+│   │           ├── correlations.py         # KNOWN_CORRELATIONS (~800 lines)
+│   │           ├── measurements.py         # MEASUREMENT_TYPES (~600 lines)
+│   │           └── enrichers/              # Dataset-specific enrichers
+│   │               ├── __init__.py
+│   │               ├── cpi_enricher.py     # CPI-specific logic (~150 lines)
+│   │               ├── ppi_enricher.py     # PPI-specific logic (~150 lines)
+│   │               ├── eci_enricher.py     # ECI-specific logic (~150 lines)
+│   │               ├── jolts_enricher.py   # JOLTS-specific logic (~150 lines)
+│   │               ├── empsit_enricher.py  # EMPSIT-specific logic (~150 lines)
+│   │               ├── laus_enricher.py    # LAUS-specific logic (TODO)
+│   │               ├── metro_enricher.py   # METRO-specific logic (TODO)
+│   │               ├── realer_enricher.py  # REALER-specific logic (TODO)
+│   │               ├── wkyeng_enricher.py  # WKYENG-specific logic (TODO)
+│   │               └── ximpim_enricher.py  # XIMPIM-specific logic (TODO)
+│   ├── pyg_builder/                        # PyG construction modules
+│   │   ├── __init__.py
+│   │   ├── constructor.py                  # Main PyG builder
+│   │   ├── node_mapper.py                  # RDF → PyG nodes
+│   │   ├── edge_mapper.py                  # RDF → PyG edges
+│   │   └── feature_extractor.py            # RDF → PyG features
 │   └── utils/
-│       ├── s3_utils.py
-│       └── rdf_utils.py
+│       ├── __init__.py
+│       ├── s3_utils.py                     # S3 I/O utilities
+│       └── rdf_utils.py                    # RDF utilities & namespaces
 ├── notebooks/
 │   ├── utils/
 │   │   └── invoke_helpers.py       # Helper functions
@@ -369,9 +396,12 @@ pyg-knowledge-graph-builder/
 │       ├── node_types.ipynb        # Experiment with node types
 │       ├── edge_types.ipynb        # Experiment with edge types
 │       └── features.ipynb          # Experiment with features
-├── lambda/                         # Production triggers
-├── tests/                          # Unit and integration tests
-└── deployment/                     # Deployment scripts
+├── tests/                                  # Unit and integration tests
+├── deployment/                             # Deployment scripts
+├── .gitignore
+├── README.md
+├── requirements.txt                        # Project dependencies
+└── setup.py                                # Package setup
 ```
 
 ---
