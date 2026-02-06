@@ -14,8 +14,7 @@ from glue_jobs.enrichment.intra_source.bls.enrichers.ppi_enricher import PPIEnri
 from glue_jobs.enrichment.intra_source.bls.enrichers.eci_enricher import ECIEnricher
 from glue_jobs.enrichment.intra_source.bls.enrichers.jolts_enricher import JOLTSEnricher
 from glue_jobs.enrichment.intra_source.bls.enrichers.empsit_enricher import EMPSITEnricher
-from glue_jobs.enrichment.intra_source.bls.patterns import BLS_SECTOR_PATTERNS
-from glue_jobs.enrichment.intra_source.bls.correlations import KNOWN_CORRELATIONS
+from glue_jobs.enrichment.intra_source.bls.enrichers.ximpim_enricher import XIMPIMEnricher
 from typing import Dict, Set, Optional, List
 import logging
 
@@ -42,6 +41,7 @@ class BLSIntraSourceLinker(IntraSourceEnricher):
             'eci': ECI,
             'jolts': JOLTS,
             'empsit': EMPSIT,
+            'ximpim': XIMPIM,
         }
 
         for dataset_name, namespace in dataset_checks.items():
@@ -70,6 +70,8 @@ class BLSIntraSourceLinker(IntraSourceEnricher):
             enrichers['jolts'] = JOLTSEnricher(self.graph)
         if 'empsit' in self.available_datasets:
             enrichers['empsit'] = EMPSITEnricher(self.graph)
+        if 'ximpim' in self.available_datasets:
+            enrichers['ximpim'] = XIMPIMEnricher(self.graph)
 
         return enrichers
 
