@@ -4,7 +4,6 @@ BLS Known Correlations - Economic relationships based on domain expertise
 from glue_jobs.utils.rdf_utils import BLS_ENRICHMENT
 
 # Specific known correlations based on economic theory
-# IMPORTANT: Only include correlations between datasets we've analyzed!
 KNOWN_CORRELATIONS = [
     # CPI-PPI Correlations
     {
@@ -503,5 +502,266 @@ KNOWN_CORRELATIONS = [
         'relationship': BLS_ENRICHMENT.hoursEarningsLink,
         'lag_months': 0,
         'strength': 'strong'
-    }
+    },
+
+    # ============================================
+    # XIMPIM-CPI CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'ximpim_cpi_import_consumer_prices',
+        'source_dataset': 'ximpim',
+        'target_dataset': 'cpi',
+        'source_pattern': 'Import',
+        'target_pattern': 'All items',
+        'description': 'Import prices affect consumer prices',
+        'relationship': BLS_ENRICHMENT.importConsumerPriceLink,
+        'lag_months': 1,
+        'strength': 'strong'
+    },
+    {
+        'name': 'ximpim_cpi_food_imports',
+        'source_dataset': 'ximpim',
+        'target_dataset': 'cpi',
+        'source_pattern': 'Food',
+        'target_pattern': 'Food',
+        'description': 'Food import prices affect consumer food prices',
+        'relationship': BLS_ENRICHMENT.importConsumerPriceLink,
+        'lag_months': 1,
+        'strength': 'strong'
+    },
+    {
+        'name': 'ximpim_cpi_energy_imports',
+        'source_dataset': 'ximpim',
+        'target_dataset': 'cpi',
+        'source_pattern': 'Fuel',
+        'target_pattern': 'Energy',
+        'description': 'Fuel import prices affect consumer energy prices',
+        'relationship': BLS_ENRICHMENT.importConsumerPriceLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'ximpim_cpi_vehicle_imports',
+        'source_dataset': 'ximpim',
+        'target_dataset': 'cpi',
+        'source_pattern': 'Motor vehicles',
+        'target_pattern': 'New vehicles',
+        'description': 'Vehicle import prices affect consumer vehicle prices',
+        'relationship': BLS_ENRICHMENT.importConsumerPriceLink,
+        'lag_months': 1,
+        'strength': 'strong'
+    },
+
+    # ============================================
+    # XIMPIM-PPI CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'ximpim_ppi_import_producer_prices',
+        'source_dataset': 'ximpim',
+        'target_dataset': 'ppi',
+        'source_pattern': 'Import',
+        'target_pattern': 'Final Demand',
+        'description': 'Import prices affect producer prices',
+        'relationship': BLS_ENRICHMENT.importProducerPriceLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'ximpim_ppi_raw_materials',
+        'source_dataset': 'ximpim',
+        'target_dataset': 'ppi',
+        'source_pattern': 'Raw materials',
+        'target_pattern': 'Intermediate Demand',
+        'description': 'Raw material import prices affect intermediate goods prices',
+        'relationship': BLS_ENRICHMENT.importProducerPriceLink,
+        'lag_months': 1,
+        'strength': 'strong'
+    },
+    {
+        'name': 'ximpim_ppi_manufacturing_inputs',
+        'source_dataset': 'ximpim',
+        'target_dataset': 'ppi',
+        'source_pattern': 'Manufactured goods',
+        'target_pattern': 'Manufacturing',
+        'description': 'Manufactured goods import prices affect producer manufacturing costs',
+        'relationship': BLS_ENRICHMENT.importProducerPriceLink,
+        'lag_months': 1,
+        'strength': 'medium'
+    },
+    {
+        'name': 'ximpim_ppi_energy_inputs',
+        'source_dataset': 'ximpim',
+        'target_dataset': 'ppi',
+        'source_pattern': 'Petroleum',
+        'target_pattern': 'Energy',
+        'description': 'Petroleum import prices affect producer energy costs',
+        'relationship': BLS_ENRICHMENT.importProducerPriceLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+
+    # ============================================
+    # XIMPIM-JOLTS CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'ximpim_jolts_import_manufacturing_employment',
+        'source_dataset': 'ximpim',
+        'target_dataset': 'jolts',
+        'source_pattern': 'Import',
+        'target_pattern': 'Manufacturing',
+        'description': 'Import levels affect manufacturing job openings',
+        'relationship': BLS_ENRICHMENT.importEmploymentLink,
+        'lag_months': 2,
+        'strength': 'medium'
+    },
+    {
+        'name': 'ximpim_jolts_export_manufacturing_employment',
+        'source_dataset': 'ximpim',
+        'target_dataset': 'jolts',
+        'source_pattern': 'Export',
+        'target_pattern': 'Manufacturing',
+        'description': 'Export levels affect manufacturing job openings',
+        'relationship': BLS_ENRICHMENT.exportEmploymentLink,
+        'lag_months': 1,
+        'strength': 'strong'
+    },
+    {
+        'name': 'ximpim_jolts_transportation_services',
+        'source_dataset': 'ximpim',
+        'target_dataset': 'jolts',
+        'source_pattern': 'Transportation services',
+        'target_pattern': 'Transportation',
+        'description': 'Transportation service prices affect transportation employment',
+        'relationship': BLS_ENRICHMENT.transportationEmploymentLink,
+        'lag_months': 1,
+        'strength': 'medium'
+    },
+
+    # ============================================
+    # XIMPIM-EMPSIT CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'ximpim_empsit_import_manufacturing',
+        'source_dataset': 'ximpim',
+        'target_dataset': 'empsit',
+        'source_pattern': 'Import',
+        'target_pattern': 'Manufacturing',
+        'description': 'Import levels affect manufacturing employment',
+        'relationship': BLS_ENRICHMENT.importEmploymentLink,
+        'lag_months': 2,
+        'strength': 'medium'
+    },
+    {
+        'name': 'ximpim_empsit_export_manufacturing',
+        'source_dataset': 'ximpim',
+        'target_dataset': 'empsit',
+        'source_pattern': 'Export',
+        'target_pattern': 'Manufacturing',
+        'description': 'Export levels affect manufacturing employment',
+        'relationship': BLS_ENRICHMENT.exportEmploymentLink,
+        'lag_months': 1,
+        'strength': 'strong'
+    },
+    {
+        'name': 'ximpim_empsit_transportation_employment',
+        'source_dataset': 'ximpim',
+        'target_dataset': 'empsit',
+        'source_pattern': 'Transportation services',
+        'target_pattern': 'Transportation and warehousing',
+        'description': 'Transportation service prices affect transportation employment',
+        'relationship': BLS_ENRICHMENT.transportationEmploymentLink,
+        'lag_months': 1,
+        'strength': 'medium'
+    },
+
+    # ============================================
+    # XIMPIM-ECI CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'ximpim_eci_import_wage_pressure',
+        'source_dataset': 'ximpim',
+        'target_dataset': 'eci',
+        'source_pattern': 'Import',
+        'target_pattern': 'Manufacturing',
+        'description': 'Import competition affects manufacturing wage growth',
+        'relationship': BLS_ENRICHMENT.importWagePressureLink,
+        'lag_months': 3,
+        'strength': 'weak'
+    },
+    {
+        'name': 'ximpim_eci_export_wage_growth',
+        'source_dataset': 'ximpim',
+        'target_dataset': 'eci',
+        'source_pattern': 'Export',
+        'target_pattern': 'Manufacturing',
+        'description': 'Export growth supports manufacturing wage increases',
+        'relationship': BLS_ENRICHMENT.exportWageGrowthLink,
+        'lag_months': 2,
+        'strength': 'medium'
+    },
+
+    # ============================================
+    # XIMPIM INTERNAL CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'ximpim_import_export_terms_of_trade',
+        'source_dataset': 'ximpim',
+        'target_dataset': 'ximpim',
+        'source_pattern': 'Import',
+        'target_pattern': 'Export',
+        'description': 'Import and export prices determine terms of trade',
+        'relationship': BLS_ENRICHMENT.termsOfTradeLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'ximpim_enduse_naics_alignment',
+        'source_dataset': 'ximpim',
+        'target_dataset': 'ximpim',
+        'source_pattern': 'End Use',
+        'target_pattern': 'NAICS',
+        'description': 'End Use categories align with NAICS industry classifications',
+        'relationship': BLS_ENRICHMENT.classificationAlignmentLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'ximpim_enduse_harmonized_alignment',
+        'source_dataset': 'ximpim',
+        'target_dataset': 'ximpim',
+        'source_pattern': 'End Use',
+        'target_pattern': 'Harmonized',
+        'description': 'End Use categories align with Harmonized System classifications',
+        'relationship': BLS_ENRICHMENT.classificationAlignmentLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'ximpim_locality_origin_destination',
+        'source_dataset': 'ximpim',
+        'target_dataset': 'ximpim',
+        'source_pattern': 'Locality of Origin',
+        'target_pattern': 'Locality of Destination',
+        'description': 'Import origins and export destinations show trade patterns',
+        'relationship': BLS_ENRICHMENT.tradePatternLink,
+        'lag_months': 0,
+        'strength': 'medium'
+    },
+    {
+        'name': 'ximpim_transportation_trade_volume',
+        'source_dataset': 'ximpim',
+        'target_dataset': 'ximpim',
+        'source_pattern': 'Transportation services',
+        'target_pattern': 'Import',
+        'description': 'Transportation service prices correlate with trade volumes',
+        'relationship': BLS_ENRICHMENT.transportationTradeLink,
+        'lag_months': 0,
+        'strength': 'medium'
+    },
 ]
