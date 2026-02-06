@@ -22,6 +22,21 @@ BLS_SECTOR_PATTERNSBLS_SECTOR_PATTERNS = {
                 # Beverage
                 'Beverage, tobacco, and leather',
             ],
+            'ximpim': [
+                'Food',
+                'Foodstuffs',
+                'Beverages',
+                'Agricultural products',
+                'Food and live animals',
+                'Meat and meat preparations',
+                'Dairy products',
+                'Fish and seafood',
+                'Cereals and cereal preparations',
+                'Vegetables and fruit',
+                'Sugar and confectionery',
+                'Coffee, tea, cocoa, spices',
+                'Animal feed',
+            ],
         },
         'relationship': BLS_ENRICHMENT.foodSectorCorrelation
     },
@@ -50,6 +65,21 @@ BLS_SECTOR_PATTERNSBLS_SECTOR_PATTERNS = {
                 'Gasoline stations and fuel dealers',
                 'Pipeline transportation',
             ],
+            'ximpim': [
+                'Fuel',
+                'Petroleum',
+                'Crude oil',
+                'Refined petroleum products',
+                'Natural gas',
+                'Coal',
+                'Energy',
+                'Mineral fuels',
+                'Petroleum oils',
+                'Gas oils',
+                'Fuel oils',
+                'Liquefied propane and butane',
+                'Petroleum gases',
+            ],
         },
         'relationship': BLS_ENRICHMENT.energySectorCorrelation
     },
@@ -64,7 +94,6 @@ BLS_SECTOR_PATTERNSBLS_SECTOR_PATTERNS = {
             'jolts': ['Construction', 'Building construction', 'Heavy construction',
                       'Specialty trade contractors', 'Residential construction'],
             'empsit': [
-                # From Table B-1
                 'Construction',
                 'Construction of buildings',
                 'Residential building construction',
@@ -77,6 +106,15 @@ BLS_SECTOR_PATTERNSBLS_SECTOR_PATTERNS = {
                 'Real estate',
                 'Real estate and rental and leasing',
                 'Lessors of nonfinancial intangible assets',
+            ],
+            'ximpim': [
+                'Construction materials',
+                'Building materials',
+                'Lumber',
+                'Wood products',
+                'Cement',
+                'Glass',
+                'Ceramic products',
             ],
         },
         'relationship': BLS_ENRICHMENT.housingSectorCorrelation
@@ -108,6 +146,21 @@ BLS_SECTOR_PATTERNSBLS_SECTOR_PATTERNS = {
                 # From Table A-14 (combined category)
                 'Transportation and utilities',
             ],
+            'ximpim': [
+                'Transportation services',
+                'Air freight',
+                'Air passenger fares',
+                'Ocean freight',
+                'Vehicles',
+                'Motor vehicles',
+                'Automobiles',
+                'Trucks',
+                'Aircraft',
+                'Ships and boats',
+                'Railway vehicles',
+                'Transportation equipment',
+                'Parts and accessories for vehicles',
+            ],
         },
         'relationship': BLS_ENRICHMENT.transportationSectorCorrelation
     },
@@ -128,6 +181,11 @@ BLS_SECTOR_PATTERNSBLS_SECTOR_PATTERNS = {
                 'Private service-providing',
                 'Durable goods',
                 'Nondurable goods',
+            ],
+            'ximpim': [
+                'Goods',
+                'Services',
+                'Transportation services',
             ],
         },
         'relationship': BLS_ENRICHMENT.goodsServicesRelation
@@ -174,6 +232,30 @@ BLS_SECTOR_PATTERNSBLS_SECTOR_PATTERNS = {
                 'Production occupations',
                 'Production, transportation, and material moving occupations',
             ],
+            'ximpim': [
+                'Manufactured goods',
+                'Machinery',
+                'Electrical machinery',
+                'Industrial machinery',
+                'Computers',
+                'Telecommunications equipment',
+                'Semiconductors',
+                'Electronic components',
+                'Chemicals',
+                'Pharmaceuticals',
+                'Plastics',
+                'Rubber products',
+                'Textiles',
+                'Apparel',
+                'Footwear',
+                'Wood products',
+                'Paper products',
+                'Printed materials',
+                'Metal products',
+                'Fabricated metal products',
+                'Iron and steel',
+                'Nonferrous metals',
+            ],
         },
         'relationship': BLS_ENRICHMENT.manufacturingSectorCorrelation
     },
@@ -216,6 +298,20 @@ BLS_SECTOR_PATTERNSBLS_SECTOR_PATTERNS = {
                 # From Table A-14 (combined category)
                 'Wholesale and retail trade',
             ],
+            'ximpim': [
+                'Consumer goods',
+                'Household goods',
+                'Furniture',
+                'Home furnishings',
+                'Appliances',
+                'Clothing',
+                'Footwear',
+                'Jewelry',
+                'Watches',
+                'Toys and games',
+                'Sporting goods',
+                'Books',
+            ],
         },
         'relationship': BLS_ENRICHMENT.retailSectorCorrelation
     },
@@ -255,6 +351,14 @@ BLS_SECTOR_PATTERNSBLS_SECTOR_PATTERNS = {
                 'Private education and health services',
                 # From Table A-14 (combined category)
                 'Education and health services',
+            ],
+            'ximpim': [
+                'Pharmaceuticals',
+                'Medicinal products',
+                'Medical equipment',
+                'Medical instruments',
+                'Surgical instruments',
+                'Diagnostic equipment',
             ],
         },
         'relationship': BLS_ENRICHMENT.healthcareSectorCorrelation
@@ -302,6 +406,15 @@ BLS_SECTOR_PATTERNSBLS_SECTOR_PATTERNS = {
                 'Professional and related occupations',
                 'Office and administrative support occupations',
             ],
+            'ximpim': [
+                'Computers',
+                'Computer equipment',
+                'Semiconductors',
+                'Electronic components',
+                'Telecommunications equipment',
+                'Office machines',
+                'Data processing equipment',
+            ],
         },
         'relationship': BLS_ENRICHMENT.professionalServicesSectorCorrelation
     },
@@ -326,6 +439,7 @@ BLS_SECTOR_PATTERNSBLS_SECTOR_PATTERNS = {
                 'Accommodation',
                 'Food services and drinking places',
             ],
+            'ximpim': [],
         },
         'relationship': BLS_ENRICHMENT.leisureHospitalitySectorCorrelation
     },
@@ -353,6 +467,7 @@ BLS_SECTOR_PATTERNSBLS_SECTOR_PATTERNS = {
                 # From Table A-14
                 'Government workers',
             ],
+            'ximpim': [],
         },
         'relationship': BLS_ENRICHMENT.governmentSectorCorrelation
     },
@@ -374,6 +489,15 @@ BLS_SECTOR_PATTERNSBLS_SECTOR_PATTERNS = {
                 'Telecommunications',
                 'Computing infrastructure providers, data processing, web hosting, and related services',
                 'Web search portals, libraries, archives, and other information services',
+            ],
+            'ximpim': [
+                'Telecommunications equipment',
+                'Communications equipment',
+                'Broadcasting equipment',
+                'Printed materials',
+                'Books',
+                'Newspapers',
+                'Periodicals',
             ],
         },
         'relationship': BLS_ENRICHMENT.informationSectorCorrelation
@@ -426,6 +550,11 @@ BLS_SECTOR_PATTERNSBLS_SECTOR_PATTERNS = {
                 # From Table A-14 (combined category)
                 'Education and health services',
             ],
+            'ximpim': [
+                'Books',
+                'Printed materials',
+                'Educational materials',
+            ],
         },
         'relationship': BLS_ENRICHMENT.educationSectorCorrelation
     },
@@ -448,6 +577,7 @@ BLS_SECTOR_PATTERNSBLS_SECTOR_PATTERNS = {
                 'Service occupations',
                 'Installation, maintenance, and repair occupations',
             ],
+            'ximpim': [],
         },
         'relationship': BLS_ENRICHMENT.otherServicesSectorCorrelation
     },
@@ -472,6 +602,21 @@ BLS_SECTOR_PATTERNSBLS_SECTOR_PATTERNS = {
                 # From Table A-14
                 'Agriculture and related private wage and salary workers',
             ],
+            'ximpim': [
+                'Agricultural products',
+                'Forestry products',
+                'Fish and seafood',
+                'Timber',
+                'Logs',
+                'Wood',
+                'Cork',
+                'Animal products',
+                'Hides and skins',
+                'Crude fertilizers',
+                'Ores',
+                'Metal ores',
+                'Minerals',
+            ],
         },
         'relationship': BLS_ENRICHMENT.naturalResourcesSectorCorrelation
     },
@@ -488,6 +633,10 @@ BLS_SECTOR_PATTERNSBLS_SECTOR_PATTERNS = {
                 # From Table A-13
                 'Construction and extraction occupations',
                 'Natural resources, construction, and maintenance occupations',
+            ],
+            'ximpim': [
+                'Construction materials',
+                'Building materials',
             ],
         },
         'relationship': BLS_ENRICHMENT.constructionTradesSectorCorrelation
