@@ -1,7 +1,7 @@
 """
 BLS Measurement Types - Temporal linking configurations
 """
-from glue_jobs.utils.rdf_utils import CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM
+from glue_jobs.utils.rdf_utils import CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS
 
 
 MEASUREMENT_TYPES = {
@@ -646,6 +646,43 @@ MEASUREMENT_TYPES = {
             'category_property': XIMPIM.hasTradeCategory,
             'month_property': XIMPIM.hasEndMonth,
             'year_property': XIMPIM.hasEndYear
+        },
+    },
+    'laus': {
+        # Table 1: Labor Force Data
+        'LaborForceData': {
+            'class': LAUS.LaborForceData,
+            'category_property': LAUS.hasState,
+            'month_property': LAUS.hasMonth,
+            'year_property': LAUS.hasYear
+        },
+        # Table 2: Employment Data
+        'EmploymentData': {
+            'class': LAUS.EmploymentData,
+            'category_property': LAUS.hasState,
+            'month_property': LAUS.hasMonth,
+            'year_property': LAUS.hasYear
+        },
+        # Table 3: Unemployment Data
+        'UnemploymentData': {
+            'class': LAUS.UnemploymentData,
+            'category_property': LAUS.hasState,
+            'month_property': LAUS.hasMonth,
+            'year_property': LAUS.hasYear
+        },
+        # Unemployment Rate
+        'UnemploymentRate': {
+            'class': LAUS.UnemploymentRate,
+            'category_property': LAUS.hasState,
+            'month_property': LAUS.hasMonth,
+            'year_property': LAUS.hasYear
+        },
+        # Industry Employment by State
+        'IndustryEmploymentData': {
+            'class': LAUS.IndustryEmploymentData,
+            'category_property': LAUS.hasIndustry,
+            'month_property': LAUS.hasMonth,
+            'year_property': LAUS.hasYear
         },
     }
 }
