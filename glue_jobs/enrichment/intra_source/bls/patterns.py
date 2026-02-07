@@ -207,8 +207,10 @@ BLS_SECTOR_PATTERNS = {
                 'Food products machinery',
             ],
             'eci': ['Food services', 'Accommodation and food', 'Food service'],
-            'jolts': ['Food services', 'Accommodation and food services', 'Restaurants',
-                      'Drinking places', 'Food service'],
+            'jolts': [
+                'Accommodation and food services',
+                'Food services',
+            ],
             'empsit': [
                 'Food manufacturing',
                 'Food and beverage retailers',
@@ -352,8 +354,7 @@ BLS_SECTOR_PATTERNS = {
                 'Fuels and lubricants retailing',
             ],
             'eci': ['Utilities', 'Mining', 'Oil and gas'],
-            'jolts': ['Mining', 'Oil and gas extraction', 'Utilities', 'Electric power',
-                      'Natural gas', 'Coal mining'],
+            'jolts': ['Mining and logging'],
             'empsit': [
                 'Mining and logging',
                 'Oil and gas extraction',
@@ -502,8 +503,7 @@ BLS_SECTOR_PATTERNS = {
                 'Lawn, garden, and farm equipment and supplies retailing',
             ],
             'eci': ['Construction', 'Real estate', 'Rental', 'Leasing'],
-            'jolts': ['Construction', 'Building construction', 'Heavy construction',
-                      'Specialty trade contractors', 'Residential construction'],
+            'jolts': ['Construction', 'Real estate and rental and leasing'],
             'empsit': [
                 'Construction',
                 'Construction of buildings',
@@ -664,8 +664,7 @@ BLS_SECTOR_PATTERNS = {
                 'Arrangement of cruises and tours',
             ],
             'eci': ['Transportation', 'Warehousing', 'Trade, transportation'],
-            'jolts': ['Transportation', 'Warehousing', 'Truck transportation',
-                      'Couriers and messengers', 'Transit', 'Air transportation'],
+            'jolts': ['Trade, transportation, and utilities', 'Transportation, warehousing, and utilities'],
             'empsit': [
                 'Transportation and warehousing',
                 'Air transportation',
@@ -780,8 +779,7 @@ BLS_SECTOR_PATTERNS = {
                 'Personal consumption services',
             ],
             'eci': ['Goods-producing', 'Service-providing'],
-            'jolts': ['Goods-producing', 'Service-providing', 'Manufacturing',
-                      'Trade, transportation, and utilities', 'Professional and business services'],
+            'jolts': [],
             'empsit': [
                 'Goods-producing',
                 'Private service-providing',
@@ -948,8 +946,7 @@ BLS_SECTOR_PATTERNS = {
                 'Metal treatment services',
             ],
             'eci': ['Manufacturing', 'Aircraft manufacturing', 'Production'],
-            'jolts': ['Manufacturing', 'Durable goods', 'Nondurable goods',
-                      'Fabricated metal', 'Machinery', 'Computer and electronic'],
+            'jolts': ['Manufacturing', 'Durable goods', 'Nondurable goods'],
             'empsit': [
                 'Manufacturing',
                 'Durable goods',
@@ -1131,8 +1128,7 @@ BLS_SECTOR_PATTERNS = {
                 'Book retailing',
             ],
             'eci': ['Retail trade', 'Wholesale trade', 'Trade, transportation'],
-            'jolts': ['Retail trade', 'Motor vehicle dealers', 'Furniture stores',
-                      'Electronics stores', 'Food and beverage stores', 'General merchandise'],
+            'jolts': ['Wholesale trade', 'Retail trade'],
             'empsit': [
                 'Retail trade',
                 'Motor vehicle and parts dealers',
@@ -1219,8 +1215,11 @@ BLS_SECTOR_PATTERNS = {
                 'Health and medical insurance',
             ],
             'eci': ['Health care', 'Healthcare', 'Hospitals', 'Nursing', 'Social assistance'],
-            'jolts': ['Health care', 'Social assistance', 'Hospitals',
-                      'Nursing', 'Ambulatory health care', 'Medical'],
+            'jolts': [
+                'Private education and health services',
+                'Private educational services',
+                'Health care and social assistance',
+            ],
             'empsit': [
                 'Health care and social assistance',
                 'Health care',
@@ -1319,7 +1318,7 @@ BLS_SECTOR_PATTERNS = {
                 'Gaming receipts (partial)',
             ],
             'eci': [],
-            'jolts': [],
+            'jolts': ['Arts, entertainment, and recreation'],
             'empsit': [
                 'Arts, entertainment, and recreation',
                 'Performing arts, spectator sports, and related industries',
@@ -1394,7 +1393,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'eci': ['Educational services', 'Education and health services', 'Elementary and secondary schools',
                     'Junior colleges', 'Colleges', 'Universities', 'Schools', 'Information'],
-            'jolts': ['Educational services', 'Information', 'Publishing', 'Broadcasting', 'Telecommunications'],
+            'jolts': ['Information'],
             'empsit': [
                 'Private educational services',
                 'Private education and health services',
@@ -1446,7 +1445,7 @@ BLS_SECTOR_PATTERNS = {
                 'Cosmetics and other toiletries',
             ],
             'eci': [],
-            'jolts': ['Other services', 'Repair', 'Personal services'],
+            'jolts': ['Other services'],
             'empsit': [
                 'Other services',
                 'Repair and maintenance',
@@ -1467,14 +1466,10 @@ BLS_SECTOR_PATTERNS = {
                 'Cigarettes',
                 'Tobacco products other than cigarettes',
             ],
-            'ppi': [
-                'Cigarettes',
-            ],
+            'ppi': ['Cigarettes'],
             'eci': [],
             'jolts': [],
-            'empsit': [
-                'Beverage, tobacco, and leather',
-            ],
+            'empsit': ['Beverage, tobacco, and leather'],
             'ximpim': [],
         },
         'relationship': BLS_ENRICHMENT.tobaccoSectorCorrelation
@@ -1580,8 +1575,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'eci': ['Professional and business services', 'Professional, scientific, and technical',
                     'Administrative and support'],
-            'jolts': ['Professional and business services', 'Professional and technical services',
-                      'Management', 'Administrative', 'Waste services'],
+            'jolts': [ 'Professional and business services'],
             'empsit': [
                 'Professional and business services',
                 'Professional, scientific, and technical services',
@@ -1624,8 +1618,11 @@ BLS_SECTOR_PATTERNS = {
             'cpi': [],
             'ppi': [],
             'eci': ['Leisure and hospitality', 'Accommodation and food'],
-            'jolts': ['Leisure and hospitality', 'Arts and entertainment',
-                      'Accommodation', 'Recreation', 'Amusement'],
+            'jolts': [
+                'Leisure and hospitality',
+                'Arts, entertainment, and recreation',
+                'Accommodation and food services',
+            ],
             'empsit': [
                 'Leisure and hospitality',
                 'Accommodation and food services',
@@ -1665,7 +1662,13 @@ BLS_SECTOR_PATTERNS = {
                 'Total private and government purchased capital investment',
             ],
             'eci': ['State and local government', 'Public administration'],
-            'jolts': ['Government', 'Federal', 'State', 'Local'],
+            'jolts': [
+                'Government',
+                'Federal',
+                'State and local',
+                'State and local education',
+                'State and local, excluding education',
+            ],
             'empsit': [
                 'Government',
                 'Federal',
@@ -1695,7 +1698,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'ppi': [],
             'eci': ['Information'],
-            'jolts': ['Information', 'Publishing', 'Broadcasting', 'Telecommunications'],
+            'jolts': ['Information'],
             'empsit': [
                 'Information',
                 'Motion picture and sound recording industries',
@@ -1730,7 +1733,11 @@ BLS_SECTOR_PATTERNS = {
             'ppi': [],
             'eci': ['Financial activities', 'Finance and insurance', 'Credit intermediation',
                     'Insurance carriers', 'Real estate'],
-            'jolts': ['Financial activities', 'Finance', 'Insurance', 'Real estate'],
+            'jolts': [
+                'Financial activities',
+                'Finance and insurance',
+                'Real estate and rental and leasing',
+            ],
             'empsit': [
                 'Financial activities',
                 'Finance and insurance',
@@ -1768,7 +1775,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'eci': ['Natural resources, construction, and maintenance',
                     'Construction, extraction, farming, fishing, and forestry'],
-            'jolts': ['Agriculture', 'Forestry', 'Fishing'],
+            'jolts': [],
             'empsit': [
                 'Logging',
                 'Natural resources, construction, and maintenance occupations',
@@ -1802,7 +1809,7 @@ BLS_SECTOR_PATTERNS = {
             'cpi': [],
             'ppi': [],
             'eci': ['Construction', 'Installation, maintenance, and repair'],
-            'jolts': ['Construction'],
+            'jolts': [],
             'empsit': [
                 'Construction and extraction occupations',
                 'Natural resources, construction, and maintenance occupations',
@@ -1971,7 +1978,7 @@ BLS_SECTOR_PATTERNS = {
             'cpi': [],
             'ppi': [],
             'eci': [],
-            'jolts': [],
+            'jolts': ['Northeast', 'South', 'Midwest', 'West'],
             'empsit': [],
             'ximpim': [
                 # Industrialized countries
@@ -2004,5 +2011,30 @@ BLS_SECTOR_PATTERNS = {
             ],
         },
         'relationship': BLS_ENRICHMENT.geographicRegionsSectorCorrelation
+    },
+
+    'employment_size_sector': {
+        'description': 'Employment by establishment size',
+        'sector_uri': BLS_ENRICHMENT.EmploymentSizeSector,
+        'keywords': {
+            'cpi': [],
+            'ppi': [],
+            'eci': [],
+            'jolts': [
+                # Total categories
+                'Total',
+                'Total private',
+                # Establishment size classes
+                '1 to 9 employees',
+                '10 to 49 employees',
+                '50 to 249 employees',
+                '250 to 999 employees',
+                '1,000 to 4,999 employees',
+                '5,000 or more employees',
+            ],
+            'empsit': [],
+            'ximpim': [],
+        },
+        'relationship': BLS_ENRICHMENT.employmentSizeSectorCorrelation
     },
 }
