@@ -764,4 +764,134 @@ KNOWN_CORRELATIONS = [
         'lag_months': 0,
         'strength': 'medium'
     },
+
+    # ============================================
+    # LAUS-EMPSIT CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'laus_empsit_unemployment_correlation',
+        'source_dataset': 'laus',
+        'target_dataset': 'empsit',
+        'source_pattern': 'Unemployed',
+        'target_pattern': 'Unemployed',
+        'description': 'State-level unemployment correlates with national unemployment',
+        'relationship': BLS_ENRICHMENT.unemploymentCorrelation,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'laus_empsit_labor_force_correlation',
+        'source_dataset': 'laus',
+        'target_dataset': 'empsit',
+        'source_pattern': 'Civilian labor force',
+        'target_pattern': 'Civilian labor force',
+        'description': 'State-level labor force correlates with national labor force',
+        'relationship': BLS_ENRICHMENT.laborForceCorrelation,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'laus_empsit_manufacturing_employment',
+        'source_dataset': 'laus',
+        'target_dataset': 'empsit',
+        'source_pattern': 'Manufacturing',
+        'target_pattern': 'Manufacturing',
+        'description': 'State-level manufacturing employment correlates with national manufacturing',
+        'relationship': BLS_ENRICHMENT.employmentCorrelation,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'laus_empsit_construction_employment',
+        'source_dataset': 'laus',
+        'target_dataset': 'empsit',
+        'source_pattern': 'Construction',
+        'target_pattern': 'Construction',
+        'description': 'State-level construction employment correlates with national construction',
+        'relationship': BLS_ENRICHMENT.employmentCorrelation,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+
+    # ============================================
+    # LAUS-JOLTS CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'laus_jolts_unemployment_job_openings',
+        'source_dataset': 'laus',
+        'target_dataset': 'jolts',
+        'source_pattern': 'Unemployed',
+        'target_pattern': 'Job openings',
+        'description': 'State unemployment inversely correlates with job openings',
+        'relationship': BLS_ENRICHMENT.unemploymentJobOpeningsLink,
+        'lag_months': 0,
+        'strength': 'medium'
+    },
+    {
+        'name': 'laus_jolts_manufacturing_employment',
+        'source_dataset': 'laus',
+        'target_dataset': 'jolts',
+        'source_pattern': 'Manufacturing',
+        'target_pattern': 'Manufacturing',
+        'description': 'State manufacturing employment correlates with job market dynamics',
+        'relationship': BLS_ENRICHMENT.employmentJobMarketLink,
+        'lag_months': 0,
+        'strength': 'medium'
+    },
+    {
+        'name': 'laus_jolts_leisure_hospitality',
+        'source_dataset': 'laus',
+        'target_dataset': 'jolts',
+        'source_pattern': 'Leisure and hospitality',
+        'target_pattern': 'Leisure and hospitality',
+        'description': 'State leisure/hospitality employment correlates with job openings',
+        'relationship': BLS_ENRICHMENT.employmentJobOpeningsLink,
+        'lag_months': 0,
+        'strength': 'medium'
+    },
+
+    # ============================================
+    # LAUS-ECI CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'laus_eci_regional_wage_patterns',
+        'source_dataset': 'laus',
+        'target_dataset': 'eci',
+        'source_pattern': 'State',
+        'target_pattern': 'Private industry',
+        'description': 'State employment patterns correlate with regional wage trends',
+        'relationship': BLS_ENRICHMENT.regionalEmploymentWageLink,
+        'lag_months': 1,
+        'strength': 'weak'
+    },
+
+    # ============================================
+    # LAUS INTERNAL CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'laus_labor_force_unemployment',
+        'source_dataset': 'laus',
+        'target_dataset': 'laus',
+        'source_pattern': 'Civilian labor force',
+        'target_pattern': 'Unemployed',
+        'description': 'Labor force size affects unemployment levels',
+        'relationship': BLS_ENRICHMENT.laborForceUnemploymentLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'laus_industry_unemployment',
+        'source_dataset': 'laus',
+        'target_dataset': 'laus',
+        'source_pattern': 'Manufacturing',
+        'target_pattern': 'Unemployed',
+        'description': 'Industry employment affects state unemployment',
+        'relationship': BLS_ENRICHMENT.industryUnemploymentLink,
+        'lag_months': 0,
+        'strength': 'medium'
+    },
 ]
