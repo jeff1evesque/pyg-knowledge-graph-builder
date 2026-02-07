@@ -217,19 +217,70 @@ BLS_SECTOR_PATTERNS = {
                 'Beverage, tobacco, and leather',
             ],
             'ximpim': [
+                # General food categories
                 'Food',
                 'Foodstuffs',
+                'Foods, feeds, & beverages',
+                'Agricultural foods, feeds & beverages, excluding distilled beverages',
+                'Nonagricultural foods (fish, distilled beverages)',
+                # Live animals and animal products
+                'Live animals; animal products',
+                'Meat and edible meat offal',
+                'Meat & edible meat offal (Dec. 2006=100)',
+                'Fish and crustaceans, molluscs and other aquatic invertebrates',
+                'Fish and crustaceans, mollusks and aquatic invertebrates (Jan. 2025=100)',
+                'Dairy products, eggs, and honey (Jan. 2025=100)',
+                'Dairy products, eggs and honey (Jan. 2025=100)',
+                'Products of animal origin, nesoi (Jan. 2025=100)',
+                # Vegetable products
+                'Vegetable products',
+                'Live trees & plants; bulbs, roots; cut flowers and ornamental foliage (Jan. 2025=100)',
+                'Edible vegetables, roots, and tubers',
+                'Edible Vegetables (Jan. 2025=100)',
+                'Edible fruit and nuts; peel of citrus fruit or melons',
+                'Edible fruit and nuts; citrus or melon peels',
+                'Coffee, tea, mate and spices',
+                'Cereals (Jan. 2025=100)',
+                'Cereals',
+                'Milling industry products; malt; starches; inulin; wheat gluten (Jan. 2025=100)',
+                'Oilseeds & misc grains, seeds, plants, straw & fodder (Jan. 2025=100)',
+                'Oilseeds and misc. grains, seeds, fruits, plants, straw and fodder',
+                # Fats and oils
+                'Animal or vegetable fats and oils (Dec. 2009=100)',
+                'Animal or vegetable fats and oils (Jan. 2025=100)',
+                'Animal or vegetable fats and oils and their cleavage products; prepared (Dec. 2023=100)',
+                'Animal or vegetable fats & oils (Jan. 2025=100)',
+                # Prepared foodstuffs
+                'Prepared foodstuffs, beverages, and tobacco',
+                'Sugars and sugar confectionary (Dec. 2021=100)',
+                'Sugars and sugar confectionary (Jan. 2025=100)',
+                'Cocoa and cocoa preparations (Dec. 2009=100)',
+                'Cocoa and cocoa preparations (Jan. 2025=100)',
+                'Preparations of cereals, flour, starch or milk; bakers\' wares (Dec. 2023=100)',
+                'Preparations of vegetables, fruit, nuts, or other parts of plants (Jan. 2025=100)',
+                'Preparations of vegetables, fruit, nuts or other parts of plants (Jan. 2025=100)',
+                'Edible preps of meat, of fish, or of aquatic invertebrates (Jan. 2025=100)',
+                'Miscellaneous edible preparations (Dec. 2022=100)',
+                'Miscellaneous edible preparations (Dec. 2017=100)',
+                # Beverages
                 'Beverages',
-                'Agricultural products',
-                'Food and live animals',
-                'Meat and meat preparations',
-                'Dairy products',
-                'Fish and seafood',
-                'Cereals and cereal preparations',
-                'Vegetables and fruit',
-                'Sugar and confectionery',
-                'Coffee, tea, cocoa, spices',
-                'Animal feed',
+                'Beverages, spirits, and vinegar',
+                'Beverages, spirits, and vinegar (Dec. 2024=100)',
+                # Animal feed
+                'Residues and waste from the food industries; prepared animal feed (Jan. 2025=100)',
+                'Residues and waste from the food industries; prepared animal feed',
+                # Tobacco
+                'Tobacco and manufactured tobacco substitutes (Jan. 2025=100)',
+                # Manufacturing categories
+                'Food manufacturing',
+                'Beverage and tobacco product manufacturing',
+                # Agriculture
+                'Agriculture, forestry, fishing and hunting',
+                'Crop production',
+                'Animal production (Dec. 2022=100)',
+                'Animal production (Jan. 2025=100)',
+                'Fishing, hunting and trapping (Jan. 2025=100)',
+                'Agricultural commodities',
             ],
         },
         'relationship': BLS_ENRICHMENT.foodSectorCorrelation
@@ -468,13 +519,38 @@ BLS_SECTOR_PATTERNS = {
                 'Lessors of nonfinancial intangible assets',
             ],
             'ximpim': [
+                # Building materials
                 'Construction materials',
                 'Building materials',
+                'Selected building materials (Jan. 2025=100)',
+                'Selected building materials',
+                # Wood products
                 'Lumber',
                 'Wood products',
+                'Wood, wood charcoal, cork, straw, basketware and wickerwork (Jan. 2025=100)',
+                'Wood and articles of wood; wood charcoal (Jan. 2025=100)',
+                'Wood, wood charcoal, cork, straw, baskets and wickerwork (Dec. 2014=100)',
+                'Wood and articles of wood; wood charcoal (Dec. 2023=100)',
+                'Wood product manufacturing (Jan. 2025=100)',
+                'Wood product manufacturing (Dec. 2017=100)',
+                'Forestry and logging (Jan. 2025=100)',
+                # Stone, cement, glass
                 'Cement',
                 'Glass',
+                'Stone, plaster, cement, asbestos, ceramics, glass etc.',
+                'Articles of stone, plaster, cement, asbestos, or mica (Dec. 2020=100)',
+                'Ceramic products (Dec. 2024=100)',
                 'Ceramic products',
+                'Glass and glassware (Dec. 2021=100)',
+                'Glass and glassware (Dec. 2019=100)',
+                'Salt; sulfur; earths and stone; plaster materials, lime & cement (Jan. 2025=100)',
+                'Nonmetallic mineral product manufacturing',
+                # Furniture
+                'Furniture',
+                'Furniture & stuffed furnishings; lamps & lighting fittings, nesoi; prefab bldgs',
+                'Furniture; stuffed furnishings; lamps and lighting fittings nesoi',
+                'Furniture and related product manufacturing',
+                'Furniture and related product manufacturing (Dec. 2023=100)',
             ],
         },
         'relationship': BLS_ENRICHMENT.housingSectorCorrelation
@@ -606,17 +682,35 @@ BLS_SECTOR_PATTERNS = {
                 'Transportation and utilities',
             ],
             'ximpim': [
+                # Transportation services
                 'Transportation services',
-                'Air freight',
-                'Air passenger fares',
-                'Ocean freight',
+                'Air Freight',
+                'Import Air Freight',
+                'Export Air Freight',
+                'Inbound Air Freight',
+                'Outbound Air Freight',
+                'Air Passenger Fares',
+                'Import Air Passenger Fares',
+                'Export Air Passenger Fares',
+                # Vehicles and transportation equipment
                 'Vehicles',
                 'Motor vehicles',
                 'Automobiles',
-                'Trucks',
+                'Vehicles, aircraft, vessels and associated transport equipment',
+                'Motor vehicles and their parts',
+                'Automotive vehicles, parts & engines',
+                'Automotive vehicles, parts and engines, 2 digit (Dec. 2023=100)',
+                'Vehicles-passenger (Dec. 2023=100)',
+                'Transportation equipment excluding motor vehicles (Dec. 2001=100)',
+                'Transportation equipment manufacturing',
+                # Aircraft
                 'Aircraft',
+                'Aircraft, spacecraft, and parts thereof (Dec. 2020=100)',
+                # Ships and boats
                 'Ships and boats',
+                # Railway vehicles
                 'Railway vehicles',
+                # Parts and accessories
                 'Transportation equipment',
                 'Parts and accessories for vehicles',
             ],
@@ -694,10 +788,32 @@ BLS_SECTOR_PATTERNS = {
                 'Durable goods',
                 'Nondurable goods',
             ],
-            'ximpim': [
+             'ximpim': [
+                # General goods categories
                 'Goods',
                 'Services',
-                'Transportation services',
+                'All commodities',
+                # Consumer goods
+                'Consumer goods, excluding automotives',
+                'Nondurables, manufactured',
+                'Durables, manufactured',
+                'Nonmanufactured consumer goods',
+                'Nonmanufactured consumer goods (Dec. 2018=100)',
+                # Industrial supplies
+                'Industrial supplies & materials',
+                'Industrial supplies & materials excluding petroleum',
+                'Industrial supplies & materials, durable',
+                'Industrial supplies & materials nondurable excluding petroleum',
+                'Industrial supplies & materials, nondurable',
+                'Agricultural industrial supplies & materials',
+                'Nonagricultural industrial supplies & materials',
+                # Capital goods
+                'Capital goods',
+                # Durable vs nondurable
+                'Materials associated with nondurable supplies & materials',
+                'Unfinished metals related to durable goods',
+                'Finished metals related to durable goods',
+                'Nonmetals related to durable goods (Jan. 2025=100)',
             ],
         },
         'relationship': BLS_ENRICHMENT.goodsServicesRelation
@@ -863,23 +979,122 @@ BLS_SECTOR_PATTERNS = {
                 'Production occupations',
                 'Production, transportation, and material moving occupations',
             ],
-            'ximpim': [
+             'ximpim': [
+                # General manufacturing
                 'Manufactured goods',
+                'Manufacturing',
+                'Manufacturing, part 1',
+                'Manufacturing, part 2',
+                'Manufacturing, part 3',
+                'Nonmanufacturing',
+                # Machinery
                 'Machinery',
+                'Machinery and mechanical appliances; parts thereof',
+                'Nonelectrical machinery',
+                'Machinery manufacturing',
+                # Electrical machinery
                 'Electrical machinery',
+                'Electrical machinery and equip, sound and TV recorders & reproducers, parts',
+                'Electrical machinery and equipment and parts and accessories thereof',
+                'Electrical equipment, appliance, and component manufacturing',
+                # Industrial machinery
                 'Industrial machinery',
+                # Computers and electronics
+                'Computers',
+                'Computer and electronic product manufacturing',
+                # Telecommunications equipment
+                'Telecommunications equipment',
+                # Semiconductors and electronic components
+                'Semiconductors',
+                'Electronic components',
+                # Chemicals
                 'Chemicals',
+                'Products of the chemical or allied industries',
+                'Inorganic chemicals (Dec. 2024=100)',
+                'Inorganic chemicals (Jan. 2025=100)',
+                'Organic chemicals',
+                'Organic chemicals (Jan. 2025=100)',
+                'Chemical manufacturing',
+                # Pharmaceuticals
                 'Pharmaceuticals',
+                'Pharmaceutical products',
+                # Plastics and rubber
                 'Plastics',
+                'Plastics and articles thereof; rubber and articles thereof',
+                'Plastics and articles thereof',
+                'Plastics and rubber products manufacturing',
                 'Rubber products',
+                'Rubber and articles thereof',
+                # Textiles
                 'Textiles',
-                'Wood products',
+                'Textile and textile articles',
+                'Textile and textile articles (Jan. 2025=100)',
+                'Cotton, yarns and woven fabrics thereof',
+                'Manmade filaments, yarns and woven fabrics (Jan. 2025=100)',
+                'Manmade staple fibers, yarns & woven fabrics (Jan. 2025=100)',
+                'Manmade staple fibers, yarns and woven fabrics (Jan. 2025=100)',
+                'Wadding, felt and nonwovens; special yarns; twine, cordage, and ropes (Jan. 2025=100)',
+                'Textile mills (Dec. 2023=100)',
+                'Textile product mills (Dec. 2023=100)',
+                # Apparel
+                'Apparel',
+                'Apparel manufacturing',
+                'Articles of apparel and clothing accessories, knitted or crocheted (Dec. 2023=100)',
+                'Articles of apparel and clothing accessories, not knitted or crocheted',
+                'Made-up or worn textile articles (Dec. 2023=100)',
+                # Footwear
+                'Footwear',
+                'Footwear and parts of such articles',
+                # Paper products
                 'Paper products',
+                'Woodpulp, recovered paper, and paper products (Jan. 2025=100)',
+                'Pulp wood, waste paper, and paperboard (Jan. 2025=100)',
+                'Woodpulp and recovered paper (Dec. 2019=100)',
+                'Paper and paperboard; articles of paper pulp, paper or paperboard (Jan. 2025=100)',
+                'Paper manufacturing',
+                'Paper manufacturing (Jan. 2025=100)',
+                # Printed materials
                 'Printed materials',
+                # Metal products
                 'Metal products',
+                'Base metals and articles of base metals',
+                'Iron and steel (Jan. 2025=100)',
+                'Articles of iron or steel',
+                'Copper and articles thereof',
+                'Nickel and articles thereof (Jan. 2025=100)',
+                'Aluminum and articles thereof',
+                'Lead and articles thereof (Jan. 2025=100)',
+                'Zinc and articles thereof (Jan. 2025=100)',
+                'Tin and articles thereof (Jan. 2025=100)',
+                'Base metals nesoi; cermets; articles thereof (Jan. 2025=100)',
+                'Tools, implements, cutlery, spoons and forks, of base metal; parts thereof',
+                'Miscellaneous articles of base metal',
+                'Miscellaneous articles of base metal (Dec. 2022=100)',
+                'Primary metal manufacturing',
+                'Fabricated metal product manufacturing',
+                # Fabricated metal products
                 'Fabricated metal products',
+                # Iron and steel
                 'Iron and steel',
+                # Nonferrous metals
                 'Nonferrous metals',
+                # Miscellaneous manufacturing
+                'Miscellaneous manufacturing',
+                'Miscellaneous manufactured articles',
+                # Fertilizers
+                'Fertilizers (Dec. 2022=100)',
+                'Fertilizers (Jan. 2025=100)',
+                # Soap and cleaning products
+                'Soap, lubricants; waxes, candles, polishing products, and modeling paste (Dec. 2024=100)',
+                'Tanning or dyeing extracts, dyes, paints varnish, putty, & inks (Dec. 2024=100)',
+                # Albuminoidal substances
+                'Albuminoidal substances; modified starches; glues; enzymes (Jan. 2025=100)',
+                # Miscellaneous chemical products
+                'Miscellaneous chemical products',
+                # Essential oils and perfumery
+                'Essential oils and resinoids; perfumery cosmetic or toilet preparations',
+                # Raw hides and leather
+                'Raw hides and skins other than furskins and leather (Jan. 2025=100)',
             ],
         },
         'relationship': BLS_ENRICHMENT.manufacturingSectorCorrelation
@@ -949,6 +1164,15 @@ BLS_SECTOR_PATTERNS = {
                 'Furniture',
                 'Home furnishings',
                 'Appliances',
+                'Clothing',
+                'Footwear',
+                'Jewelry',
+                'Watches',
+                'Toys and games',
+                'Toys, games and sports equipment; parts and accessories thereof',
+                'Sporting goods',
+                'Books',
+                'Headgear, umbrellas, artificial flowers, etc.',
             ],
         },
         'relationship': BLS_ENRICHMENT.retailSectorCorrelation
@@ -1029,6 +1253,9 @@ BLS_SECTOR_PATTERNS = {
                 'Medical instruments',
                 'Surgical instruments',
                 'Diagnostic equipment',
+                'Optical, photo, measuring, medical & musical instruments; & timepieces',
+                'Optical, photographic, measuring and medical instruments',
+                'Optical, photographic, measuring and medical instruments (Dec. 2023=100)',
             ],
         },
         'relationship': BLS_ENRICHMENT.healthcareSectorCorrelation
@@ -1101,6 +1328,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'ximpim': [
                 'Toys and games',
+                'Toys, games and sports equipment; parts and accessories thereof',
                 'Sporting goods',
                 'Books',
             ],
@@ -1194,6 +1422,7 @@ BLS_SECTOR_PATTERNS = {
                 'Electronic components',
                 'Office machines',
                 'Data processing equipment',
+                'Machinery, electrical equipment, TV image and sound recorders, parts, etc.',
             ],
         },
         'relationship': BLS_ENRICHMENT.educationCommunicationSectorCorrelation
@@ -1319,7 +1548,11 @@ BLS_SECTOR_PATTERNS = {
             'eci': [],
             'jolts': [],
             'empsit': [],
-            'ximpim': [],
+            'ximpim': [
+                'Pearls, stones, precious metals, imitation jewelry, and coins',
+                'Pearls, precious stones, precious metals jewelry, coin (Dec. 2023=100)',
+                'Pearls, precious stones, precious metals; jewelry, coin (Dec. 2023=100)',
+            ],
         },
         'relationship': BLS_ENRICHMENT.miscellaneousGoodsSectorCorrelation
     },
@@ -1513,6 +1746,7 @@ BLS_SECTOR_PATTERNS = {
                 'Real estate',
                 'Rental and leasing services',
             ],
+            'ximpim': [],
         },
         'relationship': BLS_ENRICHMENT.financialSectorCorrelation
     },
@@ -1685,7 +1919,19 @@ BLS_SECTOR_PATTERNS = {
             'eci': [],
             'jolts': [],
             'empsit': [],
-            'ximpim': [],
+            'ximpim': [
+                # Imports and exports
+                'IMPORTS',
+                'EXPORTS',
+                'Allimports',
+                'Allexports',
+                'All imports excluding food and fuels (Dec. 2010=100)',
+                'All exports excluding food and fuels (Dec. 2010=100)',
+                'Nonfuelimports',
+                'Agri-culturalexports',
+                'Non-agriculturalexports',
+                'Nonagricultural commodities',
+            ],
         },
         'relationship': BLS_ENRICHMENT.exportsSectorCorrelation
     },
@@ -1716,5 +1962,47 @@ BLS_SECTOR_PATTERNS = {
             'ximpim': [],
         },
         'relationship': BLS_ENRICHMENT.personalConsumptionSectorCorrelation
+    },
+
+'geographic_regions_sector': {
+        'description': 'Geographic regions and trading partners',
+        'sector_uri': BLS_ENRICHMENT.GeographicRegionsSector,
+        'keywords': {
+            'cpi': [],
+            'ppi': [],
+            'eci': [],
+            'jolts': [],
+            'empsit': [],
+            'ximpim': [
+                # Industrialized countries
+                'Industrialized Countries',
+                # North America
+                'Canada',
+                # Europe
+                'European Union',
+                'Europe',
+                'France (Dec. 2003=100)',
+                'Germany (Dec. 2003=100)',
+                'Germany',
+                'United Kingdom (Dec. 2003=100)',
+                # Latin America
+                'Latin America',
+                'Latin America/Caribbean',
+                'Mexico (Dec. 2003=100)',
+                'Mexico',
+                # Asia Pacific
+                'Pacific Rim (Dec. 2003=100)',
+                'Pacific Rim',
+                'Asia',
+                'China (Dec. 2003=100)',
+                'China',
+                'Japan',
+                'Taiwan (Dec. 2018=100)',
+                'Asian NICs',
+                'ASEAN (Dec. 2003=100)',
+                'Asia Near East (Dec. 2003=100)',
+            ],
+        },
+        'relationship': BLS_ENRICHMENT.geographicRegionsSectorCorrelation
     },
 }
