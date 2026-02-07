@@ -5,7 +5,7 @@ Coordinates enrichment across all BLS datasets
 from rdflib import Graph, URIRef, Literal
 from rdflib.namespace import RDF, RDFS, XSD, OWL
 from glue_jobs.utils.rdf_utils import (
-    CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM,
+    CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS,
     BLS_ENRICHMENT, UNIFIED, get_month_name, get_year_value
 )
 from glue_jobs.enrichment.intra_source.base import IntraSourceEnricher
@@ -15,9 +15,10 @@ from glue_jobs.enrichment.intra_source.bls.enrichers.eci_enricher import ECIEnri
 from glue_jobs.enrichment.intra_source.bls.enrichers.jolts_enricher import JOLTSEnricher
 from glue_jobs.enrichment.intra_source.bls.enrichers.empsit_enricher import EMPSITEnricher
 from glue_jobs.enrichment.intra_source.bls.enrichers.ximpim_enricher import XIMPIMEnricher
+from glue_jobs.enrichment.intra_source.bls.enrichers.laus_enricher import LAUSEnricher
 from glue_jobs.enrichment.intra_source.bls.patterns import BLS_SECTOR_PATTERNS
 from glue_jobs.enrichment.intra_source.bls.correlations import KNOWN_CORRELATIONS
-from typing import Dict, Set
+from typing import Dict, Set, Optional, List
 import logging
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,7 @@ class BLSIntraSourceLinker(IntraSourceEnricher):
             'jolts': JOLTS,
             'empsit': EMPSIT,
             'ximpim': XIMPIM,
+            'laus': LAUS,
         }
 
         for dataset_name, namespace in dataset_checks.items():
@@ -105,6 +107,8 @@ class BLSIntraSourceLinker(IntraSourceEnricher):
             enrichers['empsit'] = EMPSITEnricher(self.graph)
         if 'ximpim' in self.available_datasets:
             enrichers['ximpim'] = XIMPIMEnricher(self.graph)
+        if 'laus' in self.available_datasets:
+            enrichers['laus'] = LAUSEnricher(self.graph)
 
         return enrichers
 
@@ -165,6 +169,7 @@ class BLSIntraSourceLinker(IntraSourceEnricher):
             'jolts': JOLTS,
             'empsit': EMPSIT,
             'ximpim': XIMPIM,
+            'laus': LAUS,
         }
         return namespace_map.get(dataset_name)
 
@@ -176,8 +181,8 @@ class BLSIntraSourceLinker(IntraSourceEnricher):
         temporal entities to them using owl:sameAs
 
         Example:
-            cpi:November, ppi:November, jolts:November → unified:November
-            cpi:2024, ppi:2024, jolts:2024 → unified:Year2024
+            cpi:November, ppi:November, jolts:November, laus:November → unified:November
+            cpi:2024, ppi:2024, jolts:2024, laus:2024 → unified:Year2024
         """
         # Get all unique months and years across all datasets
         months_by_name = {}
@@ -297,6 +302,7 @@ class BLSIntraSourceLinker(IntraSourceEnricher):
                     category_str = str(category_uri)
 
                     # Check if any keyword matches this category
+                    matched = False
                     for keyword in keywords:
                         normalized_keyword = normalize_keyword_for_uri_matching(keyword)
 
@@ -316,6 +322,7 @@ class BLSIntraSourceLinker(IntraSourceEnricher):
                             ))
 
                             self.stats['sector_links'] += 2
+                            matched = True
                             break  # Only link once per category
 
         logger.info(f"  Added {self.stats['sector_links']} sector links")
