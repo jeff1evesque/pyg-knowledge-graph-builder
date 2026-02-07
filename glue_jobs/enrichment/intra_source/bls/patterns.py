@@ -284,6 +284,7 @@ BLS_SECTOR_PATTERNS = {
                 'Fishing, hunting and trapping (Jan. 2025=100)',
                 'Agricultural commodities',
             ],
+            'laus': [],  # LAUS doesn't have food-specific categories
         },
         'relationship': BLS_ENRICHMENT.foodSectorCorrelation
     },
@@ -384,6 +385,7 @@ BLS_SECTOR_PATTERNS = {
                 'Liquefied propane and butane',
                 'Petroleum gases',
             ],
+            'laus': ['Mining and logging'],
         },
         'relationship': BLS_ENRICHMENT.energySectorCorrelation
     },
@@ -552,6 +554,7 @@ BLS_SECTOR_PATTERNS = {
                 'Furniture and related product manufacturing',
                 'Furniture and related product manufacturing (Dec. 2023=100)',
             ],
+            'laus': ['Construction'],
         },
         'relationship': BLS_ENRICHMENT.housingSectorCorrelation
     },
@@ -713,6 +716,7 @@ BLS_SECTOR_PATTERNS = {
                 'Transportation equipment',
                 'Parts and accessories for vehicles',
             ],
+            'laus': ['Trade, transportation, and utilities'],
         },
         'relationship': BLS_ENRICHMENT.transportationSectorCorrelation
     },
@@ -813,6 +817,7 @@ BLS_SECTOR_PATTERNS = {
                 'Finished metals related to durable goods',
                 'Nonmetals related to durable goods (Jan. 2025=100)',
             ],
+            'laus': [],
         },
         'relationship': BLS_ENRICHMENT.goodsServicesRelation
     },
@@ -1093,6 +1098,7 @@ BLS_SECTOR_PATTERNS = {
                 # Raw hides and leather
                 'Raw hides and skins other than furskins and leather (Jan. 2025=100)',
             ],
+            'laus': ['Manufacturing'],
         },
         'relationship': BLS_ENRICHMENT.manufacturingSectorCorrelation
     },
@@ -1170,6 +1176,7 @@ BLS_SECTOR_PATTERNS = {
                 'Books',
                 'Headgear, umbrellas, artificial flowers, etc.',
             ],
+            'laus': [],
         },
         'relationship': BLS_ENRICHMENT.retailSectorCorrelation
     },
@@ -1256,6 +1263,7 @@ BLS_SECTOR_PATTERNS = {
                 'Optical, photographic, measuring and medical instruments',
                 'Optical, photographic, measuring and medical instruments (Dec. 2023=100)',
             ],
+            'laus': ['Education and health services'],
         },
         'relationship': BLS_ENRICHMENT.healthcareSectorCorrelation
     },
@@ -1331,6 +1339,7 @@ BLS_SECTOR_PATTERNS = {
                 'Sporting goods',
                 'Books',
             ],
+            'laus': [],
         },
         'relationship': BLS_ENRICHMENT.recreationSectorCorrelation
     },
@@ -1423,6 +1432,7 @@ BLS_SECTOR_PATTERNS = {
                 'Data processing equipment',
                 'Machinery, electrical equipment, TV image and sound recorders, parts, etc.',
             ],
+            'laus': ['Information'],
         },
         'relationship': BLS_ENRICHMENT.educationCommunicationSectorCorrelation
     },
@@ -1453,6 +1463,7 @@ BLS_SECTOR_PATTERNS = {
                 'Religious, grantmaking, civic, professional, and similar organizations',
             ],
             'ximpim': [],
+            'laus': [],
         },
         'relationship': BLS_ENRICHMENT.personalCareSectorCorrelation
     },
@@ -1471,6 +1482,7 @@ BLS_SECTOR_PATTERNS = {
             'jolts': [],
             'empsit': ['Beverage, tobacco, and leather'],
             'ximpim': [],
+            'laus': [],
         },
         'relationship': BLS_ENRICHMENT.tobaccoSectorCorrelation
     },
@@ -1548,6 +1560,7 @@ BLS_SECTOR_PATTERNS = {
                 'Pearls, precious stones, precious metals jewelry, coin (Dec. 2023=100)',
                 'Pearls, precious stones, precious metals; jewelry, coin (Dec. 2023=100)',
             ],
+            'laus': [],
         },
         'relationship': BLS_ENRICHMENT.miscellaneousGoodsSectorCorrelation
     },
@@ -1607,6 +1620,7 @@ BLS_SECTOR_PATTERNS = {
                 'Office and administrative support occupations',
             ],
             'ximpim': [],
+            'laus': ['Professional and business services'],
         },
         'relationship': BLS_ENRICHMENT.professionalServicesSectorCorrelation
     },
@@ -1629,6 +1643,7 @@ BLS_SECTOR_PATTERNS = {
                 'Accommodation',
             ],
             'ximpim': [],
+            'laus': ['Leisure and hospitality'],
         },
         'relationship': BLS_ENRICHMENT.leisureHospitalitySectorCorrelation
     },
@@ -1683,6 +1698,7 @@ BLS_SECTOR_PATTERNS = {
                 'Government workers',
             ],
             'ximpim': [],
+            'laus': ['Government'],
         },
         'relationship': BLS_ENRICHMENT.governmentSectorCorrelation
     },
@@ -1717,6 +1733,7 @@ BLS_SECTOR_PATTERNS = {
                 'Newspapers',
                 'Periodicals',
             ],
+            'laus': [],
         },
         'relationship': BLS_ENRICHMENT.informationSectorCorrelation
     },
@@ -1754,6 +1771,7 @@ BLS_SECTOR_PATTERNS = {
                 'Rental and leasing services',
             ],
             'ximpim': [],
+            'laus': ['Financial activities'],
         },
         'relationship': BLS_ENRICHMENT.financialSectorCorrelation
     },
@@ -1798,6 +1816,7 @@ BLS_SECTOR_PATTERNS = {
                 'Metal ores',
                 'Minerals',
             ],
+            'laus': [],
         },
         'relationship': BLS_ENRICHMENT.naturalResourcesSectorCorrelation
     },
@@ -1818,6 +1837,7 @@ BLS_SECTOR_PATTERNS = {
                 'Construction materials',
                 'Building materials',
             ],
+            'laus': [],
         },
         'relationship': BLS_ENRICHMENT.constructionTradesSectorCorrelation
     },
@@ -1861,6 +1881,7 @@ BLS_SECTOR_PATTERNS = {
             'jolts': [],
             'empsit': [],
             'ximpim': [],
+            'laus': [],
         },
         'relationship': BLS_ENRICHMENT.apparelSectorCorrelation
     },
@@ -1902,6 +1923,7 @@ BLS_SECTOR_PATTERNS = {
             'jolts': [],
             'empsit': [],
             'ximpim': [],
+            'laus': [],
         },
         'relationship': BLS_ENRICHMENT.capitalInvestmentSectorCorrelation
     },
@@ -1939,6 +1961,7 @@ BLS_SECTOR_PATTERNS = {
                 'Non-agriculturalexports',
                 'Nonagricultural commodities',
             ],
+            'laus': [],
         },
         'relationship': BLS_ENRICHMENT.exportsSectorCorrelation
     },
@@ -1967,11 +1990,12 @@ BLS_SECTOR_PATTERNS = {
             'jolts': [],
             'empsit': [],
             'ximpim': [],
+            'laus': [],
         },
         'relationship': BLS_ENRICHMENT.personalConsumptionSectorCorrelation
     },
 
-'geographic_regions_sector': {
+    'geographic_regions_sector': {
         'description': 'Geographic regions and trading partners',
         'sector_uri': BLS_ENRICHMENT.GeographicRegionsSector,
         'keywords': {
@@ -2034,6 +2058,64 @@ BLS_SECTOR_PATTERNS = {
             ],
             'empsit': [],
             'ximpim': [],
+            'laus': [
+                # US States
+                'State',
+                'Alabama',
+                'Alaska',
+                'Arizona',
+                'Arkansas',
+                'California',
+                'Colorado',
+                'Connecticut',
+                'Delaware',
+                'District of Columbia',
+                'Florida',
+                'Georgia',
+                'Hawaii',
+                'Idaho',
+                'Illinois',
+                'Indiana',
+                'Iowa',
+                'Kansas',
+                'Kentucky',
+                'Louisiana',
+                'Maine',
+                'Maryland',
+                'Massachusetts',
+                'Michigan',
+                'Minnesota',
+                'Mississippi',
+                'Missouri',
+                'Montana',
+                'Nebraska',
+                'Nevada',
+                'New Hampshire',
+                'New Jersey',
+                'New Mexico',
+                'New York',
+                'North Carolina',
+                'North Dakota',
+                'Ohio',
+                'Oklahoma',
+                'Oregon',
+                'Pennsylvania',
+                'Rhode Island',
+                'South Carolina',
+                'South Dakota',
+                'Tennessee',
+                'Texas',
+                'Utah',
+                'Vermont',
+                'Virginia',
+                'Washington',
+                'West Virginia',
+                'Wisconsin',
+                'Wyoming',
+                # US Territories
+                'Puerto Rico',
+                'Virgin Islands',
+            ],
         },
         'relationship': BLS_ENRICHMENT.employmentSizeSectorCorrelation
     },
