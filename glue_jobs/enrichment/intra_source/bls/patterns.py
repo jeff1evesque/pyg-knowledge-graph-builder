@@ -285,6 +285,7 @@ BLS_SECTOR_PATTERNS = {
                 'Agricultural commodities',
             ],
             'laus': [],  # LAUS doesn't have food-specific categories
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.foodSectorCorrelation
     },
@@ -386,6 +387,7 @@ BLS_SECTOR_PATTERNS = {
                 'Petroleum gases',
             ],
             'laus': ['Mining and logging'],
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.energySectorCorrelation
     },
@@ -555,6 +557,7 @@ BLS_SECTOR_PATTERNS = {
                 'Furniture and related product manufacturing (Dec. 2023=100)',
             ],
             'laus': ['Construction'],
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.housingSectorCorrelation
     },
@@ -717,6 +720,7 @@ BLS_SECTOR_PATTERNS = {
                 'Parts and accessories for vehicles',
             ],
             'laus': ['Trade, transportation, and utilities'],
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.transportationSectorCorrelation
     },
@@ -818,6 +822,7 @@ BLS_SECTOR_PATTERNS = {
                 'Nonmetals related to durable goods (Jan. 2025=100)',
             ],
             'laus': [],
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.goodsServicesRelation
     },
@@ -1099,6 +1104,7 @@ BLS_SECTOR_PATTERNS = {
                 'Raw hides and skins other than furskins and leather (Jan. 2025=100)',
             ],
             'laus': ['Manufacturing'],
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.manufacturingSectorCorrelation
     },
@@ -1177,6 +1183,7 @@ BLS_SECTOR_PATTERNS = {
                 'Headgear, umbrellas, artificial flowers, etc.',
             ],
             'laus': [],
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.retailSectorCorrelation
     },
@@ -1264,6 +1271,7 @@ BLS_SECTOR_PATTERNS = {
                 'Optical, photographic, measuring and medical instruments (Dec. 2023=100)',
             ],
             'laus': ['Education and health services'],
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.healthcareSectorCorrelation
     },
@@ -1340,6 +1348,7 @@ BLS_SECTOR_PATTERNS = {
                 'Books',
             ],
             'laus': [],
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.recreationSectorCorrelation
     },
@@ -1433,6 +1442,7 @@ BLS_SECTOR_PATTERNS = {
                 'Machinery, electrical equipment, TV image and sound recorders, parts, etc.',
             ],
             'laus': ['Information'],
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.educationCommunicationSectorCorrelation
     },
@@ -1464,6 +1474,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'ximpim': [],
             'laus': [],
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.personalCareSectorCorrelation
     },
@@ -1483,6 +1494,7 @@ BLS_SECTOR_PATTERNS = {
             'empsit': ['Beverage, tobacco, and leather'],
             'ximpim': [],
             'laus': [],
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.tobaccoSectorCorrelation
     },
@@ -1561,6 +1573,7 @@ BLS_SECTOR_PATTERNS = {
                 'Pearls, precious stones, precious metals; jewelry, coin (Dec. 2023=100)',
             ],
             'laus': [],
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.miscellaneousGoodsSectorCorrelation
     },
@@ -1621,6 +1634,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'ximpim': [],
             'laus': ['Professional and business services'],
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.professionalServicesSectorCorrelation
     },
@@ -1644,6 +1658,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'ximpim': [],
             'laus': ['Leisure and hospitality'],
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.leisureHospitalitySectorCorrelation
     },
@@ -1699,6 +1714,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'ximpim': [],
             'laus': ['Government'],
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.governmentSectorCorrelation
     },
@@ -1734,6 +1750,7 @@ BLS_SECTOR_PATTERNS = {
                 'Periodicals',
             ],
             'laus': [],
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.informationSectorCorrelation
     },
@@ -1772,6 +1789,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'ximpim': [],
             'laus': ['Financial activities'],
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.financialSectorCorrelation
     },
@@ -1817,6 +1835,7 @@ BLS_SECTOR_PATTERNS = {
                 'Minerals',
             ],
             'laus': [],
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.naturalResourcesSectorCorrelation
     },
@@ -1838,6 +1857,7 @@ BLS_SECTOR_PATTERNS = {
                 'Building materials',
             ],
             'laus': [],
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.constructionTradesSectorCorrelation
     },
@@ -1882,6 +1902,7 @@ BLS_SECTOR_PATTERNS = {
             'empsit': [],
             'ximpim': [],
             'laus': [],
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.apparelSectorCorrelation
     },
@@ -1924,6 +1945,7 @@ BLS_SECTOR_PATTERNS = {
             'empsit': [],
             'ximpim': [],
             'laus': [],
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.capitalInvestmentSectorCorrelation
     },
@@ -1962,6 +1984,7 @@ BLS_SECTOR_PATTERNS = {
                 'Nonagricultural commodities',
             ],
             'laus': [],
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.exportsSectorCorrelation
     },
@@ -1991,6 +2014,7 @@ BLS_SECTOR_PATTERNS = {
             'empsit': [],
             'ximpim': [],
             'laus': [],
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.personalConsumptionSectorCorrelation
     },
@@ -2158,6 +2182,7 @@ BLS_SECTOR_PATTERNS = {
                 'Puerto Rico',
                 'Virgin Islands',
             ],
+            'metro': [],
         },
         'relationship': BLS_ENRICHMENT.employmentSizeSectorCorrelation
     },
