@@ -2,7 +2,7 @@
 BLS Measurement Types - Temporal linking configurations
 """
 from glue_jobs.utils.rdf_utils import (
-    CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO
+    CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER
 )
 
 
@@ -783,6 +783,236 @@ MEASUREMENT_TYPES = {
             'category_property': METRO.hasMetropolitanDivision,
             'month_property': METRO.hasMonth,
             'year_property': METRO.hasYear
+        },
+    },
+
+    'realer': {
+        # Table A-1: Real Earnings - CPI-U (All Urban Consumers)
+        'RealAverageHourlyEarnings_CPIU': {
+            'class': REALER.RealAverageHourlyEarnings_CPIU,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'RealAverageWeeklyEarnings_CPIU': {
+            'class': REALER.RealAverageWeeklyEarnings_CPIU,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'ConsumerPriceIndex_CPIU': {
+            'class': REALER.ConsumerPriceIndex_CPIU,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'AverageHourlyEarnings_CPIU': {
+            'class': REALER.AverageHourlyEarnings_CPIU,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'AverageWeeklyHours_CPIU': {
+            'class': REALER.AverageWeeklyHours_CPIU,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'AverageWeeklyEarnings_CPIU': {
+            'class': REALER.AverageWeeklyEarnings_CPIU,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+
+        # Table A-1: Over-the-Month Percent Change
+        'RealAverageHourlyEarningsMonthlyChange_CPIU': {
+            'class': REALER.RealAverageHourlyEarningsMonthlyChange_CPIU,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'RealAverageWeeklyEarningsMonthlyChange_CPIU': {
+            'class': REALER.RealAverageWeeklyEarningsMonthlyChange_CPIU,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'ConsumerPriceIndexMonthlyChange_CPIU': {
+            'class': REALER.ConsumerPriceIndexMonthlyChange_CPIU,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'AverageHourlyEarningsMonthlyChange_CPIU': {
+            'class': REALER.AverageHourlyEarningsMonthlyChange_CPIU,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'AverageWeeklyHoursMonthlyChange_CPIU': {
+            'class': REALER.AverageWeeklyHoursMonthlyChange_CPIU,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'AverageWeeklyEarningsMonthlyChange_CPIU': {
+            'class': REALER.AverageWeeklyEarningsMonthlyChange_CPIU,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+
+        # Table A-1: Over-the-Year Percent Change
+        'RealAverageHourlyEarningsAnnualChange_CPIU': {
+            'class': REALER.RealAverageHourlyEarningsAnnualChange_CPIU,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'RealAverageWeeklyEarningsAnnualChange_CPIU': {
+            'class': REALER.RealAverageWeeklyEarningsAnnualChange_CPIU,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'ConsumerPriceIndexAnnualChange_CPIU': {
+            'class': REALER.ConsumerPriceIndexAnnualChange_CPIU,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'AverageHourlyEarningsAnnualChange_CPIU': {
+            'class': REALER.AverageHourlyEarningsAnnualChange_CPIU,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'AverageWeeklyHoursAnnualChange_CPIU': {
+            'class': REALER.AverageWeeklyHoursAnnualChange_CPIU,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'AverageWeeklyEarningsAnnualChange_CPIU': {
+            'class': REALER.AverageWeeklyEarningsAnnualChange_CPIU,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+
+        # Table A-2: Real Earnings - CPI-W (Urban Wage Earners and Clerical Workers)
+        'RealAverageHourlyEarnings_CPIW': {
+            'class': REALER.RealAverageHourlyEarnings_CPIW,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'RealAverageWeeklyEarnings_CPIW': {
+            'class': REALER.RealAverageWeeklyEarnings_CPIW,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'ConsumerPriceIndex_CPIW': {
+            'class': REALER.ConsumerPriceIndex_CPIW,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'AverageHourlyEarnings_CPIW': {
+            'class': REALER.AverageHourlyEarnings_CPIW,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'AverageWeeklyHours_CPIW': {
+            'class': REALER.AverageWeeklyHours_CPIW,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'AverageWeeklyEarnings_CPIW': {
+            'class': REALER.AverageWeeklyEarnings_CPIW,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+
+        # Table A-2: Over-the-Month Percent Change
+        'RealAverageHourlyEarningsMonthlyChange_CPIW': {
+            'class': REALER.RealAverageHourlyEarningsMonthlyChange_CPIW,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'RealAverageWeeklyEarningsMonthlyChange_CPIW': {
+            'class': REALER.RealAverageWeeklyEarningsMonthlyChange_CPIW,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'ConsumerPriceIndexMonthlyChange_CPIW': {
+            'class': REALER.ConsumerPriceIndexMonthlyChange_CPIW,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'AverageHourlyEarningsMonthlyChange_CPIW': {
+            'class': REALER.AverageHourlyEarningsMonthlyChange_CPIW,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'AverageWeeklyHoursMonthlyChange_CPIW': {
+            'class': REALER.AverageWeeklyHoursMonthlyChange_CPIW,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'AverageWeeklyEarningsMonthlyChange_CPIW': {
+            'class': REALER.AverageWeeklyEarningsMonthlyChange_CPIW,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+
+        # Table A-2: Over-the-Year Percent Change
+        'RealAverageHourlyEarningsAnnualChange_CPIW': {
+            'class': REALER.RealAverageHourlyEarningsAnnualChange_CPIW,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'RealAverageWeeklyEarningsAnnualChange_CPIW': {
+            'class': REALER.RealAverageWeeklyEarningsAnnualChange_CPIW,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'ConsumerPriceIndexAnnualChange_CPIW': {
+            'class': REALER.ConsumerPriceIndexAnnualChange_CPIW,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'AverageHourlyEarningsAnnualChange_CPIW': {
+            'class': REALER.AverageHourlyEarningsAnnualChange_CPIW,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'AverageWeeklyHoursAnnualChange_CPIW': {
+            'class': REALER.AverageWeeklyHoursAnnualChange_CPIW,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
+        },
+        'AverageWeeklyEarningsAnnualChange_CPIW': {
+            'class': REALER.AverageWeeklyEarningsAnnualChange_CPIW,
+            'category_property': REALER.hasCategory,
+            'month_property': REALER.hasMonth,
+            'year_property': REALER.hasYear
         },
     }
 }
