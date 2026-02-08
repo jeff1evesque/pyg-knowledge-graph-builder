@@ -16,6 +16,7 @@ from glue_jobs.enrichment.intra_source.bls.enrichers.jolts_enricher import JOLTS
 from glue_jobs.enrichment.intra_source.bls.enrichers.empsit_enricher import EMPSITEnricher
 from glue_jobs.enrichment.intra_source.bls.enrichers.ximpim_enricher import XIMPIMEnricher
 from glue_jobs.enrichment.intra_source.bls.enrichers.laus_enricher import LAUSEnricher
+from glue_jobs.enrichment.intra_source.bls.enrichers.metro_enricher import METROEnricher
 from glue_jobs.enrichment.intra_source.bls.patterns import BLS_SECTOR_PATTERNS
 from glue_jobs.enrichment.intra_source.bls.correlations import KNOWN_CORRELATIONS
 from typing import Dict, Set, Optional, List
@@ -77,6 +78,7 @@ class BLSIntraSourceLinker(IntraSourceEnricher):
             'empsit': EMPSIT,
             'ximpim': XIMPIM,
             'laus': LAUS,
+            'metro': METRO,
         }
 
         for dataset_name, namespace in dataset_checks.items():
@@ -109,6 +111,8 @@ class BLSIntraSourceLinker(IntraSourceEnricher):
             enrichers['ximpim'] = XIMPIMEnricher(self.graph)
         if 'laus' in self.available_datasets:
             enrichers['laus'] = LAUSEnricher(self.graph)
+        if 'metro' in self.available_datasets:
+            enrichers['metro'] = METROEnricher(self.graph)
 
         return enrichers
 

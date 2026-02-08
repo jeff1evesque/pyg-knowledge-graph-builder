@@ -894,4 +894,128 @@ KNOWN_CORRELATIONS = [
         'lag_months': 0,
         'strength': 'medium'
     },
+
+    # ============================================
+    # METRO-LAUS CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'metro_laus_unemployment_correlation',
+        'source_dataset': 'metro',
+        'target_dataset': 'laus',
+        'source_pattern': 'Unemployed',
+        'target_pattern': 'Unemployed',
+        'description': 'Metro-level unemployment correlates with state-level unemployment',
+        'relationship': BLS_ENRICHMENT.unemploymentCorrelation,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'metro_laus_labor_force_correlation',
+        'source_dataset': 'metro',
+        'target_dataset': 'laus',
+        'source_pattern': 'Civilian labor force',
+        'target_pattern': 'Civilian labor force',
+        'description': 'Metro-level labor force correlates with state-level labor force',
+        'relationship': BLS_ENRICHMENT.laborForceCorrelation,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+
+    # ============================================
+    # METRO-EMPSIT CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'metro_empsit_unemployment_national',
+        'source_dataset': 'metro',
+        'target_dataset': 'empsit',
+        'source_pattern': 'Unemployed',
+        'target_pattern': 'Unemployed',
+        'description': 'Metro unemployment aggregates to national unemployment',
+        'relationship': BLS_ENRICHMENT.unemploymentCorrelation,
+        'lag_months': 0,
+        'strength': 'medium'
+    },
+    {
+        'name': 'metro_empsit_labor_force_national',
+        'source_dataset': 'metro',
+        'target_dataset': 'empsit',
+        'source_pattern': 'Civilian labor force',
+        'target_pattern': 'Civilian labor force',
+        'description': 'Metro labor force aggregates to national labor force',
+        'relationship': BLS_ENRICHMENT.laborForceCorrelation,
+        'lag_months': 0,
+        'strength': 'medium'
+    },
+
+    # ============================================
+    # METRO-JOLTS CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'metro_jolts_unemployment_job_openings',
+        'source_dataset': 'metro',
+        'target_dataset': 'jolts',
+        'source_pattern': 'Unemployed',
+        'target_pattern': 'Job openings',
+        'description': 'Metro unemployment inversely correlates with regional job openings',
+        'relationship': BLS_ENRICHMENT.unemploymentJobOpeningsLink,
+        'lag_months': 0,
+        'strength': 'medium'
+    },
+
+    # ============================================
+    # METRO-ECI CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'metro_eci_regional_wage_patterns',
+        'source_dataset': 'metro',
+        'target_dataset': 'eci',
+        'source_pattern': 'Metropolitan',
+        'target_pattern': 'Private industry',
+        'description': 'Metro employment patterns correlate with regional wage trends',
+        'relationship': BLS_ENRICHMENT.regionalEmploymentWageLink,
+        'lag_months': 1,
+        'strength': 'weak'
+    },
+
+    # ============================================
+    # METRO INTERNAL CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'metro_labor_force_unemployment',
+        'source_dataset': 'metro',
+        'target_dataset': 'metro',
+        'source_pattern': 'Civilian labor force',
+        'target_pattern': 'Unemployed',
+        'description': 'Metro labor force size affects unemployment levels',
+        'relationship': BLS_ENRICHMENT.laborForceUnemploymentLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'metro_division_metro_area',
+        'source_dataset': 'metro',
+        'target_dataset': 'metro',
+        'source_pattern': 'Division',
+        'target_pattern': 'Metropolitan',
+        'description': 'Metropolitan divisions aggregate to metropolitan areas',
+        'relationship': BLS_ENRICHMENT.geographicAggregationLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'metro_seasonal_nonseasonal',
+        'source_dataset': 'metro',
+        'target_dataset': 'metro',
+        'source_pattern': 'Seasonally Adjusted',
+        'target_pattern': 'Not Seasonally Adjusted',
+        'description': 'Seasonally adjusted and non-adjusted data for same metro area',
+        'relationship': BLS_ENRICHMENT.seasonalAdjustmentLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
 ]
