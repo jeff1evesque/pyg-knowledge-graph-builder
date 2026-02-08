@@ -91,10 +91,15 @@ class RDFGraphLoader:
         self.graph.bind("wkyeng", WKYENG)
         self.graph.bind("ximpim", XIMPIM)
 
+        # NOAA weather data
+        self.graph.bind("cap", CAP)
+        self.graph.bind("nws", NWS)
+        self.graph.bind("alert", ALERT)
+        self.graph.bind("atom", ATOM)
+
         # Other data sources
         self.graph.bind("sec", SEC)
         self.graph.bind("market", MARKET)
-        self.graph.bind("noaa", NOAA)
 
         # Enrichment
         self.graph.bind("bls", BLS_ENRICHMENT)
