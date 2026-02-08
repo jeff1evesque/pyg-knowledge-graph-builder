@@ -1018,4 +1018,112 @@ KNOWN_CORRELATIONS = [
         'lag_months': 0,
         'strength': 'strong'
     },
+
+    # ============================================
+    # REALER-CPI CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'realer_cpi_inflation_adjustment',
+        'source_dataset': 'realer',
+        'target_dataset': 'cpi',
+        'source_pattern': 'Consumer Price Index',
+        'target_pattern': 'All items',
+        'description': 'REALER uses CPI to adjust nominal earnings to real earnings',
+        'relationship': BLS_ENRICHMENT.inflationAdjustmentLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+
+    # ============================================
+    # REALER-EMPSIT CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'realer_empsit_hourly_earnings',
+        'source_dataset': 'realer',
+        'target_dataset': 'empsit',
+        'source_pattern': 'Average hourly earnings',
+        'target_pattern': 'Average hourly earnings',
+        'description': 'REALER real earnings derived from EMPSIT nominal earnings',
+        'relationship': BLS_ENRICHMENT.realNominalEarningsLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'realer_empsit_weekly_earnings',
+        'source_dataset': 'realer',
+        'target_dataset': 'empsit',
+        'source_pattern': 'Average weekly earnings',
+        'target_pattern': 'Average weekly earnings',
+        'description': 'REALER real weekly earnings derived from EMPSIT nominal weekly earnings',
+        'relationship': BLS_ENRICHMENT.realNominalEarningsLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'realer_empsit_weekly_hours',
+        'source_dataset': 'realer',
+        'target_dataset': 'empsit',
+        'source_pattern': 'Average weekly hours',
+        'target_pattern': 'Average weekly hours',
+        'description': 'REALER uses EMPSIT weekly hours data',
+        'relationship': BLS_ENRICHMENT.hoursWorkedLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+
+    # ============================================
+    # REALER-ECI CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'realer_eci_real_wage_growth',
+        'source_dataset': 'realer',
+        'target_dataset': 'eci',
+        'source_pattern': 'Real average hourly earnings',
+        'target_pattern': 'Wages and salaries',
+        'description': 'REALER real earnings complement ECI wage index',
+        'relationship': BLS_ENRICHMENT.wageEarningsLink,
+        'lag_months': 0,
+        'strength': 'medium'
+    },
+
+    # ============================================
+    # REALER INTERNAL CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'realer_cpiu_cpiw_comparison',
+        'source_dataset': 'realer',
+        'target_dataset': 'realer',
+        'source_pattern': 'CPI-U',
+        'target_pattern': 'CPI-W',
+        'description': 'REALER provides real earnings using both CPI-U and CPI-W',
+        'relationship': BLS_ENRICHMENT.cpiIndexComparisonLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'realer_hourly_weekly_relationship',
+        'source_dataset': 'realer',
+        'target_dataset': 'realer',
+        'source_pattern': 'Real average hourly earnings',
+        'target_pattern': 'Real average weekly earnings',
+        'description': 'Real hourly earnings and hours determine real weekly earnings',
+        'relationship': BLS_ENRICHMENT.hoursEarningsLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'realer_nominal_real_relationship',
+        'source_dataset': 'realer',
+        'target_dataset': 'realer',
+        'source_pattern': 'Average hourly earnings',
+        'target_pattern': 'Real average hourly earnings',
+        'description': 'Nominal earnings adjusted by CPI produce real earnings',
+        'relationship': BLS_ENRICHMENT.realNominalEarningsLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
 ]

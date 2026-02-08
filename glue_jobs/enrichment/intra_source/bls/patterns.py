@@ -286,6 +286,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'laus': [],  # LAUS doesn't have food-specific categories
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.foodSectorCorrelation
     },
@@ -388,6 +389,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'laus': ['Mining and logging'],
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.energySectorCorrelation
     },
@@ -558,6 +560,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'laus': ['Construction'],
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.housingSectorCorrelation
     },
@@ -721,6 +724,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'laus': ['Trade, transportation, and utilities'],
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.transportationSectorCorrelation
     },
@@ -823,6 +827,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'laus': [],
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.goodsServicesRelation
     },
@@ -1105,6 +1110,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'laus': ['Manufacturing'],
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.manufacturingSectorCorrelation
     },
@@ -1184,6 +1190,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'laus': [],
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.retailSectorCorrelation
     },
@@ -1272,6 +1279,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'laus': ['Education and health services'],
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.healthcareSectorCorrelation
     },
@@ -1349,6 +1357,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'laus': [],
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.recreationSectorCorrelation
     },
@@ -1443,6 +1452,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'laus': ['Information'],
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.educationCommunicationSectorCorrelation
     },
@@ -1475,6 +1485,7 @@ BLS_SECTOR_PATTERNS = {
             'ximpim': [],
             'laus': [],
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.personalCareSectorCorrelation
     },
@@ -1495,6 +1506,7 @@ BLS_SECTOR_PATTERNS = {
             'ximpim': [],
             'laus': [],
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.tobaccoSectorCorrelation
     },
@@ -1574,6 +1586,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'laus': [],
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.miscellaneousGoodsSectorCorrelation
     },
@@ -1635,6 +1648,7 @@ BLS_SECTOR_PATTERNS = {
             'ximpim': [],
             'laus': ['Professional and business services'],
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.professionalServicesSectorCorrelation
     },
@@ -1659,6 +1673,7 @@ BLS_SECTOR_PATTERNS = {
             'ximpim': [],
             'laus': ['Leisure and hospitality'],
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.leisureHospitalitySectorCorrelation
     },
@@ -1715,6 +1730,7 @@ BLS_SECTOR_PATTERNS = {
             'ximpim': [],
             'laus': ['Government'],
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.governmentSectorCorrelation
     },
@@ -1751,6 +1767,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'laus': [],
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.informationSectorCorrelation
     },
@@ -1790,6 +1807,7 @@ BLS_SECTOR_PATTERNS = {
             'ximpim': [],
             'laus': ['Financial activities'],
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.financialSectorCorrelation
     },
@@ -1836,6 +1854,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'laus': [],
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.naturalResourcesSectorCorrelation
     },
@@ -1858,6 +1877,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'laus': [],
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.constructionTradesSectorCorrelation
     },
@@ -1903,6 +1923,7 @@ BLS_SECTOR_PATTERNS = {
             'ximpim': [],
             'laus': [],
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.apparelSectorCorrelation
     },
@@ -1946,6 +1967,7 @@ BLS_SECTOR_PATTERNS = {
             'ximpim': [],
             'laus': [],
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.capitalInvestmentSectorCorrelation
     },
@@ -1985,6 +2007,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'laus': [],
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.exportsSectorCorrelation
     },
@@ -2015,6 +2038,7 @@ BLS_SECTOR_PATTERNS = {
             'ximpim': [],
             'laus': [],
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.personalConsumptionSectorCorrelation
     },
@@ -2099,6 +2123,7 @@ BLS_SECTOR_PATTERNS = {
                 'St. Louis',
                 'Baltimore-Columbia-Towson',
             ],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.geographicRegionsSectorCorrelation
     },
@@ -2183,6 +2208,7 @@ BLS_SECTOR_PATTERNS = {
                 'Virgin Islands',
             ],
             'metro': [],
+            'realer': [],
         },
         'relationship': BLS_ENRICHMENT.employmentSizeSectorCorrelation
     },

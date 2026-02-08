@@ -5,7 +5,7 @@ Coordinates enrichment across all BLS datasets
 from rdflib import Graph, URIRef, Literal
 from rdflib.namespace import RDF, RDFS, XSD, OWL
 from glue_jobs.utils.rdf_utils import (
-    CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS,
+    CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER,
     BLS_ENRICHMENT, UNIFIED, get_month_name, get_year_value
 )
 from glue_jobs.enrichment.intra_source.base import IntraSourceEnricher
@@ -17,6 +17,7 @@ from glue_jobs.enrichment.intra_source.bls.enrichers.empsit_enricher import EMPS
 from glue_jobs.enrichment.intra_source.bls.enrichers.ximpim_enricher import XIMPIMEnricher
 from glue_jobs.enrichment.intra_source.bls.enrichers.laus_enricher import LAUSEnricher
 from glue_jobs.enrichment.intra_source.bls.enrichers.metro_enricher import METROEnricher
+from glue_jobs.enrichment.intra_source.bls.enrichers.realer_enricher import REALEREnricher
 from glue_jobs.enrichment.intra_source.bls.patterns import BLS_SECTOR_PATTERNS
 from glue_jobs.enrichment.intra_source.bls.correlations import KNOWN_CORRELATIONS
 from typing import Dict, Set, Optional, List
@@ -79,6 +80,7 @@ class BLSIntraSourceLinker(IntraSourceEnricher):
             'ximpim': XIMPIM,
             'laus': LAUS,
             'metro': METRO,
+            'realer': REALER,
         }
 
         for dataset_name, namespace in dataset_checks.items():
@@ -113,6 +115,8 @@ class BLSIntraSourceLinker(IntraSourceEnricher):
             enrichers['laus'] = LAUSEnricher(self.graph)
         if 'metro' in self.available_datasets:
             enrichers['metro'] = METROEnricher(self.graph)
+        if 'realer' in self.available_datasets:
+            enrichers['realer'] = REALEREnricher(self.graph)
 
         return enrichers
 
