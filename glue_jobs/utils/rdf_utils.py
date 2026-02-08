@@ -25,14 +25,31 @@ REALER = Namespace("https://www.bls.gov/realer/")
 WKYENG = Namespace("https://www.bls.gov/wkyeng/")
 XIMPIM = Namespace("https://www.bls.gov/ximpim/")
 
+# ============================================
 # SEC data namespace (TODO: Update with actual namespace from your SEC mappers)
+# ============================================
 SEC = Namespace("https://www.sec.gov/")
 
+# ============================================
 # Market data namespace (TODO: Update with actual namespace)
+# ============================================
 MARKET = Namespace("https://example.org/market/")
 
-# NOAA weather data namespace (TODO: Update with actual namespace)
-NOAA = Namespace("https://www.weather.gov/")
+# ============================================
+# NOAA WEATHER DATA NAMESPACES
+# ============================================
+
+# CAP (Common Alerting Protocol) namespace
+CAP = Namespace("http://www.oasis-open.org/committees/emergency/cap/1.2/")
+
+# NWS (National Weather Service) extensions
+NWS = Namespace("http://api.weather.gov/ontology/")
+
+# Alert instances
+ALERT = Namespace("http://api.weather.gov/alerts/")
+
+# Atom feed namespace
+ATOM = Namespace("http://www.w3.org/2005/Atom/")
 
 # ============================================
 # ENRICHMENT NAMESPACES
