@@ -360,6 +360,9 @@ pyg-knowledge-graph-builder/
 │   │       ├── sec_linker.py               # SEC orchestrator (future)
 │   │       ├── market_linker.py            # Market orchestrator (future)
 │   │       ├── noaa_linker.py              # NOAA orchestrator (future)
+│   │       ├── noaa/                       # NOAA-specific components
+│   │           ├── __init__.py
+│   │           └── patterns.py             # For cross-source linking (future)
 │   │       └── bls/                        # BLS-specific components
 │   │           ├── __init__.py
 │   │           ├── patterns.py             # BLS_SECTOR_PATTERNS (~500 lines)
