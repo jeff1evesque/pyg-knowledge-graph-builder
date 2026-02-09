@@ -113,6 +113,7 @@ class RDFGraphLoader:
 
         # Enrichment
         self.graph.bind("bls", BLS_ENRICHMENT)
+        self.graph.bind("sec_enrichment", SEC_ENRICHMENT)
         self.graph.bind("unified", UNIFIED)
 
         # Standard
