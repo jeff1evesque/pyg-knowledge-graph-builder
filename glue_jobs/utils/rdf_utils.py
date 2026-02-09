@@ -102,8 +102,13 @@ class RDFGraphLoader:
         self.graph.bind("alert", ALERT)
         self.graph.bind("atom", ATOM)
 
+        # SEC data sources
+        self.graph.bind("sec", SEC_ADMIN)  # Administrative proceedings
+        self.graph.bind("seclit", SEC_LIT)  # Litigation
+        self.graph.bind("secsusp", SEC_SUSP)  # Trading suspensions
+        self.graph.bind("filings", SEC_FILINGS)  # Filings
+
         # Other data sources
-        self.graph.bind("sec", SEC)
         self.graph.bind("market", MARKET)
 
         # Enrichment
