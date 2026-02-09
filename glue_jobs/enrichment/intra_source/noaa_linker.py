@@ -6,7 +6,7 @@ from rdflib import Graph, URIRef, Literal
 from rdflib.namespace import RDF, RDFS, XSD, OWL
 from glue_jobs.utils.rdf_utils import (
     NOAA, CAP, NWS, ATOM,
-    BLS_ENRICHMENT, UNIFIED
+    NOAA_ENRICHMENT, UNIFIED
 )
 from glue_jobs.enrichment.intra_source.base import IntraSourceEnricher
 from typing import Dict, Set
@@ -150,17 +150,17 @@ class NOAAIntraSourceLinker(IntraSourceEnricher):
             unified_year = UNIFIED[f"Year{year_value}"]
 
             # Add unified month
-            self.graph.add((unified_month, RDF.type, BLS_ENRICHMENT.UnifiedMonth))
+            self.graph.add((unified_month, RDF.type, NOAA_ENRICHMENT.UnifiedMonth))
             self.graph.add((unified_month, RDFS.label, Literal(month_name)))
 
             # Add unified year
-            self.graph.add((unified_year, RDF.type, BLS_ENRICHMENT.UnifiedYear))
+            self.graph.add((unified_year, RDF.type, NOAA_ENRICHMENT.UnifiedYear))
             self.graph.add((unified_year, RDFS.label, Literal(year_value)))
 
             # Link alerts to unified temporal entities
             for alert in alerts:
-                self.graph.add((alert, BLS_ENRICHMENT.hasUnifiedMonth, unified_month))
-                self.graph.add((alert, BLS_ENRICHMENT.hasUnifiedYear, unified_year))
+                self.graph.add((alert, NOAA_ENRICHMENT.hasUnifiedMonth, unified_month))
+                self.graph.add((alert, NOAA_ENRICHMENT.hasUnifiedYear, unified_year))
                 self.stats['temporal_unified'] += 2
 
         logger.info(f"  Unified {len(dates_by_month_year)} month-year combinations")
@@ -213,7 +213,7 @@ class NOAAIntraSourceLinker(IntraSourceEnricher):
 
                 self.graph.add((
                     current,
-                    BLS_ENRICHMENT.precedes,
+                    NOAA_ENRICHMENT.precedes,
                     next_alert
                 ))
                 links_added += 1
@@ -262,7 +262,7 @@ class NOAAIntraSourceLinker(IntraSourceEnricher):
             if pair not in linked_pairs:
                 self.graph.add((
                     alert1,
-                    BLS_ENRICHMENT.affectsSameRegion,
+                    NOAA_ENRICHMENT.affectsSameRegion,
                     alert2
                 ))
                 linked_pairs.add(pair)
@@ -308,7 +308,7 @@ class NOAAIntraSourceLinker(IntraSourceEnricher):
                 for alert2 in alerts[i + 1:]:
                     self.graph.add((
                         alert1,
-                        BLS_ENRICHMENT.sameEventType,
+                        NOAA_ENRICHMENT.sameEventType,
                         alert2
                     ))
                     links_added += 1
@@ -381,7 +381,7 @@ class NOAAIntraSourceLinker(IntraSourceEnricher):
                 if next_alert['severity_level'] > current['severity_level']:
                     self.graph.add((
                         current['alert'],
-                        BLS_ENRICHMENT.escalatesTo,
+                        NOAA_ENRICHMENT.escalatesTo,
                         next_alert['alert']
                     ))
                     links_added += 1
