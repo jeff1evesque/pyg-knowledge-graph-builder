@@ -42,7 +42,5 @@ def enrich_intra_source(graph: Graph) -> Dict[str, int]:
     stats['noaa'] = noaa_linker.enrich()
 
     # TODO: Add other source linkers as they're implemented
-    # sec_linker = SECIntraSourceLinker(graph)
-    # stats['sec'] = sec_linker.enrich()
 
     return stats
