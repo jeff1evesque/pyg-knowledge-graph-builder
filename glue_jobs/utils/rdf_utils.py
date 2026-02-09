@@ -26,9 +26,13 @@ WKYENG = Namespace("https://www.bls.gov/wkyeng/")
 XIMPIM = Namespace("https://www.bls.gov/ximpim/")
 
 # ============================================
-# SEC data namespace (TODO: Update with actual namespace from your SEC mappers)
+# SEC data namespace
 # ============================================
-SEC = Namespace("https://www.sec.gov/")
+
+SEC_ADMIN = Namespace("https://www.sec.gov/ontology/administrative-proceedings#")
+SEC_LIT = Namespace("https://www.sec.gov/ontology/litigation#")
+SEC_SUSP = Namespace("https://www.sec.gov/ontology/trading-suspensions#")
+SEC_FILINGS = Namespace("http://www.sec.gov/filings#")
 
 # ============================================
 # Market data namespace (TODO: Update with actual namespace)
@@ -57,6 +61,7 @@ ATOM = Namespace("http://www.w3.org/2005/Atom/")
 # Created by this pipeline for cross-source linking
 
 BLS_ENRICHMENT = Namespace("https://www.bls.gov/enrichment/")
+SEC_ENRICHMENT = Namespace("https://www.sec.gov/enrichment/")
 UNIFIED = Namespace("https://example.org/unified/")
 
 # ============================================
