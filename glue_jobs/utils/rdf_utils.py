@@ -62,6 +62,7 @@ ATOM = Namespace("http://www.w3.org/2005/Atom/")
 
 BLS_ENRICHMENT = Namespace("https://www.bls.gov/enrichment/")
 SEC_ENRICHMENT = Namespace("https://www.sec.gov/enrichment/")
+NOAA_ENRICHMENT = Namespace("https://www.noaa.gov/enrichment/")
 UNIFIED = Namespace("https://example.org/unified/")
 
 # ============================================
@@ -114,6 +115,7 @@ class RDFGraphLoader:
         # Enrichment
         self.graph.bind("bls", BLS_ENRICHMENT)
         self.graph.bind("sec_enrichment", SEC_ENRICHMENT)
+        self.graph.bind("noaa_enrichment", NOAA_ENRICHMENT)
         self.graph.bind("unified", UNIFIED)
 
         # Standard
