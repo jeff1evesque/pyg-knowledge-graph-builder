@@ -11,9 +11,7 @@ from glue_jobs.enrichment.intra_source.base import IntraSourceEnricher
 from glue_jobs.enrichment.intra_source.market.patterns import (
     MARKET_SECTOR_PATTERNS, MARKET_OPTION_PATTERNS, MARKET_EXCHANGE_PATTERNS
 )
-from glue_jobs.enrichment.intra_source.market.correlations import KNOWN_CORRELATIONS
 from typing import Dict, Set, Optional, List
-from datetime import datetime
 import logging
 
 logger = logging.getLogger(__name__)
