@@ -37,7 +37,9 @@ SEC_FILINGS = Namespace("http://www.sec.gov/filings#")
 # ============================================
 # Market data namespace (TODO: Update with actual namespace)
 # ============================================
-MARKET = Namespace("https://example.org/market/")
+
+MARKET = Namespace("https://financial-data.org/")
+MARKET_OPTIONS = Namespace("https://financial-data.org/options/")
 
 # ============================================
 # NOAA WEATHER DATA NAMESPACES
@@ -63,6 +65,7 @@ ATOM = Namespace("http://www.w3.org/2005/Atom/")
 BLS_ENRICHMENT = Namespace("https://www.bls.gov/enrichment/")
 SEC_ENRICHMENT = Namespace("https://www.sec.gov/enrichment/")
 NOAA_ENRICHMENT = Namespace("https://www.noaa.gov/enrichment/")
+MARKET_ENRICHMENT = Namespace("https://financial-data.org/enrichment/")
 UNIFIED = Namespace("https://example.org/unified/")
 
 # ============================================
