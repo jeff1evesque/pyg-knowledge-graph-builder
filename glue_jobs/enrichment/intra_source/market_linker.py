@@ -11,6 +11,7 @@ from glue_jobs.enrichment.intra_source.base import IntraSourceEnricher
 from glue_jobs.enrichment.intra_source.market.patterns import (
     MARKET_SECTOR_PATTERNS, MARKET_OPTION_PATTERNS, MARKET_EXCHANGE_PATTERNS
 )
+from glue_jobs.enrichment.temporal_unifier import TemporalUnifier
 from typing import Dict, Set, Optional, List
 import logging
 
@@ -168,63 +169,16 @@ class MarketIntraSourceLinker(IntraSourceEnricher):
         logger.info(f"  Created {self.stats['ticker_unified']} ticker unification links")
 
     def unify_temporal_entities(self):
-        """
-        Unify temporal entities from market data
+        """Unify temporal entities from market data"""
+        # Use TemporalUnifier with Market-only scope
+        unifier = TemporalUnifier(self.graph)
+        unifier.available_sources = {'market'}  # Restrict to Market only
 
-        Links market data timestamps to unified temporal entities
-        """
-        # Extract unique dates from price observations
-        query = f"""
-        SELECT DISTINCT ?obs ?observedAt WHERE {{
-            ?obs a <{MARKET.PriceObservation}> ;
-                 <{MARKET.observedAt}> ?observedAt .
-        }}
-        """
+        stats = unifier.unify_all_sources()
+        self.stats['temporal_unified'] = stats['temporal_links']
 
-        results = list(self.graph.query(query))
-
-        dates_by_month_year = {}
-
-        for row in results:
-            observed_at = str(row.observedAt)
-            try:
-                # Parse datetime
-                from dateutil import parser
-                dt = parser.parse(observed_at)
-
-                month_name = dt.strftime('%B')  # Full month name
-                year_value = str(dt.year)
-
-                key = (month_name, year_value)
-                if key not in dates_by_month_year:
-                    dates_by_month_year[key] = []
-                dates_by_month_year[key].append(row.obs)
-
-            except Exception as e:
-                logger.warning(f"Could not parse date {observed_at}: {e}")
-                continue
-
-        # Create unified temporal entities
-        for (month_name, year_value), observations in dates_by_month_year.items():
-            unified_month = UNIFIED[month_name]
-            unified_year = UNIFIED[f"Year{year_value}"]
-
-            # Add unified month
-            self.graph.add((unified_month, RDF.type, MARKET_ENRICHMENT.UnifiedMonth))
-            self.graph.add((unified_month, RDFS.label, Literal(month_name)))
-
-            # Add unified year
-            self.graph.add((unified_year, RDF.type, MARKET_ENRICHMENT.UnifiedYear))
-            self.graph.add((unified_year, RDFS.label, Literal(year_value)))
-
-            # Link observations to unified temporal entities
-            for obs in observations:
-                self.graph.add((obs, MARKET_ENRICHMENT.hasUnifiedMonth, unified_month))
-                self.graph.add((obs, MARKET_ENRICHMENT.hasUnifiedYear, unified_year))
-                self.stats['temporal_unified'] += 2
-
-        logger.info(f"  Unified {len(dates_by_month_year)} month-year combinations")
-        logger.info(f"  Created {self.stats['temporal_unified']} temporal unification links")
+        logger.info(f"  Unified {stats['months_unified']} months and {stats['years_unified']} years")
+        logger.info(f"  Created {stats['temporal_links']} temporal unification links")
 
     def link_price_sequences(self):
         """
