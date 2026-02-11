@@ -11,7 +11,7 @@ This is the main entry point called by build_graph.py
 from rdflib import Graph
 from glue_jobs.enrichment.intra_source_linker import enrich_intra_source
 from glue_jobs.enrichment.cross_source_linker import enrich_cross_source
-from glue_jobs.enrichment.ontology_mapper import OntologyMapper
+from glue_jobs.enrichment.ontology_mapper import map_ontologies
 from typing import Dict
 import logging
 
@@ -119,21 +119,19 @@ class EnrichmentPipeline:
         Creates owl:equivalentProperty and owl:equivalentClass mappings
         to standardize vocabularies across sources
         """
-        mapper = OntologyMapper(self.graph)
+        logger.info("Running ontology mapping...")
 
-        # Create equivalence mappings
-        mapper.create_equivalence_mappings()
+        stats = map_ontologies(
+            self.graph,
+            enable_skos=False,  # Set to True if publishing as Linked Open Data
+            enable_dublin_core=False  # Set to True if you want metadata timestamps
+        )
 
-        # Normalize labels
-        mapper.normalize_labels()
+        logger.info(f"  Property equivalences: {stats['property_equivalences']}")
+        logger.info(f"  Class equivalences: {stats['class_equivalences']}")
+        logger.info(f"  Normalized labels: {stats['normalized_labels']}")
 
-        # Align hierarchies (optional)
-        # mapper.align_hierarchies()
-
-        return {
-            'equivalence_mappings': mapper.stats.get('equivalence_mappings', 0),
-            'normalized_labels': mapper.stats.get('normalized_labels', 0)
-        }
+        return stats
 
     def _print_final_summary(self):
         """Print final enrichment summary"""
