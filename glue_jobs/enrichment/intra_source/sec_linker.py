@@ -207,8 +207,8 @@ class SECIntraSourceLinker(IntraSourceEnricher):
         for cik, company_uris in companies_by_cik.items():
             if len(company_uris) > 1:  # Only unify if multiple references exist
                 unified_company = UNIFIED[f"Company_{cik}"]
-                self.graph.add((unified_company, RDF.type, BLS_ENRICHMENT.UnifiedCompany))
-                self.graph.add((unified_company, BLS_ENRICHMENT.hasCik, Literal(cik)))
+                self.graph.add((unified_company, RDF.type, SEC_ENRICHMENT.UnifiedCompany))
+                self.graph.add((unified_company, SEC_ENRICHMENT.hasCik, Literal(cik)))
 
                 for company_uri in company_uris:
                     self.graph.add((unified_company, OWL.sameAs, company_uri))
@@ -262,8 +262,8 @@ class SECIntraSourceLinker(IntraSourceEnricher):
         for cik, person_uris in persons_by_cik.items():
             if len(person_uris) > 1:  # Only unify if multiple references exist
                 unified_person = UNIFIED[f"Person_{cik}"]
-                self.graph.add((unified_person, RDF.type, BLS_ENRICHMENT.UnifiedPerson))
-                self.graph.add((unified_person, BLS_ENRICHMENT.hasCik, Literal(cik)))
+                self.graph.add((unified_person, RDF.type, SEC_ENRICHMENT.UnifiedPerson))
+                self.graph.add((unified_person, SEC_ENRICHMENT.hasCik, Literal(cik)))
 
                 for person_uri in person_uris:
                     self.graph.add((unified_person, OWL.sameAs, person_uri))
@@ -343,7 +343,7 @@ class SECIntraSourceLinker(IntraSourceEnricher):
 
                 self.graph.add((
                     current,
-                    BLS_ENRICHMENT.precedes,
+                    SEC_ENRICHMENT.precedes,
                     next_filing
                 ))
                 links_added += 1
@@ -400,7 +400,7 @@ class SECIntraSourceLinker(IntraSourceEnricher):
 
                 self.graph.add((
                     current,
-                    BLS_ENRICHMENT.precedes,
+                    SEC_ENRICHMENT.precedes,
                     next_filing
                 ))
                 links_added += 1

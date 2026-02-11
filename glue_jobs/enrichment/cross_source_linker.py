@@ -14,6 +14,7 @@ from glue_jobs.utils.rdf_utils import (
 )
 from glue_jobs.enrichment.intra_source.bls.patterns import BLS_SECTOR_PATTERNS
 from glue_jobs.enrichment.intra_source.bls.correlations import KNOWN_CORRELATIONS
+from glue_jobs.enrichment.temporal_unifier import TemporalUnifier
 from typing import Dict, Set
 import logging
 
@@ -179,67 +180,16 @@ class CrossSourceLinker:
         """
         Create unified temporal entities that all sources reference
         
-        Extends the BLS temporal unification to include SEC, Market, and NOAA
-        
-        Example:
-            cpi:November + sec:November + market:November + noaa:November 
-            → unified:November2024
+        Delegates to TemporalUnifier for consistent temporal unification
         """
-        # Collect temporal entities from all sources
-        months_by_name = {}
-        years_by_value = {}
-        
-        # BLS temporal entities (already collected by BLS intra-source enrichment)
-        # We just need to link SEC, Market, and NOAA to the same unified entities
-        
-        # SEC temporal entities (from filing dates, proceeding dates, etc.)
-        if 'sec' in self.available_sources:
-            self._collect_sec_temporal_entities(months_by_name, years_by_value)
-        
-        # Market temporal entities (from price observations, option expirations)
-        if 'market' in self.available_sources:
-            self._collect_market_temporal_entities(months_by_name, years_by_value)
-        
-        # NOAA temporal entities (from alert timestamps)
-        if 'noaa' in self.available_sources:
-            self._collect_noaa_temporal_entities(months_by_name, years_by_value)
-        
-        # Create unified temporal entities and link with owl:sameAs
-        for month_name, month_uris in months_by_name.items():
-            if len(month_uris) < 2:  # Only unify if multiple sources reference it
-                continue
-            
-            unified_month = UNIFIED[month_name]
-            
-            # Add unified month if not already exists
-            if not list(self.graph.triples((unified_month, RDF.type, BLS_ENRICHMENT.UnifiedMonth))):
-                self.graph.add((unified_month, RDF.type, BLS_ENRICHMENT.UnifiedMonth))
-                self.graph.add((unified_month, RDFS.label, Literal(month_name)))
-            
-            # Link all source-specific temporal entities
-            for month_uri in month_uris:
-                if not list(self.graph.triples((unified_month, OWL.sameAs, month_uri))):
-                    self.graph.add((unified_month, OWL.sameAs, month_uri))
-                    self.stats['temporal_unified'] += 1
-        
-        for year_value, year_uris in years_by_value.items():
-            if len(year_uris) < 2:
-                continue
-            
-            unified_year = UNIFIED[f"Year{year_value}"]
-            
-            # Add unified year if not already exists
-            if not list(self.graph.triples((unified_year, RDF.type, BLS_ENRICHMENT.UnifiedYear))):
-                self.graph.add((unified_year, RDF.type, BLS_ENRICHMENT.UnifiedYear))
-                self.graph.add((unified_year, RDFS.label, Literal(year_value)))
-            
-            # Link all source-specific temporal entities
-            for year_uri in year_uris:
-                if not list(self.graph.triples((unified_year, OWL.sameAs, year_uri))):
-                    self.graph.add((unified_year, OWL.sameAs, year_uri))
-                    self.stats['temporal_unified'] += 1
-        
-        logger.info(f"  Unified {len(months_by_name)} months and {len(years_by_value)} years across sources")
+        # Use TemporalUnifier for cross-source temporal alignment
+        unifier = TemporalUnifier(self.graph)
+
+        stats = unifier.unify_all_sources()
+
+        self.stats['temporal_unified'] = stats['temporal_links']
+
+        logger.info(f"  Unified {stats['months_unified']} months and {stats['years_unified']} years across sources")
     
     def _collect_sec_temporal_entities(self, months_by_name: Dict, years_by_value: Dict):
         """Collect temporal entities from SEC data"""
