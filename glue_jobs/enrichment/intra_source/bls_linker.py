@@ -3,7 +3,6 @@ BLS Intra-Source Enrichment Orchestrator
 Coordinates enrichment across all BLS datasets
 """
 from rdflib import Graph, URIRef, Literal
-from rdflib.namespace import RDF, RDFS, XSD, OWL
 from glue_jobs.utils.rdf_utils import (
     CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER,
     BLS_ENRICHMENT, UNIFIED, get_month_name, get_year_value
@@ -20,7 +19,8 @@ from glue_jobs.enrichment.intra_source.bls.enrichers.metro_enricher import METRO
 from glue_jobs.enrichment.intra_source.bls.enrichers.realer_enricher import REALEREnricher
 from glue_jobs.enrichment.intra_source.bls.patterns import BLS_SECTOR_PATTERNS
 from glue_jobs.enrichment.intra_source.bls.correlations import KNOWN_CORRELATIONS
-from typing import Dict, Set, Optional, List
+from glue_jobs.enrichment.temporal_unifier import TemporalUnifier
+from typing import Dict, Set
 import logging
 
 logger = logging.getLogger(__name__)
@@ -185,70 +185,20 @@ class BLSIntraSourceLinker(IntraSourceEnricher):
         """
         Unify temporal entities across all BLS datasets
 
-        Creates unified Month and Year entities and links dataset-specific
-        temporal entities to them using owl:sameAs
-
-        Example:
-            cpi:November, ppi:November, jolts:November, laus:November → unified:November
-            cpi:2024, ppi:2024, jolts:2024, laus:2024 → unified:Year2024
+        Delegates to TemporalUnifier for consistent temporal unification
         """
-        # Get all unique months and years across all datasets
-        months_by_name = {}
-        years_by_value = {}
+        # Use TemporalUnifier instead of custom implementation
+        unifier = TemporalUnifier(self.graph)
 
-        # Collect months from all datasets
-        for dataset_name in self.available_datasets:
-            namespace = self._get_namespace(dataset_name)
-            if namespace:
-                # Query for months
-                month_query = f"""
-                SELECT DISTINCT ?month WHERE {{
-                    ?s ?p ?month .
-                    FILTER(STRSTARTS(STR(?month), "{namespace}"))
-                    FILTER(REGEX(STR(?month), "(January|February|March|April|May|June|July|August|September|October|November|December)$"))
-                }}
-                """
-                for row in self.graph.query(month_query):
-                    month_name = get_month_name(row.month)
-                    if month_name not in months_by_name:
-                        months_by_name[month_name] = []
-                    months_by_name[month_name].append(row.month)
+        # Only unify BLS sources (filter out SEC, Market, NOAA)
+        unifier.available_sources = {'bls'}
 
-                # Query for years
-                year_query = f"""
-                SELECT DISTINCT ?year WHERE {{
-                    ?s ?p ?year .
-                    FILTER(STRSTARTS(STR(?year), "{namespace}"))
-                    FILTER(REGEX(STR(?year), "[0-9]{{4}}$"))
-                }}
-                """
-                for row in self.graph.query(year_query):
-                    year_value = get_year_value(row.year)
-                    if year_value not in years_by_value:
-                        years_by_value[year_value] = []
-                    years_by_value[year_value].append(row.year)
+        stats = unifier.unify_all_sources()
 
-        # Create unified temporal entities and link with owl:sameAs
-        for month_name, month_uris in months_by_name.items():
-            unified_month = UNIFIED[month_name]
-            self.graph.add((unified_month, RDF.type, BLS_ENRICHMENT.UnifiedMonth))
-            self.graph.add((unified_month, RDFS.label, Literal(month_name)))
+        self.stats['temporal_unified'] = stats['temporal_links']
 
-            for month_uri in month_uris:
-                self.graph.add((unified_month, OWL.sameAs, month_uri))
-                self.stats['temporal_unified'] += 1
-
-        for year_value, year_uris in years_by_value.items():
-            unified_year = UNIFIED[f"Year{year_value}"]
-            self.graph.add((unified_year, RDF.type, BLS_ENRICHMENT.UnifiedYear))
-            self.graph.add((unified_year, RDFS.label, Literal(year_value)))
-
-            for year_uri in year_uris:
-                self.graph.add((unified_year, OWL.sameAs, year_uri))
-                self.stats['temporal_unified'] += 1
-
-        logger.info(f"  Unified {len(months_by_name)} months and {len(years_by_value)} years")
-        logger.info(f"  Created {self.stats['temporal_unified']} temporal unification links")
+        logger.info(f"  Unified {stats['months_unified']} months and {stats['years_unified']} years")
+        logger.info(f"  Created {stats['temporal_links']} temporal unification links")
 
     def link_temporal_sequences(self):
         """
