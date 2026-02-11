@@ -45,6 +45,9 @@ MARKET_OPTIONS = Namespace("https://financial-data.org/options/")
 # NOAA WEATHER DATA NAMESPACES
 # ============================================
 
+# NOAA base namespace
+NOAA = Namespace("https://www.noaa.gov/")
+
 # CAP (Common Alerting Protocol) namespace
 CAP = Namespace("http://www.oasis-open.org/committees/emergency/cap/1.2/")
 
@@ -101,6 +104,7 @@ class RDFGraphLoader:
         self.graph.bind("ximpim", XIMPIM)
 
         # NOAA weather data
+        self.graph.bind("noaa", NOAA)
         self.graph.bind("cap", CAP)
         self.graph.bind("nws", NWS)
         self.graph.bind("alert", ALERT)
