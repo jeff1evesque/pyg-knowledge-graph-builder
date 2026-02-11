@@ -9,6 +9,7 @@ from glue_jobs.utils.rdf_utils import (
     NOAA_ENRICHMENT, UNIFIED
 )
 from glue_jobs.enrichment.intra_source.base import IntraSourceEnricher
+from glue_jobs.enrichment.temporal_unifier import TemporalUnifier
 from typing import Dict, Set
 import logging
 
@@ -108,63 +109,16 @@ class NOAAIntraSourceLinker(IntraSourceEnricher):
         }
 
     def unify_temporal_entities(self):
-        """
-        Unify temporal entities from NOAA alerts
+        """Unify temporal entities from NOAA alerts"""
+        # Use TemporalUnifier with NOAA-only scope
+        unifier = TemporalUnifier(self.graph)
+        unifier.available_sources = {'noaa'}  # Restrict to NOAA only
 
-        Links NOAA alert timestamps to unified temporal entities
-        """
-        # Extract unique dates from alerts
-        query = f"""
-        SELECT DISTINCT ?alert ?sentTime WHERE {{
-            ?alert a <{CAP.Alert}> ;
-                   <{CAP.hasSentTime}> ?sentTime .
-        }}
-        """
+        stats = unifier.unify_all_sources()
+        self.stats['temporal_unified'] = stats['temporal_links']
 
-        results = list(self.graph.query(query))
-
-        dates_by_month_year = {}
-
-        for row in results:
-            sent_time = str(row.sentTime)
-            try:
-                # Parse datetime
-                from dateutil import parser
-                dt = parser.parse(sent_time)
-
-                month_name = dt.strftime('%B')  # Full month name
-                year_value = str(dt.year)
-
-                key = (month_name, year_value)
-                if key not in dates_by_month_year:
-                    dates_by_month_year[key] = []
-                dates_by_month_year[key].append(row.alert)
-
-            except Exception as e:
-                logger.warning(f"Could not parse date {sent_time}: {e}")
-                continue
-
-        # Create unified temporal entities
-        for (month_name, year_value), alerts in dates_by_month_year.items():
-            unified_month = UNIFIED[month_name]
-            unified_year = UNIFIED[f"Year{year_value}"]
-
-            # Add unified month
-            self.graph.add((unified_month, RDF.type, NOAA_ENRICHMENT.UnifiedMonth))
-            self.graph.add((unified_month, RDFS.label, Literal(month_name)))
-
-            # Add unified year
-            self.graph.add((unified_year, RDF.type, NOAA_ENRICHMENT.UnifiedYear))
-            self.graph.add((unified_year, RDFS.label, Literal(year_value)))
-
-            # Link alerts to unified temporal entities
-            for alert in alerts:
-                self.graph.add((alert, NOAA_ENRICHMENT.hasUnifiedMonth, unified_month))
-                self.graph.add((alert, NOAA_ENRICHMENT.hasUnifiedYear, unified_year))
-                self.stats['temporal_unified'] += 2
-
-        logger.info(f"  Unified {len(dates_by_month_year)} month-year combinations")
-        logger.info(f"  Created {self.stats['temporal_unified']} temporal unification links")
+        logger.info(f"  Unified {stats['months_unified']} months and {stats['years_unified']} years")
+        logger.info(f"  Created {stats['temporal_links']} temporal unification links")
 
     def link_temporal_sequences(self):
         """
