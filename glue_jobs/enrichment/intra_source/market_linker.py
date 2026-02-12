@@ -39,6 +39,12 @@ class MarketIntraSourceLinker(IntraSourceEnricher):
 
     def __init__(self, graph: Graph):
         super().__init__(graph)
+        self.stats.update({
+            'ticker_unified': 0,
+            'option_stock_links': 0,
+            'option_strategy_links': 0,
+            'multi_source_links': 0
+        })
         self.available_datasets = self.detect_datasets()
         logger.info(f"Detected Market datasets: {', '.join(self.available_datasets)}")
 
@@ -113,13 +119,13 @@ class MarketIntraSourceLinker(IntraSourceEnricher):
         logger.info("Market Intra-Source Enrichment Complete")
         logger.info("=" * 60)
         logger.info(f"Total triples added: {enrichment_count}")
-        logger.info(f"  - Ticker unification: {self.stats.get('ticker_unified', 0)}")
+        logger.info(f"  - Ticker unification: {self.stats['ticker_unified']}")
         logger.info(f"  - Temporal unification: {self.stats['temporal_unified']}")
         logger.info(f"  - Price sequences: {self.stats['temporal_sequences']}")
-        logger.info(f"  - Option-stock links: {self.stats.get('option_stock_links', 0)}")
-        logger.info(f"  - Option strategy links: {self.stats.get('option_strategy_links', 0)}")
+        logger.info(f"  - Option-stock links: {self.stats['option_stock_links']}")
+        logger.info(f"  - Option strategy links: {self.stats['option_strategy_links']}")
         logger.info(f"  - Sector links: {self.stats['sector_links']}")
-        logger.info(f"  - Multi-source links: {self.stats.get('multi_source_links', 0)}")
+        logger.info(f"  - Multi-source links: {self.stats['multi_source_links']}")
         logger.info("=" * 60)
 
         return {
@@ -135,8 +141,6 @@ class MarketIntraSourceLinker(IntraSourceEnricher):
         Creates unified StockTicker entities since the same ticker
         may be observed by multiple sources (yahoo, marketwatch, benzinga)
         """
-        if 'ticker_unified' not in self.stats:
-            self.stats['ticker_unified'] = 0
 
         # Collect all tickers by symbol
         tickers_by_symbol = {}
@@ -238,8 +242,6 @@ class MarketIntraSourceLinker(IntraSourceEnricher):
         Creates relationships between options and recent stock prices
         to enable analysis of option pricing relative to underlying
         """
-        if 'option_stock_links' not in self.stats:
-            self.stats['option_stock_links'] = 0
 
         # Get all option contracts with their underlying tickers
         query = f"""
@@ -338,8 +340,6 @@ class MarketIntraSourceLinker(IntraSourceEnricher):
         - Iron condors
         - Butterflies
         """
-        if 'option_strategy_links' not in self.stats:
-            self.stats['option_strategy_links'] = 0
 
         # Get all option contracts grouped by ticker and expiration
         query = f"""
@@ -521,8 +521,6 @@ class MarketIntraSourceLinker(IntraSourceEnricher):
 
         Enables comparison and validation across data sources
         """
-        if 'multi_source_links' not in self.stats:
-            self.stats['multi_source_links'] = 0
 
         # Link price observations for same ticker
         ticker_query = f"""
