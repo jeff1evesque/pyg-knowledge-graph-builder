@@ -1,7 +1,7 @@
 """
 Temporal Entity Unifier
 
-Unifies temporal entities (months, years, dates) across all data sources.
+Unifies temporal entities (months, years, quarters, dates) across all data sources.
 Creates unified temporal entities and links source-specific temporal entities
 to them using owl:sameAs.
 
@@ -18,12 +18,14 @@ Example:
     # Result:
     # cpi:November + ppi:November + sec:November + market:November
     # → unified:November2024
+    #
+    # wkyeng:Q1 → unified:Q1
 """
 from rdflib import Graph, URIRef, Literal, Namespace
 from rdflib.namespace import RDF, RDFS, OWL, XSD
 from glue_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, UNIFIED,
-    CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER,
+    CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER, WKYENG,
     SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP,
     MARKET, CAP,
     get_month_name, get_year_value
@@ -41,12 +43,13 @@ class TemporalUnifier:
 
     Strategies:
     1. Collect temporal entities from all sources
-    2. Group by normalized month/year values
+    2. Group by normalized month/year/quarter values
     3. Create unified temporal entities
     4. Link source-specific entities with owl:sameAs
 
     Supports:
-    - BLS datasets (CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER)
+    - BLS datasets with monthly granularity (CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER)
+    - BLS datasets with quarterly granularity (WKYENG)
     - SEC data (filings, proceedings, litigation, suspensions)
     - Market data (price observations, option expirations)
     - NOAA data (weather alerts)
@@ -57,6 +60,7 @@ class TemporalUnifier:
         self.stats = {
             'months_unified': 0,
             'years_unified': 0,
+            'quarters_unified': 0,
             'temporal_links': 0,
             'sources_processed': []
         }
@@ -67,6 +71,9 @@ class TemporalUnifier:
             'July', 'August', 'September', 'October', 'November', 'December'
         ]
 
+        # Quarter labels
+        self.quarter_labels = ['Q1', 'Q2', 'Q3', 'Q4']
+
         # Detect available sources
         self.available_sources = self._detect_sources()
         logger.info(f"Detected sources for temporal unification: {', '.join(self.available_sources)}")
@@ -75,8 +82,8 @@ class TemporalUnifier:
         """Detect which data sources are present in the graph"""
         sources = set()
 
-        # Check for BLS data
-        bls_namespaces = [CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER]
+        # Check for BLS data (monthly datasets)
+        bls_namespaces = [CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER, WKYENG]
         for namespace in bls_namespaces:
             query = f"""
             ASK {{
@@ -134,9 +141,10 @@ class TemporalUnifier:
         # Collect temporal entities from all sources
         months_by_name = {}
         years_by_value = {}
+        quarters_by_label = {}
 
         if 'bls' in self.available_sources:
-            self._collect_bls_temporal_entities(months_by_name, years_by_value)
+            self._collect_bls_temporal_entities(months_by_name, years_by_value, quarters_by_label)
             self.stats['sources_processed'].append('bls')
 
         if 'sec' in self.available_sources:
@@ -154,26 +162,29 @@ class TemporalUnifier:
         # Create unified temporal entities
         self._create_unified_months(months_by_name)
         self._create_unified_years(years_by_value)
+        self._create_unified_quarters(quarters_by_label)
 
         logger.info(f"Temporal unification complete:")
         logger.info(f"  - Unified {self.stats['months_unified']} months")
         logger.info(f"  - Unified {self.stats['years_unified']} years")
+        logger.info(f"  - Unified {self.stats['quarters_unified']} quarters")
         logger.info(f"  - Created {self.stats['temporal_links']} temporal links")
 
         return self.stats
 
-    def _collect_bls_temporal_entities(self, months_by_name: Dict, years_by_value: Dict):
+    def _collect_bls_temporal_entities(self, months_by_name: Dict, years_by_value: Dict,
+                                       quarters_by_label: Dict):
         """
         Collect temporal entities from BLS datasets
 
         BLS datasets use explicit Month and Year entities:
-        - cpi:November, cpi:2024
-        - ppi:November, ppi:2024
-        - etc.
+        - Monthly datasets: cpi:November, cpi:2024, ppi:November, ppi:2024, etc.
+        - Quarterly datasets (WKYENG): wkyeng:Q1, wkyeng:Q2, wkyeng:2024, etc.
         """
         logger.info("  Collecting BLS temporal entities...")
 
-        bls_namespaces = {
+        # Monthly BLS datasets
+        monthly_namespaces = {
             'cpi': CPI,
             'ppi': PPI,
             'eci': ECI,
@@ -185,7 +196,7 @@ class TemporalUnifier:
             'realer': REALER
         }
 
-        for dataset_name, namespace in bls_namespaces.items():
+        for dataset_name, namespace in monthly_namespaces.items():
             # Check if this dataset exists
             check_query = f"""
             ASK {{
@@ -228,8 +239,116 @@ class TemporalUnifier:
                 if row.year not in years_by_value[year_value]:
                     years_by_value[year_value].append(row.year)
 
+        # WKYENG: Quarterly dataset
+        self._collect_wkyeng_temporal_entities(years_by_value, quarters_by_label)
+
         logger.info(
-            f"    Collected {len(months_by_name)} unique months and {len(years_by_value)} unique years from BLS")
+            f"    Collected {len(months_by_name)} unique months, "
+            f"{len(years_by_value)} unique years, and "
+            f"{len(quarters_by_label)} unique quarters from BLS")
+
+    def _collect_wkyeng_temporal_entities(self, years_by_value: Dict, quarters_by_label: Dict):
+        """
+        Collect temporal entities from WKYENG (Weekly Earnings)
+
+        WKYENG uses quarterly granularity instead of monthly:
+        - Quarter URIs: wkyeng:Q1, wkyeng:Q2, wkyeng:Q3, wkyeng:Q4
+        - Year URIs: wkyeng:2024, wkyeng:2025, etc.
+        """
+        # Check if WKYENG data exists
+        check_query = f"""
+        ASK {{
+            ?s ?p ?o .
+            FILTER(STRSTARTS(STR(?s), "{WKYENG}"))
+        }}
+        """
+        if not self.graph.query(check_query).askAnswer:
+            return
+
+        logger.info("    Collecting WKYENG quarterly temporal entities...")
+
+        # Collect quarters
+        quarter_query = f"""
+        SELECT DISTINCT ?quarter WHERE {{
+            ?s <{WKYENG.hasQuarter}> ?quarter .
+        }}
+        """
+
+        quarters_found = 0
+        for row in self.graph.query(quarter_query):
+            quarter_uri = row.quarter
+            quarter_label = self._get_quarter_label(quarter_uri)
+
+            if quarter_label and quarter_label in self.quarter_labels:
+                if quarter_label not in quarters_by_label:
+                    quarters_by_label[quarter_label] = []
+                if quarter_uri not in quarters_by_label[quarter_label]:
+                    quarters_by_label[quarter_label].append(quarter_uri)
+                    quarters_found += 1
+
+        # Collect years from WKYENG
+        year_query = f"""
+        SELECT DISTINCT ?year WHERE {{
+            ?s <{WKYENG.hasYear}> ?year .
+        }}
+        """
+
+        years_found = 0
+        for row in self.graph.query(year_query):
+            year_uri = row.year
+            year_value = self._get_wkyeng_year_value(year_uri)
+
+            if year_value and year_value.isdigit() and len(year_value) == 4:
+                if year_value not in years_by_value:
+                    years_by_value[year_value] = []
+                if year_uri not in years_by_value[year_value]:
+                    years_by_value[year_value].append(year_uri)
+                    years_found += 1
+
+        logger.info(f"      Found {quarters_found} quarter entities and {years_found} year entities from WKYENG")
+
+    def _get_quarter_label(self, quarter_uri) -> Optional[str]:
+        """
+        Extract quarter label (Q1, Q2, Q3, Q4) from a quarter URI
+
+        Checks rdfs:label first, then falls back to URI local name.
+        """
+        uri_str = str(quarter_uri)
+        local_name = uri_str.split('/')[-1]
+
+        # Check for rdfs:label
+        for _, _, label in self.graph.triples((quarter_uri, RDFS.label, None)):
+            label_str = str(label)
+            if label_str in self.quarter_labels:
+                return label_str
+
+        # Fall back to local name
+        if local_name in self.quarter_labels:
+            return local_name
+
+        return local_name if local_name else None
+
+    def _get_wkyeng_year_value(self, year_uri) -> Optional[str]:
+        """
+        Extract year value from a WKYENG year URI
+
+        Checks rdfs:label first, then falls back to URI local name.
+        """
+        uri_str = str(year_uri)
+        local_name = uri_str.split('/')[-1]
+
+        # Check for rdfs:label
+        for _, _, label in self.graph.triples((year_uri, RDFS.label, None)):
+            label_str = str(label)
+            if label_str.isdigit() and len(label_str) == 4:
+                return label_str
+
+        # Fall back to local name
+        if local_name.isdigit():
+            return local_name
+
+        # Try get_year_value utility
+        return get_year_value(year_uri)
 
     def _collect_sec_temporal_entities(self, months_by_name: Dict, years_by_value: Dict):
         """
@@ -444,7 +563,7 @@ class TemporalUnifier:
         Create unified year entities and link source-specific years
 
         Example:
-            unified:Year2024 owl:sameAs cpi:2024, ppi:2024, sec:2024, ...
+            unified:Year2024 owl:sameAs cpi:2024, ppi:2024, sec:2024, wkyeng:2024, ...
         """
         logger.info("  Creating unified year entities...")
 
@@ -468,6 +587,66 @@ class TemporalUnifier:
                     self.stats['temporal_links'] += 1
 
         logger.info(f"    Created {self.stats['years_unified']} unified years")
+
+    def _create_unified_quarters(self, quarters_by_label: Dict):
+        """
+        Create unified quarter entities and link source-specific quarters
+
+        WKYENG uses quarterly granularity. Unified quarter entities allow
+        cross-source alignment between quarterly and monthly data.
+
+        Example:
+            unified:Q1 owl:sameAs wkyeng:Q1
+            unified:Q1 bls:coversMonths unified:January, unified:February, unified:March
+
+        Quarter-to-month mapping:
+            Q1 → January, February, March
+            Q2 → April, May, June
+            Q3 → July, August, September
+            Q4 → October, November, December
+        """
+        if not quarters_by_label:
+            return
+
+        logger.info("  Creating unified quarter entities...")
+
+        # Quarter to month mapping for cross-granularity alignment
+        quarter_month_map = {
+            'Q1': ['January', 'February', 'March'],
+            'Q2': ['April', 'May', 'June'],
+            'Q3': ['July', 'August', 'September'],
+            'Q4': ['October', 'November', 'December']
+        }
+
+        for quarter_label, quarter_uris in quarters_by_label.items():
+            if len(quarter_uris) < 1:
+                continue
+
+            unified_quarter = UNIFIED[quarter_label]
+
+            # Add unified quarter entity if not exists
+            if not list(self.graph.triples((unified_quarter, RDF.type, BLS_ENRICHMENT.UnifiedQuarter))):
+                self.graph.add((unified_quarter, RDF.type, BLS_ENRICHMENT.UnifiedQuarter))
+                self.graph.add((unified_quarter, RDFS.label, Literal(quarter_label)))
+                self.stats['quarters_unified'] += 1
+
+                # Link quarter to its constituent months for cross-granularity alignment
+                months = quarter_month_map.get(quarter_label, [])
+                for month_name in months:
+                    unified_month = UNIFIED[month_name]
+                    # Only link if the unified month exists
+                    if list(self.graph.triples((unified_month, RDF.type, BLS_ENRICHMENT.UnifiedMonth))):
+                        if not list(self.graph.triples((unified_quarter, BLS_ENRICHMENT.coversMonth, unified_month))):
+                            self.graph.add((unified_quarter, BLS_ENRICHMENT.coversMonth, unified_month))
+                            self.stats['temporal_links'] += 1
+
+            # Link all source-specific quarter entities with owl:sameAs
+            for quarter_uri in quarter_uris:
+                if not list(self.graph.triples((unified_quarter, OWL.sameAs, quarter_uri))):
+                    self.graph.add((unified_quarter, OWL.sameAs, quarter_uri))
+                    self.stats['temporal_links'] += 1
+
+        logger.info(f"    Created {self.stats['quarters_unified']} unified quarters")
 
     def get_unified_month(self, month_name: str) -> Optional[URIRef]:
         """
@@ -508,6 +687,27 @@ class TemporalUnifier:
 
         return None
 
+    def get_unified_quarter(self, quarter_label: str) -> Optional[URIRef]:
+        """
+        Get unified quarter URI for a given quarter label
+
+        Args:
+            quarter_label: Quarter label (e.g., "Q1", "Q2", "Q3", "Q4")
+
+        Returns:
+            Unified quarter URI or None if not found
+        """
+        if quarter_label not in self.quarter_labels:
+            return None
+
+        unified_quarter = UNIFIED[quarter_label]
+
+        # Check if it exists
+        if list(self.graph.triples((unified_quarter, RDF.type, BLS_ENRICHMENT.UnifiedQuarter))):
+            return unified_quarter
+
+        return None
+
     def get_source_months_for_unified(self, unified_month: URIRef) -> List[URIRef]:
         """
         Get all source-specific month URIs linked to a unified month
@@ -543,6 +743,42 @@ class TemporalUnifier:
         """
 
         return [row.sourceYear for row in self.graph.query(query)]
+
+    def get_source_quarters_for_unified(self, unified_quarter: URIRef) -> List[URIRef]:
+        """
+        Get all source-specific quarter URIs linked to a unified quarter
+
+        Args:
+            unified_quarter: Unified quarter URI
+
+        Returns:
+            List of source-specific quarter URIs
+        """
+        query = f"""
+        SELECT ?sourceQuarter WHERE {{
+            <{unified_quarter}> owl:sameAs ?sourceQuarter .
+        }}
+        """
+
+        return [row.sourceQuarter for row in self.graph.query(query)]
+
+    def get_months_for_quarter(self, unified_quarter: URIRef) -> List[URIRef]:
+        """
+        Get unified month URIs covered by a unified quarter
+
+        Args:
+            unified_quarter: Unified quarter URI (e.g., unified:Q1)
+
+        Returns:
+            List of unified month URIs (e.g., [unified:January, unified:February, unified:March])
+        """
+        query = f"""
+        SELECT ?month WHERE {{
+            <{unified_quarter}> <{BLS_ENRICHMENT.coversMonth}> ?month .
+        }}
+        """
+
+        return [row.month for row in self.graph.query(query)]
 
 
 def unify_temporal_entities(graph: Graph) -> Dict[str, int]:
