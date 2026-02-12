@@ -198,7 +198,7 @@ class OntologyMapper:
             target_uri = URIRef(target_prop)
 
             # Add equivalence if not already exists
-            if not list(self.graph.triples((source_uri, OWL.equivalentProperty, target_uri))):
+            if (source_uri, OWL.equivalentProperty, target_uri) not in self.graph:
                 self.graph.add((source_uri, OWL.equivalentProperty, target_uri))
                 self.stats['property_equivalences'] += 1
 
@@ -208,7 +208,7 @@ class OntologyMapper:
             target_uri = URIRef(target_class)
 
             # Add equivalence if not already exists
-            if not list(self.graph.triples((source_uri, OWL.equivalentClass, target_uri))):
+            if (source_uri, OWL.equivalentClass, target_uri) not in self.graph:
                 self.graph.add((source_uri, OWL.equivalentClass, target_uri))
                 self.stats['class_equivalences'] += 1
 
