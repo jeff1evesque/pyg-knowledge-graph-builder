@@ -17,6 +17,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Maximum number of strangle pairs to create per ticker/expiration.
+# Limits graph growth for liquid option chains while preserving
+# the most analytically relevant near-the-money combinations.
+MAX_STRANGLE_PAIRS_PER_CHAIN = 10
+
 
 class MarketIntraSourceLinker(IntraSourceEnricher):
     """
@@ -336,7 +341,7 @@ class MarketIntraSourceLinker(IntraSourceEnricher):
         Detects:
         - Vertical spreads (call/put spreads)
         - Straddles (same strike, call + put)
-        - Strangles (different strikes, call + put)
+        - Strangles (nearest OTM call + put pairs)
         - Iron condors
         - Butterflies
         """
@@ -378,7 +383,7 @@ class MarketIntraSourceLinker(IntraSourceEnricher):
             # Identify vertical spreads
             links_added += self._identify_vertical_spreads(contracts)
 
-            # Identify strangles
+            # Identify strangles (nearest OTM pairs only)
             links_added += self._identify_strangles(contracts)
 
         logger.info(f"  Added {links_added} option strategy links")
@@ -449,23 +454,59 @@ class MarketIntraSourceLinker(IntraSourceEnricher):
         return links_added
 
     def _identify_strangles(self, contracts: List[Dict]) -> int:
-        """Identify strangle strategies (different strikes, call + put)"""
+        """
+        Identify strangle strategies by pairing nearest OTM calls with OTM puts.
+
+        A strangle consists of an OTM call (strike above midpoint) paired with
+        an OTM put (strike below midpoint) at the same expiration. Rather than
+        creating O(n*m) links for all call-put combinations, we:
+
+        1. Find the midpoint strike of the chain
+        2. Sort OTM calls ascending by strike (nearest ATM first)
+        3. Sort OTM puts descending by strike (nearest ATM first)
+        4. Pair them by proximity rank (nearest OTM call with nearest OTM put, etc.)
+
+        This produces at most MAX_STRANGLE_PAIRS_PER_CHAIN links per chain,
+        capturing the most tradeable strangles while keeping graph size bounded.
+        """
+        calls = sorted(
+            [c for c in contracts if c['type'] == 'call'],
+            key=lambda c: c['strike']
+        )
+        puts = sorted(
+            [c for c in contracts if c['type'] == 'put'],
+            key=lambda c: c['strike']
+        )
+
+        if not calls or not puts:
+            return 0
+
+        # Determine the midpoint strike of the entire chain to separate OTM calls from OTM puts.
+        # The midpoint approximates the at-the-money level when no underlying price is available.
+        all_strikes = [c['strike'] for c in contracts]
+        midpoint = (min(all_strikes) + max(all_strikes)) / 2.0
+
+        # OTM calls: strike above midpoint, sorted ascending (nearest ATM first)
+        otm_calls = [c for c in calls if c['strike'] > midpoint]
+
+        # OTM puts: strike below midpoint, sorted descending (nearest ATM first)
+        otm_puts = [c for c in reversed(puts) if c['strike'] < midpoint]
+
+        if not otm_calls or not otm_puts:
+            return 0
+
+        # Pair by proximity rank: nearest OTM call with nearest OTM put, etc.
+        num_pairs = min(len(otm_calls), len(otm_puts), MAX_STRANGLE_PAIRS_PER_CHAIN)
+
         links_added = 0
-
-        calls = [c for c in contracts if c['type'] == 'call']
-        puts = [c for c in contracts if c['type'] == 'put']
-
-        # Link calls with puts at different strikes
-        for call in calls:
-            for put in puts:
-                if call['strike'] != put['strike']:
-                    self.graph.add((
-                        call['contract'],
-                        MARKET_ENRICHMENT.strangleWith,
-                        put['contract']
-                    ))
-                    links_added += 1
-                    self.stats['option_strategy_links'] += 1
+        for i in range(num_pairs):
+            self.graph.add((
+                otm_calls[i]['contract'],
+                MARKET_ENRICHMENT.strangleWith,
+                otm_puts[i]['contract']
+            ))
+            links_added += 1
+            self.stats['option_strategy_links'] += 1
 
         return links_added
 
