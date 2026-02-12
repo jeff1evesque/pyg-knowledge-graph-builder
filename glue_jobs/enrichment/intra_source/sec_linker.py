@@ -221,12 +221,12 @@ class SECIntraSourceLinker(IntraSourceEnricher):
             if len(company_uris) > 1:
                 unified_company = UNIFIED[f"Company_{cik}"]
 
-                if not list(self.graph.triples((unified_company, RDF.type, SEC_ENRICHMENT.UnifiedCompany))):
+                if (unified_company, RDF.type, SEC_ENRICHMENT.UnifiedCompany) not in self.graph:
                     self.graph.add((unified_company, RDF.type, SEC_ENRICHMENT.UnifiedCompany))
                     self.graph.add((unified_company, SEC_ENRICHMENT.hasCik, Literal(cik)))
 
                 for company_uri in company_uris:
-                    if not list(self.graph.triples((unified_company, OWL.sameAs, company_uri))):
+                    if (unified_company, OWL.sameAs, company_uri) not in self.graph:
                         self.graph.add((unified_company, OWL.sameAs, company_uri))
                         self.stats['company_unified'] += 1
 
@@ -281,12 +281,12 @@ class SECIntraSourceLinker(IntraSourceEnricher):
             if len(person_uris) > 1:
                 unified_person = UNIFIED[f"Person_{cik}"]
 
-                if not list(self.graph.triples((unified_person, RDF.type, SEC_ENRICHMENT.UnifiedPerson))):
+                if (unified_person, RDF.type, SEC_ENRICHMENT.UnifiedPerson) not in self.graph:
                     self.graph.add((unified_person, RDF.type, SEC_ENRICHMENT.UnifiedPerson))
                     self.graph.add((unified_person, SEC_ENRICHMENT.hasCik, Literal(cik)))
 
                 for person_uri in person_uris:
-                    if not list(self.graph.triples((unified_person, OWL.sameAs, person_uri))):
+                    if (unified_person, OWL.sameAs, person_uri) not in self.graph:
                         self.graph.add((unified_person, OWL.sameAs, person_uri))
                         self.stats['person_unified'] += 1
 
@@ -379,7 +379,7 @@ class SECIntraSourceLinker(IntraSourceEnricher):
                 current = filings[i]['filing']
                 next_filing = filings[i + 1]['filing']
 
-                if not list(self.graph.triples((current, SEC_ENRICHMENT.precedes, next_filing))):
+                if (current, SEC_ENRICHMENT.precedes, next_filing) not in self.graph:
                     self.graph.add((current, SEC_ENRICHMENT.precedes, next_filing))
                     links_added += 1
                     self.stats['temporal_sequences'] += 1
@@ -436,7 +436,7 @@ class SECIntraSourceLinker(IntraSourceEnricher):
                 current = filings[i]['filing']
                 next_filing = filings[i + 1]['filing']
 
-                if not list(self.graph.triples((current, SEC_ENRICHMENT.precedes, next_filing))):
+                if (current, SEC_ENRICHMENT.precedes, next_filing) not in self.graph:
                     self.graph.add((current, SEC_ENRICHMENT.precedes, next_filing))
                     links_added += 1
                     self.stats['temporal_sequences'] += 1
@@ -493,7 +493,7 @@ class SECIntraSourceLinker(IntraSourceEnricher):
                 current = proceedings[i]['proceeding']
                 next_proc = proceedings[i + 1]['proceeding']
 
-                if not list(self.graph.triples((current, SEC_ENRICHMENT.precedes, next_proc))):
+                if (current, SEC_ENRICHMENT.precedes, next_proc) not in self.graph:
                     self.graph.add((current, SEC_ENRICHMENT.precedes, next_proc))
                     links_added += 1
                     self.stats['temporal_sequences'] += 1
@@ -564,7 +564,7 @@ class SECIntraSourceLinker(IntraSourceEnricher):
                 current = actions[i]['action']
                 next_action = actions[i + 1]['action']
 
-                if not list(self.graph.triples((current, SEC_ENRICHMENT.precedes, next_action))):
+                if (current, SEC_ENRICHMENT.precedes, next_action) not in self.graph:
                     self.graph.add((current, SEC_ENRICHMENT.precedes, next_action))
                     links_added += 1
                     self.stats['temporal_sequences'] += 1
@@ -577,7 +577,7 @@ class SECIntraSourceLinker(IntraSourceEnricher):
                     current = releases[i]['action']
                     next_release = releases[i + 1]['action']
 
-                    if not list(self.graph.triples((current, SEC_ENRICHMENT.precedes, next_release))):
+                    if (current, SEC_ENRICHMENT.precedes, next_release) not in self.graph:
                         self.graph.add((current, SEC_ENRICHMENT.precedes, next_release))
                         links_added += 1
                         self.stats['temporal_sequences'] += 1
@@ -636,7 +636,7 @@ class SECIntraSourceLinker(IntraSourceEnricher):
                 current = suspensions[i]['suspension']
                 next_susp = suspensions[i + 1]['suspension']
 
-                if not list(self.graph.triples((current, SEC_ENRICHMENT.precedes, next_susp))):
+                if (current, SEC_ENRICHMENT.precedes, next_susp) not in self.graph:
                     self.graph.add((current, SEC_ENRICHMENT.precedes, next_susp))
                     links_added += 1
                     self.stats['temporal_sequences'] += 1
@@ -670,7 +670,7 @@ class SECIntraSourceLinker(IntraSourceEnricher):
             relationship = pattern['relationship']
 
             # Ensure sector entity exists
-            if not list(self.graph.triples((sector_uri, RDF.type, SEC_ENRICHMENT.EconomicSector))):
+            if (sector_uri, RDF.type, SEC_ENRICHMENT.EconomicSector) not in self.graph:
                 self.graph.add((sector_uri, RDF.type, SEC_ENRICHMENT.EconomicSector))
                 self.graph.add((sector_uri, RDFS.label, Literal(
                     sector_name.replace('_', ' ').title()
@@ -698,7 +698,7 @@ class SECIntraSourceLinker(IntraSourceEnricher):
                     """
 
                     for row in self.graph.query(uri_query):
-                        if not list(self.graph.triples((row.entity, SEC_ENRICHMENT.belongsToSector, sector_uri))):
+                        if (row.entity, SEC_ENRICHMENT.belongsToSector, sector_uri) not in self.graph:
                             self.graph.add((row.entity, SEC_ENRICHMENT.belongsToSector, sector_uri))
                             self.graph.add((row.entity, relationship, sector_uri))
                             self.stats['sector_links'] += 2
@@ -713,7 +713,7 @@ class SECIntraSourceLinker(IntraSourceEnricher):
                     """
 
                     for row in self.graph.query(label_query):
-                        if not list(self.graph.triples((row.entity, SEC_ENRICHMENT.belongsToSector, sector_uri))):
+                        if (row.entity, SEC_ENRICHMENT.belongsToSector, sector_uri) not in self.graph:
                             self.graph.add((row.entity, SEC_ENRICHMENT.belongsToSector, sector_uri))
                             self.graph.add((row.entity, relationship, sector_uri))
                             self.stats['sector_links'] += 2
@@ -743,7 +743,7 @@ class SECIntraSourceLinker(IntraSourceEnricher):
             relationship = pattern['relationship']
 
             # Ensure violation type entity exists
-            if not list(self.graph.triples((violation_uri, RDF.type, SEC_ENRICHMENT.ViolationType))):
+            if (violation_uri, RDF.type, SEC_ENRICHMENT.ViolationType) not in self.graph:
                 self.graph.add((violation_uri, RDF.type, SEC_ENRICHMENT.ViolationType))
                 self.graph.add((violation_uri, RDFS.label, Literal(
                     violation_name.replace('_', ' ').title()
@@ -792,7 +792,7 @@ class SECIntraSourceLinker(IntraSourceEnricher):
 
             # Link all matched entities to the violation type
             for entity in matched_entities:
-                if not list(self.graph.triples((entity, SEC_ENRICHMENT.hasViolationType, violation_uri))):
+                if (entity, SEC_ENRICHMENT.hasViolationType, violation_uri) not in self.graph:
                     self.graph.add((entity, SEC_ENRICHMENT.hasViolationType, violation_uri))
                     self.stats['violation_links'] += 1
 
@@ -816,7 +816,7 @@ class SECIntraSourceLinker(IntraSourceEnricher):
                                 b_dataset = ds
 
                         if a_dataset and b_dataset and a_dataset != b_dataset:
-                            if not list(self.graph.triples((entity_a, relationship, entity_b))):
+                            if (entity_a, relationship, entity_b) not in self.graph:
                                 self.graph.add((entity_a, relationship, entity_b))
                                 self.stats['violation_links'] += 1
 
@@ -928,7 +928,7 @@ class SECIntraSourceLinker(IntraSourceEnricher):
             if cik in target_by_cik:
                 for source_entity in source_by_cik[cik]:
                     for target_entity in target_by_cik[cik]:
-                        if not list(self.graph.triples((source_entity, relationship, target_entity))):
+                        if (source_entity, relationship, target_entity) not in self.graph:
                             self.graph.add((source_entity, relationship, target_entity))
                             links_added += 1
 
@@ -983,7 +983,7 @@ class SECIntraSourceLinker(IntraSourceEnricher):
             if ticker in target_by_ticker:
                 for source_entity in source_by_ticker[ticker]:
                     for target_entity in target_by_ticker[ticker]:
-                        if not list(self.graph.triples((source_entity, relationship, target_entity))):
+                        if (source_entity, relationship, target_entity) not in self.graph:
                             self.graph.add((source_entity, relationship, target_entity))
                             links_added += 1
 
@@ -1038,7 +1038,7 @@ class SECIntraSourceLinker(IntraSourceEnricher):
             if name in target_by_name:
                 for source_entity in source_by_name[name]:
                     for target_entity in target_by_name[name]:
-                        if not list(self.graph.triples((source_entity, relationship, target_entity))):
+                        if (source_entity, relationship, target_entity) not in self.graph:
                             self.graph.add((source_entity, relationship, target_entity))
                             links_added += 1
 
@@ -1100,7 +1100,7 @@ class SECIntraSourceLinker(IntraSourceEnricher):
         links_added = 0
         for source_entity in source_entities:
             for target_entity in target_entities:
-                if not list(self.graph.triples((source_entity, relationship, target_entity))):
+                if (source_entity, relationship, target_entity) not in self.graph:
                     self.graph.add((source_entity, relationship, target_entity))
                     links_added += 1
 
@@ -1177,7 +1177,7 @@ class SECIntraSourceLinker(IntraSourceEnricher):
                 for source_entity in source_matches:
                     for target_entity in target_matches:
                         if source_entity != target_entity:
-                            if not list(self.graph.triples((source_entity, relationship, target_entity))):
+                            if (source_entity, relationship, target_entity) not in self.graph:
                                 self.graph.add((source_entity, relationship, target_entity))
                                 links_added += 1
 
