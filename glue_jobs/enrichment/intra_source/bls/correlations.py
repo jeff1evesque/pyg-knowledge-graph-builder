@@ -1126,4 +1126,275 @@ KNOWN_CORRELATIONS = [
         'lag_months': 0,
         'strength': 'strong'
     },
+
+    # ============================================
+    # WKYENG-EMPSIT CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'wkyeng_empsit_weekly_earnings',
+        'source_dataset': 'wkyeng',
+        'target_dataset': 'empsit',
+        'source_pattern': 'Total',
+        'target_pattern': 'Average weekly earnings',
+        'description': 'WKYENG median weekly earnings correlate with EMPSIT average weekly earnings',
+        'relationship': BLS_ENRICHMENT.wageEarningsLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'wkyeng_empsit_hourly_earnings',
+        'source_dataset': 'wkyeng',
+        'target_dataset': 'empsit',
+        'source_pattern': 'Total',
+        'target_pattern': 'Average hourly earnings',
+        'description': 'WKYENG median weekly earnings correlate with EMPSIT average hourly earnings',
+        'relationship': BLS_ENRICHMENT.wageEarningsLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'wkyeng_empsit_occupation_employment',
+        'source_dataset': 'wkyeng',
+        'target_dataset': 'empsit',
+        'source_pattern': 'Management',
+        'target_pattern': 'Management',
+        'description': 'WKYENG occupation earnings correlate with EMPSIT occupation employment',
+        'relationship': BLS_ENRICHMENT.employmentEarningsLink,
+        'lag_months': 0,
+        'strength': 'medium'
+    },
+    {
+        'name': 'wkyeng_empsit_production_earnings',
+        'source_dataset': 'wkyeng',
+        'target_dataset': 'empsit',
+        'source_pattern': 'Production',
+        'target_pattern': 'Production',
+        'description': 'WKYENG production occupation earnings correlate with EMPSIT production employment',
+        'relationship': BLS_ENRICHMENT.employmentEarningsLink,
+        'lag_months': 0,
+        'strength': 'medium'
+    },
+
+    # ============================================
+    # WKYENG-ECI CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'wkyeng_eci_wage_index',
+        'source_dataset': 'wkyeng',
+        'target_dataset': 'eci',
+        'source_pattern': 'Total',
+        'target_pattern': 'Wages and salaries',
+        'description': 'WKYENG median weekly earnings correlate with ECI wage index',
+        'relationship': BLS_ENRICHMENT.wageEarningsLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'wkyeng_eci_compensation',
+        'source_dataset': 'wkyeng',
+        'target_dataset': 'eci',
+        'source_pattern': 'Total',
+        'target_pattern': 'Total compensation',
+        'description': 'WKYENG median weekly earnings correlate with ECI total compensation',
+        'relationship': BLS_ENRICHMENT.compensationEarningsLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'wkyeng_eci_private_industry',
+        'source_dataset': 'wkyeng',
+        'target_dataset': 'eci',
+        'source_pattern': 'Total',
+        'target_pattern': 'Private industry',
+        'description': 'WKYENG earnings correlate with ECI private industry wages',
+        'relationship': BLS_ENRICHMENT.wageEarningsLink,
+        'lag_months': 0,
+        'strength': 'medium'
+    },
+
+    # ============================================
+    # WKYENG-CPI CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'wkyeng_cpi_real_earnings',
+        'source_dataset': 'wkyeng',
+        'target_dataset': 'cpi',
+        'source_pattern': 'Total',
+        'target_pattern': 'All items',
+        'description': 'WKYENG constant dollar earnings are deflated by CPI',
+        'relationship': BLS_ENRICHMENT.inflationAdjustmentLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'wkyeng_cpi_purchasing_power',
+        'source_dataset': 'wkyeng',
+        'target_dataset': 'cpi',
+        'source_pattern': 'Total',
+        'target_pattern': 'All items less food and energy',
+        'description': 'WKYENG real earnings reflect purchasing power affected by core CPI',
+        'relationship': BLS_ENRICHMENT.wageInflationLink,
+        'lag_months': 0,
+        'strength': 'medium'
+    },
+
+    # ============================================
+    # WKYENG-REALER CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'wkyeng_realer_real_weekly_earnings',
+        'source_dataset': 'wkyeng',
+        'target_dataset': 'realer',
+        'source_pattern': 'Total',
+        'target_pattern': 'Real average weekly earnings',
+        'description': 'WKYENG median weekly earnings complement REALER average weekly earnings',
+        'relationship': BLS_ENRICHMENT.realNominalEarningsLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'wkyeng_realer_constant_dollar',
+        'source_dataset': 'wkyeng',
+        'target_dataset': 'realer',
+        'source_pattern': 'Total',
+        'target_pattern': 'Real average hourly earnings',
+        'description': 'WKYENG constant dollar earnings complement REALER real hourly earnings',
+        'relationship': BLS_ENRICHMENT.realNominalEarningsLink,
+        'lag_months': 0,
+        'strength': 'medium'
+    },
+
+    # ============================================
+    # WKYENG-JOLTS CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'wkyeng_jolts_earnings_openings',
+        'source_dataset': 'wkyeng',
+        'target_dataset': 'jolts',
+        'source_pattern': 'Total',
+        'target_pattern': 'Job openings',
+        'description': 'Weekly earnings levels correlate with job openings (tight labor market)',
+        'relationship': BLS_ENRICHMENT.wageJobOpeningsLink,
+        'lag_months': 0,
+        'strength': 'medium'
+    },
+    {
+        'name': 'wkyeng_jolts_earnings_quits',
+        'source_dataset': 'wkyeng',
+        'target_dataset': 'jolts',
+        'source_pattern': 'Total',
+        'target_pattern': 'Quits',
+        'description': 'Weekly earnings levels correlate with voluntary quits',
+        'relationship': BLS_ENRICHMENT.benefitsQuitsLink,
+        'lag_months': 1,
+        'strength': 'weak'
+    },
+
+    # ============================================
+    # WKYENG-LAUS CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'wkyeng_laus_earnings_unemployment',
+        'source_dataset': 'wkyeng',
+        'target_dataset': 'laus',
+        'source_pattern': 'Total',
+        'target_pattern': 'Unemployed',
+        'description': 'Weekly earnings levels inversely correlate with unemployment',
+        'relationship': BLS_ENRICHMENT.unemploymentCorrelation,
+        'lag_months': 0,
+        'strength': 'weak'
+    },
+
+    # ============================================
+    # WKYENG-XIMPIM CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'wkyeng_ximpim_earnings_import_prices',
+        'source_dataset': 'wkyeng',
+        'target_dataset': 'ximpim',
+        'source_pattern': 'Total',
+        'target_pattern': 'Import',
+        'description': 'Weekly earnings purchasing power affected by import prices',
+        'relationship': BLS_ENRICHMENT.importConsumerPriceLink,
+        'lag_months': 1,
+        'strength': 'weak'
+    },
+
+    # ============================================
+    # WKYENG INTERNAL CORRELATIONS
+    # ============================================
+
+    {
+        'name': 'wkyeng_fulltime_parttime',
+        'source_dataset': 'wkyeng',
+        'target_dataset': 'wkyeng',
+        'source_pattern': 'QuarterlyEarningsData',
+        'target_pattern': 'QuarterlyPartTimeData',
+        'description': 'Full-time and part-time earnings patterns for same demographics',
+        'relationship': BLS_ENRICHMENT.employmentTypeLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'wkyeng_current_constant_dollars',
+        'source_dataset': 'wkyeng',
+        'target_dataset': 'wkyeng',
+        'source_pattern': 'medianEarningsCurrent',
+        'target_pattern': 'medianEarningsConstant',
+        'description': 'Current and constant dollar earnings for same category',
+        'relationship': BLS_ENRICHMENT.realNominalEarningsLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'wkyeng_sex_gap',
+        'source_dataset': 'wkyeng',
+        'target_dataset': 'wkyeng',
+        'source_pattern': 'Men',
+        'target_pattern': 'Women',
+        'description': 'Gender earnings gap comparison',
+        'relationship': BLS_ENRICHMENT.demographicComparisonLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'wkyeng_race_comparison',
+        'source_dataset': 'wkyeng',
+        'target_dataset': 'wkyeng',
+        'source_pattern': 'White',
+        'target_pattern': 'Black',
+        'description': 'Racial earnings gap comparison',
+        'relationship': BLS_ENRICHMENT.demographicComparisonLink,
+        'lag_months': 0,
+        'strength': 'medium'
+    },
+    {
+        'name': 'wkyeng_education_premium',
+        'source_dataset': 'wkyeng',
+        'target_dataset': 'wkyeng',
+        'source_pattern': 'high school',
+        'target_pattern': 'Bachelor',
+        'description': 'Education earnings premium comparison',
+        'relationship': BLS_ENRICHMENT.educationPremiumLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
+    {
+        'name': 'wkyeng_median_distribution',
+        'source_dataset': 'wkyeng',
+        'target_dataset': 'wkyeng',
+        'source_pattern': 'QuarterlyCharacteristicData',
+        'target_pattern': 'QuarterlyDistributionData',
+        'description': 'Median earnings complement distribution data for same characteristics',
+        'relationship': BLS_ENRICHMENT.measurementComplementLink,
+        'lag_months': 0,
+        'strength': 'strong'
+    },
 ]

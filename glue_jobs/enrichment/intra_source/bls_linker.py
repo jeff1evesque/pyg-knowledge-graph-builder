@@ -119,6 +119,8 @@ class BLSIntraSourceLinker(IntraSourceEnricher):
             enrichers['metro'] = METROEnricher(self.graph)
         if 'realer' in self.available_datasets:
             enrichers['realer'] = REALEREnricher(self.graph)
+        if 'wkyeng' in self.available_datasets:
+            enrichers['wkyeng'] = WKYENGEnricher(self.graph)
 
         return enrichers
 
@@ -180,6 +182,7 @@ class BLSIntraSourceLinker(IntraSourceEnricher):
             'empsit': EMPSIT,
             'ximpim': XIMPIM,
             'laus': LAUS,
+            'wkyeng': WKYENG
         }
         return namespace_map.get(dataset_name)
 
