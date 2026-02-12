@@ -12,9 +12,8 @@ from glue_jobs.enrichment.intra_source.sec.patterns import (
     SEC_SECTOR_PATTERNS, SEC_VIOLATION_PATTERNS, SEC_COMPANY_STATUS_PATTERNS
 )
 from glue_jobs.enrichment.intra_source.sec.correlations import KNOWN_CORRELATIONS
-from glue_jobs.enrichment.intra_source.sec.measurements import MEASUREMENT_TYPES, ENTITY_MATCHING_PROPERTIES
 from rdflib import Namespace
-from typing import Dict, Set, List
+from typing import Dict, Set
 from dateutil import parser as date_parser
 import logging
 
