@@ -2,7 +2,7 @@
 BLS Measurement Types - Temporal linking configurations
 """
 from glue_jobs.utils.rdf_utils import (
-    CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER
+    CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER, WKYENG
 )
 
 
@@ -1013,6 +1013,54 @@ MEASUREMENT_TYPES = {
             'category_property': REALER.hasCategory,
             'month_property': REALER.hasMonth,
             'year_property': REALER.hasYear
+        },
+    },
+
+'wkyeng': {
+        # Table 1: Quarterly Earnings by Sex (Seasonally Adjusted)
+        'QuarterlyEarningsData': {
+            'class': WKYENG.QuarterlyEarningsData,
+            'category_property': WKYENG.hasSex,
+            'quarter_property': WKYENG.hasQuarter,
+            'year_property': WKYENG.hasYear,
+            # Note: WKYENG uses quarter_property instead of month_property
+            'month_property': None,
+        },
+
+        # Tables 2, 3: Quarterly Characteristic Data (Not Seasonally Adjusted)
+        'QuarterlyCharacteristicData': {
+            'class': WKYENG.QuarterlyCharacteristicData,
+            'category_property': WKYENG.hasCharacteristic,
+            'quarter_property': WKYENG.hasQuarter,
+            'year_property': WKYENG.hasYear,
+            'month_property': None,
+        },
+
+        # Table 4: Quarterly Occupation Data (Not Seasonally Adjusted)
+        'QuarterlyOccupationData': {
+            'class': WKYENG.QuarterlyOccupationData,
+            'category_property': WKYENG.hasOccupation,
+            'quarter_property': WKYENG.hasQuarter,
+            'year_property': WKYENG.hasYear,
+            'month_property': None,
+        },
+
+        # Table 5: Quarterly Distribution Data (Not Seasonally Adjusted)
+        'QuarterlyDistributionData': {
+            'class': WKYENG.QuarterlyDistributionData,
+            'category_property': WKYENG.hasCharacteristic,
+            'quarter_property': WKYENG.hasQuarter,
+            'year_property': WKYENG.hasYear,
+            'month_property': None,
+        },
+
+        # Table 6: Quarterly Part-Time Data (Not Seasonally Adjusted)
+        'QuarterlyPartTimeData': {
+            'class': WKYENG.QuarterlyPartTimeData,
+            'category_property': WKYENG.hasCharacteristic,
+            'quarter_property': WKYENG.hasQuarter,
+            'year_property': WKYENG.hasYear,
+            'month_property': None,
         },
     }
 }

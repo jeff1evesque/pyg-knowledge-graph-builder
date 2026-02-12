@@ -287,6 +287,7 @@ BLS_SECTOR_PATTERNS = {
             'laus': [],  # LAUS doesn't have food-specific categories
             'metro': [],
             'realer': [],
+            'wkyeng': [],
         },
         'relationship': BLS_ENRICHMENT.foodSectorCorrelation
     },
@@ -390,6 +391,7 @@ BLS_SECTOR_PATTERNS = {
             'laus': ['Mining and logging'],
             'metro': [],
             'realer': [],
+            'wkyeng': [],
         },
         'relationship': BLS_ENRICHMENT.energySectorCorrelation
     },
@@ -561,6 +563,7 @@ BLS_SECTOR_PATTERNS = {
             'laus': ['Construction'],
             'metro': [],
             'realer': [],
+            'wkyeng': [],
         },
         'relationship': BLS_ENRICHMENT.housingSectorCorrelation
     },
@@ -725,6 +728,7 @@ BLS_SECTOR_PATTERNS = {
             'laus': ['Trade, transportation, and utilities'],
             'metro': [],
             'realer': [],
+            'wkyeng': ['Transportation and material moving occupations'],
         },
         'relationship': BLS_ENRICHMENT.transportationSectorCorrelation
     },
@@ -828,6 +832,7 @@ BLS_SECTOR_PATTERNS = {
             'laus': [],
             'metro': [],
             'realer': [],
+            'wkyeng': []
         },
         'relationship': BLS_ENRICHMENT.goodsServicesRelation
     },
@@ -1111,6 +1116,10 @@ BLS_SECTOR_PATTERNS = {
             'laus': ['Manufacturing'],
             'metro': [],
             'realer': [],
+            'wkyeng': [
+                'Production occupations',
+                'Production, transportation, and material moving occupations',
+            ],
         },
         'relationship': BLS_ENRICHMENT.manufacturingSectorCorrelation
     },
@@ -1191,6 +1200,11 @@ BLS_SECTOR_PATTERNS = {
             'laus': [],
             'metro': [],
             'realer': [],
+            'wkyeng': [
+                'Sales and office occupations',
+                'Sales and related occupations',
+                'Office and administrative support occupations',
+            ],
         },
         'relationship': BLS_ENRICHMENT.retailSectorCorrelation
     },
@@ -1280,6 +1294,7 @@ BLS_SECTOR_PATTERNS = {
             'laus': ['Education and health services'],
             'metro': [],
             'realer': [],
+            'wkyeng': [],
         },
         'relationship': BLS_ENRICHMENT.healthcareSectorCorrelation
     },
@@ -1358,6 +1373,7 @@ BLS_SECTOR_PATTERNS = {
             'laus': [],
             'metro': [],
             'realer': [],
+            'wkyeng': [],
         },
         'relationship': BLS_ENRICHMENT.recreationSectorCorrelation
     },
@@ -1453,6 +1469,7 @@ BLS_SECTOR_PATTERNS = {
             'laus': ['Information'],
             'metro': [],
             'realer': [],
+            'wkyeng': [],
         },
         'relationship': BLS_ENRICHMENT.educationCommunicationSectorCorrelation
     },
@@ -1486,6 +1503,7 @@ BLS_SECTOR_PATTERNS = {
             'laus': [],
             'metro': [],
             'realer': [],
+            'wkyeng': [],
         },
         'relationship': BLS_ENRICHMENT.personalCareSectorCorrelation
     },
@@ -1507,6 +1525,7 @@ BLS_SECTOR_PATTERNS = {
             'laus': [],
             'metro': [],
             'realer': [],
+            'wkyeng': [],
         },
         'relationship': BLS_ENRICHMENT.tobaccoSectorCorrelation
     },
@@ -1587,6 +1606,7 @@ BLS_SECTOR_PATTERNS = {
             'laus': [],
             'metro': [],
             'realer': [],
+            'wkyeng': [],
         },
         'relationship': BLS_ENRICHMENT.miscellaneousGoodsSectorCorrelation
     },
@@ -1649,6 +1669,11 @@ BLS_SECTOR_PATTERNS = {
             'laus': ['Professional and business services'],
             'metro': [],
             'realer': [],
+            'wkyeng': [
+                'Management, professional, and related occupations',
+                'Management, business, and financial operations occupations',
+                'Professional and related occupations',
+            ],
         },
         'relationship': BLS_ENRICHMENT.professionalServicesSectorCorrelation
     },
@@ -1674,6 +1699,7 @@ BLS_SECTOR_PATTERNS = {
             'laus': ['Leisure and hospitality'],
             'metro': [],
             'realer': [],
+            'wkyeng': [],
         },
         'relationship': BLS_ENRICHMENT.leisureHospitalitySectorCorrelation
     },
@@ -1731,6 +1757,7 @@ BLS_SECTOR_PATTERNS = {
             'laus': ['Government'],
             'metro': [],
             'realer': [],
+            'wkyeng': [],
         },
         'relationship': BLS_ENRICHMENT.governmentSectorCorrelation
     },
@@ -1768,6 +1795,7 @@ BLS_SECTOR_PATTERNS = {
             'laus': [],
             'metro': [],
             'realer': [],
+            'wkyeng': [],
         },
         'relationship': BLS_ENRICHMENT.informationSectorCorrelation
     },
@@ -1808,6 +1836,7 @@ BLS_SECTOR_PATTERNS = {
             'laus': ['Financial activities'],
             'metro': [],
             'realer': [],
+            'wkyeng': [],
         },
         'relationship': BLS_ENRICHMENT.financialSectorCorrelation
     },
@@ -1855,6 +1884,10 @@ BLS_SECTOR_PATTERNS = {
             'laus': [],
             'metro': [],
             'realer': [],
+            'wkyeng': [
+                'Natural resources, construction, and maintenance occupations',
+                'Farming, fishing, and forestry occupations',
+            ],
         },
         'relationship': BLS_ENRICHMENT.naturalResourcesSectorCorrelation
     },
@@ -1878,6 +1911,11 @@ BLS_SECTOR_PATTERNS = {
             'laus': [],
             'metro': [],
             'realer': [],
+            'wkyeng': [
+                'Construction and extraction occupations',
+                'Installation, maintenance, and repair occupations',
+                'Natural resources, construction, and maintenance occupations',
+            ],
         },
         'relationship': BLS_ENRICHMENT.constructionTradesSectorCorrelation
     },
@@ -1924,6 +1962,7 @@ BLS_SECTOR_PATTERNS = {
             'laus': [],
             'metro': [],
             'realer': [],
+            'wkyeng': [],
         },
         'relationship': BLS_ENRICHMENT.apparelSectorCorrelation
     },
@@ -1968,6 +2007,7 @@ BLS_SECTOR_PATTERNS = {
             'laus': [],
             'metro': [],
             'realer': [],
+            'wkyeng': [],
         },
         'relationship': BLS_ENRICHMENT.capitalInvestmentSectorCorrelation
     },
@@ -2008,6 +2048,7 @@ BLS_SECTOR_PATTERNS = {
             'laus': [],
             'metro': [],
             'realer': [],
+            'wkyeng': [],
         },
         'relationship': BLS_ENRICHMENT.exportsSectorCorrelation
     },
@@ -2081,6 +2122,7 @@ BLS_SECTOR_PATTERNS = {
                 'ASEAN (Dec. 2003=100)',
                 'Asia Near East (Dec. 2003=100)',
             ],
+            'laus': [],
             'metro': [
                 # Metropolitan Statistical Areas (MSAs)
                 'Metropolitan',
@@ -2124,6 +2166,7 @@ BLS_SECTOR_PATTERNS = {
                 'Baltimore-Columbia-Towson',
             ],
             'realer': [],
+            'wkyeng': [],
         },
         'relationship': BLS_ENRICHMENT.geographicRegionsSectorCorrelation
     },
@@ -2209,6 +2252,7 @@ BLS_SECTOR_PATTERNS = {
             ],
             'metro': [],
             'realer': [],
+            'wkyeng': [],
         },
         'relationship': BLS_ENRICHMENT.employmentSizeSectorCorrelation
     },
