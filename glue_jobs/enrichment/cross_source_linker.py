@@ -208,47 +208,47 @@ class CrossSourceLinker:
             relationship = pattern['relationship']
             
             # Add sector entity if not exists
-            if not list(self.graph.triples((sector_uri, RDF.type, BLS_ENRICHMENT.EconomicSector))):
+            if (sector_uri, RDF.type, BLS_ENRICHMENT.EconomicSector) not in self.graph:
                 self.graph.add((sector_uri, RDF.type, BLS_ENRICHMENT.EconomicSector))
                 self.graph.add((sector_uri, RDFS.label, Literal(sector_name.replace('_', ' ').title())))
-            
+
             # Link BLS entities (already done by intra-source, but we add cross-source relationship)
             if 'bls' in self.available_sources:
                 self._link_bls_to_sector(sector_uri, relationship, pattern['keywords'])
-            
+
             # Link SEC entities
             if 'sec' in self.available_sources:
                 self._link_sec_to_sector(sector_uri, relationship, sector_name)
-            
+
             # Link Market entities
             if 'market' in self.available_sources:
                 self._link_market_to_sector(sector_uri, relationship, sector_name)
-            
+
             # Link NOAA entities
             if 'noaa' in self.available_sources:
                 self._link_noaa_to_sector(sector_uri, relationship, sector_name)
-        
+
         logger.info(f"  Created {self.stats['sector_links']} cross-source sector links")
-    
+
     def _link_bls_to_sector(self, sector_uri: URIRef, relationship: URIRef, keywords: Dict):
         """Link BLS entities to sector (cross-source relationship)"""
         # BLS entities already linked to sector by intra-source enrichment
         # Here we just add the cross-source correlation relationship if not exists
-        
+
         for dataset_name, dataset_keywords in keywords.items():
             if dataset_name not in ['cpi', 'ppi', 'eci', 'jolts', 'empsit', 'ximpim', 'laus', 'metro', 'realer', 'wkyeng']:
                 continue
-            
+
             namespace_map = {
                 'cpi': CPI, 'ppi': PPI, 'eci': ECI, 'jolts': JOLTS, 'empsit': EMPSIT,
                 'ximpim': XIMPIM, 'laus': LAUS, 'metro': METRO, 'realer': REALER,
                 'wkyeng': WKYENG
             }
-            
+
             namespace = namespace_map.get(dataset_name)
             if not namespace:
                 continue
-            
+
             # Find entities already linked to this sector
             query = f"""
             SELECT DISTINCT ?entity WHERE {{
@@ -256,13 +256,13 @@ class CrossSourceLinker:
                 FILTER(STRSTARTS(STR(?entity), "{namespace}"))
             }}
             """
-            
+
             for row in self.graph.query(query):
                 # Add cross-source correlation if not exists
-                if not list(self.graph.triples((row.entity, relationship, sector_uri))):
+                if (row.entity, relationship, sector_uri) not in self.graph:
                     self.graph.add((row.entity, relationship, sector_uri))
                     self.stats['sector_links'] += 1
-    
+
     def _link_sec_to_sector(self, sector_uri: URIRef, relationship: URIRef, sector_name: str):
         """Link SEC entities to sector based on industry keywords"""
         # Map sector names to SEC industry keywords
@@ -274,11 +274,11 @@ class CrossSourceLinker:
             'manufacturing_sector': ['Manufacturing', 'Industrial'],
             'food_sector': ['Food', 'Beverage', 'Restaurant'],
         }
-        
+
         keywords = sec_sector_keywords.get(sector_name, [])
         if not keywords:
             return
-        
+
         # Find SEC filings with industry keywords in issuer name or description
         for keyword in keywords:
             query = f"""
@@ -289,12 +289,12 @@ class CrossSourceLinker:
                 FILTER(CONTAINS(LCASE(?label), LCASE("{keyword}")))
             }}
             """
-            
+
             for row in self.graph.query(query):
                 self.graph.add((row.filing, BLS_ENRICHMENT.belongsToSector, sector_uri))
                 self.graph.add((row.filing, relationship, sector_uri))
                 self.stats['sector_links'] += 2
-    
+
     def _link_market_to_sector(self, sector_uri: URIRef, relationship: URIRef, sector_name: str):
         """Link Market entities to sector based on ticker symbols"""
         # Map sector names to ticker symbols
@@ -306,11 +306,11 @@ class CrossSourceLinker:
             'transportation_sector': ['UPS', 'FDX', 'DAL', 'UAL', 'LUV', 'AAL'],
             'food_sector': ['WMT', 'KO', 'PEP', 'MCD', 'SBUX', 'KHC', 'GIS'],
         }
-        
+
         tickers = market_sector_tickers.get(sector_name, [])
         if not tickers:
             return
-        
+
         for ticker in tickers:
             query = f"""
             SELECT DISTINCT ?ticker WHERE {{
@@ -318,12 +318,12 @@ class CrossSourceLinker:
                         <{MARKET.symbol}> "{ticker}" .
             }}
             """
-            
+
             for row in self.graph.query(query):
                 self.graph.add((row.ticker, BLS_ENRICHMENT.belongsToSector, sector_uri))
                 self.graph.add((row.ticker, relationship, sector_uri))
                 self.stats['sector_links'] += 2
-    
+
     def _link_noaa_to_sector(self, sector_uri: URIRef, relationship: URIRef, sector_name: str):
         """Link NOAA weather events to affected sectors"""
         # Weather events can affect certain sectors
@@ -332,11 +332,11 @@ class CrossSourceLinker:
             'food_sector': ['Drought', 'Flood', 'Freeze', 'Excessive Heat'],
             'transportation_sector': ['Winter Storm', 'Hurricane', 'Flood', 'Ice Storm'],
         }
-        
+
         event_types = noaa_sector_impacts.get(sector_name, [])
         if not event_types:
             return
-        
+
         for event_type in event_types:
             query = f"""
             SELECT DISTINCT ?alert WHERE {{
@@ -345,25 +345,25 @@ class CrossSourceLinker:
                 FILTER(CONTAINS(STR(?event), "{event_type}"))
             }}
             """
-            
+
             for row in self.graph.query(query):
                 self.graph.add((row.alert, BLS_ENRICHMENT.affectsSector, sector_uri))
                 self.graph.add((row.alert, relationship, sector_uri))
                 self.stats['sector_links'] += 2
-    
+
     def link_by_company(self):
         """
         Link entities referencing same company across sources
-        
+
         Example:
             sec:AAPL_Filing + market:AAPL_Ticker → unified:Company_AAPL
         """
         if 'sec' not in self.available_sources or 'market' not in self.available_sources:
             logger.info("  Skipping company linking (requires both SEC and Market data)")
             return
-        
+
         logger.info("  Linking by company/ticker...")
-        
+
         # Get all tickers from market data
         ticker_query = f"""
         SELECT DISTINCT ?ticker ?symbol WHERE {{
@@ -371,22 +371,22 @@ class CrossSourceLinker:
                     <{MARKET.symbol}> ?symbol .
         }}
         """
-        
+
         for row in self.graph.query(ticker_query):
             symbol = str(row.symbol)
-            
+
             # Create unified company entity
             unified_company = UNIFIED[f"Company_{symbol}"]
-            
-            if not list(self.graph.triples((unified_company, RDF.type, BLS_ENRICHMENT.UnifiedCompany))):
+
+            if (unified_company, RDF.type, BLS_ENRICHMENT.UnifiedCompany) not in self.graph:
                 self.graph.add((unified_company, RDF.type, BLS_ENRICHMENT.UnifiedCompany))
                 self.graph.add((unified_company, BLS_ENRICHMENT.ticker, Literal(symbol)))
-            
+
             # Link market ticker
-            if not list(self.graph.triples((row.ticker, BLS_ENRICHMENT.refersToCompany, unified_company))):
+            if (row.ticker, BLS_ENRICHMENT.refersToCompany, unified_company) not in self.graph:
                 self.graph.add((row.ticker, BLS_ENRICHMENT.refersToCompany, unified_company))
                 self.stats['company_links'] += 1
-            
+
             # Find SEC filings for this ticker
             sec_query = f"""
             SELECT DISTINCT ?filing WHERE {{
@@ -394,23 +394,23 @@ class CrossSourceLinker:
                         filings:hasIssuerTicker "{symbol}" .
             }}
             """
-            
+
             for sec_row in self.graph.query(sec_query):
-                if not list(self.graph.triples((sec_row.filing, BLS_ENRICHMENT.refersToCompany, unified_company))):
+                if (sec_row.filing, BLS_ENRICHMENT.refersToCompany, unified_company) not in self.graph:
                     self.graph.add((sec_row.filing, BLS_ENRICHMENT.refersToCompany, unified_company))
                     self.stats['company_links'] += 1
-        
+
         logger.info(f"  Created {self.stats['company_links']} company-based links")
-    
+
     def link_by_geography(self):
         """
         Link entities by geographic region
-        
+
         Example:
             laus:California + noaa:CaliforniaAlert → unified:CaliforniaRegion
         """
         logger.info("  Linking by geographic region...")
-        
+
         # Define unified regions (US states)
         us_states = [
             'Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado',
@@ -424,14 +424,14 @@ class CrossSourceLinker:
             'Tennessee', 'Texas', 'Utah', 'Vermont', 'Virginia', 'Washington',
             'West Virginia', 'Wisconsin', 'Wyoming'
         ]
-        
+
         for state in us_states:
             unified_region = UNIFIED[f"{state.replace(' ', '')}Region"]
-            
-            if not list(self.graph.triples((unified_region, RDF.type, BLS_ENRICHMENT.GeographicRegion))):
+
+            if (unified_region, RDF.type, BLS_ENRICHMENT.GeographicRegion) not in self.graph:
                 self.graph.add((unified_region, RDF.type, BLS_ENRICHMENT.GeographicRegion))
                 self.graph.add((unified_region, RDFS.label, Literal(state)))
-            
+
             # Link LAUS state data
             if 'bls' in self.available_sources:
                 laus_query = f"""
@@ -442,12 +442,12 @@ class CrossSourceLinker:
                     FILTER(CONTAINS(STR(?label), "{state}"))
                 }}
                 """
-                
+
                 for row in self.graph.query(laus_query):
-                    if not list(self.graph.triples((row.entity, BLS_ENRICHMENT.hasRegion, unified_region))):
+                    if (row.entity, BLS_ENRICHMENT.hasRegion, unified_region) not in self.graph:
                         self.graph.add((row.entity, BLS_ENRICHMENT.hasRegion, unified_region))
                         self.stats['geographic_links'] += 1
-            
+
             # Link NOAA alerts for this state
             if 'noaa' in self.available_sources:
                 noaa_query = f"""
@@ -458,18 +458,18 @@ class CrossSourceLinker:
                     FILTER(CONTAINS(STR(?areaDesc), "{state}"))
                 }}
                 """
-                
+
                 for row in self.graph.query(noaa_query):
-                    if not list(self.graph.triples((row.alert, BLS_ENRICHMENT.affectsRegion, unified_region))):
+                    if (row.alert, BLS_ENRICHMENT.affectsRegion, unified_region) not in self.graph:
                         self.graph.add((row.alert, BLS_ENRICHMENT.affectsRegion, unified_region))
                         self.stats['geographic_links'] += 1
-        
+
         logger.info(f"  Created {self.stats['geographic_links']} geographic links")
-    
+
     def create_causal_links(self):
         """
         Create potential causal relationships across sources
-        
+
         Extends KNOWN_CORRELATIONS to cross-source relationships:
         - BLS → Market (economic indicators affect stock prices)
         - BLS → SEC (economic conditions affect filings/enforcement)
@@ -477,21 +477,21 @@ class CrossSourceLinker:
         - SEC → Market (filings affect stock prices)
         """
         logger.info("  Creating causal relationships...")
-        
+
         # BLS → Market causal links
         if 'bls' in self.available_sources and 'market' in self.available_sources:
             self._link_bls_to_market()
-        
+
         # NOAA → Market causal links
         if 'noaa' in self.available_sources and 'market' in self.available_sources:
             self._link_noaa_to_market()
-        
+
         # SEC → Market causal links
         if 'sec' in self.available_sources and 'market' in self.available_sources:
             self._link_sec_to_market()
-        
+
         logger.info(f"  Created {self.stats['causal_links']} causal links")
-    
+
     def _link_bls_to_market(self):
         """Link BLS economic indicators to market entities"""
         # CPI Energy → Energy stocks
@@ -501,17 +501,17 @@ class CrossSourceLinker:
             FILTER(STRSTARTS(STR(?entity), "{CPI}"))
         }}
         """
-        
+
         market_energy_query = f"""
         SELECT DISTINCT ?ticker WHERE {{
             ?ticker <{BLS_ENRICHMENT.belongsToSector}> <{BLS_ENRICHMENT.EnergySector}> .
             FILTER(STRSTARTS(STR(?ticker), "{MARKET}"))
         }}
         """
-        
+
         cpi_entities = list(self.graph.query(cpi_energy_query))
         market_entities = list(self.graph.query(market_energy_query))
-        
+
         for cpi_row in cpi_entities:
             for market_row in market_entities:
                 self.graph.add((
@@ -520,7 +520,7 @@ class CrossSourceLinker:
                     market_row.ticker
                 ))
                 self.stats['causal_links'] += 1
-    
+
     def _link_noaa_to_market(self):
         """Link weather events to affected market sectors"""
         # Hurricane → Energy stocks
@@ -531,17 +531,17 @@ class CrossSourceLinker:
             FILTER(CONTAINS(STR(?event), "Hurricane"))
         }}
         """
-        
+
         energy_stocks_query = f"""
         SELECT DISTINCT ?ticker WHERE {{
             ?ticker <{BLS_ENRICHMENT.belongsToSector}> <{BLS_ENRICHMENT.EnergySector}> .
             FILTER(STRSTARTS(STR(?ticker), "{MARKET}"))
         }}
         """
-        
+
         alerts = list(self.graph.query(hurricane_query))
         stocks = list(self.graph.query(energy_stocks_query))
-        
+
         for alert_row in alerts:
             for stock_row in stocks:
                 self.graph.add((
@@ -550,7 +550,7 @@ class CrossSourceLinker:
                     stock_row.ticker
                 ))
                 self.stats['causal_links'] += 1
-    
+
     def _link_sec_to_market(self):
         """Link SEC filings to stock price movements"""
         # Form 10-K filings → Stock prices
@@ -562,7 +562,7 @@ class CrossSourceLinker:
                     market:symbol ?tickerSymbol .
         }
         """
-        
+
         for row in self.graph.query(filing_query):
             self.graph.add((
                 row.filing,
@@ -570,18 +570,18 @@ class CrossSourceLinker:
                 row.ticker
             ))
             self.stats['causal_links'] += 1
-    
+
     def align_measurement_types(self):
         """
         Align similar measurement types across sources
-        
+
         Examples:
         - Price indices (CPI, PPI) ↔ Stock prices (Market)
         - Rate measurements (JOLTS, LAUS) ↔ Unemployment indicators
         - Change measurements (CPI %, PPI %) ↔ Price changes
         """
         logger.info("  Aligning measurement types...")
-        
+
         # Price indices
         if 'bls' in self.available_sources:
             # Mark CPI indices as price indices
@@ -590,24 +590,24 @@ class CrossSourceLinker:
                 ?index a <{CPI.Index}> .
             }}
             """
-            
+
             for row in self.graph.query(cpi_index_query):
-                if not list(self.graph.triples((row.index, RDF.type, BLS_ENRICHMENT.PriceIndex))):
+                if (row.index, RDF.type, BLS_ENRICHMENT.PriceIndex) not in self.graph:
                     self.graph.add((row.index, RDF.type, BLS_ENRICHMENT.PriceIndex))
                     self.stats['measurement_links'] += 1
-            
+
             # Mark PPI indices as price indices
             ppi_index_query = f"""
             SELECT DISTINCT ?index WHERE {{
                 ?index a <{PPI.IndexValue}> .
             }}
             """
-            
+
             for row in self.graph.query(ppi_index_query):
-                if not list(self.graph.triples((row.index, RDF.type, BLS_ENRICHMENT.PriceIndex))):
+                if (row.index, RDF.type, BLS_ENRICHMENT.PriceIndex) not in self.graph:
                     self.graph.add((row.index, RDF.type, BLS_ENRICHMENT.PriceIndex))
                     self.stats['measurement_links'] += 1
-        
+
         # Rate measurements
         if 'bls' in self.available_sources:
             # JOLTS rates
@@ -618,21 +618,21 @@ class CrossSourceLinker:
                 {{ ?rate a <{JOLTS.QuitsRate}> }}
             }}
             """
-            
+
             for row in self.graph.query(jolts_rate_query):
-                if not list(self.graph.triples((row.rate, RDF.type, BLS_ENRICHMENT.RateMeasurement))):
+                if (row.rate, RDF.type, BLS_ENRICHMENT.RateMeasurement) not in self.graph:
                     self.graph.add((row.rate, RDF.type, BLS_ENRICHMENT.RateMeasurement))
                     self.stats['measurement_links'] += 1
-            
+
             # LAUS unemployment rates
             laus_rate_query = f"""
             SELECT DISTINCT ?rate WHERE {{
                 ?rate a <{LAUS.UnemploymentRate}> .
             }}
             """
-            
+
             for row in self.graph.query(laus_rate_query):
-                if not list(self.graph.triples((row.rate, RDF.type, BLS_ENRICHMENT.RateMeasurement))):
+                if (row.rate, RDF.type, BLS_ENRICHMENT.RateMeasurement) not in self.graph:
                     self.graph.add((row.rate, RDF.type, BLS_ENRICHMENT.RateMeasurement))
                     self.stats['measurement_links'] += 1
         
