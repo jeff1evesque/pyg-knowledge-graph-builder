@@ -545,14 +545,14 @@ class TemporalUnifier:
             unified_month = UNIFIED[month_name]
 
             # Add unified month entity if not exists
-            if not list(self.graph.triples((unified_month, RDF.type, BLS_ENRICHMENT.UnifiedMonth))):
+            if (unified_month, RDF.type, BLS_ENRICHMENT.UnifiedMonth) not in self.graph:
                 self.graph.add((unified_month, RDF.type, BLS_ENRICHMENT.UnifiedMonth))
                 self.graph.add((unified_month, RDFS.label, Literal(month_name)))
                 self.stats['months_unified'] += 1
 
             # Link all source-specific month entities with owl:sameAs
             for month_uri in month_uris:
-                if not list(self.graph.triples((unified_month, OWL.sameAs, month_uri))):
+                if (unified_month, OWL.sameAs, month_uri) not in self.graph:
                     self.graph.add((unified_month, OWL.sameAs, month_uri))
                     self.stats['temporal_links'] += 1
 
@@ -575,14 +575,14 @@ class TemporalUnifier:
             unified_year = UNIFIED[f"Year{year_value}"]
 
             # Add unified year entity if not exists
-            if not list(self.graph.triples((unified_year, RDF.type, BLS_ENRICHMENT.UnifiedYear))):
+            if (unified_year, RDF.type, BLS_ENRICHMENT.UnifiedYear) not in self.graph:
                 self.graph.add((unified_year, RDF.type, BLS_ENRICHMENT.UnifiedYear))
                 self.graph.add((unified_year, RDFS.label, Literal(year_value)))
                 self.stats['years_unified'] += 1
 
             # Link all source-specific year entities with owl:sameAs
             for year_uri in year_uris:
-                if not list(self.graph.triples((unified_year, OWL.sameAs, year_uri))):
+                if (unified_year, OWL.sameAs, year_uri) not in self.graph:
                     self.graph.add((unified_year, OWL.sameAs, year_uri))
                     self.stats['temporal_links'] += 1
 
@@ -625,7 +625,7 @@ class TemporalUnifier:
             unified_quarter = UNIFIED[quarter_label]
 
             # Add unified quarter entity if not exists
-            if not list(self.graph.triples((unified_quarter, RDF.type, BLS_ENRICHMENT.UnifiedQuarter))):
+            if (unified_quarter, RDF.type, BLS_ENRICHMENT.UnifiedQuarter) not in self.graph:
                 self.graph.add((unified_quarter, RDF.type, BLS_ENRICHMENT.UnifiedQuarter))
                 self.graph.add((unified_quarter, RDFS.label, Literal(quarter_label)))
                 self.stats['quarters_unified'] += 1
@@ -635,14 +635,14 @@ class TemporalUnifier:
                 for month_name in months:
                     unified_month = UNIFIED[month_name]
                     # Only link if the unified month exists
-                    if list(self.graph.triples((unified_month, RDF.type, BLS_ENRICHMENT.UnifiedMonth))):
-                        if not list(self.graph.triples((unified_quarter, BLS_ENRICHMENT.coversMonth, unified_month))):
+                    if (unified_month, RDF.type, BLS_ENRICHMENT.UnifiedMonth) in self.graph:
+                        if (unified_quarter, BLS_ENRICHMENT.coversMonth, unified_month) not in self.graph:
                             self.graph.add((unified_quarter, BLS_ENRICHMENT.coversMonth, unified_month))
                             self.stats['temporal_links'] += 1
 
             # Link all source-specific quarter entities with owl:sameAs
             for quarter_uri in quarter_uris:
-                if not list(self.graph.triples((unified_quarter, OWL.sameAs, quarter_uri))):
+                if (unified_quarter, OWL.sameAs, quarter_uri) not in self.graph:
                     self.graph.add((unified_quarter, OWL.sameAs, quarter_uri))
                     self.stats['temporal_links'] += 1
 
@@ -664,7 +664,7 @@ class TemporalUnifier:
         unified_month = UNIFIED[month_name]
 
         # Check if it exists
-        if list(self.graph.triples((unified_month, RDF.type, BLS_ENRICHMENT.UnifiedMonth))):
+        if (unified_month, RDF.type, BLS_ENRICHMENT.UnifiedMonth) in self.graph:
             return unified_month
 
         return None
@@ -682,7 +682,7 @@ class TemporalUnifier:
         unified_year = UNIFIED[f"Year{year_value}"]
 
         # Check if it exists
-        if list(self.graph.triples((unified_year, RDF.type, BLS_ENRICHMENT.UnifiedYear))):
+        if (unified_year, RDF.type, BLS_ENRICHMENT.UnifiedYear) in self.graph:
             return unified_year
 
         return None
@@ -703,7 +703,7 @@ class TemporalUnifier:
         unified_quarter = UNIFIED[quarter_label]
 
         # Check if it exists
-        if list(self.graph.triples((unified_quarter, RDF.type, BLS_ENRICHMENT.UnifiedQuarter))):
+        if (unified_quarter, RDF.type, BLS_ENRICHMENT.UnifiedQuarter) in self.graph:
             return unified_quarter
 
         return None
