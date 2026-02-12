@@ -9,7 +9,7 @@ from rdflib.namespace import RDF, RDFS, OWL, XSD
 from glue_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, SEC_ENRICHMENT, MARKET_ENRICHMENT, NOAA_ENRICHMENT,
     UNIFIED, CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER,
-    SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP, MARKET, CAP,
+    WKYENG, SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP, MARKET, CAP,
     get_month_name, get_year_value
 )
 from glue_jobs.enrichment.intra_source.bls.patterns import BLS_SECTOR_PATTERNS
@@ -73,7 +73,7 @@ class CrossSourceLinker:
         sources = set()
         
         # Check for BLS data (any BLS dataset)
-        bls_namespaces = [CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER]
+        bls_namespaces = [CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER, WKYENG]
         for namespace in bls_namespaces:
             query = f"""
             ASK {{
@@ -345,12 +345,13 @@ class CrossSourceLinker:
         # Here we just add the cross-source correlation relationship if not exists
         
         for dataset_name, dataset_keywords in keywords.items():
-            if dataset_name not in ['cpi', 'ppi', 'eci', 'jolts', 'empsit', 'ximpim', 'laus', 'metro', 'realer']:
+            if dataset_name not in ['cpi', 'ppi', 'eci', 'jolts', 'empsit', 'ximpim', 'laus', 'metro', 'realer', 'wkyeng']:
                 continue
             
             namespace_map = {
                 'cpi': CPI, 'ppi': PPI, 'eci': ECI, 'jolts': JOLTS, 'empsit': EMPSIT,
-                'ximpim': XIMPIM, 'laus': LAUS, 'metro': METRO, 'realer': REALER
+                'ximpim': XIMPIM, 'laus': LAUS, 'metro': METRO, 'realer': REALER,
+                'wkyeng': WKYENG
             }
             
             namespace = namespace_map.get(dataset_name)
