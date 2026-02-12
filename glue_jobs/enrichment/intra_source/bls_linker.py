@@ -4,7 +4,7 @@ Coordinates enrichment across all BLS datasets
 """
 from rdflib import Graph, URIRef, Literal
 from glue_jobs.utils.rdf_utils import (
-    CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER,
+    CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER, WKYENG,
     BLS_ENRICHMENT, UNIFIED, get_month_name, get_year_value
 )
 from glue_jobs.enrichment.intra_source.base import IntraSourceEnricher
@@ -17,6 +17,7 @@ from glue_jobs.enrichment.intra_source.bls.enrichers.ximpim_enricher import XIMP
 from glue_jobs.enrichment.intra_source.bls.enrichers.laus_enricher import LAUSEnricher
 from glue_jobs.enrichment.intra_source.bls.enrichers.metro_enricher import METROEnricher
 from glue_jobs.enrichment.intra_source.bls.enrichers.realer_enricher import REALEREnricher
+from glue_jobs.enrichment.intra_source.bls.enrichers.wkyeng_enricher import WKYENGEnricher
 from glue_jobs.enrichment.intra_source.bls.patterns import BLS_SECTOR_PATTERNS
 from glue_jobs.enrichment.intra_source.bls.correlations import KNOWN_CORRELATIONS
 from glue_jobs.enrichment.temporal_unifier import TemporalUnifier
@@ -81,6 +82,7 @@ class BLSIntraSourceLinker(IntraSourceEnricher):
             'laus': LAUS,
             'metro': METRO,
             'realer': REALER,
+            'wkyeng': WKYENG
         }
 
         for dataset_name, namespace in dataset_checks.items():
