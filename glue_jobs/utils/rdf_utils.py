@@ -4,7 +4,8 @@ Foundation for CPI data processing
 """
 
 from rdflib import Graph, Namespace, URIRef, Literal
-from typing import List, Dict, Optional, Set
+from rdflib.namespace import RDF, RDFS, OWL, XSD
+from typing import List, Dict, Set
 import logging
 
 logger = logging.getLogger(__name__)
@@ -71,15 +72,6 @@ NOAA_ENRICHMENT = Namespace("https://www.noaa.gov/enrichment/")
 MARKET_ENRICHMENT = Namespace("https://financial-data.org/enrichment/")
 UNIFIED = Namespace("https://example.org/unified/")
 
-# ============================================
-# STANDARD NAMESPACES
-# ============================================
-
-RDF = Namespace("http://www.w3.org/1999/02/22-rdf-syntax-ns#")
-RDFS = Namespace("http://www.w3.org/2000/01/rdf-schema#")
-OWL = Namespace("http://www.w3.org/2002/07/owl#")
-XSD = Namespace("http://www.w3.org/2001/XMLSchema#")
-
 
 class RDFGraphLoader:
     """Load and parse RDF data from S3"""
@@ -91,6 +83,12 @@ class RDFGraphLoader:
 
     def _bind_namespaces(self):
         """Bind all known namespaces to the graph for cleaner serialization"""
+        # Standard
+        self.graph.bind("rdf", RDF)
+        self.graph.bind("rdfs", RDFS)
+        self.graph.bind("owl", OWL)
+        self.graph.bind("xsd", XSD)
+
         # BLS data sources
         self.graph.bind("cpi", CPI)
         self.graph.bind("ppi", PPI)
