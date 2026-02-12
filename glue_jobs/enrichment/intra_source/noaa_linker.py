@@ -38,6 +38,11 @@ class NOAAIntraSourceLinker(IntraSourceEnricher):
 
     def __init__(self, graph: Graph):
         super().__init__(graph)
+        self.stats.update({
+            'geographic_links': 0,
+            'event_links': 0,
+            'severity_links': 0
+        })
         self.available_datasets = self.detect_datasets()
         logger.info(f"Detected NOAA datasets: {', '.join(self.available_datasets)}")
 
@@ -97,9 +102,9 @@ class NOAAIntraSourceLinker(IntraSourceEnricher):
         logger.info(f"Total triples added: {enrichment_count}")
         logger.info(f"  - Temporal unification: {self.stats['temporal_unified']}")
         logger.info(f"  - Temporal sequences: {self.stats['temporal_sequences']}")
-        logger.info(f"  - Geographic links: {self.stats.get('geographic_links', 0)}")
-        logger.info(f"  - Event type links: {self.stats.get('event_links', 0)}")
-        logger.info(f"  - Severity escalation links: {self.stats.get('severity_links', 0)}")
+        logger.info(f"  - Geographic links: {self.stats['geographic_links']}")
+        logger.info(f"  - Event type links: {self.stats['event_links']}")
+        logger.info(f"  - Severity escalation links: {self.stats['severity_links']}")
         logger.info("=" * 60)
 
         return {
@@ -181,8 +186,6 @@ class NOAAIntraSourceLinker(IntraSourceEnricher):
 
         Uses SAME codes, UGC codes, and FIPS codes to identify related areas
         """
-        if 'geographic_links' not in self.stats:
-            self.stats['geographic_links'] = 0
 
         # Link alerts with same SAME codes
         same_query = f"""
@@ -230,8 +233,6 @@ class NOAAIntraSourceLinker(IntraSourceEnricher):
 
         Links alerts with the same event type (e.g., all Flood Advisories)
         """
-        if 'event_links' not in self.stats:
-            self.stats['event_links'] = 0
 
         # Get all alerts grouped by event type
         query = f"""
@@ -277,8 +278,6 @@ class NOAAIntraSourceLinker(IntraSourceEnricher):
         Links watches → advisories → warnings → emergencies
         for the same region
         """
-        if 'severity_links' not in self.stats:
-            self.stats['severity_links'] = 0
 
         # Define severity hierarchy
         severity_order = {

@@ -56,6 +56,11 @@ class SECIntraSourceLinker(IntraSourceEnricher):
 
     def __init__(self, graph: Graph):
         super().__init__(graph)
+        self.stats.update({
+            'company_unified': 0,
+            'person_unified': 0,
+            'violation_links': 0
+        })
         self.available_datasets = self.detect_datasets()
         logger.info(f"Detected SEC datasets: {', '.join(self.available_datasets)}")
 
@@ -156,11 +161,11 @@ class SECIntraSourceLinker(IntraSourceEnricher):
         logger.info("SEC Intra-Source Enrichment Complete")
         logger.info("=" * 60)
         logger.info(f"Total triples added: {enrichment_count}")
-        logger.info(f"  - Company unification: {self.stats.get('company_unified', 0)}")
-        logger.info(f"  - Person unification: {self.stats.get('person_unified', 0)}")
+        logger.info(f"  - Company unification: {self.stats['company_unified']}")
+        logger.info(f"  - Person unification: {self.stats['person_unified']}")
         logger.info(f"  - Temporal sequences: {self.stats['temporal_sequences']}")
         logger.info(f"  - Sector links: {self.stats['sector_links']}")
-        logger.info(f"  - Violation links: {self.stats.get('violation_links', 0)}")
+        logger.info(f"  - Violation links: {self.stats['violation_links']}")
         logger.info(f"  - Correlation links: {self.stats['correlation_links']}")
         logger.info("=" * 60)
 
@@ -182,8 +187,6 @@ class SECIntraSourceLinker(IntraSourceEnricher):
             sec:CorporateRespondent_0001234567 → unified:Company_0001234567
             secsusp:Company_0001234567 → unified:Company_0001234567
         """
-        if 'company_unified' not in self.stats:
-            self.stats['company_unified'] = 0
 
         companies_by_cik = {}
 
@@ -237,8 +240,6 @@ class SECIntraSourceLinker(IntraSourceEnricher):
         Creates unified Person entities and links dataset-specific
         person entities to them using owl:sameAs
         """
-        if 'person_unified' not in self.stats:
-            self.stats['person_unified'] = 0
 
         persons_by_cik = {}
 
@@ -727,8 +728,6 @@ class SECIntraSourceLinker(IntraSourceEnricher):
         Uses SEC_VIOLATION_PATTERNS to connect related violations,
         claims, and enforcement actions across datasets.
         """
-        if 'violation_links' not in self.stats:
-            self.stats['violation_links'] = 0
 
         logger.info("  Applying violation patterns...")
 
