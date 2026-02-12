@@ -96,14 +96,14 @@ class TemporalUnifier:
                 break
 
         # Check for SEC data
-        sec_query = """
-        ASK {
-            { ?s a filings:Form3 } UNION
-            { ?s a filings:Form4 } UNION
-            { ?s a sec:AdministrativeProceeding } UNION
-            { ?s a seclit:LitigationRelease } UNION
-            { ?s a secsusp:TradingSuspension }
-        }
+        sec_query = f"""
+        ASK {{
+            {{ ?s a <{SEC_FILINGS.Form3}> }} UNION
+            {{ ?s a <{SEC_FILINGS.Form4}> }} UNION
+            {{ ?s a <{SEC_ADMIN.AdministrativeProceeding}> }} UNION
+            {{ ?s a <{SEC_LIT.LitigationRelease}> }} UNION
+            {{ ?s a <{SEC_SUSP.TradingSuspension}> }}
+        }}
         """
         if self.graph.query(sec_query).askAnswer:
             sources.add('sec')
