@@ -242,84 +242,116 @@ class MarketIntraSourceLinker(IntraSourceEnricher):
 
     def link_options_to_stocks(self):
         """
-        Link option contracts to their underlying stock price observations
+        Link option contracts to their underlying stock price observations.
 
         Creates relationships between options and recent stock prices
-        to enable analysis of option pricing relative to underlying
+        to enable analysis of option pricing relative to underlying.
+
+        Uses two batch queries instead of per-contract queries:
+        1. One query for all option contracts (with ticker, strike, type)
+        2. One query for all price observations (with ticker, price, obs URI)
+        Then joins in Python by ticker for O(1) lookups.
         """
 
-        # Get all option contracts with their underlying tickers
-        query = f"""
-        SELECT ?contract ?ticker ?strike WHERE {{
+        # Batch query 1: all option contracts with ticker, strike, and type
+        contracts_query = f"""
+        SELECT ?contract ?ticker ?strike ?type WHERE {{
             ?contract a <{MARKET.OptionContract}> ;
                       <{MARKET.underlyingTicker}> ?ticker ;
                       <{MARKET.strikePrice}> ?strike .
+            OPTIONAL {{ ?contract <{MARKET.optionType}> ?type }}
         }}
         """
+        contract_results = list(self.graph.query(contracts_query))
 
-        results = list(self.graph.query(query))
+        if not contract_results:
+            logger.info("  No option contracts found")
+            return
 
-        # For each contract, find recent price observations
+        # Batch query 2: all price observations indexed by ticker.
+        # When multiple observations exist for a ticker we keep one
+        # representative (the first returned by the engine).
+        prices_query = f"""
+        SELECT ?ticker ?obs ?price WHERE {{
+            ?obs a <{MARKET.PriceObservation}> ;
+                 <{MARKET.observedTicker}> ?ticker ;
+                 <{MARKET.observedPrice}> ?price .
+        }}
+        """
+        price_results = list(self.graph.query(prices_query))
+
+        # Build lookup: ticker URI string → (obs URI, price float)
+        # Keep first observation per ticker as representative
+        price_by_ticker: Dict[str, Dict] = {}
+        for row in price_results:
+            ticker_str = str(row.ticker)
+            if ticker_str not in price_by_ticker:
+                try:
+                    price_by_ticker[ticker_str] = {
+                        'obs': row.obs,
+                        'price': float(row.price)
+                    }
+                except (ValueError, TypeError):
+                    continue
+
+        # Join contracts with prices in Python
         links_added = 0
-        for row in results:
+        for row in contract_results:
             contract = row.contract
-            ticker = row.ticker
+            ticker_str = str(row.ticker)
+
+            price_info = price_by_ticker.get(ticker_str)
+            if not price_info:
+                continue
+
             strike = float(row.strike)
+            obs = price_info['obs']
+            stock_price = price_info['price']
 
-            # Find price observations for this ticker
-            price_query = f"""
-            SELECT ?obs ?price WHERE {{
-                ?obs a <{MARKET.PriceObservation}> ;
-                     <{MARKET.observedTicker}> <{ticker}> ;
-                     <{MARKET.observedPrice}> ?price .
-            }}
-            LIMIT 1
-            """
+            # Link option to price observation
+            self.graph.add((
+                contract,
+                MARKET_ENRICHMENT.hasUnderlyingPriceObservation,
+                obs
+            ))
+            links_added += 1
+            self.stats['option_stock_links'] += 1
 
-            price_results = list(self.graph.query(price_query))
-            if price_results:
-                obs = price_results[0].obs
-                price = float(price_results[0].price)
-
-                # Link option to price observation
+            # Classify option as ITM, ATM, or OTM
+            option_type = str(row.type) if row.type else None
+            moneyness = self._classify_option_moneyness(strike, stock_price, option_type)
+            if moneyness:
                 self.graph.add((
                     contract,
-                    MARKET_ENRICHMENT.hasUnderlyingPriceObservation,
-                    obs
+                    MARKET_ENRICHMENT.hasMoneyness,
+                    moneyness
                 ))
-                links_added += 1
-                self.stats['option_stock_links'] += 1
-
-                # Classify option as ITM, ATM, or OTM
-                moneyness = self._classify_option_moneyness(strike, price, row.contract)
-                if moneyness:
-                    self.graph.add((
-                        contract,
-                        MARKET_ENRICHMENT.hasMoneyness,
-                        moneyness
-                    ))
 
         logger.info(f"  Added {links_added} option-stock links")
+        logger.info(f"  Matched against {len(price_by_ticker)} tickers with price data")
 
-    def _classify_option_moneyness(self, strike: float, stock_price: float, contract_uri: URIRef) -> Optional[URIRef]:
+    def _classify_option_moneyness(
+        self, strike: float, stock_price: float, option_type: Optional[str]
+    ) -> Optional[URIRef]:
         """
-        Classify option as in-the-money, at-the-money, or out-of-the-money
-        """
-        # Get option type
-        type_query = f"""
-        SELECT ?type WHERE {{
-            <{contract_uri}> <{MARKET.optionType}> ?type .
-        }}
-        """
+        Classify option as in-the-money, at-the-money, or out-of-the-money.
 
-        type_results = list(self.graph.query(type_query))
-        if not type_results:
+        Pure computation — no graph queries needed since option_type is
+        passed in from the batch query results.
+
+        Args:
+            strike: Option strike price
+            stock_price: Current underlying stock price
+            option_type: 'call' or 'put' (or None if unknown)
+
+        Returns:
+            Moneyness URI or None if option_type is unknown
+        """
+        if not option_type:
             return None
 
-        option_type = str(type_results[0].type)
-
-        # Calculate moneyness
-        threshold = stock_price * 0.02  # 2% threshold for ATM
+        # 2% threshold for ATM classification
+        threshold = stock_price * 0.02
 
         if abs(strike - stock_price) <= threshold:
             return MARKET_ENRICHMENT.AtTheMoney
