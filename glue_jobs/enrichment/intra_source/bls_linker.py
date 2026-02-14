@@ -1,437 +1,718 @@
 """
-BLS Intra-Source Enrichment Orchestrator
-Coordinates enrichment across all BLS datasets
+BLS Intra-Source Enrichment Orchestrator — PySpark Implementation
+
+Migrated from rdflib SPARQL-based enricher to fully distributed PySpark.
+All operations run on executors — no rdflib, no driver data operations.
+
+Coordinates enrichment across all BLS datasets:
+- CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER, WKYENG
+
+Enrichment steps:
+1. Link temporal sequences (delegated to per-dataset sub-enrichers)
+2. Apply sector patterns (keyword matching against category URIs)
+3. Apply known correlations (cross-dataset economic relationships)
+4. Link category hierarchies (parent-child from URI path structure)
+
+Note: Temporal unification (Step 1 of the old rdflib orchestrator) is now
+handled by the standalone TemporalUnifier in pipeline.py Phase 2.
+It no longer runs inside the BLS intra-source enricher.
 """
-from rdflib import Graph, URIRef, Literal
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
+from functools import reduce
+from typing import Dict, List, Optional, Set
+
+from rdflib.namespace import RDF, RDFS
+
 from glue_jobs.utils.rdf_utils import (
-    CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER, WKYENG,
-    BLS_ENRICHMENT, UNIFIED, get_month_name, get_year_value
+    BLS_ENRICHMENT, UNIFIED,
+    CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER, WKYENG,
 )
-from glue_jobs.enrichment.intra_source.base import IntraSourceEnricher
-from glue_jobs.enrichment.intra_source.bls.enrichers.cpi_enricher import CPIEnricher
-from glue_jobs.enrichment.intra_source.bls.enrichers.ppi_enricher import PPIEnricher
-from glue_jobs.enrichment.intra_source.bls.enrichers.eci_enricher import ECIEnricher
-from glue_jobs.enrichment.intra_source.bls.enrichers.jolts_enricher import JOLTSEnricher
-from glue_jobs.enrichment.intra_source.bls.enrichers.empsit_enricher import EMPSITEnricher
-from glue_jobs.enrichment.intra_source.bls.enrichers.ximpim_enricher import XIMPIMEnricher
-from glue_jobs.enrichment.intra_source.bls.enrichers.laus_enricher import LAUSEnricher
-from glue_jobs.enrichment.intra_source.bls.enrichers.metro_enricher import METROEnricher
-from glue_jobs.enrichment.intra_source.bls.enrichers.realer_enricher import REALEREnricher
-from glue_jobs.enrichment.intra_source.bls.enrichers.wkyeng_enricher import WKYENGEnricher
 from glue_jobs.enrichment.intra_source.bls.patterns import BLS_SECTOR_PATTERNS
 from glue_jobs.enrichment.intra_source.bls.correlations import KNOWN_CORRELATIONS
-from glue_jobs.enrichment.temporal_unifier import TemporalUnifier
-from typing import Dict, Set
+from glue_jobs.utils.spark_rdf_utils import deduplicate_against_existing
+
 import logging
 
 logger = logging.getLogger(__name__)
 
+# ============================================
+# URI string constants
+# ============================================
+
+_RDF_TYPE = str(RDF.type)
+_RDFS_LABEL = str(RDFS.label)
+_BELONGS_TO_SECTOR = str(BLS_ENRICHMENT.belongsToSector)
+_HAS_PARENT = str(BLS_ENRICHMENT.hasParent)
+
+# Namespace prefix strings for dataset detection and filtering
+DATASET_NS_MAP: Dict[str, str] = {
+    'cpi': str(CPI),
+    'ppi': str(PPI),
+    'eci': str(ECI),
+    'jolts': str(JOLTS),
+    'empsit': str(EMPSIT),
+    'ximpim': str(XIMPIM),
+    'laus': str(LAUS),
+    'metro': str(METRO),
+    'realer': str(REALER),
+    'wkyeng': str(WKYENG),
+}
+
+# All BLS namespace prefixes for filtering
+_ALL_BLS_PREFIXES = list(DATASET_NS_MAP.values())
+
 
 def normalize_keyword_for_uri_matching(keyword: str) -> str:
     """
-    Normalize a keyword for matching against BLS URIs
+    Normalize a keyword for matching against BLS URIs.
 
     BLS URIs use underscores and remove special characters:
-    - Spaces become underscores
-    - Apostrophes are removed
-    - Commas are removed
-    - Hyphens may become underscores
-
-    Examples:
         "Food at home" → "Food_at_home"
         "Owners' equivalent rent" → "Owners_equivalent_rent"
-        "Men's and boys' apparel" → "Mens_and_boys_apparel"
         "All items less food, shelter, and energy" → "All_items_less_food_shelter_and_energy"
-
-    Args:
-        keyword: Human-readable keyword from BLS_SECTOR_PATTERNS
-
-    Returns:
-        Normalized keyword for URI substring matching
     """
-    return (keyword
-            .replace(' ', '_')
-            .replace("'", '')
-            .replace(',', '')
-            .replace('-', '_')
-            .replace('(', '')
-            .replace(')', ''))
+    return (
+        keyword
+        .replace(' ', '_')
+        .replace("'", '')
+        .replace(',', '')
+        .replace('-', '_')
+        .replace('(', '')
+        .replace(')', '')
+    )
 
 
-class BLSIntraSourceLinker(IntraSourceEnricher):
+class BLSIntraSourceLinker:
     """
-    Orchestrates BLS intra-source enrichment across all datasets
+    PySpark-based BLS intra-source enrichment orchestrator.
+
+    Handles orchestrator-level enrichment (sectors, correlations, hierarchies)
+    and delegates temporal sequence linking to per-dataset sub-enrichers.
+
+    All methods:
+    1. Read from self._bls_triples (cached BLS subset)
+    2. Return new triples DataFrames
+    3. Never call .collect() except for bounded dataset detection
     """
 
-    def __init__(self, graph: Graph):
-        super().__init__(graph)
-        self.available_datasets = self.detect_datasets()
-        self.enrichers = self._initialize_enrichers()
-        logger.info(f"Detected datasets: {', '.join(self.available_datasets)}")
+    def __init__(self, spark: SparkSession):
+        self.spark = spark
+        self._sub_enrichers: Dict[str, 'BLSDatasetEnricher'] = {}
 
-    def detect_datasets(self) -> Set[str]:
-        """Detect which BLS datasets are present in the graph"""
+    def enrich(self, triples_df: DataFrame) -> DataFrame:
+        """
+        Run all BLS intra-source enrichment steps.
+
+        Args:
+            triples_df: DataFrame with (subject, predicate, object)
+
+        Returns:
+            DataFrame of NEW triples only
+        """
+        self.triples_df = triples_df
+        empty = self.spark.createDataFrame(
+            [], "subject STRING, predicate STRING, object STRING"
+        )
+
+        # Detect which BLS datasets are present
+        self.available_datasets = self._detect_datasets()
+        if not self.available_datasets:
+            logger.info("No BLS data detected, skipping enrichment")
+            return empty
+
+        logger.info("=" * 60)
+        logger.info("Starting BLS Intra-Source Enrichment (PySpark)")
+        logger.info(f"Detected BLS datasets: {', '.join(sorted(self.available_datasets))}")
+        logger.info("=" * 60)
+
+        # Cache the BLS-relevant subset for performance
+        self._bls_triples = self._filter_bls_triples().cache()
+
+        # Initialize per-dataset sub-enrichers
+        self._initialize_sub_enrichers()
+
+        new_dfs: List[DataFrame] = []
+
+        # Step 1: Link temporal sequences (delegated to sub-enrichers)
+        logger.info("\n[Step 1/4] Linking temporal sequences...")
+        self._append(new_dfs, self._link_temporal_sequences())
+
+        # Step 2: Apply sector patterns
+        logger.info("\n[Step 2/4] Applying sector patterns...")
+        self._append(new_dfs, self._apply_sector_patterns())
+
+        # Step 3: Apply known correlations
+        logger.info("\n[Step 3/4] Applying known correlations...")
+        self._append(new_dfs, self._apply_known_correlations())
+
+        # Step 4: Link category hierarchies
+        logger.info("\n[Step 4/4] Linking category hierarchies...")
+        self._append(new_dfs, self._link_category_hierarchies())
+
+        # Unpersist cached subset
+        self._bls_triples.unpersist()
+
+        if not new_dfs:
+            logger.info("BLS enrichment produced no new triples")
+            return empty
+
+        all_new = reduce(DataFrame.unionAll, new_dfs)
+        all_new = all_new.dropDuplicates(["subject", "predicate", "object"])
+        all_new = deduplicate_against_existing(all_new, triples_df)
+
+        all_new = all_new.cache()
+        total = all_new.count()
+
+        logger.info("\n" + "=" * 60)
+        logger.info(f"BLS Intra-Source Enrichment Complete: {total} new triples")
+        logger.info("=" * 60)
+
+        return all_new
+
+    # ================================================================
+    # Detection and filtering
+    # ================================================================
+
+    def _detect_datasets(self) -> Set[str]:
+        """Detect which BLS datasets are present. Bounded collect."""
         datasets = set()
-        dataset_checks = {
-            'cpi': CPI,
-            'ppi': PPI,
-            'eci': ECI,
-            'jolts': JOLTS,
-            'empsit': EMPSIT,
-            'ximpim': XIMPIM,
-            'laus': LAUS,
-            'metro': METRO,
-            'realer': REALER,
-            'wkyeng': WKYENG
-        }
 
-        for dataset_name, namespace in dataset_checks.items():
-            query = f"""
-            ASK {{
-                ?s ?p ?o .
-                FILTER(STRSTARTS(STR(?s), "{namespace}"))
-            }}
-            """
-            if self.graph.query(query).askAnswer:
-                datasets.add(dataset_name)
+        # Sample subjects to detect which BLS namespaces are present
+        sample = (
+            self.triples_df
+            .select("subject")
+            .limit(200000)
+            .distinct()
+            .collect()
+        )
+
+        for row in sample:
+            s = row.subject
+            for dataset_name, ns in DATASET_NS_MAP.items():
+                if s.startswith(ns):
+                    datasets.add(dataset_name)
+            if len(datasets) == len(DATASET_NS_MAP):
+                break  # Found all possible datasets
 
         return datasets
 
-    def _initialize_enrichers(self) -> Dict:
-        """Initialize dataset-specific enrichers"""
-        enrichers = {}
+    def _filter_bls_triples(self) -> DataFrame:
+        """Filter triples to only BLS-relevant subjects."""
+        bls_filter = F.col("subject").startswith(_ALL_BLS_PREFIXES[0])
+        for p in _ALL_BLS_PREFIXES[1:]:
+            bls_filter = bls_filter | F.col("subject").startswith(p)
+        return self.triples_df.filter(bls_filter)
+
+    def _initialize_sub_enrichers(self):
+        """
+        Initialize per-dataset sub-enrichers for temporal sequence linking.
+
+        Each sub-enricher implements link_temporal_sequences() for its
+        specific measurement types and temporal properties.
+
+        Sub-enrichers are added in phases 6B–6J.
+        """
+        # Import sub-enrichers as they are migrated.
+        # Each import is guarded so the orchestrator works even if
+        # a sub-enricher hasn't been migrated yet.
 
         if 'cpi' in self.available_datasets:
-            enrichers['cpi'] = CPIEnricher(self.graph)
+            try:
+                from glue_jobs.enrichment.intra_source.bls.enrichers.cpi_enricher import CPIEnricher
+                self._sub_enrichers['cpi'] = CPIEnricher(self.spark)
+            except ImportError:
+                logger.warning("CPI sub-enricher not yet migrated to PySpark")
+
         if 'ppi' in self.available_datasets:
-            enrichers['ppi'] = PPIEnricher(self.graph)
+            try:
+                from glue_jobs.enrichment.intra_source.bls.enrichers.ppi_enricher import PPIEnricher
+                self._sub_enrichers['ppi'] = PPIEnricher(self.spark)
+            except ImportError:
+                logger.warning("PPI sub-enricher not yet migrated to PySpark")
+
         if 'eci' in self.available_datasets:
-            enrichers['eci'] = ECIEnricher(self.graph)
+            try:
+                from glue_jobs.enrichment.intra_source.bls.enrichers.eci_enricher import ECIEnricher
+                self._sub_enrichers['eci'] = ECIEnricher(self.spark)
+            except ImportError:
+                logger.warning("ECI sub-enricher not yet migrated to PySpark")
+
         if 'jolts' in self.available_datasets:
-            enrichers['jolts'] = JOLTSEnricher(self.graph)
+            try:
+                from glue_jobs.enrichment.intra_source.bls.enrichers.jolts_enricher import JOLTSEnricher
+                self._sub_enrichers['jolts'] = JOLTSEnricher(self.spark)
+            except ImportError:
+                logger.warning("JOLTS sub-enricher not yet migrated to PySpark")
+
         if 'empsit' in self.available_datasets:
-            enrichers['empsit'] = EMPSITEnricher(self.graph)
+            try:
+                from glue_jobs.enrichment.intra_source.bls.enrichers.empsit_enricher import EMPSITEnricher
+                self._sub_enrichers['empsit'] = EMPSITEnricher(self.spark)
+            except ImportError:
+                logger.warning("EMPSIT sub-enricher not yet migrated to PySpark")
+
         if 'ximpim' in self.available_datasets:
-            enrichers['ximpim'] = XIMPIMEnricher(self.graph)
+            try:
+                from glue_jobs.enrichment.intra_source.bls.enrichers.ximpim_enricher import XIMPIMEnricher
+                self._sub_enrichers['ximpim'] = XIMPIMEnricher(self.spark)
+            except ImportError:
+                logger.warning("XIMPIM sub-enricher not yet migrated to PySpark")
+
         if 'laus' in self.available_datasets:
-            enrichers['laus'] = LAUSEnricher(self.graph)
+            try:
+                from glue_jobs.enrichment.intra_source.bls.enrichers.laus_enricher import LAUSEnricher
+                self._sub_enrichers['laus'] = LAUSEnricher(self.spark)
+            except ImportError:
+                logger.warning("LAUS sub-enricher not yet migrated to PySpark")
+
         if 'metro' in self.available_datasets:
-            enrichers['metro'] = METROEnricher(self.graph)
+            try:
+                from glue_jobs.enrichment.intra_source.bls.enrichers.metro_enricher import METROEnricher
+                self._sub_enrichers['metro'] = METROEnricher(self.spark)
+            except ImportError:
+                logger.warning("METRO sub-enricher not yet migrated to PySpark")
+
         if 'realer' in self.available_datasets:
-            enrichers['realer'] = REALEREnricher(self.graph)
+            try:
+                from glue_jobs.enrichment.intra_source.bls.enrichers.realer_enricher import REALEREnricher
+                self._sub_enrichers['realer'] = REALEREnricher(self.spark)
+            except ImportError:
+                logger.warning("REALER sub-enricher not yet migrated to PySpark")
+
         if 'wkyeng' in self.available_datasets:
-            enrichers['wkyeng'] = WKYENGEnricher(self.graph)
+            try:
+                from glue_jobs.enrichment.intra_source.bls.enrichers.wkyeng_enricher import WKYENGEnricher
+                self._sub_enrichers['wkyeng'] = WKYENGEnricher(self.spark)
+            except ImportError:
+                logger.warning("WKYENG sub-enricher not yet migrated to PySpark")
 
-        return enrichers
+        logger.info(
+            f"  Initialized {len(self._sub_enrichers)} sub-enrichers: "
+            f"{', '.join(sorted(self._sub_enrichers.keys()))}"
+        )
 
-    def enrich(self) -> Dict[str, int]:
-        """Run all BLS intra-source enrichment steps"""
-        initial_count = len(self.graph)
+    @staticmethod
+    def _append(lst: list, item: Optional[DataFrame]):
+        if item is not None:
+            lst.append(item)
 
-        logger.info("=" * 60)
-        logger.info("Starting BLS Intra-Source Enrichment")
-        logger.info("=" * 60)
+    # ================================================================
+    # Step 1: Temporal sequences (delegated to sub-enrichers)
+    # ================================================================
 
-        # Step 1: Unify temporal entities
-        logger.info("\n[Step 1/5] Unifying temporal entities...")
-        self.unify_temporal_entities()
-
-        # Step 2: Link temporal sequences (delegated to enrichers)
-        logger.info("\n[Step 2/5] Linking temporal sequences...")
-        self.link_temporal_sequences()
-
-        # Step 3: Apply sector patterns
-        logger.info("\n[Step 3/5] Applying sector patterns...")
-        self.apply_sector_patterns()
-
-        # Step 4: Apply correlations
-        logger.info("\n[Step 4/5] Applying correlations...")
-        self.apply_known_correlations()
-
-        # Step 5: Link hierarchies
-        logger.info("\n[Step 5/5] Linking hierarchies...")
-        self.link_cross_dataset_hierarchies()
-
-        final_count = len(self.graph)
-        enrichment_count = final_count - initial_count
-
-        logger.info("\n" + "=" * 60)
-        logger.info("BLS Intra-Source Enrichment Complete")
-        logger.info("=" * 60)
-        logger.info(f"Total triples added: {enrichment_count}")
-        logger.info(f"  - Temporal unification: {self.stats['temporal_unified']}")
-        logger.info(f"  - Temporal sequences: {self.stats['temporal_sequences']}")
-        logger.info(f"  - Sector links: {self.stats['sector_links']}")
-        logger.info(f"  - Correlation links: {self.stats['correlation_links']}")
-        logger.info(f"  - Hierarchy links: {self.stats['hierarchy_links']}")
-        logger.info("=" * 60)
-
-        return {
-            'total_triples_added': enrichment_count,
-            'available_datasets': list(self.available_datasets),
-            **self.stats
-        }
-
-    def _get_namespace(self, dataset_name: str):
-        """Get namespace for a dataset"""
-        namespace_map = {
-            'cpi': CPI,
-            'ppi': PPI,
-            'eci': ECI,
-            'jolts': JOLTS,
-            'empsit': EMPSIT,
-            'ximpim': XIMPIM,
-            'laus': LAUS,
-            'wkyeng': WKYENG
-        }
-        return namespace_map.get(dataset_name)
-
-    def unify_temporal_entities(self):
+    def _link_temporal_sequences(self) -> Optional[DataFrame]:
         """
-        Unify temporal entities across all BLS datasets
+        Delegate temporal sequence linking to per-dataset sub-enrichers.
 
-        Delegates to TemporalUnifier for consistent temporal unification
+        Each sub-enricher reads from self._bls_triples and returns
+        new precedes triples for its measurement types.
         """
-        # Use TemporalUnifier instead of custom implementation
-        unifier = TemporalUnifier(self.graph)
+        new_dfs: List[DataFrame] = []
 
-        # Only unify BLS sources (filter out SEC, Market, NOAA)
-        unifier.available_sources = {'bls'}
-
-        stats = unifier.unify_all_sources()
-
-        self.stats['temporal_unified'] = stats['temporal_links']
-
-        logger.info(f"  Unified {stats['months_unified']} months and {stats['years_unified']} years")
-        logger.info(f"  Created {stats['temporal_links']} temporal unification links")
-
-    def link_temporal_sequences(self):
-        """
-        Delegate temporal sequence linking to dataset enrichers
-
-        Each dataset enricher handles its own temporal sequence linking
-        based on its specific measurement types and temporal properties.
-
-        Example:
-            CPI Index for Food in Nov 2024 → precedes → CPI Index for Food in Dec 2024
-        """
-        for dataset_name, enricher in self.enrichers.items():
+        for dataset_name, enricher in sorted(self._sub_enrichers.items()):
             logger.info(f"  Processing {dataset_name}...")
-            links = enricher.link_temporal_sequences()
-            self.stats['temporal_sequences'] += links
+            try:
+                result = enricher.link_temporal_sequences(self._bls_triples)
+                if result is not None:
+                    new_dfs.append(result)
+            except Exception as e:
+                logger.error(f"  {dataset_name} temporal linking failed: {e}", exc_info=True)
 
-    def apply_sector_patterns(self):
+        if not new_dfs:
+            return None
+
+        result = reduce(DataFrame.unionAll, new_dfs)
+        logger.info("  Temporal sequence triples prepared (lazy)")
+        return result
+
+    # ================================================================
+    # Step 2: Sector patterns
+    # ================================================================
+
+    def _apply_sector_patterns(self) -> Optional[DataFrame]:
         """
-        Apply sector-based linking patterns
+        Apply sector-based linking patterns.
 
-        Links category entities to economic sectors based on keyword matching.
-        Uses normalized keyword matching to handle URI format (underscores, no special chars).
+        Links category entities (URIs ending with _Entity) to economic
+        sectors based on keyword matching against URI substrings.
 
         Example:
             cpi:All_items_Food_Food_at_home_Entity → belongsToSector → bls:FoodSector
-            cpi:All_items_Energy_Entity → belongsToSector → bls:EnergySector
         """
-        logger.info("  Applying sector patterns...")
-
+        # Build keyword lookup: (keyword_normalized, sector_uri, relationship, namespace)
+        sector_rows = []
         for sector_name, pattern in BLS_SECTOR_PATTERNS.items():
-            sector_uri = pattern['sector_uri']
-            relationship = pattern['relationship']
-
-            # Process each dataset that has keywords for this sector
+            sector_uri = str(pattern['sector_uri'])
+            relationship = str(pattern['relationship'])
             for dataset_name in self.available_datasets:
                 keywords = pattern['keywords'].get(dataset_name, [])
-                if not keywords:
+                ns = DATASET_NS_MAP.get(dataset_name, '')
+                if not ns or not keywords:
                     continue
+                for keyword in keywords:
+                    normalized = normalize_keyword_for_uri_matching(keyword)
+                    sector_rows.append((normalized, sector_uri, relationship, ns))
 
-                namespace = self._get_namespace(dataset_name)
-                if not namespace:
-                    continue
+        if not sector_rows:
+            return None
 
-                # Find category entities for this dataset
-                # Categories typically end with "_Entity"
-                category_query = f"""
-                SELECT DISTINCT ?category WHERE {{
-                    ?measurement ?prop ?category .
-                    FILTER(STRSTARTS(STR(?category), "{namespace}"))
-                    FILTER(REGEX(STR(?category), "_Entity$"))
-                }}
-                """
+        sector_df = self.spark.createDataFrame(
+            sector_rows,
+            schema=["keyword_normalized", "sector_uri", "relationship", "namespace"],
+        ).dropDuplicates(["keyword_normalized", "sector_uri", "namespace"])
 
-                categories = list(self.graph.query(category_query))
+        # Find all category entities (URIs ending with _Entity)
+        category_entities = (
+            self._bls_triples
+            .select("subject")
+            .distinct()
+            .filter(F.col("subject").endswith("_Entity"))
+        )
 
-                # Match categories against keywords
-                for row in categories:
-                    category_uri = row.category
-                    category_str = str(category_uri)
+        # Join: category URI starts with namespace AND contains normalized keyword
+        matched = (
+            category_entities
+            .join(
+                F.broadcast(sector_df),
+                on=(
+                    F.col("subject").startswith(F.col("namespace")) &
+                    F.col("subject").contains(F.col("keyword_normalized"))
+                ),
+                how="inner",
+            )
+            .dropDuplicates(["subject", "sector_uri"])
+        )
 
-                    # Check if any keyword matches this category
-                    matched = False
-                    for keyword in keywords:
-                        normalized_keyword = normalize_keyword_for_uri_matching(keyword)
+        if matched.head(1) == []:
+            return None
 
-                        if normalized_keyword in category_str:
-                            # Link category to sector
-                            self.graph.add((
-                                category_uri,
-                                BLS_ENRICHMENT.belongsToSector,
-                                sector_uri
-                            ))
+        # Sector type triples
+        sector_type_triples = (
+            matched.select("sector_uri").distinct()
+            .select(
+                F.col("sector_uri").alias("subject"),
+                F.lit(_RDF_TYPE).alias("predicate"),
+                F.lit(str(BLS_ENRICHMENT.EconomicSector)).alias("object"),
+            )
+        )
 
-                            # Add sector correlation relationship
-                            self.graph.add((
-                                category_uri,
-                                relationship,
-                                sector_uri
-                            ))
+        # Sector label triples (derive label from URI local name)
+        sector_label_triples = (
+            matched.select("sector_uri").distinct()
+            .withColumn(
+                "label",
+                F.regexp_replace(
+                    F.regexp_extract(F.col("sector_uri"), r"[/#]([^/#]+)$", 1),
+                    "([A-Z])", r" $1"
+                )
+            )
+            .withColumn("label", F.trim(F.col("label")))
+            .select(
+                F.col("sector_uri").alias("subject"),
+                F.lit(_RDFS_LABEL).alias("predicate"),
+                F.col("label").alias("object"),
+            )
+        )
 
-                            self.stats['sector_links'] += 2
-                            matched = True
-                            break  # Only link once per category
+        # belongsToSector triples
+        belongs_triples = matched.select(
+            F.col("subject"),
+            F.lit(_BELONGS_TO_SECTOR).alias("predicate"),
+            F.col("sector_uri").alias("object"),
+        )
 
-        logger.info(f"  Added {self.stats['sector_links']} sector links")
+        # Sector correlation relationship triples
+        rel_triples = matched.select(
+            F.col("subject"),
+            F.col("relationship").alias("predicate"),
+            F.col("sector_uri").alias("object"),
+        )
 
-    def apply_known_correlations(self):
+        result = (
+            sector_type_triples
+            .unionAll(sector_label_triples)
+            .unionAll(belongs_triples)
+            .unionAll(rel_triples)
+        )
+
+        logger.info("  Sector pattern triples prepared (lazy)")
+        return result
+
+    # ================================================================
+    # Step 3: Known correlations
+    # ================================================================
+
+    def _apply_known_correlations(self) -> Optional[DataFrame]:
         """
-        Apply known correlations from domain expertise
+        Apply known correlations from domain expertise.
 
-        Links entities across datasets based on economic relationships.
-        Uses pattern matching on category URIs.
+        Links category entities across datasets based on economic
+        relationships using pattern matching on category URIs.
 
         Example:
             ppi:Food_Manufacturing_Entity → producerConsumerLink → cpi:Food_Entity
-            eci:Wages_and_salaries_Entity → wageInflationLink → cpi:All_items_Entity
         """
-        logger.info("  Applying known correlations...")
+        new_dfs: List[DataFrame] = []
 
         for correlation in KNOWN_CORRELATIONS:
             source_dataset = correlation['source_dataset']
             target_dataset = correlation['target_dataset']
-            source_pattern = correlation['source_pattern']
-            target_pattern = correlation['target_pattern']
-            relationship = correlation['relationship']
 
-            # Skip if datasets not available
-            if source_dataset not in self.available_datasets or target_dataset not in self.available_datasets:
+            if source_dataset not in self.available_datasets:
+                continue
+            if target_dataset not in self.available_datasets:
                 continue
 
-            # Normalize patterns for URI matching
-            source_pattern_normalized = normalize_keyword_for_uri_matching(source_pattern)
-            target_pattern_normalized = normalize_keyword_for_uri_matching(target_pattern)
-
-            # Get namespaces
-            source_namespace = self._get_namespace(source_dataset)
-            target_namespace = self._get_namespace(target_dataset)
-
-            if not source_namespace or not target_namespace:
+            source_ns = DATASET_NS_MAP.get(source_dataset, '')
+            target_ns = DATASET_NS_MAP.get(target_dataset, '')
+            if not source_ns or not target_ns:
                 continue
 
-            # Find source categories matching pattern
-            source_query = f"""
-            SELECT DISTINCT ?category WHERE {{
-                ?measurement ?prop ?category .
-                FILTER(STRSTARTS(STR(?category), "{source_namespace}"))
-                FILTER(REGEX(STR(?category), "_Entity$"))
-                FILTER(CONTAINS(STR(?category), "{source_pattern_normalized}"))
-            }}
-            """
+            source_pattern = normalize_keyword_for_uri_matching(correlation['source_pattern'])
+            target_pattern = normalize_keyword_for_uri_matching(correlation['target_pattern'])
+            relationship = str(correlation['relationship'])
 
-            # Find target categories matching pattern
-            target_query = f"""
-            SELECT DISTINCT ?category WHERE {{
-                ?measurement ?prop ?category .
-                FILTER(STRSTARTS(STR(?category), "{target_namespace}"))
-                FILTER(REGEX(STR(?category), "_Entity$"))
-                FILTER(CONTAINS(STR(?category), "{target_pattern_normalized}"))
-            }}
-            """
+            # Find source category entities matching pattern
+            source_entities = (
+                self._bls_triples
+                .select("subject").distinct()
+                .filter(
+                    F.col("subject").startswith(source_ns) &
+                    F.col("subject").endswith("_Entity") &
+                    F.col("subject").contains(source_pattern)
+                )
+                .select(F.col("subject").alias("source_entity"))
+            )
 
-            source_categories = list(self.graph.query(source_query))
-            target_categories = list(self.graph.query(target_query))
+            # Find target category entities matching pattern
+            target_entities = (
+                self._bls_triples
+                .select("subject").distinct()
+                .filter(
+                    F.col("subject").startswith(target_ns) &
+                    F.col("subject").endswith("_Entity") &
+                    F.col("subject").contains(target_pattern)
+                )
+                .select(F.col("subject").alias("target_entity"))
+            )
 
-            # Create correlation links
-            links_added = 0
-            for source_row in source_categories:
-                for target_row in target_categories:
-                    self.graph.add((
-                        source_row.category,
-                        relationship,
-                        target_row.category
-                    ))
-                    links_added += 1
-                    self.stats['correlation_links'] += 1
+            # Cross join source × target (both should be small for category entities)
+            linked = source_entities.crossJoin(target_entities)
 
-            if links_added > 0:
-                logger.info(f"    {correlation['name']}: {links_added} links")
+            if linked.head(1) != []:
+                correlation_triples = linked.select(
+                    F.col("source_entity").alias("subject"),
+                    F.lit(relationship).alias("predicate"),
+                    F.col("target_entity").alias("object"),
+                )
+                new_dfs.append(correlation_triples)
 
-        logger.info(f"  Total correlation links added: {self.stats['correlation_links']}")
+        if not new_dfs:
+            return None
 
-    def link_cross_dataset_hierarchies(self):
+        result = reduce(DataFrame.unionAll, new_dfs)
+        logger.info("  Correlation triples prepared (lazy)")
+        return result
+
+    # ================================================================
+    # Step 4: Category hierarchies
+    # ================================================================
+
+    def _link_category_hierarchies(self) -> Optional[DataFrame]:
         """
-        Link hierarchies across datasets
+        Link category hierarchies based on URI path structure.
 
-        Identifies parent-child relationships within category URIs based on
-        hierarchical path structure (e.g., All_items_Food_Food_at_home).
+        BLS category URIs encode hierarchy in their path:
+            cpi:All_items_Food_Food_at_home_Entity
+                → hasParent → cpi:All_items_Food_Entity
+            cpi:All_items_Food_Entity
+                → hasParent → cpi:All_items_Entity
 
-        Example:
-            cpi:All_items_Food_Food_at_home_Entity → hasParent → cpi:All_items_Food_Entity
-            cpi:All_items_Food_Entity → hasParent → cpi:All_items_Entity
+        Strategy:
+        1. Collect all _Entity URIs
+        2. For each, extract the path (remove namespace + _Entity suffix)
+        3. Generate candidate parent paths by progressively removing trailing segments
+        4. Join candidates against existing entities to find actual parents
+        5. Keep only the immediate parent (longest matching parent path)
         """
-        logger.info("  Linking cross-dataset hierarchies...")
+        # Get all category entities across all BLS datasets
+        all_categories = (
+            self._bls_triples
+            .select("subject")
+            .distinct()
+            .filter(F.col("subject").endswith("_Entity"))
+        )
 
-        for dataset_name in self.available_datasets:
-            namespace = self._get_namespace(dataset_name)
-            if not namespace:
-                continue
+        if all_categories.head(1) == []:
+            return None
 
-            # Get all category entities
-            category_query = f"""
-            SELECT DISTINCT ?category WHERE {{
-                ?measurement ?prop ?category .
-                FILTER(STRSTARTS(STR(?category), "{namespace}"))
-                FILTER(REGEX(STR(?category), "_Entity$"))
-            }}
-            """
+        # Extract namespace and local path
+        # URI format: {namespace}{path}_Entity
+        # We need to split into namespace + path
+        all_categories = all_categories.withColumn(
+            "local_name",
+            F.regexp_extract(F.col("subject"), r"[/]([^/]+)$", 1)
+        ).withColumn(
+            "namespace",
+            F.regexp_extract(F.col("subject"), r"^(.+/)", 1)
+        ).withColumn(
+            "path",
+            F.regexp_replace(F.col("local_name"), "_Entity$", "")
+        ).filter(
+            F.length(F.col("path")) > 0
+        )
 
-            categories = list(self.graph.query(category_query))
+        # Count path segments to determine hierarchy depth
+        all_categories = all_categories.withColumn(
+            "segment_count",
+            F.size(F.split(F.col("path"), "_"))
+        )
 
-            # Build hierarchy based on URI path structure
-            # e.g., All_items_Food_Food_at_home_Entity has parent All_items_Food_Entity
-            dataset_links = 0
-            for row in categories:
-                category_uri = row.category
-                category_str = str(category_uri)
+        # Only entities with >1 segment can have parents
+        children = all_categories.filter(F.col("segment_count") > 1)
 
-                # Extract the path part (remove namespace and _Entity suffix)
-                if '_Entity' in category_str:
-                    # Get the local name (everything after the last /)
-                    local_name = category_str.split('/')[-1]
-                    path = local_name.replace('_Entity', '')
-                    path_parts = path.split('_')
+        if children.head(1) == []:
+            return None
 
-                    # If path has multiple parts, try to find parent
-                    if len(path_parts) > 1:
-                        # Try progressively shorter paths to find parent
-                        for i in range(len(path_parts) - 1, 0, -1):
-                            parent_path = '_'.join(path_parts[:i])
-                            parent_uri = URIRef(f"{namespace}{parent_path}_Entity")
+        # Generate candidate parent paths by removing trailing segments
+        # For path "A_B_C_D", candidates are: "A_B_C", "A_B", "A"
+        # We want the longest match (immediate parent)
+        #
+        # Strategy: explode each child into multiple candidate rows,
+        # one per possible parent depth, then join against existing entities.
 
-                            # Check if parent exists in graph
-                            parent_exists = False
-                            for _ in self.graph.triples((parent_uri, None, None)):
-                                parent_exists = True
-                                break
+        # Generate candidates using a UDF-free approach:
+        # For each segment count N, the parent at depth K has path = first K segments
+        # We generate rows for K = N-1, N-2, ..., 1 and pick the max K that exists.
 
-                            if parent_exists:
-                                self.graph.add((
-                                    category_uri,
-                                    BLS_ENRICHMENT.hasParent,
-                                    parent_uri
-                                ))
-                                self.stats['hierarchy_links'] += 1
-                                dataset_links += 1
-                                break  # Only link to immediate parent
+        # First, build a lookup of all existing (namespace, path) pairs
+        existing_paths = (
+            all_categories
+            .select(
+                F.col("namespace").alias("parent_ns"),
+                F.col("path").alias("parent_path"),
+                F.col("subject").alias("parent_uri"),
+            )
+        )
 
-            if dataset_links > 0:
-                logger.info(f"    {dataset_name}: {dataset_links} hierarchy links")
+        # For children, generate the immediate parent candidate (remove last segment)
+        # This handles the most common case. For deeper gaps, we'd need iteration,
+        # but the rdflib version also only linked to the immediate parent (break after first match).
+        children_with_parent_path = children.withColumn(
+            "parent_path_candidate",
+            F.regexp_replace(F.col("path"), r"_[^_]+$", "")
+        ).filter(
+            # Ensure we actually removed something
+            F.col("parent_path_candidate") != F.col("path")
+        )
 
-        logger.info(f"  Total hierarchy links added: {self.stats['hierarchy_links']}")
+        # Join against existing entities to find actual parents
+        # Try immediate parent first (one segment removed)
+        matched = (
+            children_with_parent_path
+            .join(
+                existing_paths,
+                on=(
+                    (children_with_parent_path.namespace == existing_paths.parent_ns) &
+                    (children_with_parent_path.parent_path_candidate == existing_paths.parent_path)
+                ),
+                how="inner",
+            )
+            .select(
+                F.col("subject"),
+                F.col("parent_uri"),
+            )
+        )
+
+        if matched.head(1) == []:
+            # Try removing two segments for entities where immediate parent doesn't exist
+            children_depth2 = children_with_parent_path.withColumn(
+                "parent_path_d2",
+                F.regexp_replace(F.col("parent_path_candidate"), r"_[^_]+$", "")
+            ).filter(
+                F.col("parent_path_d2") != F.col("parent_path_candidate")
+            )
+
+            matched = (
+                children_depth2
+                .join(
+                    existing_paths,
+                    on=(
+                        (children_depth2.namespace == existing_paths.parent_ns) &
+                        (children_depth2.parent_path_d2 == existing_paths.parent_path)
+                    ),
+                    how="inner",
+                )
+                .select(
+                    F.col("subject"),
+                    F.col("parent_uri"),
+                )
+            )
+
+            if matched.head(1) == []:
+                return None
+
+        # Also try depth-2 for entities that didn't match at depth-1
+        # Union both depths, keeping the closest parent (depth-1 preferred)
+        depth1_matched = (
+            children_with_parent_path
+            .join(
+                existing_paths,
+                on=(
+                    (children_with_parent_path.namespace == existing_paths.parent_ns) &
+                    (children_with_parent_path.parent_path_candidate == existing_paths.parent_path)
+                ),
+                how="inner",
+            )
+            .select(
+                F.col("subject"),
+                F.col("parent_uri"),
+                F.lit(1).alias("depth"),
+            )
+        )
+
+        # Entities that didn't match at depth 1
+        unmatched_at_d1 = (
+            children_with_parent_path
+            .join(
+                depth1_matched.select("subject").distinct(),
+                on="subject",
+                how="left_anti",
+            )
+        )
+
+        depth2_candidates = unmatched_at_d1.withColumn(
+            "parent_path_d2",
+            F.regexp_replace(F.col("parent_path_candidate"), r"_[^_]+$", "")
+        ).filter(
+            F.col("parent_path_d2") != F.col("parent_path_candidate")
+        )
+
+        depth2_matched = (
+            depth2_candidates
+            .join(
+                existing_paths,
+                on=(
+                    (depth2_candidates.namespace == existing_paths.parent_ns) &
+                    (depth2_candidates.parent_path_d2 == existing_paths.parent_path)
+                ),
+                how="inner",
+            )
+            .select(
+                F.col("subject"),
+                F.col("parent_uri"),
+                F.lit(2).alias("depth"),
+            )
+        )
+
+        all_matched = depth1_matched.unionAll(depth2_matched)
+
+        hierarchy_triples = all_matched.select(
+            F.col("subject"),
+            F.lit(_HAS_PARENT).alias("predicate"),
+            F.col("parent_uri").alias("object"),
+        )
+
+        logger.info("  Hierarchy triples prepared (lazy)")
+        return hierarchy_triples
