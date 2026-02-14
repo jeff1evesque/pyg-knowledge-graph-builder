@@ -72,13 +72,17 @@ def enrich_intra_source(
     logger.info("Checking for Market data...")
     if spark is not None and triples_df is not None:
         try:
-            market_linker = MarketIntraSourceLinker(spark, triples_df)
-            if market_linker.available_datasets:
-                new_market = market_linker.enrich()
-                spark_new_dfs.append(new_market)
-                stats['market'] = market_linker.get_stats()
-            else:
-                logger.info("No Market data detected")
+            market_linker = MarketIntraSourceLinker(spark)
+            market_new_df = market_linker.enrich(triples_df)
+
+            # enrich() returns an empty DataFrame if no market data found,
+            # so we always append — the union is a no-op if empty.
+            spark_new_dfs.append(market_new_df)
+
+            # Count for stats (enrich() already logged the count,
+            # but we capture it here for the stats dict)
+            market_count = market_new_df.count()
+            stats['market'] = {'total_triples_added': market_count}
         except Exception as e:
             logger.error(f"Market enrichment failed: {e}", exc_info=True)
             stats['market'] = {'total_triples_added': 0, 'error': str(e)}
@@ -86,11 +90,13 @@ def enrich_intra_source(
         logger.info("Spark not available, skipping Market enrichment")
 
     # ----------------------------------------
-    # NOAA Enrichment (placeholder)
+    # NOAA Enrichment (placeholder — Phase 3)
     # ----------------------------------------
-    # When migrated:
-    # noaa_linker = NOAAIntraSourceLinker(spark, triples_df)
-    # spark_new_dfs.append(noaa_linker.enrich())
+    # When migrated to PySpark:
+    # noaa_linker = NOAAIntraSourceLinker(spark)
+    # noaa_new_df = noaa_linker.enrich(triples_df)
+    # spark_new_dfs.append(noaa_new_df)
+    # stats['noaa'] = {'total_triples_added': noaa_new_df.count()}
 
     # ----------------------------------------
     # Combine PySpark outputs (stays on executors)
@@ -100,7 +106,6 @@ def enrich_intra_source(
         spark_new_triples = spark_new_dfs[0]
         for df in spark_new_dfs[1:]:
             spark_new_triples = spark_new_triples.unionByName(df)
-        spark_new_triples = spark_new_triples.dropDuplicates(["subject", "predicate", "object"])
 
     return {
         'stats': stats,
