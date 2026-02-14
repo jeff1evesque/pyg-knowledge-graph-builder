@@ -733,6 +733,6 @@ class MarketIntraSourceLinker:
             logger.info("  No multi-source observations to link")
             return None
 
-        result = reduce(DataFrame.unionAll, new_dfs)
+        result = reduce(DataFrame.unionAll, new_dfs).cache()
         logger.info("  Multi-source observation linking complete")
         return result
