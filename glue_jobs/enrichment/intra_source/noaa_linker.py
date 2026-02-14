@@ -1,343 +1,484 @@
 """
-NOAA Intra-Source Enrichment Orchestrator
-Coordinates enrichment for NOAA weather alerts
+NOAA Intra-Source Enrichment Orchestrator (PySpark)
+
+Coordinates enrichment for NOAA weather alerts (CAP 1.2 format).
+All enrichment runs as distributed PySpark DataFrame operations.
+
+Enrichment strategies:
+1. Link temporal sequences of alerts per geographic area (precedes)
+2. Link alerts affecting same geographic regions (via SAME codes)
+3. Link alerts of the same event type (sameEventType)
+4. Link severity escalations within same area over time (escalatesTo)
+
+Note: Temporal unification is handled separately by TemporalUnifier
+in pipeline.py Phase 2 — not called from here.
 """
-from rdflib import Graph, URIRef, Literal
-from rdflib.namespace import RDF, RDFS, XSD, OWL
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+from functools import reduce
+from typing import List, Optional
+
 from glue_jobs.utils.rdf_utils import (
-    NOAA, CAP, NWS, ATOM,
-    NOAA_ENRICHMENT, UNIFIED
+    CAP, NWS, NOAA_ENRICHMENT
 )
-from glue_jobs.enrichment.intra_source.base import IntraSourceEnricher
-from glue_jobs.enrichment.temporal_unifier import TemporalUnifier
-from typing import Dict, Set
+
 import logging
 
 logger = logging.getLogger(__name__)
 
+# ============================================
+# URI string constants
+# ============================================
 
-class NOAAIntraSourceLinker(IntraSourceEnricher):
+RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
+
+# CAP class URIs
+ALERT_TYPE = str(CAP.Alert)
+INFO_TYPE = str(CAP.Info)
+AREA_TYPE = str(CAP.Area)
+GEOCODE_TYPE = str(CAP.Geocode)
+
+# CAP property URIs
+HAS_SENT_TIME = str(CAP.hasSentTime)
+HAS_INFO = str(CAP.hasInfo)
+HAS_AREA = str(CAP.hasArea)
+HAS_AREA_DESC = str(CAP.hasAreaDescription)
+HAS_EVENT = str(CAP.hasEvent)
+HAS_SEVERITY = str(CAP.hasSeverity)
+HAS_GEOCODE = str(CAP.hasGeocode)
+
+# NWS geocode property URIs
+HAS_SAME_CODE = str(NWS.hasSAMECode)
+
+# Enrichment property URIs
+PRECEDES_PRED = str(NOAA_ENRICHMENT.precedes)
+AFFECTS_SAME_REGION_PRED = str(NOAA_ENRICHMENT.affectsSameRegion)
+SAME_EVENT_TYPE_PRED = str(NOAA_ENRICHMENT.sameEventType)
+ESCALATES_TO_PRED = str(NOAA_ENRICHMENT.escalatesTo)
+
+# Severity hierarchy — higher number = more severe
+# The severity objects in the triples are URIs like cap:Minor, cap:Moderate, etc.
+SEVERITY_URIS = {
+    str(CAP.Minor): 1,
+    str(CAP.Moderate): 2,
+    str(CAP.Severe): 3,
+    str(CAP.Extreme): 4,
+}
+
+
+class NOAAIntraSourceLinker:
     """
-    Orchestrates NOAA intra-source enrichment for weather alerts
+    NOAA intra-source enrichment using PySpark DataFrames.
 
-    NOAA weather alerts use the Common Alerting Protocol (CAP) 1.2 standard
-    with NWS-specific extensions. The data structure is:
-
-    - Alert (top level) - contains metadata about the alert message
-    - Info (information segment) - contains specific alert details
-    - Area (geographic area) - defines affected regions
-    - Geocodes (SAME, UGC, FIPS) - specific geographic identifiers
-    - Parameters (NWS-specific) - additional alert metadata
-
-    Enrichment strategies:
-    1. Temporal sequences - Link alerts by time and geographic area
-    2. Geographic relationships - Link alerts affecting same/nearby regions
-    3. Event type relationships - Link related weather events
-    4. Severity escalation - Link watches → warnings → emergencies
+    Each method reads from triples_df, produces a DataFrame of new triples
+    (subject, predicate, object), and returns it. The enrich() method unions
+    all new triples together.
     """
 
-    def __init__(self, graph: Graph):
-        super().__init__(graph)
-        self.stats.update({
-            'geographic_links': 0,
-            'event_links': 0,
-            'severity_links': 0
-        })
-        self.available_datasets = self.detect_datasets()
-        logger.info(f"Detected NOAA datasets: {', '.join(self.available_datasets)}")
+    def __init__(self, spark: SparkSession):
+        self.spark = spark
 
-    def detect_datasets(self) -> Set[str]:
-        """Detect if NOAA weather alert data is present in the graph"""
-        datasets = set()
-
-        # Check for CAP alerts
-        query = f"""
-        ASK {{
-            ?s a <{CAP.Alert}> .
-        }}
+    def enrich(self, triples_df: DataFrame) -> DataFrame:
         """
-        if self.graph.query(query).askAnswer:
-            datasets.add('noaa_alerts')
+        Run all NOAA intra-source enrichment steps.
 
-        return datasets
+        Args:
+            triples_df: DataFrame with columns (subject, predicate, object)
 
-    def enrich(self) -> Dict[str, int]:
-        """Run all NOAA intra-source enrichment steps"""
-        if 'noaa_alerts' not in self.available_datasets:
+        Returns:
+            DataFrame of NEW triples to union with triples_df.
+        """
+        empty = self.spark.createDataFrame(
+            [], "subject STRING, predicate STRING, object STRING"
+        )
+
+        # Quick check: is there any NOAA data?
+        has_noaa = triples_df.filter(
+            (F.col("predicate") == RDF_TYPE)
+            & (F.col("object") == ALERT_TYPE)
+        ).limit(1).count() > 0
+
+        if not has_noaa:
             logger.info("No NOAA data detected, skipping enrichment")
-            return {'total_triples_added': 0}
-
-        initial_count = len(self.graph)
+            return empty
 
         logger.info("=" * 60)
-        logger.info("Starting NOAA Intra-Source Enrichment")
+        logger.info("Starting NOAA Intra-Source Enrichment (PySpark)")
         logger.info("=" * 60)
 
-        # Step 1: Unify temporal entities
-        logger.info("\n[Step 1/5] Unifying temporal entities...")
-        self.unify_temporal_entities()
+        triples_df.cache()
 
-        # Step 2: Link temporal sequences
-        logger.info("\n[Step 2/5] Linking temporal sequences...")
-        self.link_temporal_sequences()
+        # Build the alert info table once — used by multiple steps.
+        # Structure: (alert, info, area, area_desc, sent_time, event, severity_uri)
+        alert_info_df = self._build_alert_info(triples_df)
 
-        # Step 3: Link geographic relationships
-        logger.info("\n[Step 3/5] Linking geographic relationships...")
-        self.link_geographic_relationships()
+        if alert_info_df is None:
+            logger.info("No fully-specified alerts found")
+            return empty
 
-        # Step 4: Link event type relationships
-        logger.info("\n[Step 4/5] Linking event type relationships...")
-        self.link_event_relationships()
+        alert_info_df.cache()
 
-        # Step 5: Link severity escalations
-        logger.info("\n[Step 5/5] Linking severity escalations...")
-        self.link_severity_escalations()
+        new_dfs: List[DataFrame] = []
 
-        final_count = len(self.graph)
-        enrichment_count = final_count - initial_count
+        logger.info("[Step 1/4] Linking temporal sequences...")
+        df = self._link_temporal_sequences(alert_info_df)
+        if df is not None:
+            new_dfs.append(df)
 
-        logger.info("\n" + "=" * 60)
-        logger.info("NOAA Intra-Source Enrichment Complete")
+        logger.info("[Step 2/4] Linking geographic relationships...")
+        df = self._link_geographic_relationships(triples_df)
+        if df is not None:
+            new_dfs.append(df)
+
+        logger.info("[Step 3/4] Linking event type relationships...")
+        df = self._link_event_relationships(alert_info_df)
+        if df is not None:
+            new_dfs.append(df)
+
+        logger.info("[Step 4/4] Linking severity escalations...")
+        df = self._link_severity_escalations(alert_info_df)
+        if df is not None:
+            new_dfs.append(df)
+
+        alert_info_df.unpersist()
+
+        if not new_dfs:
+            logger.info("No enrichment triples produced")
+            return empty
+
+        result = reduce(DataFrame.unionAll, new_dfs).cache()
+        count = result.count()
+
         logger.info("=" * 60)
-        logger.info(f"Total triples added: {enrichment_count}")
-        logger.info(f"  - Temporal unification: {self.stats['temporal_unified']}")
-        logger.info(f"  - Temporal sequences: {self.stats['temporal_sequences']}")
-        logger.info(f"  - Geographic links: {self.stats['geographic_links']}")
-        logger.info(f"  - Event type links: {self.stats['event_links']}")
-        logger.info(f"  - Severity escalation links: {self.stats['severity_links']}")
+        logger.info(f"NOAA Intra-Source Enrichment Complete: {count} triples")
         logger.info("=" * 60)
 
-        return {
-            'total_triples_added': enrichment_count,
-            'available_datasets': list(self.available_datasets),
-            **self.stats
-        }
+        return result
 
-    def unify_temporal_entities(self):
-        """Unify temporal entities from NOAA alerts"""
-        # Use TemporalUnifier with NOAA-only scope
-        unifier = TemporalUnifier(self.graph)
-        unifier.available_sources = {'noaa'}  # Restrict to NOAA only
+    # ================================================================
+    # Shared: Build alert info table
+    # ================================================================
 
-        stats = unifier.unify_all_sources()
-        self.stats['temporal_unified'] = stats['temporal_links']
-
-        logger.info(f"  Unified {stats['months_unified']} months and {stats['years_unified']} years")
-        logger.info(f"  Created {stats['temporal_links']} temporal unification links")
-
-    def link_temporal_sequences(self):
+    def _build_alert_info(self, triples_df: DataFrame) -> Optional[DataFrame]:
         """
-        Link temporal sequences for weather alerts
+        Build a denormalized table of alert metadata by joining through
+        the CAP structure: Alert → Info → Area, Event, Severity.
 
-        Links alerts in chronological order for the same geographic area
+        Returns DataFrame with columns:
+            alert, info, area, area_desc, sent_time, event, severity_uri
         """
-        # Get all alerts with their areas and times
-        query = f"""
-        SELECT ?alert ?area ?areaDesc ?sentTime WHERE {{
-            ?alert a <{CAP.Alert}> ;
-                   <{CAP.hasSentTime}> ?sentTime ;
-                   <{CAP.hasInfo}> ?info .
-            ?info <{CAP.hasArea}> ?area .
-            ?area <{CAP.hasAreaDescription}> ?areaDesc .
-        }}
+        # Alerts
+        alerts = triples_df.filter(
+            (F.col("predicate") == RDF_TYPE)
+            & (F.col("object") == ALERT_TYPE)
+        ).select(F.col("subject").alias("alert"))
+
+        # Alert → sent time
+        sent_times = triples_df.filter(
+            F.col("predicate") == HAS_SENT_TIME
+        ).select(
+            F.col("subject").alias("alert"),
+            F.col("object").alias("sent_time"),
+        )
+
+        # Alert → Info
+        alert_infos = triples_df.filter(
+            F.col("predicate") == HAS_INFO
+        ).select(
+            F.col("subject").alias("alert"),
+            F.col("object").alias("info"),
+        )
+
+        # Info → Area
+        info_areas = triples_df.filter(
+            F.col("predicate") == HAS_AREA
+        ).select(
+            F.col("subject").alias("info"),
+            F.col("object").alias("area"),
+        )
+
+        # Area → area description
+        area_descs = triples_df.filter(
+            F.col("predicate") == HAS_AREA_DESC
+        ).select(
+            F.col("subject").alias("area"),
+            F.col("object").alias("area_desc"),
+        )
+
+        # Info → event (literal string like "Flood Advisory")
+        events = triples_df.filter(
+            F.col("predicate") == HAS_EVENT
+        ).select(
+            F.col("subject").alias("info"),
+            F.col("object").alias("event"),
+        )
+
+        # Info → severity (URI like cap:Minor)
+        severities = triples_df.filter(
+            F.col("predicate") == HAS_SEVERITY
+        ).select(
+            F.col("subject").alias("info"),
+            F.col("object").alias("severity_uri"),
+        )
+
+        # Join everything together
+        result = (
+            alerts
+            .join(sent_times, "alert", "inner")
+            .join(alert_infos, "alert", "inner")
+            .join(info_areas, "info", "left")
+            .join(area_descs, "area", "left")
+            .join(events, "info", "left")
+            .join(severities, "info", "left")
+        )
+
+        if result.head(1) == []:
+            return None
+
+        return result
+
+    # ================================================================
+    # Step 1: Temporal Sequences
+    # ================================================================
+
+    def _link_temporal_sequences(
+        self, alert_info_df: DataFrame
+    ) -> Optional[DataFrame]:
         """
+        Link alerts in chronological order per geographic area.
 
-        results = list(self.graph.query(query))
-
-        # Group by area description
-        by_area = {}
-        for row in results:
-            area_desc = str(row.areaDesc)
-            if area_desc not in by_area:
-                by_area[area_desc] = []
-
-            by_area[area_desc].append({
-                'alert': row.alert,
-                'sent_time': str(row.sentTime)
-            })
-
-        # Sort and link alerts chronologically for each area
-        links_added = 0
-        for area_desc, alerts in by_area.items():
-            if len(alerts) < 2:
-                continue
-
-            # Sort by sent time
-            alerts.sort(key=lambda x: x['sent_time'])
-
-            # Link consecutive alerts
-            for i in range(len(alerts) - 1):
-                current = alerts[i]['alert']
-                next_alert = alerts[i + 1]['alert']
-
-                self.graph.add((
-                    current,
-                    NOAA_ENRICHMENT.precedes,
-                    next_alert
-                ))
-                links_added += 1
-                self.stats['temporal_sequences'] += 1
-
-        logger.info(f"  Added {links_added} temporal sequence links")
-
-    def link_geographic_relationships(self):
+        For each area_desc, orders alerts by sent_time and produces:
+            alert_N  noaa_enrichment:precedes  alert_N+1
         """
-        Link alerts affecting same or overlapping geographic areas
+        # Only alerts with area_desc and sent_time
+        sequenceable = alert_info_df.filter(
+            F.col("area_desc").isNotNull() & F.col("sent_time").isNotNull()
+        ).select("alert", "area_desc", "sent_time").dropDuplicates()
 
-        Uses SAME codes, UGC codes, and FIPS codes to identify related areas
+        if sequenceable.head(1) == []:
+            return None
+
+        w = Window.partitionBy("area_desc").orderBy("sent_time")
+        sequenced = sequenceable.withColumn(
+            "next_alert", F.lead("alert").over(w)
+        ).filter(F.col("next_alert").isNotNull())
+
+        if sequenced.head(1) == []:
+            return None
+
+        result = sequenced.select(
+            F.col("alert").alias("subject"),
+            F.lit(PRECEDES_PRED).alias("predicate"),
+            F.col("next_alert").alias("object"),
+        )
+
+        logger.info("  Temporal sequence linking complete")
+        return result
+
+    # ================================================================
+    # Step 2: Geographic Relationships (via SAME codes)
+    # ================================================================
+
+    def _link_geographic_relationships(
+        self, triples_df: DataFrame
+    ) -> Optional[DataFrame]:
         """
+        Link alerts that share SAME geocodes (same geographic region).
 
-        # Link alerts with same SAME codes
-        same_query = f"""
-        SELECT ?alert1 ?alert2 ?sameCode WHERE {{
-            ?alert1 <{CAP.hasInfo}> ?info1 .
-            ?info1 <{CAP.hasArea}> ?area1 .
-            ?area1 <{CAP.hasGeocode}> ?geocode1 .
-            ?geocode1 <{NWS.hasSAMECode}> ?sameCode .
+        Traverses: Alert → Info → Area → Geocode → hasSAMECode
+        Then self-joins on SAME code to find alert pairs.
 
-            ?alert2 <{CAP.hasInfo}> ?info2 .
-            ?info2 <{CAP.hasArea}> ?area2 .
-            ?area2 <{CAP.hasGeocode}> ?geocode2 .
-            ?geocode2 <{NWS.hasSAMECode}> ?sameCode .
-
-            FILTER(?alert1 != ?alert2)
-        }}
+        Uses alert1 < alert2 to produce each pair exactly once.
         """
+        # Alert → Info
+        alert_infos = triples_df.filter(
+            F.col("predicate") == HAS_INFO
+        ).select(
+            F.col("subject").alias("alert"),
+            F.col("object").alias("info"),
+        )
 
-        results = list(self.graph.query(same_query))
+        # Info → Area
+        info_areas = triples_df.filter(
+            F.col("predicate") == HAS_AREA
+        ).select(
+            F.col("subject").alias("info"),
+            F.col("object").alias("area"),
+        )
 
-        # Track unique pairs to avoid duplicates
-        linked_pairs = set()
+        # Area → Geocode
+        area_geocodes = triples_df.filter(
+            F.col("predicate") == HAS_GEOCODE
+        ).select(
+            F.col("subject").alias("area"),
+            F.col("object").alias("geocode"),
+        )
 
-        for row in results:
-            alert1 = row.alert1
-            alert2 = row.alert2
+        # Geocode → SAME code
+        same_codes = triples_df.filter(
+            F.col("predicate") == HAS_SAME_CODE
+        ).select(
+            F.col("subject").alias("geocode"),
+            F.col("object").alias("same_code"),
+        )
 
-            # Create ordered pair to avoid duplicates
-            pair = tuple(sorted([str(alert1), str(alert2)]))
+        # Join: alert → same_code
+        alert_same = (
+            alert_infos
+            .join(info_areas, "info", "inner")
+            .join(area_geocodes, "area", "inner")
+            .join(same_codes, "geocode", "inner")
+            .select("alert", "same_code")
+            .dropDuplicates()
+        )
 
-            if pair not in linked_pairs:
-                self.graph.add((
-                    alert1,
-                    NOAA_ENRICHMENT.affectsSameRegion,
-                    alert2
-                ))
-                linked_pairs.add(pair)
-                self.stats['geographic_links'] += 1
+        if alert_same.head(1) == []:
+            logger.info("  No SAME codes found")
+            return None
 
-        logger.info(f"  Added {len(linked_pairs)} geographic relationship links")
+        # Self-join on same_code, alert1 < alert2
+        left = alert_same.select(
+            F.col("alert").alias("alert1"),
+            F.col("same_code").alias("sc1"),
+        )
+        right = alert_same.select(
+            F.col("alert").alias("alert2"),
+            F.col("same_code").alias("sc2"),
+        )
 
-    def link_event_relationships(self):
+        pairs = left.join(
+            right,
+            (left.sc1 == right.sc2) & (left.alert1 < right.alert2),
+            "inner",
+        ).select("alert1", "alert2").dropDuplicates()
+
+        if pairs.head(1) == []:
+            return None
+
+        result = pairs.select(
+            F.col("alert1").alias("subject"),
+            F.lit(AFFECTS_SAME_REGION_PRED).alias("predicate"),
+            F.col("alert2").alias("object"),
+        )
+
+        logger.info("  Geographic relationship linking complete")
+        return result
+
+    # ================================================================
+    # Step 3: Event Type Relationships
+    # ================================================================
+
+    def _link_event_relationships(
+        self, alert_info_df: DataFrame
+    ) -> Optional[DataFrame]:
         """
-        Link related weather events
+        Link alerts with the same event type (e.g., all "Flood Advisory" alerts).
 
-        Links alerts with the same event type (e.g., all Flood Advisories)
+        Uses alert1 < alert2 to produce each pair exactly once.
         """
+        alert_events = alert_info_df.filter(
+            F.col("event").isNotNull()
+        ).select("alert", "event").dropDuplicates()
 
-        # Get all alerts grouped by event type
-        query = f"""
-        SELECT ?alert ?event WHERE {{
-            ?alert <{CAP.hasInfo}> ?info .
-            ?info <{CAP.hasEvent}> ?event .
-        }}
+        if alert_events.head(1) == []:
+            return None
+
+        left = alert_events.select(
+            F.col("alert").alias("alert1"),
+            F.col("event").alias("e1"),
+        )
+        right = alert_events.select(
+            F.col("alert").alias("alert2"),
+            F.col("event").alias("e2"),
+        )
+
+        pairs = left.join(
+            right,
+            (left.e1 == right.e2) & (left.alert1 < right.alert2),
+            "inner",
+        ).select("alert1", "alert2").dropDuplicates()
+
+        if pairs.head(1) == []:
+            return None
+
+        result = pairs.select(
+            F.col("alert1").alias("subject"),
+            F.lit(SAME_EVENT_TYPE_PRED).alias("predicate"),
+            F.col("alert2").alias("object"),
+        )
+
+        logger.info("  Event type linking complete")
+        return result
+
+    # ================================================================
+    # Step 4: Severity Escalations
+    # ================================================================
+
+    def _link_severity_escalations(
+        self, alert_info_df: DataFrame
+    ) -> Optional[DataFrame]:
         """
+        Link severity escalations for the same geographic area.
 
-        results = list(self.graph.query(query))
+        For each area_desc, orders alerts by sent_time, then links
+        consecutive alerts where severity increases:
+            alert_N  noaa_enrichment:escalatesTo  alert_N+1
+            (only when severity_level(N+1) > severity_level(N))
 
-        # Group by event type
-        by_event = {}
-        for row in results:
-            event = str(row.event)
-            if event not in by_event:
-                by_event[event] = []
-            by_event[event].append(row.alert)
-
-        # Link alerts of same event type
-        links_added = 0
-        for event_type, alerts in by_event.items():
-            if len(alerts) < 2:
-                continue
-
-            # Link each alert to others of same type
-            for i, alert1 in enumerate(alerts):
-                for alert2 in alerts[i + 1:]:
-                    self.graph.add((
-                        alert1,
-                        NOAA_ENRICHMENT.sameEventType,
-                        alert2
-                    ))
-                    links_added += 1
-                    self.stats['event_links'] += 1
-
-        logger.info(f"  Added {links_added} event type links")
-
-    def link_severity_escalations(self):
+        Severity hierarchy: Minor(1) < Moderate(2) < Severe(3) < Extreme(4)
         """
-        Link severity escalations for same geographic areas
+        # Only alerts with area_desc, sent_time, and severity
+        escalatable = alert_info_df.filter(
+            F.col("area_desc").isNotNull()
+            & F.col("sent_time").isNotNull()
+            & F.col("severity_uri").isNotNull()
+        ).select(
+            "alert", "area_desc", "sent_time", "severity_uri"
+        ).dropDuplicates()
 
-        Links watches → advisories → warnings → emergencies
-        for the same region
-        """
+        if escalatable.head(1) == []:
+            return None
 
-        # Define severity hierarchy
-        severity_order = {
-            'Minor': 1,
-            'Moderate': 2,
-            'Severe': 3,
-            'Extreme': 4
-        }
+        # Map severity URIs to numeric levels via broadcast join
+        severity_rows = list(SEVERITY_URIS.items())
+        severity_df = self.spark.createDataFrame(
+            severity_rows, ["severity_uri", "severity_level"]
+        )
 
-        # Get alerts with severity and area
-        query = f"""
-        SELECT ?alert ?severity ?areaDesc ?sentTime WHERE {{
-            ?alert <{CAP.hasInfo}> ?info ;
-                   <{CAP.hasSentTime}> ?sentTime .
-            ?info <{CAP.hasSeverity}> ?severityUri ;
-                  <{CAP.hasArea}> ?area .
-            ?area <{CAP.hasAreaDescription}> ?areaDesc .
-            ?severityUri <{RDFS.label}> ?severity .
-        }}
-        """
+        escalatable = escalatable.join(
+            F.broadcast(severity_df), "severity_uri", "inner"
+        )
 
-        results = list(self.graph.query(query))
+        if escalatable.head(1) == []:
+            return None
 
-        # Group by area
-        by_area = {}
-        for row in results:
-            area_desc = str(row.areaDesc)
-            severity = str(row.severity)
+        # Window: partition by area, order by time
+        w = Window.partitionBy("area_desc").orderBy("sent_time")
 
-            if area_desc not in by_area:
-                by_area[area_desc] = []
+        with_next = escalatable.withColumn(
+            "next_alert", F.lead("alert").over(w)
+        ).withColumn(
+            "next_severity", F.lead("severity_level").over(w)
+        ).filter(
+            F.col("next_alert").isNotNull()
+            & F.col("next_severity").isNotNull()
+        )
 
-            by_area[area_desc].append({
-                'alert': row.alert,
-                'severity': severity,
-                'severity_level': severity_order.get(severity, 0),
-                'sent_time': str(row.sentTime)
-            })
+        # Only keep pairs where severity increases
+        escalations = with_next.filter(
+            F.col("next_severity") > F.col("severity_level")
+        )
 
-        # Link escalating severity alerts
-        links_added = 0
-        for area_desc, alerts in by_area.items():
-            if len(alerts) < 2:
-                continue
+        if escalations.head(1) == []:
+            return None
 
-            # Sort by time
-            alerts.sort(key=lambda x: x['sent_time'])
+        result = escalations.select(
+            F.col("alert").alias("subject"),
+            F.lit(ESCALATES_TO_PRED).alias("predicate"),
+            F.col("next_alert").alias("object"),
+        )
 
-            # Find escalations (increasing severity over time)
-            for i in range(len(alerts) - 1):
-                current = alerts[i]
-                next_alert = alerts[i + 1]
-
-                if next_alert['severity_level'] > current['severity_level']:
-                    self.graph.add((
-                        current['alert'],
-                        NOAA_ENRICHMENT.escalatesTo,
-                        next_alert['alert']
-                    ))
-                    links_added += 1
-                    self.stats['severity_links'] += 1
-
-        logger.info(f"  Added {links_added} severity escalation links")
+        logger.info("  Severity escalation linking complete")
+        return result

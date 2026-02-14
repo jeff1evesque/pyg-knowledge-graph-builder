@@ -15,6 +15,7 @@ from pyspark.sql import SparkSession, DataFrame
 from glue_jobs.enrichment.intra_source.bls_linker import BLSIntraSourceLinker
 from glue_jobs.enrichment.intra_source.sec_linker import SECIntraSourceLinker
 from glue_jobs.enrichment.intra_source.market_linker import MarketIntraSourceLinker
+from glue_jobs.enrichment.intra_source.noaa_linker import NOAAIntraSourceLinker
 from typing import Dict, Optional, List
 import logging
 
@@ -35,7 +36,7 @@ def enrich_intra_source(
         - 'spark_new_triples': DataFrame of PySpark enrichment output
           (stays on executors, never collected here)
     """
-    stats = {}
+    stats: Dict[str, Dict[str, any]] = {}
     spark_new_dfs: List[DataFrame] = []
 
     # ----------------------------------------
@@ -74,13 +75,7 @@ def enrich_intra_source(
         try:
             market_linker = MarketIntraSourceLinker(spark)
             market_new_df = market_linker.enrich(triples_df)
-
-            # enrich() returns an empty DataFrame if no market data found,
-            # so we always append — the union is a no-op if empty.
             spark_new_dfs.append(market_new_df)
-
-            # Count for stats (enrich() already logged the count,
-            # but we capture it here for the stats dict)
             market_count = market_new_df.count()
             stats['market'] = {'total_triples_added': market_count}
         except Exception as e:
@@ -90,13 +85,21 @@ def enrich_intra_source(
         logger.info("Spark not available, skipping Market enrichment")
 
     # ----------------------------------------
-    # NOAA Enrichment (placeholder — Phase 3)
+    # NOAA Enrichment (PySpark — returns DataFrame)
     # ----------------------------------------
-    # When migrated to PySpark:
-    # noaa_linker = NOAAIntraSourceLinker(spark)
-    # noaa_new_df = noaa_linker.enrich(triples_df)
-    # spark_new_dfs.append(noaa_new_df)
-    # stats['noaa'] = {'total_triples_added': noaa_new_df.count()}
+    logger.info("Checking for NOAA data...")
+    if spark is not None and triples_df is not None:
+        try:
+            noaa_linker = NOAAIntraSourceLinker(spark)
+            noaa_new_df = noaa_linker.enrich(triples_df)
+            spark_new_dfs.append(noaa_new_df)
+            noaa_count = noaa_new_df.count()
+            stats['noaa'] = {'total_triples_added': noaa_count}
+        except Exception as e:
+            logger.error(f"NOAA enrichment failed: {e}", exc_info=True)
+            stats['noaa'] = {'total_triples_added': 0, 'error': str(e)}
+    else:
+        logger.info("Spark not available, skipping NOAA enrichment")
 
     # ----------------------------------------
     # Combine PySpark outputs (stays on executors)
