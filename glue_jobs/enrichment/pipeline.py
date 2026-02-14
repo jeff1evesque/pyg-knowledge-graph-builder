@@ -4,6 +4,7 @@ Main Enrichment Pipeline Orchestrator
 Architecture:
 - Intra-source enrichers run independently (some rdflib, some PySpark)
 - After intra-source: all new triples merged into triples_df on executors
+- Temporal unification runs on PySpark (cross-source temporal alignment)
 - Cross-source enrichment runs on PySpark reading from triples_df
 - rdflib graph only needed for rdflib-based intra-source enrichers
 - As enrichers migrate to PySpark, rdflib usage shrinks to zero
@@ -11,9 +12,10 @@ Architecture:
 from rdflib import Graph
 from pyspark.sql import SparkSession, DataFrame
 from glue_jobs.enrichment.intra_source_linker import enrich_intra_source
+from glue_jobs.enrichment.temporal_unifier import TemporalUnifier
 from glue_jobs.enrichment.cross_source_linker import enrich_cross_source
 from glue_jobs.utils.spark_rdf_utils import (
-    snapshot_rdflib_graph, rdflib_diff_to_triples_df, deduplicate_against_existing
+    snapshot_rdflib_graph, rdflib_diff_to_triples_df
 )
 from typing import Dict, Optional
 import logging
@@ -41,6 +43,7 @@ class EnrichmentPipeline:
         self.stats = {
             'initial_triples': len(graph),
             'intra_source': {},
+            'temporal_triples': 0,
             'cross_source_triples': 0,
             'final_triples': 0,
             'total_enrichment': 0
@@ -109,10 +112,40 @@ class EnrichmentPipeline:
                 logger.info("Merged intra-source enrichment into triples_df on executors")
 
         # ============================================
-        # PHASE 2: CROSS-SOURCE ENRICHMENT (PySpark)
+        # PHASE 2: TEMPORAL UNIFICATION (PySpark)
         # ============================================
         logger.info("\n" + "=" * 80)
-        logger.info("PHASE 2: CROSS-SOURCE ENRICHMENT")
+        logger.info("PHASE 2: TEMPORAL UNIFICATION")
+        logger.info("=" * 80)
+
+        if self.spark is not None and self.triples_df is not None:
+            temporal_unifier = TemporalUnifier(self.spark)
+            temporal_new = temporal_unifier.enrich(self.triples_df)
+
+            temporal_count = temporal_new.count()
+            self.stats['temporal_triples'] = temporal_count
+
+            if temporal_count > 0:
+                old_df = self.triples_df
+                self.triples_df = (
+                    self.triples_df
+                    .unionByName(temporal_new)
+                    .dropDuplicates(["subject", "predicate", "object"])
+                    .cache()
+                )
+                self.triples_df.count()
+                old_df.unpersist()
+                temporal_new.unpersist()
+
+            logger.info(f"Temporal unification added {temporal_count} triples")
+        else:
+            logger.info("Skipping temporal unification (no Spark session)")
+
+        # ============================================
+        # PHASE 3: CROSS-SOURCE ENRICHMENT (PySpark)
+        # ============================================
+        logger.info("\n" + "=" * 80)
+        logger.info("PHASE 3: CROSS-SOURCE ENRICHMENT")
         logger.info("=" * 80)
 
         if self.spark is not None and self.triples_df is not None:
@@ -138,12 +171,11 @@ class EnrichmentPipeline:
             logger.info("Skipping cross-source enrichment (no Spark session)")
 
         # ============================================
-        # PHASE 3: ONTOLOGY MAPPING (optional)
+        # PHASE 4: ONTOLOGY MAPPING (optional)
         # ============================================
-        # TODO: Migrate to PySpark. For now, skip or run on rdflib.
         if enable_ontology_mapping:
             logger.info("\n" + "=" * 80)
-            logger.info("PHASE 3: ONTOLOGY MAPPING")
+            logger.info("PHASE 4: ONTOLOGY MAPPING")
             logger.info("=" * 80)
             logger.info("  (Ontology mapping not yet migrated to PySpark — skipping)")
 
@@ -167,6 +199,7 @@ class EnrichmentPipeline:
         logger.info("ENRICHMENT PIPELINE COMPLETE")
         logger.info("=" * 80)
         logger.info(f"  Initial triples:       {self.stats['initial_triples']:>10,}")
+        logger.info(f"  Temporal triples:      {self.stats['temporal_triples']:>10,}")
         logger.info(f"  Cross-source triples:  {self.stats['cross_source_triples']:>10,}")
         logger.info(f"  Final triples:         {self.stats['final_triples']:>10,}")
         logger.info(f"  Total enrichment:      {self.stats['total_enrichment']:>10,}")
