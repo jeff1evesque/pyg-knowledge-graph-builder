@@ -1,5 +1,5 @@
 """
-Ontology Mapping Utilities
+Ontology Mapping Utilities (PySpark)
 
 Maps between different ontology vocabularies and creates standardized mappings.
 This is OPTIONAL - the pipeline works without it, but it improves interoperability.
@@ -7,360 +7,364 @@ This is OPTIONAL - the pipeline works without it, but it improves interoperabili
 Use cases:
 1. Standardize property names across BLS datasets (hasMonth → unified:hasMonth)
 2. Create owl:equivalentProperty and owl:equivalentClass mappings
-3. Add SKOS metadata for better semantic interoperability
-4. Align classification systems (NAICS, SIC, GICS, etc.)
+3. Add SKOS prefLabel for entities that only have rdfs:label
+4. Align classification systems (NAICS, SIC, GICS, etc.) — future
 
-Example:
-    from glue_jobs.enrichment.ontology_mapper import OntologyMapper
-
-    mapper = OntologyMapper(graph)
-    mapper.create_equivalence_mappings()
-    mapper.normalize_labels()
+All operations run as PySpark DataFrame transformations.
 """
-from rdflib import Graph, URIRef, Literal, Namespace
-from rdflib.namespace import RDF, RDFS, OWL, XSD
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
+from functools import reduce
+from typing import List, Optional
+
 from glue_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, SEC_ENRICHMENT, MARKET_ENRICHMENT, NOAA_ENRICHMENT,
     UNIFIED, CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER,
     SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP, MARKET, CAP
 )
-from typing import Dict
-from datetime import datetime
+
 import logging
 
 logger = logging.getLogger(__name__)
 
-# SKOS namespace for semantic metadata
-SKOS = Namespace("http://www.w3.org/2004/02/skos/core#")
-DCTERMS = Namespace("http://purl.org/dc/terms/")
+# ============================================
+# URI string constants
+# ============================================
+
+RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
+OWL_EQUIVALENT_PROPERTY = "http://www.w3.org/2002/07/owl#equivalentProperty"
+OWL_EQUIVALENT_CLASS = "http://www.w3.org/2002/07/owl#equivalentClass"
+SKOS_PREF_LABEL = "http://www.w3.org/2004/02/skos/core#prefLabel"
+SKOS_CONCEPT_SCHEME = "http://www.w3.org/2004/02/skos/core#ConceptScheme"
+DCTERMS_DESCRIPTION = "http://purl.org/dc/terms/description"
+
+# ============================================
+# PROPERTY EQUIVALENCE MAPPINGS
+# ============================================
+
+PROPERTY_MAPPINGS = {
+    # Temporal: all month properties → unified:hasMonth
+    str(CPI.hasMonth): str(UNIFIED.hasMonth),
+    str(PPI.hasStartMonth): str(UNIFIED.hasMonth),
+    str(PPI.hasEndMonth): str(UNIFIED.hasMonth),
+    str(ECI.hasMonth): str(UNIFIED.hasMonth),
+    str(JOLTS.hasMonth): str(UNIFIED.hasMonth),
+    str(EMPSIT.hasMonth): str(UNIFIED.hasMonth),
+    str(XIMPIM.hasMonth): str(UNIFIED.hasMonth),
+    str(LAUS.hasMonth): str(UNIFIED.hasMonth),
+    str(METRO.hasMonth): str(UNIFIED.hasMonth),
+    str(REALER.hasMonth): str(UNIFIED.hasMonth),
+
+    # Temporal: all year properties → unified:hasYear
+    str(CPI.hasYear): str(UNIFIED.hasYear),
+    str(PPI.hasStartYear): str(UNIFIED.hasYear),
+    str(PPI.hasEndYear): str(UNIFIED.hasYear),
+    str(ECI.hasYear): str(UNIFIED.hasYear),
+    str(JOLTS.hasYear): str(UNIFIED.hasYear),
+    str(EMPSIT.hasYear): str(UNIFIED.hasYear),
+    str(XIMPIM.hasYear): str(UNIFIED.hasYear),
+    str(LAUS.hasYear): str(UNIFIED.hasYear),
+    str(METRO.hasYear): str(UNIFIED.hasYear),
+    str(REALER.hasYear): str(UNIFIED.hasYear),
+
+    # Measurement values → unified:measurementValue
+    str(CPI.indexValue): str(UNIFIED.measurementValue),
+    str(PPI.changeValue): str(UNIFIED.measurementValue),
+    str(PPI.indexValue): str(UNIFIED.measurementValue),
+    str(JOLTS.level): str(UNIFIED.measurementValue),
+    str(JOLTS.rate): str(UNIFIED.measurementValue),
+    str(EMPSIT.value): str(UNIFIED.measurementValue),
+    str(ECI.indexValue): str(UNIFIED.measurementValue),
+    str(MARKET.observedPrice): str(UNIFIED.measurementValue),
+    str(MARKET.lastPrice): str(UNIFIED.measurementValue),
+
+    # Category properties → unified:hasCategory
+    str(CPI.hasCategory): str(UNIFIED.hasCategory),
+    str(PPI.hasCommodityGrouping): str(UNIFIED.hasCategory),
+    str(ECI.hasOccupationalGroup): str(UNIFIED.hasCategory),
+    str(JOLTS.hasIndustry): str(UNIFIED.hasCategory),
+    str(EMPSIT.hasIndustry): str(UNIFIED.hasCategory),
+    str(EMPSIT.hasCategory): str(UNIFIED.hasCategory),
+
+    # Company/ticker
+    str(MARKET.symbol): str(UNIFIED.ticker),
+
+    # Geographic
+    str(LAUS.hasState): str(UNIFIED.hasRegion),
+    str(METRO.hasMetropolitanArea): str(UNIFIED.hasRegion),
+}
+
+# ============================================
+# CLASS EQUIVALENCE MAPPINGS
+# ============================================
+
+CLASS_MAPPINGS = {
+    # Price indices
+    str(CPI.Index): str(BLS_ENRICHMENT.PriceIndex),
+    str(PPI.IndexValue): str(BLS_ENRICHMENT.PriceIndex),
+
+    # Rate measurements
+    str(JOLTS.JobOpeningsRate): str(BLS_ENRICHMENT.RateMeasurement),
+    str(JOLTS.HiresRate): str(BLS_ENRICHMENT.RateMeasurement),
+    str(JOLTS.QuitsRate): str(BLS_ENRICHMENT.RateMeasurement),
+    str(LAUS.UnemploymentRate): str(BLS_ENRICHMENT.RateMeasurement),
+    str(METRO.UnemploymentRate): str(BLS_ENRICHMENT.RateMeasurement),
+
+    # Change measurements
+    str(CPI.PercentChange): str(BLS_ENRICHMENT.ChangeMeasurement),
+    str(PPI.MonthlyChange): str(BLS_ENRICHMENT.ChangeMeasurement),
+    str(PPI.TwelveMonthChange): str(BLS_ENRICHMENT.ChangeMeasurement),
+    str(ECI.PercentChangeData): str(BLS_ENRICHMENT.ChangeMeasurement),
+
+    # Level measurements
+    str(JOLTS.JobOpeningsLevel): str(BLS_ENRICHMENT.LevelMeasurement),
+    str(JOLTS.HiresLevel): str(BLS_ENRICHMENT.LevelMeasurement),
+    str(EMPSIT.EmployeeCount): str(BLS_ENRICHMENT.LevelMeasurement),
+    str(LAUS.LaborForceData): str(BLS_ENRICHMENT.LevelMeasurement),
+
+    # Economic indicators
+    str(CPI.Category): str(BLS_ENRICHMENT.EconomicIndicator),
+    str(PPI.CommodityGrouping): str(BLS_ENRICHMENT.EconomicIndicator),
+
+    # Industry classifications
+    str(JOLTS.Industry): str(BLS_ENRICHMENT.IndustryClassification),
+    str(EMPSIT.Industry): str(BLS_ENRICHMENT.IndustryClassification),
+    str(ECI.Industry): str(BLS_ENRICHMENT.IndustryClassification),
+
+    # Occupational classifications
+    str(ECI.OccupationalGroup): str(BLS_ENRICHMENT.OccupationalClassification),
+    str(EMPSIT.Occupation): str(BLS_ENRICHMENT.OccupationalClassification),
+}
 
 
 class OntologyMapper:
     """
-    Maps between different ontology vocabularies
+    Creates ontology equivalence mappings and label normalization
+    using PySpark DataFrames.
 
-    Creates standardized mappings to improve interoperability and
-    make PyG construction easier with consistent property names.
+    All mappings are static configuration — no data-dependent queries
+    except for the label normalization step which reads rdfs:label
+    triples from the graph.
     """
 
-    def __init__(self, graph: Graph):
-        self.graph = graph
-        self.stats = {
-            'property_equivalences': 0,
-            'class_equivalences': 0,
-            'normalized_labels': 0,
-            'skos_concepts': 0,
-            'classification_alignments': 0
-        }
+    def __init__(self, spark: SparkSession):
+        self.spark = spark
 
-        # Bind additional namespaces
-        self.graph.bind("skos", SKOS)
-        self.graph.bind("dcterms", DCTERMS)
-
-        # Load mapping configurations
-        self.property_mappings = self._load_property_mappings()
-        self.class_mappings = self._load_class_mappings()
-
-    def _load_property_mappings(self) -> Dict[str, str]:
+    def enrich(
+        self,
+        triples_df: DataFrame,
+        enable_skos: bool = False,
+    ) -> DataFrame:
         """
-        Load property equivalence mappings
+        Run ontology mapping.
 
-        Maps dataset-specific properties to unified properties
+        Args:
+            triples_df: DataFrame with columns (subject, predicate, object)
+            enable_skos: Whether to create SKOS concept schemes
+
+        Returns:
+            DataFrame of NEW triples (equivalences + labels)
         """
-        return {
-            # ============================================
-            # TEMPORAL PROPERTY MAPPINGS
-            # ============================================
-            # All month properties → unified:hasMonth
-            str(CPI.hasMonth): str(UNIFIED.hasMonth),
-            str(PPI.hasStartMonth): str(UNIFIED.hasMonth),
-            str(PPI.hasEndMonth): str(UNIFIED.hasMonth),
-            str(ECI.hasMonth): str(UNIFIED.hasMonth),
-            str(JOLTS.hasMonth): str(UNIFIED.hasMonth),
-            str(EMPSIT.hasMonth): str(UNIFIED.hasMonth),
-            str(XIMPIM.hasMonth): str(UNIFIED.hasMonth),
-            str(LAUS.hasMonth): str(UNIFIED.hasMonth),
-            str(METRO.hasMonth): str(UNIFIED.hasMonth),
-            str(REALER.hasMonth): str(UNIFIED.hasMonth),
+        empty = self.spark.createDataFrame(
+            [], "subject STRING, predicate STRING, object STRING"
+        )
 
-            # All year properties → unified:hasYear
-            str(CPI.hasYear): str(UNIFIED.hasYear),
-            str(PPI.hasStartYear): str(UNIFIED.hasYear),
-            str(PPI.hasEndYear): str(UNIFIED.hasYear),
-            str(ECI.hasYear): str(UNIFIED.hasYear),
-            str(JOLTS.hasYear): str(UNIFIED.hasYear),
-            str(EMPSIT.hasYear): str(UNIFIED.hasYear),
-            str(XIMPIM.hasYear): str(UNIFIED.hasYear),
-            str(LAUS.hasYear): str(UNIFIED.hasYear),
-            str(METRO.hasYear): str(UNIFIED.hasYear),
-            str(REALER.hasYear): str(UNIFIED.hasYear),
+        logger.info("=" * 60)
+        logger.info("Starting Ontology Mapping (PySpark)")
+        logger.info("=" * 60)
 
-            # ============================================
-            # MEASUREMENT VALUE MAPPINGS
-            # ============================================
-            # All measurement values → unified:measurementValue
-            str(CPI.indexValue): str(UNIFIED.measurementValue),
-            str(PPI.changeValue): str(UNIFIED.measurementValue),
-            str(PPI.indexValue): str(UNIFIED.measurementValue),
-            str(JOLTS.level): str(UNIFIED.measurementValue),
-            str(JOLTS.rate): str(UNIFIED.measurementValue),
-            str(EMPSIT.value): str(UNIFIED.measurementValue),
-            str(ECI.indexValue): str(UNIFIED.measurementValue),
-            str(MARKET.observedPrice): str(UNIFIED.measurementValue),
-            str(MARKET.lastPrice): str(UNIFIED.measurementValue),
+        new_dfs: List[DataFrame] = []
 
-            # ============================================
-            # CATEGORY/ENTITY MAPPINGS
-            # ============================================
-            # All category properties → unified:hasCategory
-            str(CPI.hasCategory): str(UNIFIED.hasCategory),
-            str(PPI.hasCommodityGrouping): str(UNIFIED.hasCategory),
-            str(ECI.hasOccupationalGroup): str(UNIFIED.hasCategory),
-            str(JOLTS.hasIndustry): str(UNIFIED.hasCategory),
-            str(EMPSIT.hasIndustry): str(UNIFIED.hasCategory),
-            str(EMPSIT.hasCategory): str(UNIFIED.hasCategory),
+        logger.info("[Step 1/3] Creating property equivalences...")
+        df = self._create_property_equivalences()
+        if df is not None:
+            new_dfs.append(df)
 
-            # ============================================
-            # COMPANY/TICKER MAPPINGS
-            # ============================================
-            str(MARKET.symbol): str(UNIFIED.ticker),
-            # SEC CIK mappings handled separately
+        logger.info("[Step 2/3] Creating class equivalences...")
+        df = self._create_class_equivalences()
+        if df is not None:
+            new_dfs.append(df)
 
-            # ============================================
-            # GEOGRAPHIC MAPPINGS
-            # ============================================
-            str(LAUS.hasState): str(UNIFIED.hasRegion),
-            str(METRO.hasMetropolitanArea): str(UNIFIED.hasRegion),
-        }
+        logger.info("[Step 3/3] Normalizing labels (skos:prefLabel)...")
+        df = self._normalize_labels(triples_df)
+        if df is not None:
+            new_dfs.append(df)
 
-    def _load_class_mappings(self) -> Dict[str, str]:
+        if enable_skos:
+            logger.info("[Optional] Creating SKOS concept schemes...")
+            df = self._create_skos_concept_schemes()
+            if df is not None:
+                new_dfs.append(df)
+
+        if not new_dfs:
+            logger.info("No ontology mapping triples produced")
+            return empty
+
+        result = reduce(DataFrame.unionAll, new_dfs).cache()
+        count = result.count()
+
+        logger.info("=" * 60)
+        logger.info(f"Ontology Mapping Complete: {count} triples")
+        logger.info("=" * 60)
+
+        return result
+
+    # ================================================================
+    # Step 1: Property Equivalences
+    # ================================================================
+
+    def _create_property_equivalences(self) -> Optional[DataFrame]:
         """
-        Load class equivalence mappings
+        Create owl:equivalentProperty triples from the static mapping table.
 
-        Maps dataset-specific classes to unified classes
+        Produces:
+            cpi:hasMonth  owl:equivalentProperty  unified:hasMonth
+            ppi:hasStartMonth  owl:equivalentProperty  unified:hasMonth
+            ...
         """
-        return {
-            # ============================================
-            # MEASUREMENT TYPE MAPPINGS
-            # ============================================
-            # Price indices
-            str(CPI.Index): str(BLS_ENRICHMENT.PriceIndex),
-            str(PPI.IndexValue): str(BLS_ENRICHMENT.PriceIndex),
+        if not PROPERTY_MAPPINGS:
+            return None
 
-            # Rate measurements
-            str(JOLTS.JobOpeningsRate): str(BLS_ENRICHMENT.RateMeasurement),
-            str(JOLTS.HiresRate): str(BLS_ENRICHMENT.RateMeasurement),
-            str(JOLTS.QuitsRate): str(BLS_ENRICHMENT.RateMeasurement),
-            str(LAUS.UnemploymentRate): str(BLS_ENRICHMENT.RateMeasurement),
-            str(METRO.UnemploymentRate): str(BLS_ENRICHMENT.RateMeasurement),
+        rows = [
+            (source, OWL_EQUIVALENT_PROPERTY, target)
+            for source, target in PROPERTY_MAPPINGS.items()
+        ]
 
-            # Change measurements
-            str(CPI.PercentChange): str(BLS_ENRICHMENT.ChangeMeasurement),
-            str(PPI.MonthlyChange): str(BLS_ENRICHMENT.ChangeMeasurement),
-            str(PPI.TwelveMonthChange): str(BLS_ENRICHMENT.ChangeMeasurement),
-            str(ECI.PercentChangeData): str(BLS_ENRICHMENT.ChangeMeasurement),
+        df = self.spark.createDataFrame(
+            rows, ["subject", "predicate", "object"]
+        )
 
-            # Level measurements
-            str(JOLTS.JobOpeningsLevel): str(BLS_ENRICHMENT.LevelMeasurement),
-            str(JOLTS.HiresLevel): str(BLS_ENRICHMENT.LevelMeasurement),
-            str(EMPSIT.EmployeeCount): str(BLS_ENRICHMENT.LevelMeasurement),
-            str(LAUS.LaborForceData): str(BLS_ENRICHMENT.LevelMeasurement),
+        logger.info(f"  Created {len(rows)} property equivalences")
+        return df
 
-            # ============================================
-            # ENTITY TYPE MAPPINGS
-            # ============================================
-            # Economic indicators
-            str(CPI.Category): str(BLS_ENRICHMENT.EconomicIndicator),
-            str(PPI.CommodityGrouping): str(BLS_ENRICHMENT.EconomicIndicator),
+    # ================================================================
+    # Step 2: Class Equivalences
+    # ================================================================
 
-            # Industry classifications
-            str(JOLTS.Industry): str(BLS_ENRICHMENT.IndustryClassification),
-            str(EMPSIT.Industry): str(BLS_ENRICHMENT.IndustryClassification),
-            str(ECI.Industry): str(BLS_ENRICHMENT.IndustryClassification),
-
-            # Occupational classifications
-            str(ECI.OccupationalGroup): str(BLS_ENRICHMENT.OccupationalClassification),
-            str(EMPSIT.Occupation): str(BLS_ENRICHMENT.OccupationalClassification),
-        }
-
-    def create_equivalence_mappings(self):
+    def _create_class_equivalences(self) -> Optional[DataFrame]:
         """
-        Create owl:equivalentProperty and owl:equivalentClass mappings
+        Create owl:equivalentClass triples from the static mapping table.
 
-        This makes it easier to query the graph with standardized properties
-        and enables reasoning engines to infer relationships.
+        Produces:
+            cpi:Index  owl:equivalentClass  bls:PriceIndex
+            ppi:IndexValue  owl:equivalentClass  bls:PriceIndex
+            ...
         """
-        logger.info("Creating ontology equivalence mappings...")
+        if not CLASS_MAPPINGS:
+            return None
 
-        # Property equivalences
-        for source_prop, target_prop in self.property_mappings.items():
-            source_uri = URIRef(source_prop)
-            target_uri = URIRef(target_prop)
+        rows = [
+            (source, OWL_EQUIVALENT_CLASS, target)
+            for source, target in CLASS_MAPPINGS.items()
+        ]
 
-            # Add equivalence if not already exists
-            if (source_uri, OWL.equivalentProperty, target_uri) not in self.graph:
-                self.graph.add((source_uri, OWL.equivalentProperty, target_uri))
-                self.stats['property_equivalences'] += 1
+        df = self.spark.createDataFrame(
+            rows, ["subject", "predicate", "object"]
+        )
 
-        # Class equivalences
-        for source_class, target_class in self.class_mappings.items():
-            source_uri = URIRef(source_class)
-            target_uri = URIRef(target_class)
+        logger.info(f"  Created {len(rows)} class equivalences")
+        return df
 
-            # Add equivalence if not already exists
-            if (source_uri, OWL.equivalentClass, target_uri) not in self.graph:
-                self.graph.add((source_uri, OWL.equivalentClass, target_uri))
-                self.stats['class_equivalences'] += 1
+    # ================================================================
+    # Step 3: Label Normalization
+    # ================================================================
 
-        logger.info(f"  Created {self.stats['property_equivalences']} property equivalences")
-        logger.info(f"  Created {self.stats['class_equivalences']} class equivalences")
-
-    def normalize_labels(self):
+    def _normalize_labels(self, triples_df: DataFrame) -> Optional[DataFrame]:
         """
-        Normalize labels across ontologies
+        Add skos:prefLabel for entities that have rdfs:label but no
+        skos:prefLabel.
 
-        Adds skos:prefLabel for entities that only have rdfs:label
-        This improves semantic interoperability with other knowledge graphs.
+        Reads the triples DataFrame to find entities with rdfs:label,
+        checks they don't already have skos:prefLabel, and produces
+        new skos:prefLabel triples.
         """
-        logger.info("Normalizing labels...")
+        # Entities with rdfs:label
+        has_label = triples_df.filter(
+            F.col("predicate") == RDFS_LABEL
+        ).select(
+            F.col("subject").alias("entity"),
+            F.col("object").alias("label"),
+        )
 
-        # Add skos:prefLabel for entities with rdfs:label but no skos:prefLabel
-        query = """
-        SELECT ?entity ?label WHERE {
-            ?entity rdfs:label ?label .
-            FILTER NOT EXISTS { ?entity skos:prefLabel ?prefLabel }
-        }
+        # Entities that already have skos:prefLabel
+        has_pref = triples_df.filter(
+            F.col("predicate") == SKOS_PREF_LABEL
+        ).select(
+            F.col("subject").alias("entity")
+        ).dropDuplicates()
+
+        # Left anti join: entities with label but no prefLabel
+        needs_pref = has_label.join(has_pref, "entity", "left_anti")
+
+        if needs_pref.head(1) == []:
+            logger.info("  No labels to normalize")
+            return None
+
+        result = needs_pref.select(
+            F.col("entity").alias("subject"),
+            F.lit(SKOS_PREF_LABEL).alias("predicate"),
+            F.col("label").alias("object"),
+        )
+
+        logger.info("  Label normalization complete")
+        return result
+
+    # ================================================================
+    # Optional: SKOS Concept Schemes
+    # ================================================================
+
+    def _create_skos_concept_schemes(self) -> Optional[DataFrame]:
         """
+        Create SKOS concept scheme triples for major classifications.
 
-        for row in self.graph.query(query):
-            self.graph.add((row.entity, SKOS.prefLabel, row.label))
-            self.stats['normalized_labels'] += 1
-
-        logger.info(f"  Added {self.stats['normalized_labels']} skos:prefLabel triples")
-
-    def create_skos_concepts(self):
+        Produces:
+            bls:SectorConceptScheme  rdf:type  skos:ConceptScheme
+            bls:SectorConceptScheme  rdfs:label  "BLS Economic Sectors"
+            bls:SectorConceptScheme  dcterms:description  "..."
+            ...
         """
-        Create SKOS concept schemes for major classifications
+        schemes = [
+            (str(BLS_ENRICHMENT.SectorConceptScheme),
+             "BLS Economic Sectors",
+             "Economic sector classifications used in BLS data"),
+            (str(BLS_ENRICHMENT.IndustryConceptScheme),
+             "BLS Industry Classifications",
+             "Industry classifications across BLS datasets"),
+            (str(BLS_ENRICHMENT.OccupationConceptScheme),
+             "BLS Occupational Classifications",
+             "Occupational group classifications in ECI and EMPSIT"),
+        ]
 
-        Useful for publishing the knowledge graph as Linked Open Data
-        """
-        logger.info("Creating SKOS concept schemes...")
+        rows = []
+        for uri, label, description in schemes:
+            rows.append((uri, RDF_TYPE, SKOS_CONCEPT_SCHEME))
+            rows.append((uri, RDFS_LABEL, label))
+            rows.append((uri, DCTERMS_DESCRIPTION, description))
 
-        # Create concept schemes for major classifications
-        concept_schemes = {
-            'bls_sectors': {
-                'uri': BLS_ENRICHMENT.SectorConceptScheme,
-                'label': 'BLS Economic Sectors',
-                'description': 'Economic sector classifications used in BLS data'
-            },
-            'bls_industries': {
-                'uri': BLS_ENRICHMENT.IndustryConceptScheme,
-                'label': 'BLS Industry Classifications',
-                'description': 'Industry classifications across BLS datasets'
-            },
-            'bls_occupations': {
-                'uri': BLS_ENRICHMENT.OccupationConceptScheme,
-                'label': 'BLS Occupational Classifications',
-                'description': 'Occupational group classifications in ECI and EMPSIT'
-            }
-        }
+        df = self.spark.createDataFrame(
+            rows, ["subject", "predicate", "object"]
+        )
 
-        for scheme_name, scheme_config in concept_schemes.items():
-            scheme_uri = scheme_config['uri']
-
-            # Add concept scheme
-            self.graph.add((scheme_uri, RDF.type, SKOS.ConceptScheme))
-            self.graph.add((scheme_uri, RDFS.label, Literal(scheme_config['label'])))
-            self.graph.add((scheme_uri, DCTERMS.description, Literal(scheme_config['description'])))
-
-            self.stats['skos_concepts'] += 1
-
-        logger.info(f"  Created {self.stats['skos_concepts']} SKOS concept schemes")
-
-    def align_classification_systems(self):
-        """
-        Align different classification systems
-
-        Examples:
-        - NAICS codes (used in XIMPIM, JOLTS, EMPSIT)
-        - SIC codes (legacy)
-        - GICS sectors (market data)
-        - Harmonized System codes (XIMPIM)
-
-        This is ADVANCED and optional - only needed if you want to
-        map between different industry classification systems.
-        """
-        logger.info("Aligning classification systems...")
-
-        # Example: Map NAICS to unified industry classifications
-        # This would require external NAICS ontology or mapping tables
-
-        # For now, just log that this is available for future enhancement
-        logger.info("  Classification alignment available for future enhancement")
-        logger.info("  (Requires external NAICS/SIC/GICS mapping tables)")
-
-    def add_dublin_core_metadata(self):
-        """
-        Add Dublin Core metadata to major entities
-
-        Useful for publishing the knowledge graph
-        """
-        logger.info("Adding Dublin Core metadata...")
-
-        # Add dcterms:created for unified temporal entities
-        query = f"""
-        SELECT ?entity ?label WHERE {{
-            ?entity a <{BLS_ENRICHMENT.UnifiedMonth}> ;
-                    rdfs:label ?label .
-            FILTER NOT EXISTS {{ ?entity <{DCTERMS.created}> ?created }}
-        }}
-        """
-
-        for row in self.graph.query(query):
-            # Add creation timestamp
-            self.graph.add((
-                row.entity,
-                DCTERMS.created,
-                Literal(datetime.now().isoformat(), datatype=XSD.dateTime)
-            ))
-
-        logger.info("  Added Dublin Core metadata")
-
-    def get_stats(self) -> Dict[str, int]:
-        """Return mapping statistics"""
-        return self.stats.copy()
+        logger.info(f"  Created {len(schemes)} SKOS concept schemes")
+        return df
 
 
-def map_ontologies(graph: Graph,
-                   enable_skos: bool = False,
-                   enable_dublin_core: bool = False) -> Dict[str, int]:
+def map_ontologies(
+    spark: SparkSession,
+    triples_df: DataFrame,
+    enable_skos: bool = False,
+) -> DataFrame:
     """
-    Convenience function for ontology mapping
+    Convenience function for ontology mapping.
 
     Args:
-        graph: RDFLib graph to enrich
+        spark: SparkSession
+        triples_df: DataFrame with (subject, predicate, object)
         enable_skos: Whether to create SKOS concept schemes
-        enable_dublin_core: Whether to add Dublin Core metadata
 
     Returns:
-        Dictionary with mapping statistics
-
-    Example:
-        from glue_jobs.enrichment.ontology_mapper import map_ontologies
-
-        stats = map_ontologies(graph, enable_skos=True)
+        DataFrame of new ontology mapping triples
     """
-    mapper = OntologyMapper(graph)
-
-    # Always create equivalence mappings and normalize labels
-    mapper.create_equivalence_mappings()
-    mapper.normalize_labels()
-
-    # Optional enhancements
-    if enable_skos:
-        mapper.create_skos_concepts()
-
-    if enable_dublin_core:
-        mapper.add_dublin_core_metadata()
-
-    return mapper.get_stats()
+    mapper = OntologyMapper(spark)
+    return mapper.enrich(triples_df, enable_skos=enable_skos)
