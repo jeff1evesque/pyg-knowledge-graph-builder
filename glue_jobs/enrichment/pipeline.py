@@ -6,6 +6,7 @@ Architecture:
 - After intra-source: all new triples merged into triples_df on executors
 - Temporal unification runs on PySpark (cross-source temporal alignment)
 - Cross-source enrichment runs on PySpark reading from triples_df
+- Ontology mapping runs on PySpark (optional)
 - rdflib graph only needed for rdflib-based intra-source enrichers
 - As enrichers migrate to PySpark, rdflib usage shrinks to zero
 """
@@ -14,6 +15,7 @@ from pyspark.sql import SparkSession, DataFrame
 from glue_jobs.enrichment.intra_source_linker import enrich_intra_source
 from glue_jobs.enrichment.temporal_unifier import TemporalUnifier
 from glue_jobs.enrichment.cross_source_linker import enrich_cross_source
+from glue_jobs.enrichment.ontology_mapper import OntologyMapper
 from glue_jobs.utils.spark_rdf_utils import (
     snapshot_rdflib_graph, rdflib_diff_to_triples_df
 )
@@ -40,16 +42,21 @@ class EnrichmentPipeline:
         self.graph = graph
         self.spark = spark
         self.triples_df = triples_df
-        self.stats = {
+        self.stats: Dict[str, any] = {
             'initial_triples': len(graph),
             'intra_source': {},
             'temporal_triples': 0,
             'cross_source_triples': 0,
+            'ontology_mapping_triples': 0,
             'final_triples': 0,
             'total_enrichment': 0
         }
 
-    def run(self, enable_ontology_mapping: bool = False) -> Dict[str, any]:
+    def run(
+        self,
+        enable_ontology_mapping: bool = False,
+        enable_skos: bool = False,
+    ) -> Dict[str, any]:
         logger.info("=" * 80)
         logger.info("STARTING ENRICHMENT PIPELINE")
         logger.info("=" * 80)
@@ -105,7 +112,6 @@ class EnrichmentPipeline:
                     .dropDuplicates(["subject", "predicate", "object"])
                     .cache()
                 )
-                # Force materialization so old DF can be unpersisted
                 self.triples_df.count()
                 old_df.unpersist()
 
@@ -171,13 +177,37 @@ class EnrichmentPipeline:
             logger.info("Skipping cross-source enrichment (no Spark session)")
 
         # ============================================
-        # PHASE 4: ONTOLOGY MAPPING (optional)
+        # PHASE 4: ONTOLOGY MAPPING (PySpark, optional)
         # ============================================
         if enable_ontology_mapping:
             logger.info("\n" + "=" * 80)
             logger.info("PHASE 4: ONTOLOGY MAPPING")
             logger.info("=" * 80)
-            logger.info("  (Ontology mapping not yet migrated to PySpark — skipping)")
+
+            if self.spark is not None and self.triples_df is not None:
+                ontology_mapper = OntologyMapper(self.spark)
+                ontology_new = ontology_mapper.enrich(
+                    self.triples_df, enable_skos=enable_skos
+                )
+
+                ontology_count = ontology_new.count()
+                self.stats['ontology_mapping_triples'] = ontology_count
+
+                if ontology_count > 0:
+                    old_df = self.triples_df
+                    self.triples_df = (
+                        self.triples_df
+                        .unionByName(ontology_new)
+                        .dropDuplicates(["subject", "predicate", "object"])
+                        .cache()
+                    )
+                    self.triples_df.count()
+                    old_df.unpersist()
+                    ontology_new.unpersist()
+
+                logger.info(f"Ontology mapping added {ontology_count} triples")
+            else:
+                logger.info("Skipping ontology mapping (no Spark session)")
 
         # Final stats
         if self.triples_df is not None:
@@ -185,7 +215,9 @@ class EnrichmentPipeline:
         else:
             self.stats['final_triples'] = len(self.graph)
 
-        self.stats['total_enrichment'] = self.stats['final_triples'] - self.stats['initial_triples']
+        self.stats['total_enrichment'] = (
+            self.stats['final_triples'] - self.stats['initial_triples']
+        )
 
         self._print_summary()
         return self.stats
@@ -198,20 +230,25 @@ class EnrichmentPipeline:
         logger.info("\n" + "=" * 80)
         logger.info("ENRICHMENT PIPELINE COMPLETE")
         logger.info("=" * 80)
-        logger.info(f"  Initial triples:       {self.stats['initial_triples']:>10,}")
-        logger.info(f"  Temporal triples:      {self.stats['temporal_triples']:>10,}")
-        logger.info(f"  Cross-source triples:  {self.stats['cross_source_triples']:>10,}")
-        logger.info(f"  Final triples:         {self.stats['final_triples']:>10,}")
-        logger.info(f"  Total enrichment:      {self.stats['total_enrichment']:>10,}")
+        logger.info(f"  Initial triples:         {self.stats['initial_triples']:>10,}")
+        logger.info(f"  Temporal triples:        {self.stats['temporal_triples']:>10,}")
+        logger.info(f"  Cross-source triples:    {self.stats['cross_source_triples']:>10,}")
+        logger.info(f"  Ontology mapping triples:{self.stats['ontology_mapping_triples']:>10,}")
+        logger.info(f"  Final triples:           {self.stats['final_triples']:>10,}")
+        logger.info(f"  Total enrichment:        {self.stats['total_enrichment']:>10,}")
         logger.info("=" * 80)
 
 
 def enrich_graph(
     graph: Graph,
     enable_ontology_mapping: bool = False,
+    enable_skos: bool = False,
     spark: Optional[SparkSession] = None,
     triples_df: Optional[DataFrame] = None
 ) -> Dict[str, any]:
     """Main entry point for graph enrichment."""
     pipeline = EnrichmentPipeline(graph, spark=spark, triples_df=triples_df)
-    return pipeline.run(enable_ontology_mapping=enable_ontology_mapping)
+    return pipeline.run(
+        enable_ontology_mapping=enable_ontology_mapping,
+        enable_skos=enable_skos,
+    )
