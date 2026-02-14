@@ -4,11 +4,11 @@ Intra-Source Enrichment Entry Point
 Routes enrichment to the appropriate enricher per source family.
 Returns both rdflib stats and PySpark new triples DataFrame.
 
-The bridge to rdflib is NOT done here — it's handled by pipeline.py
-via the snapshot/diff mechanism. This keeps the flow clean:
-- rdflib enrichers mutate the graph (driver)
-- PySpark enrichers return DataFrames (executors)
-- pipeline.py merges both into triples_df
+Migration status:
+- BLS:    rdflib (mutates graph on driver)
+- SEC:    PySpark (returns DataFrame on executors)
+- Market: PySpark (returns DataFrame on executors)
+- NOAA:   PySpark (returns DataFrame on executors)
 """
 from rdflib import Graph
 from pyspark.sql import SparkSession, DataFrame
@@ -54,18 +54,22 @@ def enrich_intra_source(
         stats['bls'] = {'total_triples_added': 0, 'error': str(e)}
 
     # ----------------------------------------
-    # SEC Enrichment (rdflib — mutates graph)
+    # SEC Enrichment (PySpark — returns DataFrame)
     # ----------------------------------------
     logger.info("Checking for SEC data...")
-    try:
-        sec_linker = SECIntraSourceLinker(graph)
-        if sec_linker.available_datasets:
-            stats['sec'] = sec_linker.enrich()
-        else:
-            logger.info("No SEC data detected")
-    except Exception as e:
-        logger.error(f"SEC enrichment failed: {e}", exc_info=True)
-        stats['sec'] = {'total_triples_added': 0, 'error': str(e)}
+    if spark is not None and triples_df is not None:
+        try:
+            sec_linker = SECIntraSourceLinker(spark)
+            sec_new_df = sec_linker.enrich(triples_df)
+            spark_new_dfs.append(sec_new_df)
+            sec_count = sec_new_df.count()
+            stats['sec'] = {'total_triples_added': sec_count}
+            logger.info(f"SEC enrichment produced {sec_count} new triples")
+        except Exception as e:
+            logger.error(f"SEC enrichment failed: {e}", exc_info=True)
+            stats['sec'] = {'total_triples_added': 0, 'error': str(e)}
+    else:
+        logger.info("Spark not available, skipping SEC enrichment")
 
     # ----------------------------------------
     # Market Enrichment (PySpark — returns DataFrame)
