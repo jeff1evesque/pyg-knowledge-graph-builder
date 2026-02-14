@@ -1,800 +1,620 @@
 """
-Temporal Entity Unifier
+Temporal Entity Unifier (PySpark)
 
-Unifies temporal entities (months, years, quarters, dates) across all data sources.
+Unifies temporal entities (months, years, quarters) across all data sources.
 Creates unified temporal entities and links source-specific temporal entities
 to them using owl:sameAs.
 
-This module is used by:
-- intra_source_linker.py (BLS temporal unification)
-- cross_source_linker.py (cross-source temporal alignment)
+All operations run as distributed PySpark DataFrame transformations.
 
-Example:
-    from glue_jobs.enrichment.temporal_unifier import TemporalUnifier
+Example output triples:
+    unified:November  rdf:type      bls:UnifiedMonth
+    unified:November  rdfs:label    "November"
+    unified:November  owl:sameAs    cpi:November
+    unified:November  owl:sameAs    ppi:November
+    unified:November  owl:sameAs    https://financial-data.org/temporal/November
 
-    unifier = TemporalUnifier(graph)
-    stats = unifier.unify_all_sources()
+    unified:Year2024  rdf:type      bls:UnifiedYear
+    unified:Year2024  rdfs:label    "2024"
+    unified:Year2024  owl:sameAs    cpi:2024
+    unified:Year2024  owl:sameAs    https://www.sec.gov/temporal/2024
 
-    # Result:
-    # cpi:November + ppi:November + sec:November + market:November
-    # → unified:November2024
-    #
-    # wkyeng:Q1 → unified:Q1
+    unified:Q1        rdf:type      bls:UnifiedQuarter
+    unified:Q1        rdfs:label    "Q1"
+    unified:Q1        owl:sameAs    wkyeng:Q1
+    unified:Q1        bls:coversMonth  unified:January
+    unified:Q1        bls:coversMonth  unified:February
+    unified:Q1        bls:coversMonth  unified:March
 """
-from rdflib import Graph, URIRef, Literal, Namespace
-from rdflib.namespace import RDF, RDFS, OWL, XSD
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
+from functools import reduce
+from typing import List, Optional
+
 from glue_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, UNIFIED,
     CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER, WKYENG,
     SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP,
-    MARKET, CAP,
-    get_month_name, get_year_value
+    MARKET, MARKET_OPTIONS, CAP,
 )
-from typing import Dict, Set, List, Optional
-from dateutil import parser as date_parser
+
 import logging
 
 logger = logging.getLogger(__name__)
 
+# ============================================
+# URI string constants
+# ============================================
+
+RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
+OWL_SAME_AS = "http://www.w3.org/2002/07/owl#sameAs"
+
+UNIFIED_MONTH_TYPE = str(BLS_ENRICHMENT.UnifiedMonth)
+UNIFIED_YEAR_TYPE = str(BLS_ENRICHMENT.UnifiedYear)
+UNIFIED_QUARTER_TYPE = str(BLS_ENRICHMENT.UnifiedQuarter)
+COVERS_MONTH_PRED = str(BLS_ENRICHMENT.coversMonth)
+
+UNIFIED_BASE = str(UNIFIED)
+
+# BLS monthly dataset namespace prefixes
+BLS_MONTHLY_PREFIXES = [
+    str(CPI), str(PPI), str(ECI), str(JOLTS), str(EMPSIT),
+    str(XIMPIM), str(LAUS), str(METRO), str(REALER),
+]
+
+# BLS quarterly dataset namespace prefix
+WKYENG_PREFIX = str(WKYENG)
+WKYENG_HAS_QUARTER = str(WKYENG.hasQuarter)
+WKYENG_HAS_YEAR = str(WKYENG.hasYear)
+
+# Market predicates
+MARKET_OBSERVED_AT = str(MARKET.observedAt)
+MARKET_PRICE_OBS_TYPE = str(MARKET.PriceObservation)
+MARKET_OPTION_CONTRACT_TYPE = str(MARKET.OptionContract)
+MARKET_EXPIRATION_DATE = str(MARKET_OPTIONS.expirationDate)
+
+# SEC types for detection
+SEC_TYPES = [
+    str(SEC_FILINGS.Form3), str(SEC_FILINGS.Form4),
+    str(SEC_ADMIN.AdministrativeProceeding),
+    str(SEC_LIT.LitigationRelease),
+    str(SEC_SUSP.TradingSuspension),
+]
+
+# SEC date predicates
+SEC_DATE_PREDS = [
+    str(SEC_FILINGS.hasPeriodOfReport) if hasattr(SEC_FILINGS, 'hasPeriodOfReport') else "http://www.sec.gov/filings#hasPeriodOfReport",
+    str(SEC_FILINGS.hasReportDate) if hasattr(SEC_FILINGS, 'hasReportDate') else "http://www.sec.gov/filings#hasReportDate",
+    str(SEC_ADMIN.initiationDate) if hasattr(SEC_ADMIN, 'initiationDate') else "https://www.sec.gov/ontology/administrative-proceedings#initiationDate",
+    str(SEC_LIT.filingDate) if hasattr(SEC_LIT, 'filingDate') else "https://www.sec.gov/ontology/litigation#filingDate",
+    str(SEC_SUSP.startDate) if hasattr(SEC_SUSP, 'startDate') else "https://www.sec.gov/ontology/trading-suspensions#startDate",
+]
+
+# NOAA
+CAP_ALERT_TYPE = str(CAP.Alert)
+CAP_HAS_SENT_TIME = str(CAP.hasSentTime)
+
+# Valid month names for regex matching
+MONTH_NAMES = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]
+
+# Month number → name mapping for date parsing
+MONTH_NUM_TO_NAME = {
+    "01": "January", "02": "February", "03": "March", "04": "April",
+    "05": "May", "06": "June", "07": "July", "08": "August",
+    "09": "September", "10": "October", "11": "November", "12": "December",
+}
+
+# Quarter → months mapping
+QUARTER_MONTH_MAP = {
+    "Q1": ["January", "February", "March"],
+    "Q2": ["April", "May", "June"],
+    "Q3": ["July", "August", "September"],
+    "Q4": ["October", "November", "December"],
+}
+
 
 class TemporalUnifier:
     """
-    Unifies temporal entities across all data sources
+    Unifies temporal entities across all data sources using PySpark.
 
     Strategies:
-    1. Collect temporal entities from all sources
-    2. Group by normalized month/year/quarter values
-    3. Create unified temporal entities
-    4. Link source-specific entities with owl:sameAs
-
-    Supports:
-    - BLS datasets with monthly granularity (CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER)
-    - BLS datasets with quarterly granularity (WKYENG)
-    - SEC data (filings, proceedings, litigation, suspensions)
-    - Market data (price observations, option expirations)
-    - NOAA data (weather alerts)
+    1. Collect temporal URIs from BLS (explicit month/year/quarter entities)
+    2. Extract month/year from SEC date literals → synthetic temporal URIs
+    3. Extract month/year from Market timestamps → synthetic temporal URIs
+    4. Extract month/year from NOAA timestamps → synthetic temporal URIs
+    5. Group all temporal URIs by normalized name
+    6. Produce unified entities with owl:sameAs links
     """
 
-    def __init__(self, graph: Graph):
-        self.graph = graph
-        self.stats = {
-            'months_unified': 0,
-            'years_unified': 0,
-            'quarters_unified': 0,
-            'temporal_links': 0,
-            'sources_processed': []
-        }
+    def __init__(self, spark: SparkSession):
+        self.spark = spark
 
-        # Month name normalization
-        self.month_names = [
-            'January', 'February', 'March', 'April', 'May', 'June',
-            'July', 'August', 'September', 'October', 'November', 'December'
-        ]
-
-        # Quarter labels
-        self.quarter_labels = ['Q1', 'Q2', 'Q3', 'Q4']
-
-        # Detect available sources
-        self.available_sources = self._detect_sources()
-        logger.info(f"Detected sources for temporal unification: {', '.join(self.available_sources)}")
-
-    def _detect_sources(self) -> Set[str]:
-        """Detect which data sources are present in the graph"""
-        sources = set()
-
-        # Check for BLS data (monthly datasets)
-        bls_namespaces = [CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER, WKYENG]
-        for namespace in bls_namespaces:
-            query = f"""
-            ASK {{
-                ?s ?p ?o .
-                FILTER(STRSTARTS(STR(?s), "{namespace}"))
-            }}
-            """
-            if self.graph.query(query).askAnswer:
-                sources.add('bls')
-                break
-
-        # Check for SEC data
-        sec_query = f"""
-        ASK {{
-            {{ ?s a <{SEC_FILINGS.Form3}> }} UNION
-            {{ ?s a <{SEC_FILINGS.Form4}> }} UNION
-            {{ ?s a <{SEC_ADMIN.AdministrativeProceeding}> }} UNION
-            {{ ?s a <{SEC_LIT.LitigationRelease}> }} UNION
-            {{ ?s a <{SEC_SUSP.TradingSuspension}> }}
-        }}
+    def enrich(self, triples_df: DataFrame) -> DataFrame:
         """
-        if self.graph.query(sec_query).askAnswer:
-            sources.add('sec')
+        Run temporal unification across all sources.
 
-        # Check for Market data
-        market_query = f"""
-        ASK {{
-            {{ ?s a <{MARKET.PriceObservation}> }} UNION
-            {{ ?s a <{MARKET.OptionContract}> }}
-        }}
-        """
-        if self.graph.query(market_query).askAnswer:
-            sources.add('market')
-
-        # Check for NOAA data
-        noaa_query = f"""
-        ASK {{
-            ?s a <{CAP.Alert}> .
-        }}
-        """
-        if self.graph.query(noaa_query).askAnswer:
-            sources.add('noaa')
-
-        return sources
-
-    def unify_all_sources(self) -> Dict[str, int]:
-        """
-        Main entry point: Unify temporal entities across all sources
+        Args:
+            triples_df: DataFrame with columns (subject, predicate, object)
 
         Returns:
-            Dictionary with unification statistics
+            DataFrame of NEW triples (unified temporal entities + sameAs links)
         """
-        logger.info("Starting temporal unification across all sources...")
+        empty = self.spark.createDataFrame(
+            [], "subject STRING, predicate STRING, object STRING"
+        )
 
-        # Collect temporal entities from all sources
-        months_by_name = {}
-        years_by_value = {}
-        quarters_by_label = {}
+        logger.info("=" * 60)
+        logger.info("Starting Temporal Unification (PySpark)")
+        logger.info("=" * 60)
 
-        if 'bls' in self.available_sources:
-            self._collect_bls_temporal_entities(months_by_name, years_by_value, quarters_by_label)
-            self.stats['sources_processed'].append('bls')
+        triples_df.cache()
 
-        if 'sec' in self.available_sources:
-            self._collect_sec_temporal_entities(months_by_name, years_by_value)
-            self.stats['sources_processed'].append('sec')
+        # Collect (temporal_uri, normalized_name, kind) from all sources
+        # kind is "month", "year", or "quarter"
+        temporal_dfs: List[DataFrame] = []
 
-        if 'market' in self.available_sources:
-            self._collect_market_temporal_entities(months_by_name, years_by_value)
-            self.stats['sources_processed'].append('market')
-
-        if 'noaa' in self.available_sources:
-            self._collect_noaa_temporal_entities(months_by_name, years_by_value)
-            self.stats['sources_processed'].append('noaa')
-
-        # Create unified temporal entities
-        self._create_unified_months(months_by_name)
-        self._create_unified_years(years_by_value)
-        self._create_unified_quarters(quarters_by_label)
-
-        logger.info(f"Temporal unification complete:")
-        logger.info(f"  - Unified {self.stats['months_unified']} months")
-        logger.info(f"  - Unified {self.stats['years_unified']} years")
-        logger.info(f"  - Unified {self.stats['quarters_unified']} quarters")
-        logger.info(f"  - Created {self.stats['temporal_links']} temporal links")
-
-        return self.stats
-
-    def _collect_bls_temporal_entities(self, months_by_name: Dict, years_by_value: Dict,
-                                       quarters_by_label: Dict):
-        """
-        Collect temporal entities from BLS datasets
-
-        BLS datasets use explicit Month and Year entities:
-        - Monthly datasets: cpi:November, cpi:2024, ppi:November, ppi:2024, etc.
-        - Quarterly datasets (WKYENG): wkyeng:Q1, wkyeng:Q2, wkyeng:2024, etc.
-        """
         logger.info("  Collecting BLS temporal entities...")
+        df = self._collect_bls_months_years(triples_df)
+        if df is not None:
+            temporal_dfs.append(df)
 
-        # Monthly BLS datasets
-        monthly_namespaces = {
-            'cpi': CPI,
-            'ppi': PPI,
-            'eci': ECI,
-            'jolts': JOLTS,
-            'empsit': EMPSIT,
-            'ximpim': XIMPIM,
-            'laus': LAUS,
-            'metro': METRO,
-            'realer': REALER
-        }
+        df = self._collect_bls_quarters(triples_df)
+        if df is not None:
+            temporal_dfs.append(df)
 
-        for dataset_name, namespace in monthly_namespaces.items():
-            # Check if this dataset exists
-            check_query = f"""
-            ASK {{
-                ?s ?p ?o .
-                FILTER(STRSTARTS(STR(?s), "{namespace}"))
-            }}
-            """
-            if not self.graph.query(check_query).askAnswer:
-                continue
-
-            # Collect months
-            month_query = f"""
-            SELECT DISTINCT ?month WHERE {{
-                ?s ?p ?month .
-                FILTER(STRSTARTS(STR(?month), "{namespace}"))
-                FILTER(REGEX(STR(?month), "(January|February|March|April|May|June|July|August|September|October|November|December)$"))
-            }}
-            """
-
-            for row in self.graph.query(month_query):
-                month_name = get_month_name(row.month)
-                if month_name not in months_by_name:
-                    months_by_name[month_name] = []
-                if row.month not in months_by_name[month_name]:
-                    months_by_name[month_name].append(row.month)
-
-            # Collect years
-            year_query = f"""
-            SELECT DISTINCT ?year WHERE {{
-                ?s ?p ?year .
-                FILTER(STRSTARTS(STR(?year), "{namespace}"))
-                FILTER(REGEX(STR(?year), "[0-9]{{4}}$"))
-            }}
-            """
-
-            for row in self.graph.query(year_query):
-                year_value = get_year_value(row.year)
-                if year_value not in years_by_value:
-                    years_by_value[year_value] = []
-                if row.year not in years_by_value[year_value]:
-                    years_by_value[year_value].append(row.year)
-
-        # WKYENG: Quarterly dataset
-        self._collect_wkyeng_temporal_entities(years_by_value, quarters_by_label)
-
-        logger.info(
-            f"    Collected {len(months_by_name)} unique months, "
-            f"{len(years_by_value)} unique years, and "
-            f"{len(quarters_by_label)} unique quarters from BLS")
-
-    def _collect_wkyeng_temporal_entities(self, years_by_value: Dict, quarters_by_label: Dict):
-        """
-        Collect temporal entities from WKYENG (Weekly Earnings)
-
-        WKYENG uses quarterly granularity instead of monthly:
-        - Quarter URIs: wkyeng:Q1, wkyeng:Q2, wkyeng:Q3, wkyeng:Q4
-        - Year URIs: wkyeng:2024, wkyeng:2025, etc.
-        """
-        # Check if WKYENG data exists
-        check_query = f"""
-        ASK {{
-            ?s ?p ?o .
-            FILTER(STRSTARTS(STR(?s), "{WKYENG}"))
-        }}
-        """
-        if not self.graph.query(check_query).askAnswer:
-            return
-
-        logger.info("    Collecting WKYENG quarterly temporal entities...")
-
-        # Collect quarters
-        quarter_query = f"""
-        SELECT DISTINCT ?quarter WHERE {{
-            ?s <{WKYENG.hasQuarter}> ?quarter .
-        }}
-        """
-
-        quarters_found = 0
-        for row in self.graph.query(quarter_query):
-            quarter_uri = row.quarter
-            quarter_label = self._get_quarter_label(quarter_uri)
-
-            if quarter_label and quarter_label in self.quarter_labels:
-                if quarter_label not in quarters_by_label:
-                    quarters_by_label[quarter_label] = []
-                if quarter_uri not in quarters_by_label[quarter_label]:
-                    quarters_by_label[quarter_label].append(quarter_uri)
-                    quarters_found += 1
-
-        # Collect years from WKYENG
-        year_query = f"""
-        SELECT DISTINCT ?year WHERE {{
-            ?s <{WKYENG.hasYear}> ?year .
-        }}
-        """
-
-        years_found = 0
-        for row in self.graph.query(year_query):
-            year_uri = row.year
-            year_value = self._get_wkyeng_year_value(year_uri)
-
-            if year_value and year_value.isdigit() and len(year_value) == 4:
-                if year_value not in years_by_value:
-                    years_by_value[year_value] = []
-                if year_uri not in years_by_value[year_value]:
-                    years_by_value[year_value].append(year_uri)
-                    years_found += 1
-
-        logger.info(f"      Found {quarters_found} quarter entities and {years_found} year entities from WKYENG")
-
-    def _get_quarter_label(self, quarter_uri) -> Optional[str]:
-        """
-        Extract quarter label (Q1, Q2, Q3, Q4) from a quarter URI
-
-        Checks rdfs:label first, then falls back to URI local name.
-        """
-        uri_str = str(quarter_uri)
-        local_name = uri_str.split('/')[-1]
-
-        # Check for rdfs:label
-        for _, _, label in self.graph.triples((quarter_uri, RDFS.label, None)):
-            label_str = str(label)
-            if label_str in self.quarter_labels:
-                return label_str
-
-        # Fall back to local name
-        if local_name in self.quarter_labels:
-            return local_name
-
-        return local_name if local_name else None
-
-    def _get_wkyeng_year_value(self, year_uri) -> Optional[str]:
-        """
-        Extract year value from a WKYENG year URI
-
-        Checks rdfs:label first, then falls back to URI local name.
-        """
-        uri_str = str(year_uri)
-        local_name = uri_str.split('/')[-1]
-
-        # Check for rdfs:label
-        for _, _, label in self.graph.triples((year_uri, RDFS.label, None)):
-            label_str = str(label)
-            if label_str.isdigit() and len(label_str) == 4:
-                return label_str
-
-        # Fall back to local name
-        if local_name.isdigit():
-            return local_name
-
-        # Try get_year_value utility
-        return get_year_value(year_uri)
-
-    def _collect_sec_temporal_entities(self, months_by_name: Dict, years_by_value: Dict):
-        """
-        Collect temporal entities from SEC data
-
-        SEC data uses date literals, not explicit temporal entities.
-        We extract month/year from dates and create synthetic temporal URIs.
-        """
         logger.info("  Collecting SEC temporal entities...")
+        df = self._collect_date_based_temporals(
+            triples_df, SEC_DATE_PREDS, "https://www.sec.gov/temporal/"
+        )
+        if df is not None:
+            temporal_dfs.append(df)
 
-        # Query for all dates in SEC data
-        date_query = """
-        SELECT DISTINCT ?date WHERE {
-            { ?filing filings:hasPeriodOfReport ?date } UNION
-            { ?filing filings:hasReportDate ?date } UNION
-            { ?proceeding sec:initiationDate ?date } UNION
-            { ?litigation seclit:filingDate ?date } UNION
-            { ?suspension secsusp:startDate ?date }
-        }
-        """
-
-        dates_processed = 0
-        for row in self.graph.query(date_query):
-            date_str = str(row.date)
-            try:
-                dt = date_parser.parse(date_str)
-
-                month_name = dt.strftime('%B')
-                year_value = str(dt.year)
-
-                # Create synthetic SEC temporal URIs
-                sec_month = URIRef(f"https://www.sec.gov/temporal/{month_name}")
-                sec_year = URIRef(f"https://www.sec.gov/temporal/{year_value}")
-
-                if month_name not in months_by_name:
-                    months_by_name[month_name] = []
-                if sec_month not in months_by_name[month_name]:
-                    months_by_name[month_name].append(sec_month)
-
-                if year_value not in years_by_value:
-                    years_by_value[year_value] = []
-                if sec_year not in years_by_value[year_value]:
-                    years_by_value[year_value].append(sec_year)
-
-                dates_processed += 1
-
-            except Exception as e:
-                logger.warning(f"Could not parse SEC date {date_str}: {e}")
-
-        logger.info(f"    Processed {dates_processed} SEC dates")
-
-    def _collect_market_temporal_entities(self, months_by_name: Dict, years_by_value: Dict):
-        """
-        Collect temporal entities from Market data
-
-        Market data uses timestamp literals for price observations.
-        We extract month/year and create synthetic temporal URIs.
-        """
         logger.info("  Collecting Market temporal entities...")
+        df = self._collect_market_temporals(triples_df)
+        if df is not None:
+            temporal_dfs.append(df)
 
-        # Query for price observation timestamps
-        timestamp_query = f"""
-        SELECT DISTINCT ?observedAt WHERE {{
-            ?obs a <{MARKET.PriceObservation}> ;
-                 <{MARKET.observedAt}> ?observedAt .
-        }}
-        """
-
-        timestamps_processed = 0
-        for row in self.graph.query(timestamp_query):
-            observed_at = str(row.observedAt)
-            try:
-                dt = date_parser.parse(observed_at)
-
-                month_name = dt.strftime('%B')
-                year_value = str(dt.year)
-
-                # Create synthetic Market temporal URIs
-                market_month = URIRef(f"https://financial-data.org/temporal/{month_name}")
-                market_year = URIRef(f"https://financial-data.org/temporal/{year_value}")
-
-                if month_name not in months_by_name:
-                    months_by_name[month_name] = []
-                if market_month not in months_by_name[month_name]:
-                    months_by_name[month_name].append(market_month)
-
-                if year_value not in years_by_value:
-                    years_by_value[year_value] = []
-                if market_year not in years_by_value[year_value]:
-                    years_by_value[year_value].append(market_year)
-
-                timestamps_processed += 1
-
-            except Exception as e:
-                logger.warning(f"Could not parse Market timestamp {observed_at}: {e}")
-
-        # Query for option expiration dates
-        expiration_query = f"""
-        SELECT DISTINCT ?expirationDate WHERE {{
-            ?contract a <{MARKET.OptionContract}> ;
-                      <{MARKET.expirationDate}> ?expirationDate .
-        }}
-        """
-
-        for row in self.graph.query(expiration_query):
-            expiration_date = str(row.expirationDate)
-            try:
-                dt = date_parser.parse(expiration_date)
-
-                month_name = dt.strftime('%B')
-                year_value = str(dt.year)
-
-                market_month = URIRef(f"https://financial-data.org/temporal/{month_name}")
-                market_year = URIRef(f"https://financial-data.org/temporal/{year_value}")
-
-                if month_name not in months_by_name:
-                    months_by_name[month_name] = []
-                if market_month not in months_by_name[month_name]:
-                    months_by_name[month_name].append(market_month)
-
-                if year_value not in years_by_value:
-                    years_by_value[year_value] = []
-                if market_year not in years_by_value[year_value]:
-                    years_by_value[year_value].append(market_year)
-
-                timestamps_processed += 1
-
-            except Exception as e:
-                logger.warning(f"Could not parse option expiration date {expiration_date}: {e}")
-
-        logger.info(f"    Processed {timestamps_processed} Market timestamps")
-
-    def _collect_noaa_temporal_entities(self, months_by_name: Dict, years_by_value: Dict):
-        """
-        Collect temporal entities from NOAA weather alerts
-
-        NOAA alerts use CAP standard with timestamp literals.
-        We extract month/year and create synthetic temporal URIs.
-        """
         logger.info("  Collecting NOAA temporal entities...")
+        df = self._collect_date_based_temporals(
+            triples_df, [CAP_HAS_SENT_TIME], "https://www.noaa.gov/temporal/"
+        )
+        if df is not None:
+            temporal_dfs.append(df)
 
-        # Query for alert sent times
-        sent_time_query = f"""
-        SELECT DISTINCT ?sentTime WHERE {{
-            ?alert a <{CAP.Alert}> ;
-                   <{CAP.hasSentTime}> ?sentTime .
-        }}
+        if not temporal_dfs:
+            logger.info("No temporal entities found in any source")
+            return empty
+
+        # Union all temporal entities: (temporal_uri, normalized_name, kind)
+        all_temporals = reduce(DataFrame.unionAll, temporal_dfs).dropDuplicates(
+            ["temporal_uri", "normalized_name", "kind"]
+        )
+
+        # Produce unified triples
+        new_dfs: List[DataFrame] = []
+
+        df = self._create_unified_months(all_temporals)
+        if df is not None:
+            new_dfs.append(df)
+
+        df = self._create_unified_years(all_temporals)
+        if df is not None:
+            new_dfs.append(df)
+
+        df = self._create_unified_quarters(all_temporals)
+        if df is not None:
+            new_dfs.append(df)
+
+        if not new_dfs:
+            logger.info("No unified temporal triples produced")
+            return empty
+
+        result = reduce(DataFrame.unionAll, new_dfs).cache()
+        count = result.count()
+
+        logger.info("=" * 60)
+        logger.info(f"Temporal Unification Complete: {count} triples")
+        logger.info("=" * 60)
+
+        return result
+
+    # ================================================================
+    # BLS: Explicit month/year URIs
+    # ================================================================
+
+    def _collect_bls_months_years(
+        self, triples_df: DataFrame
+    ) -> Optional[DataFrame]:
         """
+        Collect month and year URIs from BLS monthly datasets.
 
-        timestamps_processed = 0
-        for row in self.graph.query(sent_time_query):
-            sent_time = str(row.sentTime)
-            try:
-                dt = date_parser.parse(sent_time)
+        BLS datasets use URI-based temporal entities like:
+          cpi:November, ppi:November, cpi:2024, ppi:2024
 
-                month_name = dt.strftime('%B')
-                year_value = str(dt.year)
-
-                # Create synthetic NOAA temporal URIs
-                noaa_month = URIRef(f"https://www.noaa.gov/temporal/{month_name}")
-                noaa_year = URIRef(f"https://www.noaa.gov/temporal/{year_value}")
-
-                if month_name not in months_by_name:
-                    months_by_name[month_name] = []
-                if noaa_month not in months_by_name[month_name]:
-                    months_by_name[month_name].append(noaa_month)
-
-                if year_value not in years_by_value:
-                    years_by_value[year_value] = []
-                if noaa_year not in years_by_value[year_value]:
-                    years_by_value[year_value].append(noaa_year)
-
-                timestamps_processed += 1
-
-            except Exception as e:
-                logger.warning(f"Could not parse NOAA timestamp {sent_time}: {e}")
-
-        logger.info(f"    Processed {timestamps_processed} NOAA timestamps")
-
-    def _create_unified_months(self, months_by_name: Dict):
+        We find these by looking for URIs under BLS namespace prefixes
+        whose local name matches a month name or 4-digit year.
         """
-        Create unified month entities and link source-specific months
+        # Build filter: object URI starts with any BLS monthly prefix
+        # and is used as an object in any triple (i.e., referenced as a value)
+        bls_prefix_filter = F.lit(False)
+        for prefix in BLS_MONTHLY_PREFIXES:
+            bls_prefix_filter = bls_prefix_filter | F.col("object").startswith(prefix)
 
-        Example:
-            unified:November owl:sameAs cpi:November, ppi:November, sec:November, ...
-        """
-        logger.info("  Creating unified month entities...")
+        bls_objects = (
+            triples_df
+            .filter(bls_prefix_filter)
+            .select(F.col("object").alias("temporal_uri"))
+            .dropDuplicates()
+        )
 
-        for month_name, month_uris in months_by_name.items():
-            # Only unify if multiple sources reference this month
-            if len(month_uris) < 1:
-                continue
-
-            unified_month = UNIFIED[month_name]
-
-            # Add unified month entity if not exists
-            if (unified_month, RDF.type, BLS_ENRICHMENT.UnifiedMonth) not in self.graph:
-                self.graph.add((unified_month, RDF.type, BLS_ENRICHMENT.UnifiedMonth))
-                self.graph.add((unified_month, RDFS.label, Literal(month_name)))
-                self.stats['months_unified'] += 1
-
-            # Link all source-specific month entities with owl:sameAs
-            for month_uri in month_uris:
-                if (unified_month, OWL.sameAs, month_uri) not in self.graph:
-                    self.graph.add((unified_month, OWL.sameAs, month_uri))
-                    self.stats['temporal_links'] += 1
-
-        logger.info(f"    Created {self.stats['months_unified']} unified months")
-
-    def _create_unified_years(self, years_by_value: Dict):
-        """
-        Create unified year entities and link source-specific years
-
-        Example:
-            unified:Year2024 owl:sameAs cpi:2024, ppi:2024, sec:2024, wkyeng:2024, ...
-        """
-        logger.info("  Creating unified year entities...")
-
-        for year_value, year_uris in years_by_value.items():
-            # Only unify if multiple sources reference this year
-            if len(year_uris) < 1:
-                continue
-
-            unified_year = UNIFIED[f"Year{year_value}"]
-
-            # Add unified year entity if not exists
-            if (unified_year, RDF.type, BLS_ENRICHMENT.UnifiedYear) not in self.graph:
-                self.graph.add((unified_year, RDF.type, BLS_ENRICHMENT.UnifiedYear))
-                self.graph.add((unified_year, RDFS.label, Literal(year_value)))
-                self.stats['years_unified'] += 1
-
-            # Link all source-specific year entities with owl:sameAs
-            for year_uri in year_uris:
-                if (unified_year, OWL.sameAs, year_uri) not in self.graph:
-                    self.graph.add((unified_year, OWL.sameAs, year_uri))
-                    self.stats['temporal_links'] += 1
-
-        logger.info(f"    Created {self.stats['years_unified']} unified years")
-
-    def _create_unified_quarters(self, quarters_by_label: Dict):
-        """
-        Create unified quarter entities and link source-specific quarters
-
-        WKYENG uses quarterly granularity. Unified quarter entities allow
-        cross-source alignment between quarterly and monthly data.
-
-        Example:
-            unified:Q1 owl:sameAs wkyeng:Q1
-            unified:Q1 bls:coversMonths unified:January, unified:February, unified:March
-
-        Quarter-to-month mapping:
-            Q1 → January, February, March
-            Q2 → April, May, June
-            Q3 → July, August, September
-            Q4 → October, November, December
-        """
-        if not quarters_by_label:
-            return
-
-        logger.info("  Creating unified quarter entities...")
-
-        # Quarter to month mapping for cross-granularity alignment
-        quarter_month_map = {
-            'Q1': ['January', 'February', 'March'],
-            'Q2': ['April', 'May', 'June'],
-            'Q3': ['July', 'August', 'September'],
-            'Q4': ['October', 'November', 'December']
-        }
-
-        for quarter_label, quarter_uris in quarters_by_label.items():
-            if len(quarter_uris) < 1:
-                continue
-
-            unified_quarter = UNIFIED[quarter_label]
-
-            # Add unified quarter entity if not exists
-            if (unified_quarter, RDF.type, BLS_ENRICHMENT.UnifiedQuarter) not in self.graph:
-                self.graph.add((unified_quarter, RDF.type, BLS_ENRICHMENT.UnifiedQuarter))
-                self.graph.add((unified_quarter, RDFS.label, Literal(quarter_label)))
-                self.stats['quarters_unified'] += 1
-
-                # Link quarter to its constituent months for cross-granularity alignment
-                months = quarter_month_map.get(quarter_label, [])
-                for month_name in months:
-                    unified_month = UNIFIED[month_name]
-                    # Only link if the unified month exists
-                    if (unified_month, RDF.type, BLS_ENRICHMENT.UnifiedMonth) in self.graph:
-                        if (unified_quarter, BLS_ENRICHMENT.coversMonth, unified_month) not in self.graph:
-                            self.graph.add((unified_quarter, BLS_ENRICHMENT.coversMonth, unified_month))
-                            self.stats['temporal_links'] += 1
-
-            # Link all source-specific quarter entities with owl:sameAs
-            for quarter_uri in quarter_uris:
-                if (unified_quarter, OWL.sameAs, quarter_uri) not in self.graph:
-                    self.graph.add((unified_quarter, OWL.sameAs, quarter_uri))
-                    self.stats['temporal_links'] += 1
-
-        logger.info(f"    Created {self.stats['quarters_unified']} unified quarters")
-
-    def get_unified_month(self, month_name: str) -> Optional[URIRef]:
-        """
-        Get unified month URI for a given month name
-
-        Args:
-            month_name: Month name (e.g., "November")
-
-        Returns:
-            Unified month URI or None if not found
-        """
-        if month_name not in self.month_names:
+        if bls_objects.head(1) == []:
             return None
 
-        unified_month = UNIFIED[month_name]
+        # Extract local name (everything after the last "/")
+        bls_objects = bls_objects.withColumn(
+            "local_name",
+            F.regexp_extract(F.col("temporal_uri"), r"([^/]+)$", 1)
+        )
 
-        # Check if it exists
-        if (unified_month, RDF.type, BLS_ENRICHMENT.UnifiedMonth) in self.graph:
-            return unified_month
+        # Month URIs: local name is a valid month name
+        month_names_str = "|".join(MONTH_NAMES)
+        months = bls_objects.filter(
+            F.col("local_name").rlike(f"^({month_names_str})$")
+        ).select(
+            F.col("temporal_uri"),
+            F.col("local_name").alias("normalized_name"),
+            F.lit("month").alias("kind"),
+        )
 
-        return None
+        # Year URIs: local name is a 4-digit number
+        years = bls_objects.filter(
+            F.col("local_name").rlike(r"^\d{4}$")
+        ).select(
+            F.col("temporal_uri"),
+            F.col("local_name").alias("normalized_name"),
+            F.lit("year").alias("kind"),
+        )
 
-    def get_unified_year(self, year_value: str) -> Optional[URIRef]:
-        """
-        Get unified year URI for a given year value
-
-        Args:
-            year_value: Year value (e.g., "2024")
-
-        Returns:
-            Unified year URI or None if not found
-        """
-        unified_year = UNIFIED[f"Year{year_value}"]
-
-        # Check if it exists
-        if (unified_year, RDF.type, BLS_ENRICHMENT.UnifiedYear) in self.graph:
-            return unified_year
-
-        return None
-
-    def get_unified_quarter(self, quarter_label: str) -> Optional[URIRef]:
-        """
-        Get unified quarter URI for a given quarter label
-
-        Args:
-            quarter_label: Quarter label (e.g., "Q1", "Q2", "Q3", "Q4")
-
-        Returns:
-            Unified quarter URI or None if not found
-        """
-        if quarter_label not in self.quarter_labels:
+        result = months.unionAll(years)
+        if result.head(1) == []:
             return None
 
-        unified_quarter = UNIFIED[quarter_label]
+        return result
 
-        # Check if it exists
-        if (unified_quarter, RDF.type, BLS_ENRICHMENT.UnifiedQuarter) in self.graph:
-            return unified_quarter
-
-        return None
-
-    def get_source_months_for_unified(self, unified_month: URIRef) -> List[URIRef]:
+    def _collect_bls_quarters(
+        self, triples_df: DataFrame
+    ) -> Optional[DataFrame]:
         """
-        Get all source-specific month URIs linked to a unified month
+        Collect quarter and year URIs from WKYENG (quarterly BLS dataset).
+
+        WKYENG uses:
+          ?entity wkyeng:hasQuarter wkyeng:Q1
+          ?entity wkyeng:hasYear wkyeng:2024
+        """
+        # Quarters: objects of wkyeng:hasQuarter
+        quarters = triples_df.filter(
+            F.col("predicate") == WKYENG_HAS_QUARTER
+        ).select(
+            F.col("object").alias("temporal_uri")
+        ).dropDuplicates().withColumn(
+            "local_name",
+            F.regexp_extract(F.col("temporal_uri"), r"([^/]+)$", 1)
+        ).filter(
+            F.col("local_name").isin(["Q1", "Q2", "Q3", "Q4"])
+        ).select(
+            F.col("temporal_uri"),
+            F.col("local_name").alias("normalized_name"),
+            F.lit("quarter").alias("kind"),
+        )
+
+        # Years: objects of wkyeng:hasYear
+        years = triples_df.filter(
+            F.col("predicate") == WKYENG_HAS_YEAR
+        ).select(
+            F.col("object").alias("temporal_uri")
+        ).dropDuplicates().withColumn(
+            "local_name",
+            F.regexp_extract(F.col("temporal_uri"), r"([^/]+)$", 1)
+        ).filter(
+            F.col("local_name").rlike(r"^\d{4}$")
+        ).select(
+            F.col("temporal_uri"),
+            F.col("local_name").alias("normalized_name"),
+            F.lit("year").alias("kind"),
+        )
+
+        result = quarters.unionAll(years)
+        if result.head(1) == []:
+            return None
+
+        return result
+
+    # ================================================================
+    # SEC / NOAA: Date literals → synthetic temporal URIs
+    # ================================================================
+
+    def _collect_date_based_temporals(
+        self,
+        triples_df: DataFrame,
+        date_predicates: List[str],
+        synthetic_prefix: str,
+    ) -> Optional[DataFrame]:
+        """
+        Extract month/year from date literal values and create synthetic
+        temporal URIs.
+
+        Works for any source that stores dates as literal values
+        (SEC filing dates, NOAA alert timestamps, etc.)
 
         Args:
-            unified_month: Unified month URI
+            triples_df: The triples DataFrame
+            date_predicates: List of predicate URIs that hold date values
+            synthetic_prefix: URI prefix for synthetic temporal entities
+                              e.g., "https://www.sec.gov/temporal/"
 
-        Returns:
-            List of source-specific month URIs
+        Produces (temporal_uri, normalized_name, kind) rows like:
+            ("https://www.sec.gov/temporal/November", "November", "month")
+            ("https://www.sec.gov/temporal/2024", "2024", "year")
         """
-        query = f"""
-        SELECT ?sourceMonth WHERE {{
-            <{unified_month}> owl:sameAs ?sourceMonth .
-        }}
+        # Filter to triples with the relevant date predicates
+        date_triples = triples_df.filter(
+            F.col("predicate").isin(date_predicates)
+        ).select(F.col("object").alias("date_value"))
+
+        if date_triples.head(1) == []:
+            return None
+
+        date_triples = date_triples.dropDuplicates()
+
+        # Extract month number and year from date strings.
+        # Handles ISO formats: "2024-11-15", "2024-11-15T10:30:00", etc.
+        # Uses substring extraction — no UDF needed.
+        parsed = date_triples.withColumn(
+            "year_str", F.regexp_extract(F.col("date_value"), r"(\d{4})", 1)
+        ).withColumn(
+            "month_str", F.regexp_extract(F.col("date_value"), r"\d{4}-(\d{2})", 1)
+        ).filter(
+            (F.col("year_str") != "") & (F.col("month_str") != "")
+        )
+
+        if parsed.head(1) == []:
+            return None
+
+        # Map month number to month name using a broadcast join
+        month_mapping = self.spark.createDataFrame(
+            list(MONTH_NUM_TO_NAME.items()),
+            ["month_str", "month_name"]
+        )
+
+        parsed = parsed.join(F.broadcast(month_mapping), "month_str", "inner")
+
+        # Produce month rows
+        months = parsed.select(
+            F.concat(F.lit(synthetic_prefix), F.col("month_name")).alias("temporal_uri"),
+            F.col("month_name").alias("normalized_name"),
+            F.lit("month").alias("kind"),
+        ).dropDuplicates()
+
+        # Produce year rows
+        years = parsed.select(
+            F.concat(F.lit(synthetic_prefix), F.col("year_str")).alias("temporal_uri"),
+            F.col("year_str").alias("normalized_name"),
+            F.lit("year").alias("kind"),
+        ).dropDuplicates()
+
+        return months.unionAll(years)
+
+    # ================================================================
+    # Market: Timestamps + expiration dates → synthetic temporal URIs
+    # ================================================================
+
+    def _collect_market_temporals(
+        self, triples_df: DataFrame
+    ) -> Optional[DataFrame]:
         """
+        Extract month/year from Market price observation timestamps
+        and option expiration dates.
 
-        return [row.sourceMonth for row in self.graph.query(query)]
-
-    def get_source_years_for_unified(self, unified_year: URIRef) -> List[URIRef]:
+        Price observations use finance:observedAt with dateTime values.
+        Option contracts use options:expirationDate with date values.
+        Both are ISO format, so we reuse the date parsing logic.
         """
-        Get all source-specific year URIs linked to a unified year
+        market_date_preds = [MARKET_OBSERVED_AT, MARKET_EXPIRATION_DATE]
+        return self._collect_date_based_temporals(
+            triples_df, market_date_preds, "https://financial-data.org/temporal/"
+        )
 
-        Args:
-            unified_year: Unified year URI
+    # ================================================================
+    # Produce unified entities
+    # ================================================================
 
-        Returns:
-            List of source-specific year URIs
+    def _create_unified_months(
+        self, all_temporals: DataFrame
+    ) -> Optional[DataFrame]:
         """
-        query = f"""
-        SELECT ?sourceYear WHERE {{
-            <{unified_year}> owl:sameAs ?sourceYear .
-        }}
+        Create unified month entities and owl:sameAs links.
+
+        For each unique month name, produces:
+          unified:{MonthName}  rdf:type    bls:UnifiedMonth
+          unified:{MonthName}  rdfs:label  "{MonthName}"
+          unified:{MonthName}  owl:sameAs  <source_temporal_uri_1>
+          unified:{MonthName}  owl:sameAs  <source_temporal_uri_2>
+          ...
         """
+        months = all_temporals.filter(F.col("kind") == "month")
 
-        return [row.sourceYear for row in self.graph.query(query)]
+        if months.head(1) == []:
+            return None
 
-    def get_source_quarters_for_unified(self, unified_quarter: URIRef) -> List[URIRef]:
+        # Build unified URI
+        months = months.withColumn(
+            "unified_uri",
+            F.concat(F.lit(UNIFIED_BASE), F.col("normalized_name"))
+        )
+
+        # Type triples (one per unique month name)
+        distinct_months = months.select("unified_uri", "normalized_name").dropDuplicates()
+
+        type_triples = distinct_months.select(
+            F.col("unified_uri").alias("subject"),
+            F.lit(RDF_TYPE).alias("predicate"),
+            F.lit(UNIFIED_MONTH_TYPE).alias("object"),
+        )
+
+        label_triples = distinct_months.select(
+            F.col("unified_uri").alias("subject"),
+            F.lit(RDFS_LABEL).alias("predicate"),
+            F.col("normalized_name").alias("object"),
+        )
+
+        # sameAs triples (one per source temporal URI)
+        same_as_triples = months.select(
+            F.col("unified_uri").alias("subject"),
+            F.lit(OWL_SAME_AS).alias("predicate"),
+            F.col("temporal_uri").alias("object"),
+        )
+
+        return type_triples.unionAll(label_triples).unionAll(same_as_triples)
+
+    def _create_unified_years(
+        self, all_temporals: DataFrame
+    ) -> Optional[DataFrame]:
         """
-        Get all source-specific quarter URIs linked to a unified quarter
+        Create unified year entities and owl:sameAs links.
 
-        Args:
-            unified_quarter: Unified quarter URI
-
-        Returns:
-            List of source-specific quarter URIs
+        For each unique year value, produces:
+          unified:Year{YYYY}  rdf:type    bls:UnifiedYear
+          unified:Year{YYYY}  rdfs:label  "{YYYY}"
+          unified:Year{YYYY}  owl:sameAs  <source_temporal_uri_1>
+          ...
         """
-        query = f"""
-        SELECT ?sourceQuarter WHERE {{
-            <{unified_quarter}> owl:sameAs ?sourceQuarter .
-        }}
+        years = all_temporals.filter(F.col("kind") == "year")
+
+        if years.head(1) == []:
+            return None
+
+        years = years.withColumn(
+            "unified_uri",
+            F.concat(F.lit(UNIFIED_BASE), F.lit("Year"), F.col("normalized_name"))
+        )
+
+        distinct_years = years.select("unified_uri", "normalized_name").dropDuplicates()
+
+        type_triples = distinct_years.select(
+            F.col("unified_uri").alias("subject"),
+            F.lit(RDF_TYPE).alias("predicate"),
+            F.lit(UNIFIED_YEAR_TYPE).alias("object"),
+        )
+
+        label_triples = distinct_years.select(
+            F.col("unified_uri").alias("subject"),
+            F.lit(RDFS_LABEL).alias("predicate"),
+            F.col("normalized_name").alias("object"),
+        )
+
+        same_as_triples = years.select(
+            F.col("unified_uri").alias("subject"),
+            F.lit(OWL_SAME_AS).alias("predicate"),
+            F.col("temporal_uri").alias("object"),
+        )
+
+        return type_triples.unionAll(label_triples).unionAll(same_as_triples)
+
+    def _create_unified_quarters(
+        self, all_temporals: DataFrame
+    ) -> Optional[DataFrame]:
         """
+        Create unified quarter entities, owl:sameAs links, and
+        coversMonth links to unified months.
 
-        return [row.sourceQuarter for row in self.graph.query(query)]
-
-    def get_months_for_quarter(self, unified_quarter: URIRef) -> List[URIRef]:
+        For each unique quarter label, produces:
+          unified:{Q1}  rdf:type           bls:UnifiedQuarter
+          unified:{Q1}  rdfs:label         "Q1"
+          unified:{Q1}  owl:sameAs         <source_quarter_uri>
+          unified:{Q1}  bls:coversMonth    unified:January
+          unified:{Q1}  bls:coversMonth    unified:February
+          unified:{Q1}  bls:coversMonth    unified:March
         """
-        Get unified month URIs covered by a unified quarter
+        quarters = all_temporals.filter(F.col("kind") == "quarter")
 
-        Args:
-            unified_quarter: Unified quarter URI (e.g., unified:Q1)
+        if quarters.head(1) == []:
+            return None
 
-        Returns:
-            List of unified month URIs (e.g., [unified:January, unified:February, unified:March])
-        """
-        query = f"""
-        SELECT ?month WHERE {{
-            <{unified_quarter}> <{BLS_ENRICHMENT.coversMonth}> ?month .
-        }}
-        """
+        quarters = quarters.withColumn(
+            "unified_uri",
+            F.concat(F.lit(UNIFIED_BASE), F.col("normalized_name"))
+        )
 
-        return [row.month for row in self.graph.query(query)]
+        distinct_quarters = quarters.select(
+            "unified_uri", "normalized_name"
+        ).dropDuplicates()
+
+        type_triples = distinct_quarters.select(
+            F.col("unified_uri").alias("subject"),
+            F.lit(RDF_TYPE).alias("predicate"),
+            F.lit(UNIFIED_QUARTER_TYPE).alias("object"),
+        )
+
+        label_triples = distinct_quarters.select(
+            F.col("unified_uri").alias("subject"),
+            F.lit(RDFS_LABEL).alias("predicate"),
+            F.col("normalized_name").alias("object"),
+        )
+
+        same_as_triples = quarters.select(
+            F.col("unified_uri").alias("subject"),
+            F.lit(OWL_SAME_AS).alias("predicate"),
+            F.col("temporal_uri").alias("object"),
+        )
+
+        # coversMonth links: quarter → constituent months
+        # Build a small DataFrame of (quarter_label, month_name) pairs
+        covers_rows = []
+        for q_label, month_names in QUARTER_MONTH_MAP.items():
+            for m_name in month_names:
+                covers_rows.append((q_label, m_name))
+
+        covers_df = self.spark.createDataFrame(
+            covers_rows, ["quarter_label", "month_name"]
+        )
+
+        # Join to get (unified_quarter_uri, unified_month_uri)
+        covers_joined = distinct_quarters.join(
+            F.broadcast(covers_df),
+            distinct_quarters.normalized_name == covers_df.quarter_label,
+            "inner",
+        )
+
+        covers_triples = covers_joined.select(
+            F.col("unified_uri").alias("subject"),
+            F.lit(COVERS_MONTH_PRED).alias("predicate"),
+            F.concat(F.lit(UNIFIED_BASE), F.col("month_name")).alias("object"),
+        )
+
+        return (
+            type_triples
+            .unionAll(label_triples)
+            .unionAll(same_as_triples)
+            .unionAll(covers_triples)
+        )
 
 
-def unify_temporal_entities(graph: Graph) -> Dict[str, int]:
+def unify_temporal_entities(
+    spark: SparkSession, triples_df: DataFrame
+) -> DataFrame:
     """
-    Convenience function for temporal unification
+    Convenience function for temporal unification.
 
     Args:
-        graph: RDFLib graph to enrich
+        spark: SparkSession
+        triples_df: DataFrame with (subject, predicate, object)
 
     Returns:
-        Dictionary with unification statistics
-
-    Example:
-        from glue_jobs.enrichment.temporal_unifier import unify_temporal_entities
-
-        stats = unify_temporal_entities(graph)
+        DataFrame of new temporal unification triples
     """
-    unifier = TemporalUnifier(graph)
-    return unifier.unify_all_sources()
+    unifier = TemporalUnifier(spark)
+    return unifier.enrich(triples_df)
