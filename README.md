@@ -422,18 +422,7 @@ pyg-knowledge-graph-builder/
 │   │       │   ├── patterns.py             # BLS_SECTOR_PATTERNS
 │   │       │   ├── correlations.py         # KNOWN_CORRELATIONS
 │   │       │   ├── measurements.py         # MEASUREMENT_TYPES
-│   │       │   └── enrichers/              # Dataset-specific enrichers
-│   │       │       ├── __init__.py
-│   │       │       ├── cpi_enricher.py     # CPI-specific logic
-│   │       │       ├── ppi_enricher.py     # PPI-specific logic
-│   │       │       ├── eci_enricher.py     # ECI-specific logic
-│   │       │       ├── jolts_enricher.py   # JOLTS-specific logic
-│   │       │       ├── empsit_enricher.py  # EMPSIT-specific logic
-│   │       │       ├── laus_enricher.py    # LAUS-specific logic
-│   │       │       ├── metro_enricher.py   # METRO-specific logic
-│   │       │       ├── realer_enricher.py  # REALER-specific logic
-│   │       │       ├── wkyeng_enricher.py  # WKYENG-specific logic
-│   │       │       └── ximpim_enricher.py  # XIMPIM-specific logic
+│   │       │   └── base_enricher.py        # Dataset-specific enrichers
 │   │       ├── sec/                        # SEC-specific components
 │   │       │   ├── __init__.py
 │   │       │   ├── patterns.py             # SEC_SECTOR_PATTERNS, SEC_VIOLATION_PATTERNS
