@@ -30,6 +30,9 @@ from glue_jobs.utils.rdf_utils import (
 )
 from glue_jobs.enrichment.intra_source.bls.patterns import BLS_SECTOR_PATTERNS
 from glue_jobs.enrichment.intra_source.bls.correlations import KNOWN_CORRELATIONS
+from glue_jobs.enrichment.intra_source.bls.base_enricher import (
+    BLSDatasetEnricher, DATASET_ENRICHERS,
+)
 from glue_jobs.utils.spark_rdf_utils import deduplicate_against_existing
 
 import logging
@@ -98,7 +101,7 @@ class BLSIntraSourceLinker:
 
     def __init__(self, spark: SparkSession):
         self.spark = spark
-        self._sub_enrichers: Dict[str, 'BLSDatasetEnricher'] = {}
+        self._sub_enrichers: Dict[str, BLSDatasetEnricher] = {}
 
     def enrich(self, triples_df: DataFrame) -> DataFrame:
         """
@@ -206,86 +209,19 @@ class BLSIntraSourceLinker:
 
     def _initialize_sub_enrichers(self):
         """
-        Initialize per-dataset sub-enrichers for temporal sequence linking.
+        Initialize per-dataset enrichers from the registry.
 
-        Each sub-enricher implements link_temporal_sequences() for its
-        specific measurement types and temporal properties.
-
-        Sub-enrichers are added in phases 6B–6J.
+        Each enricher is a BLSDatasetEnricher (or subclass) that
+        implements link_temporal_sequences() for its measurement types.
         """
-        # Import sub-enrichers as they are migrated.
-        # Each import is guarded so the orchestrator works even if
-        # a sub-enricher hasn't been migrated yet.
-
-        if 'cpi' in self.available_datasets:
-            try:
-                from glue_jobs.enrichment.intra_source.bls.enrichers.cpi_enricher import CPIEnricher
-                self._sub_enrichers['cpi'] = CPIEnricher(self.spark)
-            except ImportError:
-                logger.warning("CPI sub-enricher not yet migrated to PySpark")
-
-        if 'ppi' in self.available_datasets:
-            try:
-                from glue_jobs.enrichment.intra_source.bls.enrichers.ppi_enricher import PPIEnricher
-                self._sub_enrichers['ppi'] = PPIEnricher(self.spark)
-            except ImportError:
-                logger.warning("PPI sub-enricher not yet migrated to PySpark")
-
-        if 'eci' in self.available_datasets:
-            try:
-                from glue_jobs.enrichment.intra_source.bls.enrichers.eci_enricher import ECIEnricher
-                self._sub_enrichers['eci'] = ECIEnricher(self.spark)
-            except ImportError:
-                logger.warning("ECI sub-enricher not yet migrated to PySpark")
-
-        if 'jolts' in self.available_datasets:
-            try:
-                from glue_jobs.enrichment.intra_source.bls.enrichers.jolts_enricher import JOLTSEnricher
-                self._sub_enrichers['jolts'] = JOLTSEnricher(self.spark)
-            except ImportError:
-                logger.warning("JOLTS sub-enricher not yet migrated to PySpark")
-
-        if 'empsit' in self.available_datasets:
-            try:
-                from glue_jobs.enrichment.intra_source.bls.enrichers.empsit_enricher import EMPSITEnricher
-                self._sub_enrichers['empsit'] = EMPSITEnricher(self.spark)
-            except ImportError:
-                logger.warning("EMPSIT sub-enricher not yet migrated to PySpark")
-
-        if 'ximpim' in self.available_datasets:
-            try:
-                from glue_jobs.enrichment.intra_source.bls.enrichers.ximpim_enricher import XIMPIMEnricher
-                self._sub_enrichers['ximpim'] = XIMPIMEnricher(self.spark)
-            except ImportError:
-                logger.warning("XIMPIM sub-enricher not yet migrated to PySpark")
-
-        if 'laus' in self.available_datasets:
-            try:
-                from glue_jobs.enrichment.intra_source.bls.enrichers.laus_enricher import LAUSEnricher
-                self._sub_enrichers['laus'] = LAUSEnricher(self.spark)
-            except ImportError:
-                logger.warning("LAUS sub-enricher not yet migrated to PySpark")
-
-        if 'metro' in self.available_datasets:
-            try:
-                from glue_jobs.enrichment.intra_source.bls.enrichers.metro_enricher import METROEnricher
-                self._sub_enrichers['metro'] = METROEnricher(self.spark)
-            except ImportError:
-                logger.warning("METRO sub-enricher not yet migrated to PySpark")
-
-        if 'realer' in self.available_datasets:
-            try:
-                from glue_jobs.enrichment.intra_source.bls.enrichers.realer_enricher import REALEREnricher
-                self._sub_enrichers['realer'] = REALEREnricher(self.spark)
-            except ImportError:
-                logger.warning("REALER sub-enricher not yet migrated to PySpark")
-
-        if 'wkyeng' in self.available_datasets:
-            try:
-                from glue_jobs.enrichment.intra_source.bls.enrichers.wkyeng_enricher import WKYENGEnricher
-                self._sub_enrichers['wkyeng'] = WKYENGEnricher(self.spark)
-            except ImportError:
-                logger.warning("WKYENG sub-enricher not yet migrated to PySpark")
+        for dataset_name in sorted(self.available_datasets):
+            enricher_class = DATASET_ENRICHERS.get(dataset_name)
+            if enricher_class:
+                self._sub_enrichers[dataset_name] = enricher_class(
+                    self.spark, dataset_name
+                )
+            else:
+                logger.warning(f"No enricher registered for dataset: {dataset_name}")
 
         logger.info(
             f"  Initialized {len(self._sub_enrichers)} sub-enrichers: "
@@ -582,10 +518,6 @@ class BLSIntraSourceLinker:
         # Strategy: explode each child into multiple candidate rows,
         # one per possible parent depth, then join against existing entities.
 
-        # Generate candidates using a UDF-free approach:
-        # For each segment count N, the parent at depth K has path = first K segments
-        # We generate rows for K = N-1, N-2, ..., 1 and pick the max K that exists.
-
         # First, build a lookup of all existing (namespace, path) pairs
         existing_paths = (
             all_categories
@@ -598,7 +530,8 @@ class BLSIntraSourceLinker:
 
         # For children, generate the immediate parent candidate (remove last segment)
         # This handles the most common case. For deeper gaps, we'd need iteration,
-        # but the rdflib version also only linked to the immediate parent (break after first match).
+        # but the rdflib version also only linked to the immediate parent
+        # (break after first match).
         children_with_parent_path = children.withColumn(
             "parent_path_candidate",
             F.regexp_replace(F.col("path"), r"_[^_]+$", "")
@@ -609,52 +542,6 @@ class BLSIntraSourceLinker:
 
         # Join against existing entities to find actual parents
         # Try immediate parent first (one segment removed)
-        matched = (
-            children_with_parent_path
-            .join(
-                existing_paths,
-                on=(
-                    (children_with_parent_path.namespace == existing_paths.parent_ns) &
-                    (children_with_parent_path.parent_path_candidate == existing_paths.parent_path)
-                ),
-                how="inner",
-            )
-            .select(
-                F.col("subject"),
-                F.col("parent_uri"),
-            )
-        )
-
-        if matched.head(1) == []:
-            # Try removing two segments for entities where immediate parent doesn't exist
-            children_depth2 = children_with_parent_path.withColumn(
-                "parent_path_d2",
-                F.regexp_replace(F.col("parent_path_candidate"), r"_[^_]+$", "")
-            ).filter(
-                F.col("parent_path_d2") != F.col("parent_path_candidate")
-            )
-
-            matched = (
-                children_depth2
-                .join(
-                    existing_paths,
-                    on=(
-                        (children_depth2.namespace == existing_paths.parent_ns) &
-                        (children_depth2.parent_path_d2 == existing_paths.parent_path)
-                    ),
-                    how="inner",
-                )
-                .select(
-                    F.col("subject"),
-                    F.col("parent_uri"),
-                )
-            )
-
-            if matched.head(1) == []:
-                return None
-
-        # Also try depth-2 for entities that didn't match at depth-1
-        # Union both depths, keeping the closest parent (depth-1 preferred)
         depth1_matched = (
             children_with_parent_path
             .join(
@@ -682,6 +569,7 @@ class BLSIntraSourceLinker:
             )
         )
 
+        # Try removing two segments for entities where immediate parent doesn't exist
         depth2_candidates = unmatched_at_d1.withColumn(
             "parent_path_d2",
             F.regexp_replace(F.col("parent_path_candidate"), r"_[^_]+$", "")
@@ -706,6 +594,7 @@ class BLSIntraSourceLinker:
             )
         )
 
+        # Union both depths, keeping the closest parent (depth-1 preferred)
         all_matched = depth1_matched.unionAll(depth2_matched)
 
         hierarchy_triples = all_matched.select(
