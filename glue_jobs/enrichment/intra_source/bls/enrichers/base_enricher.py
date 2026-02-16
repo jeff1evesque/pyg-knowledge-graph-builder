@@ -21,9 +21,7 @@ from pyspark.sql import functions as F
 from pyspark.sql import Window
 from functools import reduce
 from typing import Dict, List, Optional
-
 from rdflib.namespace import RDF
-
 from glue_jobs.utils.rdf_utils import BLS_ENRICHMENT
 from glue_jobs.enrichment.intra_source.bls.measurements import MEASUREMENT_TYPES
 
