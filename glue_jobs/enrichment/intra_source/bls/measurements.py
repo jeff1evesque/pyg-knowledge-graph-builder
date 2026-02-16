@@ -435,6 +435,9 @@ MEASUREMENT_TYPES = {
         }
     },
     'jolts': {
+        # ============================================
+        # Tables 1, 8, A: Job Openings by Industry (hasIndustry)
+        # ============================================
         'JobOpeningsLevel': {
             'class': JOLTS.JobOpeningsLevel,
             'category_property': JOLTS.hasIndustry,
@@ -447,6 +450,26 @@ MEASUREMENT_TYPES = {
             'month_property': JOLTS.hasMonth,
             'year_property': JOLTS.hasYear
         },
+
+        # ============================================
+        # Tables 1, 8: Job Openings by Region (hasRegion)
+        # ============================================
+        'JobOpeningsLevel_Region': {
+            'class': JOLTS.JobOpeningsLevel,
+            'category_property': JOLTS.hasRegion,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'JobOpeningsRate_Region': {
+            'class': JOLTS.JobOpeningsRate,
+            'category_property': JOLTS.hasRegion,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+
+        # ============================================
+        # Tables 2, 9, A: Hires by Industry (hasIndustry)
+        # ============================================
         'HiresLevel': {
             'class': JOLTS.HiresLevel,
             'category_property': JOLTS.hasIndustry,
@@ -459,6 +482,26 @@ MEASUREMENT_TYPES = {
             'month_property': JOLTS.hasMonth,
             'year_property': JOLTS.hasYear
         },
+
+        # ============================================
+        # Tables 2, 9: Hires by Region (hasRegion)
+        # ============================================
+        'HiresLevel_Region': {
+            'class': JOLTS.HiresLevel,
+            'category_property': JOLTS.hasRegion,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'HiresRate_Region': {
+            'class': JOLTS.HiresRate,
+            'category_property': JOLTS.hasRegion,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+
+        # ============================================
+        # Tables 3, 10, A: Total Separations by Industry (hasIndustry)
+        # ============================================
         'TotalSeparationsLevel': {
             'class': JOLTS.TotalSeparationsLevel,
             'category_property': JOLTS.hasIndustry,
@@ -471,6 +514,26 @@ MEASUREMENT_TYPES = {
             'month_property': JOLTS.hasMonth,
             'year_property': JOLTS.hasYear
         },
+
+        # ============================================
+        # Tables 3, 10: Total Separations by Region (hasRegion)
+        # ============================================
+        'TotalSeparationsLevel_Region': {
+            'class': JOLTS.TotalSeparationsLevel,
+            'category_property': JOLTS.hasRegion,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'TotalSeparationsRate_Region': {
+            'class': JOLTS.TotalSeparationsRate,
+            'category_property': JOLTS.hasRegion,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+
+        # ============================================
+        # Tables 4, 11: Quits by Industry (hasIndustry)
+        # ============================================
         'QuitsLevel': {
             'class': JOLTS.QuitsLevel,
             'category_property': JOLTS.hasIndustry,
@@ -483,6 +546,60 @@ MEASUREMENT_TYPES = {
             'month_property': JOLTS.hasMonth,
             'year_property': JOLTS.hasYear
         },
+
+        # ============================================
+        # Tables 4, 11: Quits by Region (hasRegion)
+        # ============================================
+        'QuitsLevel_Region': {
+            'class': JOLTS.QuitsLevel,
+            'category_property': JOLTS.hasRegion,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'QuitsRate_Region': {
+            'class': JOLTS.QuitsRate,
+            'category_property': JOLTS.hasRegion,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+
+        # ============================================
+        # Tables 5: Layoffs and Discharges by Industry (hasIndustry)
+        # Note: Tables 5, 7 use "LayoffsAndDischarges" class names
+        # ============================================
+        'LayoffsAndDischargesLevel': {
+            'class': JOLTS.LayoffsAndDischargesLevel,
+            'category_property': JOLTS.hasIndustry,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'LayoffsAndDischargesRate': {
+            'class': JOLTS.LayoffsAndDischargesRate,
+            'category_property': JOLTS.hasIndustry,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+
+        # ============================================
+        # Table 5: Layoffs and Discharges by Region (hasRegion)
+        # ============================================
+        'LayoffsAndDischargesLevel_Region': {
+            'class': JOLTS.LayoffsAndDischargesLevel,
+            'category_property': JOLTS.hasRegion,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'LayoffsAndDischargesRate_Region': {
+            'class': JOLTS.LayoffsAndDischargesRate,
+            'category_property': JOLTS.hasRegion,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+
+        # ============================================
+        # Table 12: Layoffs Discharges by Industry (hasIndustry)
+        # Note: Table 12 uses "LayoffsDischarges" (no "And") class names
+        # ============================================
         'LayoffsDischargesLevel': {
             'class': JOLTS.LayoffsDischargesLevel,
             'category_property': JOLTS.hasIndustry,
@@ -495,6 +612,26 @@ MEASUREMENT_TYPES = {
             'month_property': JOLTS.hasMonth,
             'year_property': JOLTS.hasYear
         },
+
+        # ============================================
+        # Table 12: Layoffs Discharges by Region (hasRegion)
+        # ============================================
+        'LayoffsDischargesLevel_Region': {
+            'class': JOLTS.LayoffsDischargesLevel,
+            'category_property': JOLTS.hasRegion,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'LayoffsDischargesRate_Region': {
+            'class': JOLTS.LayoffsDischargesRate,
+            'category_property': JOLTS.hasRegion,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+
+        # ============================================
+        # Tables 6, 13: Other Separations by Industry (hasIndustry)
+        # ============================================
         'OtherSeparationsLevel': {
             'class': JOLTS.OtherSeparationsLevel,
             'category_property': JOLTS.hasIndustry,
@@ -506,7 +643,180 @@ MEASUREMENT_TYPES = {
             'category_property': JOLTS.hasIndustry,
             'month_property': JOLTS.hasMonth,
             'year_property': JOLTS.hasYear
-        }
+        },
+
+        # ============================================
+        # Tables 6, 13: Other Separations by Region (hasRegion)
+        # ============================================
+        'OtherSeparationsLevel_Region': {
+            'class': JOLTS.OtherSeparationsLevel,
+            'category_property': JOLTS.hasRegion,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'OtherSeparationsRate_Region': {
+            'class': JOLTS.OtherSeparationsRate,
+            'category_property': JOLTS.hasRegion,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+
+        # ============================================
+        # Table 7: All metrics by Establishment Size Class (hasEstablishmentSizeClass)
+        # ============================================
+        'JobOpeningsLevel_EstablishmentSize': {
+            'class': JOLTS.JobOpeningsLevel,
+            'category_property': JOLTS.hasEstablishmentSizeClass,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'JobOpeningsRate_EstablishmentSize': {
+            'class': JOLTS.JobOpeningsRate,
+            'category_property': JOLTS.hasEstablishmentSizeClass,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'HiresLevel_EstablishmentSize': {
+            'class': JOLTS.HiresLevel,
+            'category_property': JOLTS.hasEstablishmentSizeClass,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'HiresRate_EstablishmentSize': {
+            'class': JOLTS.HiresRate,
+            'category_property': JOLTS.hasEstablishmentSizeClass,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'TotalSeparationsLevel_EstablishmentSize': {
+            'class': JOLTS.TotalSeparationsLevel,
+            'category_property': JOLTS.hasEstablishmentSizeClass,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'TotalSeparationsRate_EstablishmentSize': {
+            'class': JOLTS.TotalSeparationsRate,
+            'category_property': JOLTS.hasEstablishmentSizeClass,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'QuitsLevel_EstablishmentSize': {
+            'class': JOLTS.QuitsLevel,
+            'category_property': JOLTS.hasEstablishmentSizeClass,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'QuitsRate_EstablishmentSize': {
+            'class': JOLTS.QuitsRate,
+            'category_property': JOLTS.hasEstablishmentSizeClass,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'LayoffsAndDischargesLevel_EstablishmentSize': {
+            'class': JOLTS.LayoffsAndDischargesLevel,
+            'category_property': JOLTS.hasEstablishmentSizeClass,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'LayoffsAndDischargesRate_EstablishmentSize': {
+            'class': JOLTS.LayoffsAndDischargesRate,
+            'category_property': JOLTS.hasEstablishmentSizeClass,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'OtherSeparationsLevel_EstablishmentSize': {
+            'class': JOLTS.OtherSeparationsLevel,
+            'category_property': JOLTS.hasEstablishmentSizeClass,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'OtherSeparationsRate_EstablishmentSize': {
+            'class': JOLTS.OtherSeparationsRate,
+            'category_property': JOLTS.hasEstablishmentSizeClass,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+
+        # ============================================
+        # Table 14: All metrics by Establishment Size (hasEstablishmentSize)
+        # Note: Table 14 uses "hasEstablishmentSize" (not "hasEstablishmentSizeClass")
+        # and "LayoffsDischarges" (not "LayoffsAndDischarges") for L&D classes
+        # The Level/Rate classes for JO, Hires, TotalSep, Quits, OtherSep
+        # are the same as Tables 1-13, so the inner join on hasEstablishmentSize
+        # naturally filters to only Table 14 entities.
+        # ============================================
+        'JobOpeningsLevel_EstablishmentSize14': {
+            'class': JOLTS.JobOpeningsLevel,
+            'category_property': JOLTS.hasEstablishmentSize,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'JobOpeningsRate_EstablishmentSize14': {
+            'class': JOLTS.JobOpeningsRate,
+            'category_property': JOLTS.hasEstablishmentSize,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'HiresLevel_EstablishmentSize14': {
+            'class': JOLTS.HiresLevel,
+            'category_property': JOLTS.hasEstablishmentSize,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'HiresRate_EstablishmentSize14': {
+            'class': JOLTS.HiresRate,
+            'category_property': JOLTS.hasEstablishmentSize,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'TotalSeparationsLevel_EstablishmentSize14': {
+            'class': JOLTS.TotalSeparationsLevel,
+            'category_property': JOLTS.hasEstablishmentSize,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'TotalSeparationsRate_EstablishmentSize14': {
+            'class': JOLTS.TotalSeparationsRate,
+            'category_property': JOLTS.hasEstablishmentSize,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'QuitsLevel_EstablishmentSize14': {
+            'class': JOLTS.QuitsLevel,
+            'category_property': JOLTS.hasEstablishmentSize,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'QuitsRate_EstablishmentSize14': {
+            'class': JOLTS.QuitsRate,
+            'category_property': JOLTS.hasEstablishmentSize,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'LayoffsDischargesLevel_EstablishmentSize14': {
+            'class': JOLTS.LayoffsDischargesLevel,
+            'category_property': JOLTS.hasEstablishmentSize,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'LayoffsDischargesRate_EstablishmentSize14': {
+            'class': JOLTS.LayoffsDischargesRate,
+            'category_property': JOLTS.hasEstablishmentSize,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'OtherSeparationsLevel_EstablishmentSize14': {
+            'class': JOLTS.OtherSeparationsLevel,
+            'category_property': JOLTS.hasEstablishmentSize,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
+        'OtherSeparationsRate_EstablishmentSize14': {
+            'class': JOLTS.OtherSeparationsRate,
+            'category_property': JOLTS.hasEstablishmentSize,
+            'month_property': JOLTS.hasMonth,
+            'year_property': JOLTS.hasYear
+        },
     },
     'empsit': {
         # Establishment Survey Tables (9 tables)
