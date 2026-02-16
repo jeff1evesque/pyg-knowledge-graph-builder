@@ -7,25 +7,142 @@ from glue_jobs.utils.rdf_utils import (
 
 
 MEASUREMENT_TYPES = {
-    'cpi': {
+        'cpi': {
+        # ============================================
+        # Tables 1, 3: Index values (hasCategory)
+        # ============================================
         'Index': {
             'class': CPI.Index,
             'category_property': CPI.hasCategory,
             'month_property': CPI.hasMonth,
             'year_property': CPI.hasYear
         },
+
+        # ============================================
+        # Tables 1, 2, 3: Relative Importance (hasCategory)
+        # ============================================
+        'RelativeImportance': {
+            'class': CPI.RelativeImportance,
+            'category_property': CPI.hasCategory,
+            'month_property': CPI.hasMonth,
+            'year_property': CPI.hasYear
+        },
+
+        # ============================================
+        # Tables 1, 2: Percent Change by category (hasEndMonth/hasEndYear)
+        # ============================================
         'PercentChange': {
             'class': CPI.PercentChange,
             'category_property': CPI.hasCategory,
             'month_property': CPI.hasEndMonth,
             'year_property': CPI.hasEndYear
         },
-        'RelativeImportance': {
-            'class': CPI.RelativeImportance,
-            'category_property': CPI.hasCategory,
+
+        # ============================================
+        # Table 3: Special Aggregate variants
+        # Same types but linked via hasSpecialAggregate instead of hasCategory
+        # ============================================
+        'Index_SpecialAggregate': {
+            'class': CPI.Index,
+            'category_property': CPI.hasSpecialAggregate,
             'month_property': CPI.hasMonth,
             'year_property': CPI.hasYear
-        }
+        },
+        'RelativeImportance_SpecialAggregate': {
+            'class': CPI.RelativeImportance,
+            'category_property': CPI.hasSpecialAggregate,
+            'month_property': CPI.hasMonth,
+            'year_property': CPI.hasYear
+        },
+        'PercentChange_SpecialAggregate': {
+            'class': CPI.PercentChange,
+            'category_property': CPI.hasSpecialAggregate,
+            'month_property': CPI.hasEndMonth,
+            'year_property': CPI.hasEndYear
+        },
+
+        # ============================================
+        # Table 4: Percent Change by area
+        # ============================================
+        'PercentChange_Area': {
+            'class': CPI.PercentChange,
+            'category_property': CPI.hasArea,
+            'month_property': CPI.hasEndMonth,
+            'year_property': CPI.hasEndYear
+        },
+
+        # ============================================
+        # Table 5: Chained CPI (C-CPI-U vs CPI-U)
+        # These use hasTimePeriod → TimePeriod → hasMonth/hasYear
+        # The base enricher can't follow 2-hop paths, so we link
+        # TimePeriod entities directly (they ARE the temporal grouping)
+        # Category = hasIndexType (CCPIU or CPIU)
+        # ============================================
+        'OneMonthPercentChange': {
+            'class': CPI.OneMonthPercentChange,
+            'category_property': CPI.hasIndexType,
+            'month_property': CPI.hasTimePeriod,
+            # Note: This won't work with the base enricher's month extraction
+            # because hasTimePeriod points to a TimePeriod entity, not a Month.
+            # We skip this — Table 5 has only ~24 rows, not worth custom logic.
+            'year_property': None
+        },
+        'TwelveMonthPercentChange': {
+            'class': CPI.TwelveMonthPercentChange,
+            'category_property': CPI.hasIndexType,
+            'month_property': CPI.hasTimePeriod,
+            'year_property': None
+        },
+
+        # ============================================
+        # Tables 6, 7: Percent Change by expenditure category
+        # ============================================
+        'PercentChange_ExpenditureCategory': {
+            'class': CPI.PercentChange,
+            'category_property': CPI.hasExpenditureCategory,
+            'month_property': CPI.hasEndMonth,
+            'year_property': CPI.hasEndYear
+        },
+
+        # ============================================
+        # Table 6: Effect on All Items
+        # ============================================
+        'EffectOnAllItems': {
+            'class': CPI.EffectOnAllItems,
+            'category_property': CPI.hasExpenditureCategory,
+            'month_property': CPI.hasEndMonth,
+            'year_property': CPI.hasEndYear
+        },
+
+        # ============================================
+        # Tables 6, 7: Standard Error
+        # ============================================
+        'StandardError': {
+            'class': CPI.StandardError,
+            'category_property': CPI.hasExpenditureCategory,
+            'month_property': CPI.hasMonth,
+            'year_property': CPI.hasYear
+        },
+
+        # ============================================
+        # Table A: Seasonally Adjusted Change (month-to-month)
+        # ============================================
+        'SeasonallyAdjustedChange': {
+            'class': CPI.SeasonallyAdjustedChange,
+            'category_property': CPI.hasExpenditureCategory,
+            'month_property': CPI.hasMonth,
+            'year_property': CPI.hasYear
+        },
+
+        # ============================================
+        # Table A: Unadjusted Annual Change (12-month)
+        # ============================================
+        'UnadjustedAnnualChange': {
+            'class': CPI.UnadjustedAnnualChange,
+            'category_property': CPI.hasExpenditureCategory,
+            'month_property': CPI.hasEndMonth,
+            'year_property': CPI.hasEndYear
+        },
     },
     'ppi': {
         'MonthlyChange': {
