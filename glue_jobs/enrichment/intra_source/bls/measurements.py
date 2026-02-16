@@ -7,7 +7,7 @@ from glue_jobs.utils.rdf_utils import (
 
 
 MEASUREMENT_TYPES = {
-        'cpi': {
+    'cpi': {
         # ============================================
         # Tables 1, 3: Index values (hasCategory)
         # ============================================
