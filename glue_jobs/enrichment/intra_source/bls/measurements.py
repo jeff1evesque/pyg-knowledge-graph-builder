@@ -145,30 +145,69 @@ MEASUREMENT_TYPES = {
         },
     },
     'ppi': {
+        # ============================================
+        # Tables 1, 2: MonthlyChange (hasCommodityGrouping, hasEndMonth/hasEndYear)
+        # ============================================
         'MonthlyChange': {
             'class': PPI.MonthlyChange,
             'category_property': PPI.hasCommodityGrouping,
             'month_property': PPI.hasEndMonth,
             'year_property': PPI.hasEndYear
         },
+
+        # ============================================
+        # Tables 1, 2: TwelveMonthChange (hasCommodityGrouping, hasEndMonth/hasEndYear)
+        # ============================================
         'TwelveMonthChange': {
             'class': PPI.TwelveMonthChange,
             'category_property': PPI.hasCommodityGrouping,
             'month_property': PPI.hasEndMonth,
             'year_property': PPI.hasEndYear
         },
+
+        # ============================================
+        # Table 3: IndexValue (hasCommodityGrouping, hasMonth/hasYear)
+        # ============================================
         'IndexValue': {
             'class': PPI.IndexValue,
             'category_property': PPI.hasCommodityGrouping,
             'month_property': PPI.hasMonth,
             'year_property': PPI.hasYear
         },
+
+        # ============================================
+        # Table 1: RelativeImportance (hasCommodityGrouping, hasMonth/hasYear)
+        # ============================================
         'RelativeImportance': {
             'class': PPI.RelativeImportance,
             'category_property': PPI.hasCommodityGrouping,
             'month_property': PPI.hasMonth,
             'year_property': PPI.hasYear
-        }
+        },
+
+        # ============================================
+        # Tables A, B, C, D: MonthlyChange (hasPriceIndex, hasMonth/hasYear)
+        # These are flat summary tables where changes link to PriceIndex
+        # entities instead of CommodityGrouping entities.
+        # ============================================
+        'MonthlyChange_PriceIndex': {
+            'class': PPI.MonthlyChange,
+            'category_property': PPI.hasPriceIndex,
+            'month_property': PPI.hasMonth,
+            'year_property': PPI.hasYear
+        },
+
+        # ============================================
+        # Tables A, B, C: TwelveMonthChange (hasPriceIndex, hasMonth/hasYear)
+        # Same flat summary pattern — 12-month changes also use
+        # hasMonth/hasYear (not hasEndMonth/hasEndYear) in these tables.
+        # ============================================
+        'TwelveMonthChange_PriceIndex': {
+            'class': PPI.TwelveMonthChange,
+            'category_property': PPI.hasPriceIndex,
+            'month_property': PPI.hasMonth,
+            'year_property': PPI.hasYear
+        },
     },
     'eci': {
         # Table 1: Total Compensation (seasonally adjusted)
