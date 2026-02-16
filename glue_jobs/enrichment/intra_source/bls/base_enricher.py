@@ -1,9 +1,7 @@
 """
-Base class for BLS per-dataset sub-enrichers (PySpark).
+Base class for BLS per-dataset enrichment (PySpark) + dataset registry.
 
-Each sub-enricher implements link_temporal_sequences() for its
-specific measurement types and temporal properties.
-
+Each dataset's enrichment is driven by its MEASUREMENT_TYPES config.
 The common pattern across all BLS datasets:
 1. For each measurement type in MEASUREMENT_TYPES[dataset]:
    a. Find all entities of that rdf:type
@@ -13,8 +11,9 @@ The common pattern across all BLS datasets:
    e. Window partition by category, order by sort key
    f. Produce precedes triples linking consecutive measurements
 
-This base class provides the reusable machinery. Sub-enrichers
-only need to specify their dataset name and override if needed.
+This base class provides the reusable machinery. All 10 BLS datasets
+use it directly via the DATASET_ENRICHERS registry. If a dataset ever
+needs custom logic, replace its registry entry with a subclass.
 """
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -47,16 +46,19 @@ QUARTER_ORDER = {
 
 class BLSDatasetEnricher:
     """
-    Base class for per-dataset BLS sub-enrichers.
+    BLS per-dataset enricher.
+
+    Instantiated with a dataset_name, reads measurement type configs
+    from MEASUREMENT_TYPES, and produces precedes triples via PySpark
+    window functions.
 
     Subclasses set `dataset_name` and optionally override
     `link_temporal_sequences` for dataset-specific behavior.
     """
 
-    dataset_name: str = ''  # Override in subclass: 'cpi', 'ppi', etc.
-
-    def __init__(self, spark: SparkSession):
+    def __init__(self, spark: SparkSession, dataset_name: str):
         self.spark = spark
+        self.dataset_name = dataset_name
 
     def link_temporal_sequences(self, bls_triples: DataFrame) -> Optional[DataFrame]:
         """
@@ -74,9 +76,6 @@ class BLSDatasetEnricher:
         Returns:
             DataFrame of new precedes triples, or None
         """
-        if not self.dataset_name:
-            return None
-
         measurement_configs = MEASUREMENT_TYPES.get(self.dataset_name, {})
         if not measurement_configs:
             return None
@@ -281,3 +280,25 @@ class BLSDatasetEnricher:
         )
 
         return precedes_triples
+
+
+# ============================================
+# Dataset registry
+#
+# All 10 BLS datasets use BLSDatasetEnricher directly.
+# If a dataset ever needs custom logic, replace its entry
+# with a subclass.
+# ============================================
+
+DATASET_ENRICHERS: Dict[str, type] = {
+    'cpi': BLSDatasetEnricher,
+    'ppi': BLSDatasetEnricher,
+    'eci': BLSDatasetEnricher,
+    'jolts': BLSDatasetEnricher,
+    'empsit': BLSDatasetEnricher,
+    'ximpim': BLSDatasetEnricher,
+    'laus': BLSDatasetEnricher,
+    'metro': BLSDatasetEnricher,
+    'realer': BLSDatasetEnricher,
+    'wkyeng': BLSDatasetEnricher,
+}
