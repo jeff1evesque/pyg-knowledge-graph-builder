@@ -213,15 +213,32 @@ MEASUREMENT_TYPES = {
         # ============================================
         # Table 1: Total Compensation by Occupational Group and Industry (Seasonally Adjusted)
         # ============================================
-        'EmploymentCostIndexData': {
+
+        # Index data partitioned by occupational group
+        'EmploymentCostIndexData_OccupationalGroup': {
             'class': ECI.EmploymentCostIndexData,
-            'category_property': ECI.hasOccupationalGroup,  # or hasIndustry - multiple possible
+            'category_property': ECI.hasOccupationalGroup,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
-        'PercentChangeData': {
+        # Index data partitioned by industry
+        'EmploymentCostIndexData_Industry': {
+            'class': ECI.EmploymentCostIndexData,
+            'category_property': ECI.hasIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        # Percent change partitioned by occupational group
+        'PercentChangeData_OccupationalGroup': {
             'class': ECI.PercentChangeData,
             'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        # Percent change partitioned by industry
+        'PercentChangeData_Industry': {
+            'class': ECI.PercentChangeData,
+            'category_property': ECI.hasIndustry,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
@@ -229,15 +246,28 @@ MEASUREMENT_TYPES = {
         # ============================================
         # Table 2: Wages and Salaries by Occupational Group and Industry (Seasonally Adjusted)
         # ============================================
-        'WagesAndSalariesIndexData': {
+
+        'WagesAndSalariesIndexData_OccupationalGroup': {
             'class': ECI.WagesAndSalariesIndexData,
             'category_property': ECI.hasOccupationalGroup,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
-        'WagesAndSalariesPercentChangeData': {
+        'WagesAndSalariesIndexData_Industry': {
+            'class': ECI.WagesAndSalariesIndexData,
+            'category_property': ECI.hasIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'WagesAndSalariesPercentChangeData_OccupationalGroup': {
             'class': ECI.WagesAndSalariesPercentChangeData,
             'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'WagesAndSalariesPercentChangeData_Industry': {
+            'class': ECI.WagesAndSalariesPercentChangeData,
+            'category_property': ECI.hasIndustry,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
@@ -245,15 +275,28 @@ MEASUREMENT_TYPES = {
         # ============================================
         # Table 3: Benefits by Occupational Group and Industry (Seasonally Adjusted)
         # ============================================
-        'BenefitsIndexData': {
+
+        'BenefitsIndexData_OccupationalGroup': {
             'class': ECI.BenefitsIndexData,
             'category_property': ECI.hasOccupationalGroup,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
-        'BenefitsPercentChangeData': {
+        'BenefitsIndexData_Industry': {
+            'class': ECI.BenefitsIndexData,
+            'category_property': ECI.hasIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'BenefitsPercentChangeData_OccupationalGroup': {
             'class': ECI.BenefitsPercentChangeData,
             'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'BenefitsPercentChangeData_Industry': {
+            'class': ECI.BenefitsPercentChangeData,
+            'category_property': ECI.hasIndustry,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
@@ -261,43 +304,160 @@ MEASUREMENT_TYPES = {
         # ============================================
         # Table 4: Total Compensation for Civilian Workers (Not Seasonally Adjusted)
         # ============================================
-        'CivilianWorkerIndexData': {
+
+        'CivilianWorkerIndexData_OccupationalGroup': {
             'class': ECI.CivilianWorkerIndexData,
             'category_property': ECI.hasOccupationalGroup,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
-        'ThreeMonthPercentChangeData': {
+        'CivilianWorkerIndexData_Industry': {
+            'class': ECI.CivilianWorkerIndexData,
+            'category_property': ECI.hasIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'CivilianWorkerIndexData_SpecialCategory': {
+            'class': ECI.CivilianWorkerIndexData,
+            'category_property': ECI.hasSpecialCategory,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'ThreeMonthPercentChangeData_OccupationalGroup': {
             'class': ECI.ThreeMonthPercentChangeData,
             'category_property': ECI.hasOccupationalGroup,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
-        'TwelveMonthPercentChangeData': {
+        'ThreeMonthPercentChangeData_Industry': {
+            'class': ECI.ThreeMonthPercentChangeData,
+            'category_property': ECI.hasIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'ThreeMonthPercentChangeData_SpecialCategory': {
+            'class': ECI.ThreeMonthPercentChangeData,
+            'category_property': ECI.hasSpecialCategory,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'TwelveMonthPercentChangeData_OccupationalGroup': {
             'class': ECI.TwelveMonthPercentChangeData,
             'category_property': ECI.hasOccupationalGroup,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
+        'TwelveMonthPercentChangeData_Industry': {
+            'class': ECI.TwelveMonthPercentChangeData,
+            'category_property': ECI.hasIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'TwelveMonthPercentChangeData_SpecialCategory': {
+            'class': ECI.TwelveMonthPercentChangeData,
+            'category_property': ECI.hasSpecialCategory,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
 
         # ============================================
-        # Table 5: Total Compensation for Private Industry Workers (Not Seasonally Adjusted)
+        # Table 5: Total Compensation for Private Industry Workers by Occ/Industry (Not Seasonally Adjusted)
+        # Shared classes with Table 6 — partitioned by occupational group and industry here
         # ============================================
-        'PrivateIndustryWorkerIndexData': {
+
+        'PrivateIndustryWorkerIndexData_OccupationalGroup': {
             'class': ECI.PrivateIndustryWorkerIndexData,
             'category_property': ECI.hasOccupationalGroup,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
-        'PrivateIndustryThreeMonthPercentChangeData': {
+        'PrivateIndustryWorkerIndexData_Industry': {
+            'class': ECI.PrivateIndustryWorkerIndexData,
+            'category_property': ECI.hasIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryThreeMonthPercentChangeData_OccupationalGroup': {
             'class': ECI.PrivateIndustryThreeMonthPercentChangeData,
             'category_property': ECI.hasOccupationalGroup,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
-        'PrivateIndustryTwelveMonthPercentChangeData': {
+        'PrivateIndustryThreeMonthPercentChangeData_Industry': {
+            'class': ECI.PrivateIndustryThreeMonthPercentChangeData,
+            'category_property': ECI.hasIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryTwelveMonthPercentChangeData_OccupationalGroup': {
             'class': ECI.PrivateIndustryTwelveMonthPercentChangeData,
             'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryTwelveMonthPercentChangeData_Industry': {
+            'class': ECI.PrivateIndustryTwelveMonthPercentChangeData,
+            'category_property': ECI.hasIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+
+        # ============================================
+        # Table 6: Total Compensation by Bargaining Status and Census Region (Not Seasonally Adjusted)
+        # Same data classes as Table 5 — partitioned by bargaining/census properties
+        # ============================================
+
+        'PrivateIndustryWorkerIndexData_BargainingStatus': {
+            'class': ECI.PrivateIndustryWorkerIndexData,
+            'category_property': ECI.hasBargainingStatus,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryWorkerIndexData_CensusRegion': {
+            'class': ECI.PrivateIndustryWorkerIndexData,
+            'category_property': ECI.hasCensusRegion,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryWorkerIndexData_CensusDivision': {
+            'class': ECI.PrivateIndustryWorkerIndexData,
+            'category_property': ECI.hasCensusDivision,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryThreeMonthPercentChangeData_BargainingStatus': {
+            'class': ECI.PrivateIndustryThreeMonthPercentChangeData,
+            'category_property': ECI.hasBargainingStatus,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryThreeMonthPercentChangeData_CensusRegion': {
+            'class': ECI.PrivateIndustryThreeMonthPercentChangeData,
+            'category_property': ECI.hasCensusRegion,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryThreeMonthPercentChangeData_CensusDivision': {
+            'class': ECI.PrivateIndustryThreeMonthPercentChangeData,
+            'category_property': ECI.hasCensusDivision,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryTwelveMonthPercentChangeData_BargainingStatus': {
+            'class': ECI.PrivateIndustryTwelveMonthPercentChangeData,
+            'category_property': ECI.hasBargainingStatus,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryTwelveMonthPercentChangeData_CensusRegion': {
+            'class': ECI.PrivateIndustryTwelveMonthPercentChangeData,
+            'category_property': ECI.hasCensusRegion,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryTwelveMonthPercentChangeData_CensusDivision': {
+            'class': ECI.PrivateIndustryTwelveMonthPercentChangeData,
+            'category_property': ECI.hasCensusDivision,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
@@ -305,21 +465,40 @@ MEASUREMENT_TYPES = {
         # ============================================
         # Table 7: Total Compensation for State/Local Government Workers (Not Seasonally Adjusted)
         # ============================================
-        'StateLocalGovernmentWorkerIndexData': {
+
+        'StateLocalGovernmentWorkerIndexData_OccupationalGroup': {
             'class': ECI.StateLocalGovernmentWorkerIndexData,
             'category_property': ECI.hasOccupationalGroup,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
-        'StateLocalGovernmentThreeMonthPercentChangeData': {
+        'StateLocalGovernmentWorkerIndexData_Industry': {
+            'class': ECI.StateLocalGovernmentWorkerIndexData,
+            'category_property': ECI.hasIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'StateLocalGovernmentThreeMonthPercentChangeData_OccupationalGroup': {
             'class': ECI.StateLocalGovernmentThreeMonthPercentChangeData,
             'category_property': ECI.hasOccupationalGroup,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
-        'StateLocalGovernmentTwelveMonthPercentChangeData': {
+        'StateLocalGovernmentThreeMonthPercentChangeData_Industry': {
+            'class': ECI.StateLocalGovernmentThreeMonthPercentChangeData,
+            'category_property': ECI.hasIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'StateLocalGovernmentTwelveMonthPercentChangeData_OccupationalGroup': {
             'class': ECI.StateLocalGovernmentTwelveMonthPercentChangeData,
             'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'StateLocalGovernmentTwelveMonthPercentChangeData_Industry': {
+            'class': ECI.StateLocalGovernmentTwelveMonthPercentChangeData,
+            'category_property': ECI.hasIndustry,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
@@ -327,65 +506,159 @@ MEASUREMENT_TYPES = {
         # ============================================
         # Table 8: Wages/Salaries for Civilian Workers (Not Seasonally Adjusted)
         # ============================================
-        'CivilianWorkerWagesSalariesIndexData': {
+
+        'CivilianWorkerWagesSalariesIndexData_OccupationalGroup': {
             'class': ECI.CivilianWorkerWagesSalariesIndexData,
             'category_property': ECI.hasOccupationalGroup,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
-        'CivilianWorkerWagesSalariesThreeMonthPercentChangeData': {
+        'CivilianWorkerWagesSalariesIndexData_Industry': {
+            'class': ECI.CivilianWorkerWagesSalariesIndexData,
+            'category_property': ECI.hasIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'CivilianWorkerWagesSalariesThreeMonthPercentChangeData_OccupationalGroup': {
             'class': ECI.CivilianWorkerWagesSalariesThreeMonthPercentChangeData,
             'category_property': ECI.hasOccupationalGroup,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
-        'CivilianWorkerWagesSalariesTwelveMonthPercentChangeData': {
+        'CivilianWorkerWagesSalariesThreeMonthPercentChangeData_Industry': {
+            'class': ECI.CivilianWorkerWagesSalariesThreeMonthPercentChangeData,
+            'category_property': ECI.hasIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'CivilianWorkerWagesSalariesTwelveMonthPercentChangeData_OccupationalGroup': {
             'class': ECI.CivilianWorkerWagesSalariesTwelveMonthPercentChangeData,
             'category_property': ECI.hasOccupationalGroup,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
+        'CivilianWorkerWagesSalariesTwelveMonthPercentChangeData_Industry': {
+            'class': ECI.CivilianWorkerWagesSalariesTwelveMonthPercentChangeData,
+            'category_property': ECI.hasIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
 
         # ============================================
-        # Table 9: Wages/Salaries for Private Industry Workers (Not Seasonally Adjusted)
+        # Table 9: Wages/Salaries for Private Industry Workers by Occ/Industry (Not Seasonally Adjusted)
         # ============================================
-        'PrivateIndustryWorkerWagesSalariesIndexData': {
+
+        'PrivateIndustryWorkerWagesSalariesIndexData_OccupationalGroup': {
             'class': ECI.PrivateIndustryWorkerWagesSalariesIndexData,
             'category_property': ECI.hasOccupationalGroup,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
-        'PrivateIndustryWorkerWagesSalariesThreeMonthPercentChangeData': {
+        'PrivateIndustryWorkerWagesSalariesIndexData_Industry': {
+            'class': ECI.PrivateIndustryWorkerWagesSalariesIndexData,
+            'category_property': ECI.hasIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryWorkerWagesSalariesThreeMonthPercentChangeData_OccupationalGroup': {
             'class': ECI.PrivateIndustryWorkerWagesSalariesThreeMonthPercentChangeData,
             'category_property': ECI.hasOccupationalGroup,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
-        'PrivateIndustryWorkerWagesSalariesTwelveMonthPercentChangeData': {
+        'PrivateIndustryWorkerWagesSalariesThreeMonthPercentChangeData_Industry': {
+            'class': ECI.PrivateIndustryWorkerWagesSalariesThreeMonthPercentChangeData,
+            'category_property': ECI.hasIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryWorkerWagesSalariesTwelveMonthPercentChangeData_OccupationalGroup': {
             'class': ECI.PrivateIndustryWorkerWagesSalariesTwelveMonthPercentChangeData,
             'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryWorkerWagesSalariesTwelveMonthPercentChangeData_Industry': {
+            'class': ECI.PrivateIndustryWorkerWagesSalariesTwelveMonthPercentChangeData,
+            'category_property': ECI.hasIndustry,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
 
         # ============================================
         # Table 10: Wages/Salaries by Bargaining Status and Census Region (Not Seasonally Adjusted)
+        # Distinct classes from Table 9
         # ============================================
-        'PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionIndexData': {
+
+        'PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionIndexData_BargainingStatus': {
             'class': ECI.PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionIndexData,
             'category_property': ECI.hasBargainingStatus,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
-        'PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionThreeMonthPercentChangeData': {
+        'PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionIndexData_BargainingStatusIndustry': {
+            'class': ECI.PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionIndexData,
+            'category_property': ECI.hasBargainingStatusIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionIndexData_CensusRegion': {
+            'class': ECI.PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionIndexData,
+            'category_property': ECI.hasCensusRegion,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionIndexData_CensusDivision': {
+            'class': ECI.PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionIndexData,
+            'category_property': ECI.hasCensusDivision,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionThreeMonthPercentChangeData_BargainingStatus': {
             'class': ECI.PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionThreeMonthPercentChangeData,
             'category_property': ECI.hasBargainingStatus,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
-        'PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionTwelveMonthPercentChangeData': {
+        'PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionThreeMonthPercentChangeData_BargainingStatusIndustry': {
+            'class': ECI.PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionThreeMonthPercentChangeData,
+            'category_property': ECI.hasBargainingStatusIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionThreeMonthPercentChangeData_CensusRegion': {
+            'class': ECI.PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionThreeMonthPercentChangeData,
+            'category_property': ECI.hasCensusRegion,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionThreeMonthPercentChangeData_CensusDivision': {
+            'class': ECI.PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionThreeMonthPercentChangeData,
+            'category_property': ECI.hasCensusDivision,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionTwelveMonthPercentChangeData_BargainingStatus': {
             'class': ECI.PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionTwelveMonthPercentChangeData,
             'category_property': ECI.hasBargainingStatus,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionTwelveMonthPercentChangeData_BargainingStatusIndustry': {
+            'class': ECI.PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionTwelveMonthPercentChangeData,
+            'category_property': ECI.hasBargainingStatusIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionTwelveMonthPercentChangeData_CensusRegion': {
+            'class': ECI.PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionTwelveMonthPercentChangeData,
+            'category_property': ECI.hasCensusRegion,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionTwelveMonthPercentChangeData_CensusDivision': {
+            'class': ECI.PrivateIndustryWorkerWagesSalariesByBargainingStatusRegionTwelveMonthPercentChangeData,
+            'category_property': ECI.hasCensusDivision,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
@@ -393,21 +666,58 @@ MEASUREMENT_TYPES = {
         # ============================================
         # Table 11: Wages/Salaries for State/Local Government by Occupation and Industry (Not Seasonally Adjusted)
         # ============================================
-        'StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryIndexData': {
+
+        'StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryIndexData_OccupationalGroup': {
             'class': ECI.StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryIndexData,
             'category_property': ECI.hasOccupationalGroup,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
-        'StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryThreeMonthPercentChangeData': {
+        'StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryIndexData_StateLocalIndustry': {
+            'class': ECI.StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryIndexData,
+            'category_property': ECI.hasStateLocalIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryIndexData_WorkerCategory': {
+            'class': ECI.StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryIndexData,
+            'category_property': ECI.hasWorkerCategory,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryThreeMonthPercentChangeData_OccupationalGroup': {
             'class': ECI.StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryThreeMonthPercentChangeData,
             'category_property': ECI.hasOccupationalGroup,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
-        'StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryTwelveMonthPercentChangeData': {
+        'StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryThreeMonthPercentChangeData_StateLocalIndustry': {
+            'class': ECI.StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryThreeMonthPercentChangeData,
+            'category_property': ECI.hasStateLocalIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryThreeMonthPercentChangeData_WorkerCategory': {
+            'class': ECI.StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryThreeMonthPercentChangeData,
+            'category_property': ECI.hasWorkerCategory,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryTwelveMonthPercentChangeData_OccupationalGroup': {
             'class': ECI.StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryTwelveMonthPercentChangeData,
             'category_property': ECI.hasOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryTwelveMonthPercentChangeData_StateLocalIndustry': {
+            'class': ECI.StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryTwelveMonthPercentChangeData,
+            'category_property': ECI.hasStateLocalIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryTwelveMonthPercentChangeData_WorkerCategory': {
+            'class': ECI.StateLocalGovernmentWorkerWagesSalariesByOccupationIndustryTwelveMonthPercentChangeData,
+            'category_property': ECI.hasWorkerCategory,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
@@ -415,21 +725,76 @@ MEASUREMENT_TYPES = {
         # ============================================
         # Table 12: Benefits by Occupation, Industry, and Bargaining Status (Not Seasonally Adjusted)
         # ============================================
-        'BenefitsByOccupationIndustryBargainingStatusIndexData': {
+
+        'BenefitsByOccupationIndustryBargainingStatusIndexData_WorkerType': {
             'class': ECI.BenefitsByOccupationIndustryBargainingStatusIndexData,
-            'category_property': ECI.hasWorkerSector,
+            'category_property': ECI.hasWorkerType,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
-        'BenefitsByOccupationIndustryBargainingStatusThreeMonthPercentChangeData': {
+        'BenefitsByOccupationIndustryBargainingStatusIndexData_BenefitsOccupationalGroup': {
+            'class': ECI.BenefitsByOccupationIndustryBargainingStatusIndexData,
+            'category_property': ECI.hasBenefitsOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'BenefitsByOccupationIndustryBargainingStatusIndexData_BenefitsIndustry': {
+            'class': ECI.BenefitsByOccupationIndustryBargainingStatusIndexData,
+            'category_property': ECI.hasBenefitsIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'BenefitsByOccupationIndustryBargainingStatusIndexData_BenefitsBargainingStatus': {
+            'class': ECI.BenefitsByOccupationIndustryBargainingStatusIndexData,
+            'category_property': ECI.hasBenefitsBargainingStatus,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'BenefitsByOccupationIndustryBargainingStatusThreeMonthPercentChangeData_WorkerType': {
             'class': ECI.BenefitsByOccupationIndustryBargainingStatusThreeMonthPercentChangeData,
-            'category_property': ECI.hasWorkerSector,
+            'category_property': ECI.hasWorkerType,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
-        'BenefitsByOccupationIndustryBargainingStatusTwelveMonthPercentChangeData': {
+        'BenefitsByOccupationIndustryBargainingStatusThreeMonthPercentChangeData_BenefitsOccupationalGroup': {
+            'class': ECI.BenefitsByOccupationIndustryBargainingStatusThreeMonthPercentChangeData,
+            'category_property': ECI.hasBenefitsOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'BenefitsByOccupationIndustryBargainingStatusThreeMonthPercentChangeData_BenefitsIndustry': {
+            'class': ECI.BenefitsByOccupationIndustryBargainingStatusThreeMonthPercentChangeData,
+            'category_property': ECI.hasBenefitsIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'BenefitsByOccupationIndustryBargainingStatusThreeMonthPercentChangeData_BenefitsBargainingStatus': {
+            'class': ECI.BenefitsByOccupationIndustryBargainingStatusThreeMonthPercentChangeData,
+            'category_property': ECI.hasBenefitsBargainingStatus,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'BenefitsByOccupationIndustryBargainingStatusTwelveMonthPercentChangeData_WorkerType': {
             'class': ECI.BenefitsByOccupationIndustryBargainingStatusTwelveMonthPercentChangeData,
-            'category_property': ECI.hasWorkerSector,
+            'category_property': ECI.hasWorkerType,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'BenefitsByOccupationIndustryBargainingStatusTwelveMonthPercentChangeData_BenefitsOccupationalGroup': {
+            'class': ECI.BenefitsByOccupationIndustryBargainingStatusTwelveMonthPercentChangeData,
+            'category_property': ECI.hasBenefitsOccupationalGroup,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'BenefitsByOccupationIndustryBargainingStatusTwelveMonthPercentChangeData_BenefitsIndustry': {
+            'class': ECI.BenefitsByOccupationIndustryBargainingStatusTwelveMonthPercentChangeData,
+            'category_property': ECI.hasBenefitsIndustry,
+            'month_property': ECI.hasMonth,
+            'year_property': ECI.hasYear
+        },
+        'BenefitsByOccupationIndustryBargainingStatusTwelveMonthPercentChangeData_BenefitsBargainingStatus': {
+            'class': ECI.BenefitsByOccupationIndustryBargainingStatusTwelveMonthPercentChangeData,
+            'category_property': ECI.hasBenefitsBargainingStatus,
             'month_property': ECI.hasMonth,
             'year_property': ECI.hasYear
         },
@@ -437,6 +802,7 @@ MEASUREMENT_TYPES = {
         # ============================================
         # Table 13: Total Compensation and Wages/Salaries by Area (Not Seasonally Adjusted)
         # ============================================
+
         'PrivateIndustryWorkerTotalCompensationByAreaTwelveMonthPercentChangeData': {
             'class': ECI.PrivateIndustryWorkerTotalCompensationByAreaTwelveMonthPercentChangeData,
             'category_property': ECI.hasMetropolitanArea,
@@ -453,6 +819,7 @@ MEASUREMENT_TYPES = {
         # ============================================
         # Table A: Major Series Percent Change
         # ============================================
+
         'ThreeMonthSeasonallyAdjustedPercentChangeData': {
             'class': ECI.ThreeMonthSeasonallyAdjustedPercentChangeData,
             'category_property': ECI.hasMajorSeriesCompensationComponent,
