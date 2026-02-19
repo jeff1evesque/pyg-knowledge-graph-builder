@@ -1654,99 +1654,31 @@ MEASUREMENT_TYPES = {
         }
     },
 
-    'metro': {
-        # Table 1: Civilian Labor Force - States and Selected Areas (Not Seasonally Adjusted)
+        'metro': {
+        # ============================================
+        # Tables 1, 2: Civilian Labor Force Data container
+        # Contains embedded CivilianLaborForce, UnemployedNumber,
+        # UnemploymentRate as BNodes. Only the container has
+        # hasRegion/hasMonth/hasYear.
+        # Partitioned by region (state, metro area, or metro division).
+        # ============================================
         'CivilianLaborForceData': {
             'class': METRO.CivilianLaborForceData,
-            'category_property': METRO.hasMetropolitanArea,
+            'category_property': METRO.hasRegion,
             'month_property': METRO.hasMonth,
             'year_property': METRO.hasYear
         },
 
-        # Table 1: Unemployment Data - States and Selected Areas (Not Seasonally Adjusted)
-        'UnemploymentData': {
-            'class': METRO.UnemploymentData,
-            'category_property': METRO.hasMetropolitanArea,
-            'month_property': METRO.hasMonth,
-            'year_property': METRO.hasYear
-        },
-
-        # Table 1: Unemployment Rate - States and Selected Areas (Not Seasonally Adjusted)
-        'UnemploymentRate': {
-            'class': METRO.UnemploymentRate,
-            'category_property': METRO.hasMetropolitanArea,
-            'month_property': METRO.hasMonth,
-            'year_property': METRO.hasYear
-        },
-
-        # Table 2: Civilian Labor Force - Large Metropolitan Divisions (Not Seasonally Adjusted)
-        'CivilianLaborForceDivisionData': {
-            'class': METRO.CivilianLaborForceDivisionData,
-            'category_property': METRO.hasMetropolitanDivision,
-            'month_property': METRO.hasMonth,
-            'year_property': METRO.hasYear
-        },
-
-        # Table 2: Unemployment Data - Large Metropolitan Divisions (Not Seasonally Adjusted)
-        'UnemploymentDivisionData': {
-            'class': METRO.UnemploymentDivisionData,
-            'category_property': METRO.hasMetropolitanDivision,
-            'month_property': METRO.hasMonth,
-            'year_property': METRO.hasYear
-        },
-
-        # Table 2: Unemployment Rate - Large Metropolitan Divisions (Not Seasonally Adjusted)
-        'UnemploymentDivisionRate': {
-            'class': METRO.UnemploymentDivisionRate,
-            'category_property': METRO.hasMetropolitanDivision,
-            'month_property': METRO.hasMonth,
-            'year_property': METRO.hasYear
-        },
-
-        # Table 3: Civilian Labor Force - States and Selected Areas (Seasonally Adjusted)
-        'CivilianLaborForceSeasonallyAdjustedData': {
-            'class': METRO.CivilianLaborForceSeasonallyAdjustedData,
-            'category_property': METRO.hasMetropolitanArea,
-            'month_property': METRO.hasMonth,
-            'year_property': METRO.hasYear
-        },
-
-        # Table 3: Unemployment Data - States and Selected Areas (Seasonally Adjusted)
-        'UnemploymentSeasonallyAdjustedData': {
-            'class': METRO.UnemploymentSeasonallyAdjustedData,
-            'category_property': METRO.hasMetropolitanArea,
-            'month_property': METRO.hasMonth,
-            'year_property': METRO.hasYear
-        },
-
-        # Table 3: Unemployment Rate - States and Selected Areas (Seasonally Adjusted)
-        'UnemploymentSeasonallyAdjustedRate': {
-            'class': METRO.UnemploymentSeasonallyAdjustedRate,
-            'category_property': METRO.hasMetropolitanArea,
-            'month_property': METRO.hasMonth,
-            'year_property': METRO.hasYear
-        },
-
-        # Table 4: Civilian Labor Force - Large Metropolitan Divisions (Seasonally Adjusted)
-        'CivilianLaborForceDivisionSeasonallyAdjustedData': {
-            'class': METRO.CivilianLaborForceDivisionSeasonallyAdjustedData,
-            'category_property': METRO.hasMetropolitanDivision,
-            'month_property': METRO.hasMonth,
-            'year_property': METRO.hasYear
-        },
-
-        # Table 4: Unemployment Data - Large Metropolitan Divisions (Seasonally Adjusted)
-        'UnemploymentDivisionSeasonallyAdjustedData': {
-            'class': METRO.UnemploymentDivisionSeasonallyAdjustedData,
-            'category_property': METRO.hasMetropolitanDivision,
-            'month_property': METRO.hasMonth,
-            'year_property': METRO.hasYear
-        },
-
-        # Table 4: Unemployment Rate - Large Metropolitan Divisions (Seasonally Adjusted)
-        'UnemploymentDivisionSeasonallyAdjustedRate': {
-            'class': METRO.UnemploymentDivisionSeasonallyAdjustedRate,
-            'category_property': METRO.hasMetropolitanDivision,
+        # ============================================
+        # Tables 3, 4: Nonfarm Payroll Data container
+        # Contains embedded NonfarmPayrollEmployment, EmploymentChange,
+        # EmploymentChangePercent as BNodes. Only the container has
+        # hasRegion/hasMonth/hasYear.
+        # Partitioned by region (state, metro area, or metro division).
+        # ============================================
+        'NonfarmPayrollData': {
+            'class': METRO.NonfarmPayrollData,
+            'category_property': METRO.hasRegion,
             'month_property': METRO.hasMonth,
             'year_property': METRO.hasYear
         },
