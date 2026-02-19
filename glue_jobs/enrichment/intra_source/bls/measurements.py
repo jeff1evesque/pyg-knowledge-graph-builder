@@ -1887,7 +1887,7 @@ MEASUREMENT_TYPES = {
         },
     },
 
-'wkyeng': {
+    'wkyeng': {
         # Table 1: Quarterly Earnings by Sex (Seasonally Adjusted)
         'QuarterlyEarningsData': {
             'class': WKYENG.QuarterlyEarningsData,
