@@ -1043,6 +1043,47 @@ MEASUREMENT_TYPES = {
         },
     },
 
+    'laus': {
+        # ============================================
+        # Tables 1, 2: Labor Force Data container
+        # Contains embedded CivilianLaborForce, UnemploymentNumber,
+        # UnemploymentRate as BNodes. Only the container entity has
+        # hasState/hasMonth/hasYear properties, so we create temporal
+        # chains on the container, partitioned by state.
+        #
+        # This produces precedes chains like:
+        #   Alabama_2024_July → Alabama_2024_August → Alabama_2025_July → ...
+        # allowing traversal of all labor force metrics for a state
+        # in chronological order.
+        # ============================================
+        'LaborForceData': {
+            'class': LAUS.LaborForceData,
+            'category_property': LAUS.hasState,
+            'month_property': LAUS.hasMonth,
+            'year_property': LAUS.hasYear
+        },
+
+        # ============================================
+        # Tables 3, 3-continued, 4, 4-continued: Nonfarm Payroll Data container
+        # Contains embedded TotalEmployment, ConstructionEmployment,
+        # ManufacturingEmployment, TradeTransportationUtilitiesEmployment,
+        # FinancialActivitiesEmployment, ProfessionalBusinessServicesEmployment,
+        # InformationEmployment, MiningLoggingEmployment as BNodes.
+        # Only the container has hasState/hasMonth/hasYear.
+        #
+        # This produces precedes chains like:
+        #   California_2024_July → California_2024_August → ...
+        # allowing traversal of all nonfarm payroll metrics for a state
+        # in chronological order.
+        # ============================================
+        'NonfarmPayrollData': {
+            'class': LAUS.NonfarmPayrollData,
+            'category_property': LAUS.hasState,
+            'month_property': LAUS.hasMonth,
+            'year_property': LAUS.hasYear
+        },
+    },
+
     'jolts': {
         # ============================================
         # Tables 1, 8, A: Job Openings by Industry (hasIndustry)
