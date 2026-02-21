@@ -29,7 +29,7 @@ Multi-type entities:
     This avoids double-counting nodes across types.
 """
 import logging
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Dict, Any, Tuple, List
 
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
