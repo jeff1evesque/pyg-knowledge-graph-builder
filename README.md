@@ -13,6 +13,8 @@ PyTorch Geometric Knowledge Graph Builder is a serverless pipeline that transfor
 
 The pipeline processes data from **100+ domain-specific ontologies** spanning economic indicators, financial filings, market data, and environmental alerts. All enrichment logic runs as **distributed PySpark DataFrame operations** on AWS Glue, enabling horizontal scaling across the cluster rather than bottlenecking on a single-threaded in-memory graph.
 
+PyG construction also leverages Spark executors for all heavy computation (node ID assignment, edge resolution, feature extraction). Only compact integer and float tensors cross the Spark → driver boundary for final `HeteroData` assembly.
+
 The pipeline supports three execution modes:
 
 - **Full Pipeline**: End-to-end RDF enrichment and PyG graph construction
@@ -21,12 +23,14 @@ The pipeline supports three execution modes:
 
 ### Key Features
 
-- **Large-Scale Integration**: Processes 100+ ontologies with millions of triples per time period
+- **Large-Scale Integration**: Processes 100+ ontologies with tens of millions of triples per time period
 - **Distributed Enrichment**: All enrichment runs as PySpark DataFrame operations across Spark executors
+- **Distributed PyG Construction**: Node ID assignment, edge resolution, and feature extraction run on Spark executors — only compact tensors are collected to the driver
 - **Temporal Unification**: Unified temporal entities across all data sources
 - **Intra-Source Linking**: Automatic relationship discovery within data source families
 - **Cross-Source Linking**: Automatic relationship discovery across heterogeneous datasets
 - **PyTorch Geometric Output**: Native `HeteroData` objects with configurable node/edge types
+- **Per-Type Feature Isolation**: Each node type carries only its ontology-relevant features, not a single wide matrix across all 100+ ontologies
 - **Flexible Graph Construction**: Experiment with different graph structures without re-enrichment
 - **Serverless Architecture**: Fully managed AWS Glue, no infrastructure to maintain
 - **Experiment-Friendly**: Rapid iteration on PyG graph structures (5-10 min per experiment)
@@ -39,29 +43,32 @@ The pipeline supports three execution modes:
 │ Raw Data Sources (S3)                                      │
 │ ├── BLS Economic Data (10 categories, ~100 mappers) - RDF  │
 │ ├── SEC Data (4 categories, 4 mappers) - RDF               │
-│ ├── Market Data (1 mapper) - RDF                           │
+│ ├── Market Data (1 mapper, intraday snapshots) - RDF       │
 │ └── NOAA Weather Alerts (1 mapper) - RDF                   │
 │                                                            │
 │ Total: 100+ mappers and ontologies                         │
+│ Volume: ~30-50M triples/month with intraday market data    │
 └────────────────────────────────────────────────────────────┘
                             ↓
 ┌────────────────────────────────────────────────────────────┐
 │ AWS Glue Job: pyg-knowledge-graph-builder                  │
 │                                                            │
 │  ┌──────────────┐   ┌───────────────┐   ┌──────────────┐   │
-│  │ Read RDF     │──▶│ Enrichment    │──▶│ Write        │   │
-│  │ (N-Triples   │   │ (PySpark      │   │ (Parquet +   │   │
-│  │  from S3)    │   │  DataFrames)  │   │  PyG .pt)    │   │
-│  └──────────────┘   └───────────────┘   └──────────────┘   │
+│  │ Read RDF     │──▶│ Enrichment    │──▶│ Build PyG    │   │
+│  │ (N-Triples   │   │ (PySpark      │   │ (PySpark     │   │
+│  │  → triples   │   │  DataFrames   │   │  executors   │   │
+│  │  DataFrame)  │   │  on executors)│   │  → driver    │   │
+│  └──────────────┘   └───────────────┘   │  tensors)    │   │
+│                                         └──────────────┘   │
 │                                                            │
 │ Mode 1: Full Pipeline                                      │
-│   Raw RDF → Enrich (PySpark) → Build PyG HeteroData        │
+│   Raw RDF → triples_df → Enrich → Build PyG HeteroData     │
 │                                                            │
 │ Mode 2: Enrichment Only                                    │
-│   Raw RDF → Enrich (PySpark) → Save Parquet to S3          │
+│   Raw RDF → triples_df → Enrich → Save Parquet to S3       │
 │                                                            │
 │ Mode 3: PyG Only                                           │
-│   Enriched Parquet (S3) → Build PyG HeteroData             │
+│   Enriched Parquet (S3) → triples_df → Build PyG HeteroData│
 └────────────────────────────────────────────────────────────┘
                             ↓
 ┌────────────────────────────────────────────────────────────┐
@@ -90,7 +97,7 @@ Schema: (subject: string, predicate: string, object: string)
 └─────────────────────────────────┴──────────────────────┴────────────────────┘
 ```
 
-Enrichment steps read from this DataFrame, produce new triples DataFrames, and union them back. This keeps the entire pipeline distributed — Spark partitions the data across executors and optimizes joins via the Catalyst query planner.
+Enrichment steps read from this DataFrame, produce new triples DataFrames, and union them back. PyG construction reads the final enriched DataFrame, assigns integer node IDs, resolves edges, and extracts features — all on Spark executors. Only compact tensors cross to the driver for final `HeteroData` assembly.
 
 ### Why PySpark Instead of rdflib/SPARQL
 
@@ -103,7 +110,98 @@ Enrichment steps read from this DataFrame, produce new triples DataFrames, and u
 | Glue DPU utilization | Pays for cluster, uses 1 core | Uses all allocated DPUs |
 | Join pattern | Python dict lookups or nested SPARQL | Distributed hash/sort-merge joins |
 
-rdflib Namespace objects are still used as **URI string constants** for readability — they just don't hold or query graph data.
+rdflib Namespace objects are used as **URI string constants** in the enrichment modules for readability — they produce plain strings and don't hold or query graph data. The PyG builder modules use plain string constants directly.
+
+## PyG Construction Pipeline
+
+The PyG builder converts the enriched triples DataFrame into a PyTorch Geometric `HeteroData` object through four steps, with all heavy computation on Spark executors:
+
+```
+triples_df (enriched, on executors)
+    │
+    ├── Step 1: NodeMapper (on executors)
+    │   ├── Discover node types from rdf:type triples
+    │   ├── Assign canonical type per entity (most specific wins)
+    │   ├── Assign per-type 0-indexed integer IDs via Window functions
+    │   └── Output: node_id_df (uri, node_id, node_type) — cached on executors
+    │              node_counts Dict[str, int] — small collect to driver
+    │
+    ├── Step 2: EdgeMapper (on executors → driver tensors)
+    │   ├── Double-join triples with node_id_df (subject → src_id, object → dst_id)
+    │   ├── Inner join on object naturally filters out literal properties
+    │   ├── Derive relation names from predicate URIs
+    │   ├── Collect per-edge-type [2, num_edges] int64 arrays via toPandas()
+    │   └── Output: Dict[(src_type, relation, dst_type) → LongTensor]
+    │
+    ├── Step 3: FeatureExtractor (on executors → driver tensors)
+    │   ├── Extract numeric properties (auto-discovered or config whitelist)
+    │   ├── Extract categorical properties (config whitelist, integer-encoded)
+    │   ├── Pivot long → wide per node type on executors
+    │   ├── Optional z-score normalization on executors
+    │   ├── Collect per-type [num_nodes, num_features] float32 arrays
+    │   └── Output: Dict[node_type → FloatTensor]
+    │
+    └── Step 4: Assemble HeteroData (on driver)
+        ├── Only compact tensors on driver — no URI strings
+        ├── Attach feature tensors and node counts per type
+        ├── Attach edge_index tensors per (src, rel, dst) type
+        └── Output: HeteroData ready for torch.save() and GNN training
+```
+
+### Scaling Characteristics
+
+The PyG builder is designed to handle the full enriched graph without collecting URI strings to the driver:
+
+| Component | Where it runs | Memory model |
+|-----------|--------------|--------------|
+| Node ID assignment | Spark executors | URI → int mapping stays on executors via Window functions |
+| Edge resolution | Spark executors | Double-join resolves URIs to ints on executors |
+| Feature extraction | Spark executors | Pivot and normalization on executors |
+| Edge index collection | Driver | Per-edge-type [2, N] int64 — ~16 bytes/edge |
+| Feature collection | Driver | Per-node-type [N, F] float32 — ~4 bytes/cell |
+| HeteroData assembly | Driver | Only compact tensors, no strings |
+
+**Per-type feature isolation**: HeteroData stores separate feature tensors per node type. A CPI Index node carries ~5-10 CPI-specific features (`indexValue`, `relativeImportance`, etc.), not all 200+ properties from every ontology. This keeps per-type tensors compact:
+
+| Node type example | Typical nodes | Typical features | Memory |
+|-------------------|--------------|-----------------|--------|
+| cpi_Index | ~50K | 5-10 | ~2 MB |
+| market_PriceObservation | ~500K-1M | 10-15 | ~40-60 MB |
+| market_options_OptionQuote | ~1-2M | 12-18 | ~80-140 MB |
+| jolts_JobOpeningsLevel | ~10K | 3-5 | ~200 KB |
+| sec_filings_Form4 | ~50K | 5-8 | ~2 MB |
+
+**Total driver memory** for PyG object: typically 2-8 GB for 30-50M triples. Fits comfortably on Glue G.2X (32 GB) or G.4X (64 GB) workers.
+
+### PyG Configuration
+
+The PyG builder accepts an optional configuration dict:
+
+```json
+{
+    "node_types": ["cpi_Index", "ppi_MonthlyChange", "market_PriceObservation"],
+    "edge_types": ["bls_enrichment_precedes", "bls_enrichment_correlatesWith"],
+    "feature_config": {
+        "numeric_properties": ["indexValue", "changeValue", "observedPrice"],
+        "categorical_properties": ["hasCategory", "hasIndustry"],
+        "normalize": true
+    },
+    "include_temporal_nodes": true,
+    "include_sector_nodes": true
+}
+```
+
+| Config key | Default | Description |
+|-----------|---------|-------------|
+| `node_types` | All rdf:type classes | Whitelist of PyG node type names to include |
+| `edge_types` | All entity-to-entity predicates | Whitelist of relation names to include |
+| `feature_config.numeric_properties` | Auto-discovered (all parseable floats) | Whitelist of numeric property local names |
+| `feature_config.categorical_properties` | None (opt-in only) | Whitelist of categorical property local names |
+| `feature_config.normalize` | `false` | Z-score normalize numeric features |
+| `include_temporal_nodes` | `true` | Include Month/Year/Quarter node types |
+| `include_sector_nodes` | `true` | Include EconomicSector node types |
+
+When config is empty, sensible defaults are inferred from the data.
 
 ## Knowledge Graph Enrichment
 
@@ -135,7 +233,10 @@ triples_df (raw)
     │   └── Sector classification (belongsToSector)
     │
     ├── NOAA Intra-Source Enricher
-    │   └── Alert region/temporal linking
+    │   ├── Alert temporal sequences (precedes by sent time)
+    │   ├── Geographic linking (affectsSameRegion via SAME codes)
+    │   ├── Event type linking (sameEventType)
+    │   └── Severity escalation detection (escalatesTo)
     │
     ├── Temporal Unifier (cross-source)
     │   └── Unified months/years/quarters (owl:sameAs)
@@ -171,17 +272,18 @@ Discovers and creates relationships within each data source family:
 - Links filings in chronological sequences per company/owner
 - Classifies entities by sector and violation type
 
-**Within Market Data** (1 mapper)
-- Unifies ticker entities across data sources (Yahoo, MarketWatch, Benzinga)
+**Within Market Data** (1 mapper, intraday snapshots every 10-30 minutes)
 - Links price observations in chronological sequences per ticker
 - Links option contracts to underlying stock price observations
 - Identifies option strategies (straddles, vertical spreads, strangles)
 - Classifies tickers by sector
+- Links multi-source observations of same ticker/contract
 
 **Within NOAA Weather Data** (1 mapper)
-- Links related weather alerts by region
-- Connects temporal sequences of weather events
-- Associates alerts with affected geographic areas
+- Links alerts in chronological sequences per geographic area
+- Connects alerts affecting same regions via SAME geocodes
+- Links alerts of the same event type
+- Detects severity escalations within same area over time
 
 ### Enrichment as PySpark Operations
 
@@ -364,6 +466,7 @@ This enriched structure enables GNNs to learn:
 - **Lead-Lag Relationships**: Which indicators predict changes in others
 - **Geographic Effects**: How regional factors affect economic and market outcomes
 - **Company-Specific Patterns**: How company fundamentals relate to market performance
+- **Intraday Dynamics**: How market prices and options evolve within trading sessions
 
 ## Data Sources
 
@@ -387,13 +490,17 @@ The pipeline ingests RDF data from multiple heterogeneous sources:
 - Litigation releases
 - Trading suspensions
 
-**Market Data** (1 mapper)
+**Market Data** (1 mapper, intraday snapshots every 10-30 minutes)
 - Stock prices with options chains (select tickers)
+- ~39 snapshots/day at 10-min intervals during trading hours
+- ~1-1.5M triples/day, ~30-35M triples/month
 
 **NOAA Weather Data** (1 mapper)
 - US weather alerts (CAP format)
 
 > **Total: 100+ mappers and ontologies** covering economic, financial, employment, and environmental data
+
+> **Typical monthly volume: ~30-50M triples** (dominated by intraday market snapshots)
 
 > **Note:** Raw RDF data is generated by separate Lambda scraper functions (not part of this repository). This pipeline assumes RDF data is already available in S3 in N-Triples format conforming to 100+ domain-specific ontologies.
 
@@ -437,13 +544,12 @@ pyg-knowledge-graph-builder/
 │   │           └── patterns.py             # NOAA alert patterns
 │   ├── pyg_builder/                        # PyG construction modules
 │   │   ├── __init__.py
-│   │   ├── constructor.py                  # Main PyG builder
-│   │   ├── node_mapper.py                  # Triples → PyG nodes
-│   │   ├── edge_mapper.py                  # Triples → PyG edges
-│   │   └── feature_extractor.py            # Triples → PyG features
+│   │   ├── constructor.py                  # Orchestrates HeteroData construction
+│   │   ├── node_mapper.py                  # Assigns per-type integer node IDs on executors
+│   │   ├── edge_mapper.py                  # Resolves edges to integer index tensors on executors
+│   │   └── feature_extractor.py            # Extracts numeric/categorical features per node type
 │   └── utils/
 │       ├── __init__.py
-│       ├── s3_utils.py                     # S3 I/O utilities
 │       └── rdf_utils.py                    # Namespace constants & URI helpers
 ├── notebooks/
 │   ├── utils/
@@ -462,7 +568,7 @@ pyg-knowledge-graph-builder/
 └── setup.py
 ```
 
-### Module Roles After PySpark Refactor
+### Module Roles
 
 | Module | Role | Uses PySpark? |
 |--------|------|--------------|
@@ -473,14 +579,18 @@ pyg-knowledge-graph-builder/
 | `bls_linker.py`, `sec_linker.py`, `market_linker.py`, `noaa_linker.py` | Produce intra-source enrichment triples | Yes |
 | `cross_source_linker.py` | Produces cross-source enrichment triples | Yes |
 | `ontology_mapper.py` | Produces equivalence mapping triples | Yes |
-| `constructor.py`, `node_mapper.py`, `edge_mapper.py`, `feature_extractor.py` | Reads enriched triples DataFrame, builds PyG `HeteroData` | Yes |
+| `constructor.py` | Orchestrates PyG HeteroData construction from triples DataFrame | Yes (orchestration) |
+| `node_mapper.py` | Discovers node types, assigns per-type integer IDs via Spark Window functions | Yes (heavy) |
+| `edge_mapper.py` | Double-joins triples with node IDs on executors, collects edge index tensors | Yes (heavy) |
+| `feature_extractor.py` | Extracts and pivots numeric/categorical features per node type on executors | Yes (heavy) |
 
 ### Scalability
 
 The pipeline is designed to handle:
 - **100+ ontologies** with different schemas and vocabularies
-- **Millions of triples** per time period
+- **30-50M triples per month** with intraday market snapshots
 - **Heterogeneous data types** (prices, rates, levels, changes, categorical)
-- **Multiple temporal granularities** (daily, weekly, monthly, quarterly)
+- **Multiple temporal granularities** (intraday, daily, weekly, monthly, quarterly)
 - **Dynamic schema evolution** as new data sources are added
-- **Horizontal scaling** by adding Glue DPUs — enrichment work distributes automatically
+- **Horizontal scaling** by adding Glue DPUs — enrichment and PyG construction work distributes automatically
+- **Bounded driver memory** — PyG construction collects only compact integer/float tensors, not URI strings. Per-type feature isolation keeps tensors compact even with 100+ ontologies.
