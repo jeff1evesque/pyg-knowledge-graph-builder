@@ -26,9 +26,19 @@ class S3Stack(Stack):
 
         data_bucket/
             raw/
-                bls/ sec/ market/ noaa/
+                bls/
+                    YYYY/MM/               # per-source, date-partitioned
+                sec/
+                    YYYY/MM/
+                market/
+                    YYYY/MM/
+                noaa/
+                    YYYY/MM/
             enriched/
-                <run_id>/
+                year=YYYY/
+                    month=MM/
+                        <run_id>/          # merged across all sources
+                            knowledge_graph.ttl
 
         output_bucket/
             pyg/
@@ -37,8 +47,18 @@ class S3Stack(Stack):
                         <run_id>/
                             hetero_data.pt
             manifests/
-                YYYY-MM/
-                    <mode>_<timestamp>.json
+                year=YYYY/
+                    month=MM/
+                        <mode>_<timestamp>.json
+
+    Partitioning rationale:
+        - raw/ uses source/YYYY/MM/ because data arrives per-source
+          from separate Lambda scrapers
+        - enriched/ uses year=YYYY/month=MM/<run_id>/ because enrichment
+          merges all sources into a single graph — the source dimension
+          collapses, but time period and run identity are preserved
+        - pyg/ mirrors enriched/ partitioning for lineage traceability
+        - manifests/ mirrors the same date partitions for discoverability
     """
 
     def __init__(
@@ -90,7 +110,14 @@ class S3Stack(Stack):
         )
 
     def _create_data_bucket(self) -> s3.Bucket:
-        """Bucket for raw RDF data and enriched Parquet artifacts."""
+        """Bucket for raw RDF data and enriched artifacts.
+
+        Raw data arrives per-source with date partitions:
+            raw/bls/2024/12/, raw/sec/2024/12/, etc.
+
+        Enriched data merges all sources with date partitions:
+            enriched/year=2024/month=12/<run_id>/
+        """
         return s3.Bucket(
             self,
             "DataBucket",
@@ -121,8 +148,9 @@ class S3Stack(Stack):
     def _create_output_bucket(self) -> s3.Bucket:
         """Bucket for PyG HeteroData .pt output files and manifests.
 
-        Output structure uses date partitions:
+        Both use date partitions matching enriched data:
             pyg/year=YYYY/month=MM/<run_id>/hetero_data.pt
+            manifests/year=YYYY/month=MM/<mode>_<timestamp>.json
         """
         return s3.Bucket(
             self,
