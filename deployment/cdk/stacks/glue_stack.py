@@ -13,26 +13,34 @@ class GlueStack(Stack):
     """AWS Glue resources for the PyG Knowledge Graph Builder.
 
     Creates:
-        - Glue Job for build_graph.py (supports full, enrichment-only, pyg-only modes)
+        - Glue Job for build_graph.py with sensible defaults
         - SSM Parameters for blue/green deployment version tracking
-        - CloudWatch log group configuration
+        - SSM Parameters for notebook discovery of job configuration
 
     Blue/Green Deployment Support:
         - Script and wheel paths are versioned in S3:
             s3://<artifacts>/glue-scripts/<version>/build_graph.py
             s3://<artifacts>/glue-wheels/<version>/*.whl
-        - SSM parameters track active version for external CodeDeploy integration
-        - Job name includes no version suffix — CodeDeploy updates the job in-place
-          by updating the script location and extra-py-files to the new version
-    """
+        - SSM parameters track active version for external CodeDeploy
+        - Job name is stable — CodeDeploy updates script location in-place
 
-    # Glue job parameter keys used by build_graph.py
-    JOB_PARAM_MODE = "--mode"
-    JOB_PARAM_INPUT_PATH = "--input_path"
-    JOB_PARAM_ENRICHED_PATH = "--enriched_path"
-    JOB_PARAM_OUTPUT_PATH = "--output_path"
-    JOB_PARAM_PYG_CONFIG = "--pyg_config"
-    JOB_PARAM_TIME_PERIOD = "--time_period"
+    Notebook Override Support:
+        SageMaker Studio notebooks invoke via start_job_run and can
+        override any combination of parameters:
+
+        Infrastructure overrides (top-level start_job_run kwargs):
+            WorkerType      — e.g., 'G.2X', 'G.4X'
+            NumberOfWorkers  — e.g., 5, 10, 20
+            Timeout          — minutes
+
+        Pipeline parameter overrides (via Arguments dict, merged with
+        job defaults — only keys you specify are overridden):
+            --mode, --source_bucket, --source_prefix, --output_bucket,
+            --enriched_rdf_key, --pyg_output_key, --time_period,
+            --rdf_format, --enable_ontology_mapping, --pyg_config
+
+        max_concurrent_runs > 1 allows parallel experiments.
+    """
 
     def __init__(
         self,
@@ -56,18 +64,38 @@ class GlueStack(Stack):
         self._glue_role = glue_role
 
         # Read Glue configuration from CDK context
-        self._glue_version = self.node.try_get_context("glue_version") or "4.0"
-        self._python_version = self.node.try_get_context("python_version") or "3"
-        self._worker_type = self.node.try_get_context("worker_type") or "G.2X"
-        self._number_of_workers = self.node.try_get_context("number_of_workers") or 10
-        self._timeout_minutes = self.node.try_get_context("timeout_minutes") or 120
-        self._max_retries = self.node.try_get_context("max_retries") or 0
-        self._max_concurrent_runs = (
-            self.node.try_get_context("max_concurrent_runs") or 1
+        self._glue_version = (
+            self.node.try_get_context("glue_version") or "4.0"
         )
-        self._enable_spark_ui = self.node.try_get_context("enable_spark_ui") or True
+        self._python_version = (
+            self.node.try_get_context("python_version") or "3"
+        )
+        self._default_worker_type = (
+            self.node.try_get_context("default_worker_type") or "G.2X"
+        )
+        self._default_number_of_workers = int(
+            self.node.try_get_context("default_number_of_workers") or 10
+        )
+        self._timeout_minutes = int(
+            self.node.try_get_context("timeout_minutes") or 120
+        )
+        self._max_retries = int(
+            self.node.try_get_context("max_retries") or 0
+        )
+        self._max_concurrent_runs = int(
+            self.node.try_get_context("max_concurrent_runs") or 3
+        )
+        self._enable_spark_ui = (
+            self.node.try_get_context("enable_spark_ui") is not False
+        )
         self._spark_ui_log_prefix = (
-            self.node.try_get_context("spark_ui_log_prefix") or "spark-ui-logs/"
+            self.node.try_get_context("spark_ui_log_prefix")
+            or "spark-ui-logs/"
+        )
+
+        # Stable job name (no version suffix for blue/green)
+        self._job_name = (
+            f"{self._project_name}-{self._environment}-build-graph"
         )
 
         # SSM parameters for blue/green version tracking
@@ -76,16 +104,19 @@ class GlueStack(Stack):
         # Main Glue job
         self._build_graph_job = self._create_build_graph_job()
 
+        # SSM parameters for notebook discovery
+        self._create_discovery_parameters()
+
         self._add_outputs()
 
+    # ------------------------------------------------------------------
+    # SSM parameters
+    # ------------------------------------------------------------------
     def _create_version_parameter(self) -> ssm.StringParameter:
-        """SSM parameter to track the active deployment version.
+        """SSM parameter tracking the active deployment version.
 
-        CodeDeploy (in a separate repo) reads this parameter to determine
-        the current active version and updates it during blue/green cutover.
-
-        Value format: semantic version or git SHA, e.g. "1.0.0" or "abc1234"
-        This version maps to the S3 prefix:
+        CodeDeploy (separate repo) reads and updates this during
+        blue/green cutover. Maps to S3 prefix:
             s3://<artifacts>/glue-scripts/<version>/
             s3://<artifacts>/glue-wheels/<version>/
         """
@@ -98,51 +129,86 @@ class GlueStack(Stack):
             string_value="initial",
             description=(
                 f"Active deployment version for {self._project_name} "
-                f"Glue jobs in {self._environment}. Updated by CodeDeploy "
-                f"during blue/green deployments."
+                f"Glue jobs. Updated by CodeDeploy during blue/green "
+                f"deployments."
             ),
             tier=ssm.ParameterTier.STANDARD,
         )
 
-    def _get_script_location(self) -> str:
-        """S3 path to the main Glue script.
+    def _create_discovery_parameters(self) -> None:
+        """SSM parameters for notebook discovery of job configuration.
 
-        Uses 'initial' as the default version. During deployment, the CI/CD
-        pipeline uploads scripts to s3://<bucket>/glue-scripts/<version>/
-        and CodeDeploy updates the job to point to the new version.
+        Notebooks read these to construct start_job_run calls without
+        hardcoding bucket names, job names, or S3 paths.
         """
+        params = {
+            "JobNameParam": (
+                "glue-job-name/build-graph",
+                self._job_name,
+                "Glue job name for build-graph.",
+            ),
+            "DataBucketParam": (
+                "buckets/data",
+                self._data_bucket.bucket_name,
+                "S3 bucket for raw and enriched data.",
+            ),
+            "OutputBucketParam": (
+                "buckets/output",
+                self._output_bucket.bucket_name,
+                "S3 bucket for PyG outputs and manifests.",
+            ),
+            "ArtifactsBucketParam": (
+                "buckets/artifacts",
+                self._artifacts_bucket.bucket_name,
+                "S3 bucket for Glue scripts and wheels.",
+            ),
+            "DefaultWorkerTypeParam": (
+                "defaults/worker-type",
+                self._default_worker_type,
+                "Default Glue worker type.",
+            ),
+            "DefaultNumberOfWorkersParam": (
+                "defaults/number-of-workers",
+                str(self._default_number_of_workers),
+                "Default number of Glue workers.",
+            ),
+        }
+
+        for logical_id, (suffix, value, description) in params.items():
+            ssm.StringParameter(
+                self,
+                logical_id,
+                parameter_name=(
+                    f"/{self._project_name}/{self._environment}/{suffix}"
+                ),
+                string_value=value,
+                description=description,
+            )
+
+    # ------------------------------------------------------------------
+    # S3 paths
+    # ------------------------------------------------------------------
+    def _get_script_location(self) -> str:
         return (
             f"s3://{self._artifacts_bucket.bucket_name}"
             f"/glue-scripts/initial/build_graph.py"
         )
 
     def _get_extra_py_files(self) -> str:
-        """S3 path to the zipped glue_jobs package.
-
-        The package is zipped as glue_jobs.zip containing:
-            glue_jobs/
-                __init__.py
-                enrichment/
-                pyg_builder/
-                utils/
-        """
         return (
             f"s3://{self._artifacts_bucket.bucket_name}"
             f"/glue-scripts/initial/glue_jobs.zip"
         )
 
-    def _get_extra_jars_or_wheels(self) -> str:
-        """S3 paths to pre-built wheel files for dependencies.
+    def _get_additional_python_modules(self) -> str:
+        """S3 paths to pre-built wheel files.
 
         Wheels are uploaded per version:
-            s3://<bucket>/glue-wheels/<version>/rdflib-x.y.z-py3-none-any.whl
-            s3://<bucket>/glue-wheels/<version>/torch-x.y.z+cpu-....whl
-            s3://<bucket>/glue-wheels/<version>/torch_geometric-x.y.z-....whl
-
-        Returns comma-separated S3 paths.
+            s3://<bucket>/glue-wheels/<version>/*.whl
         """
         base = (
-            f"s3://{self._artifacts_bucket.bucket_name}/glue-wheels/initial"
+            f"s3://{self._artifacts_bucket.bucket_name}"
+            f"/glue-wheels/initial"
         )
         return ",".join(
             [
@@ -152,58 +218,66 @@ class GlueStack(Stack):
             ]
         )
 
+    # ------------------------------------------------------------------
+    # Default arguments
+    # ------------------------------------------------------------------
     def _build_default_arguments(self) -> dict:
-        """Construct the default arguments dict for the Glue job.
+        """Construct default arguments for the Glue job.
 
-        These are defaults that can be overridden at job run time.
-        The --mode parameter controls pipeline behavior:
-            'full'       — enrichment + PyG construction
-            'enrichment' — enrichment only, save Parquet
-            'pyg'        — PyG construction from existing enriched Parquet
+        These defaults are used when the job is started without overrides.
+        Notebooks override any subset via start_job_run(Arguments={...}).
+        Only keys present in the Arguments dict are overridden; all other
+        defaults are preserved.
+
+        Note: WorkerType and NumberOfWorkers are top-level job properties,
+        not default arguments. Notebooks override them via:
+            start_job_run(WorkerType='G.4X', NumberOfWorkers=20, ...)
         """
-        context_defaults = self.node.try_get_context("default_arguments") or {}
-
         default_args = {
-            # Pipeline mode
-            self.JOB_PARAM_MODE: "full",
-            # S3 paths (defaults, overridable per run)
-            self.JOB_PARAM_INPUT_PATH: (
-                f"s3://{self._data_bucket.bucket_name}/raw/"
-            ),
-            self.JOB_PARAM_ENRICHED_PATH: (
-                f"s3://{self._data_bucket.bucket_name}/enriched/"
-            ),
-            self.JOB_PARAM_OUTPUT_PATH: (
-                f"s3://{self._output_bucket.bucket_name}/pyg/"
-            ),
-            # Extra Python files (zipped package)
+            # ---- Pipeline parameters (from build_graph.py) ----
+            "--mode": "full",
+            "--source_bucket": self._data_bucket.bucket_name,
+            "--source_prefix": "raw/",
+            "--output_bucket": self._output_bucket.bucket_name,
+            "--enriched_rdf_key": "",
+            "--pyg_output_key": "",
+            "--enable_ontology_mapping": "false",
+            "--time_period": "",
+            "--rdf_format": "turtle",
+            "--pyg_config": "",
+
+            # ---- Glue platform parameters ----
             "--extra-py-files": self._get_extra_py_files(),
-            # Pre-built wheels for rdflib, torch, torch-geometric
-            "--additional-python-modules": self._get_extra_jars_or_wheels(),
-            # Glue continuous logging
+            "--additional-python-modules": (
+                self._get_additional_python_modules()
+            ),
+
+            # Continuous logging
             "--enable-continuous-cloudwatch-log": "true",
             "--continuous-log-logGroup": (
                 f"/aws-glue/{self._project_name}/{self._environment}"
             ),
             "--enable-continuous-log-filter": "true",
-            # Glue metrics
+
+            # Metrics
             "--enable-metrics": "true",
+
             # Job bookmarks disabled (stateless pipeline)
             "--job-bookmark-option": "job-bookmark-disable",
+
             # Spark configuration
             "--conf": (
-                "spark.serializer=org.apache.spark.serializer.KryoSerializer"
+                "spark.serializer="
+                "org.apache.spark.serializer.KryoSerializer"
                 " --conf spark.sql.adaptive.enabled=true"
                 " --conf spark.sql.adaptive.coalescePartitions.enabled=true"
             ),
-            # Deployment version tracking (readable by the job if needed)
+
+            # Deployment version tracking
             "--deployment_version": "initial",
         }
 
-        # Merge context overrides (context values take precedence)
-        default_args.update(context_defaults)
-
-        # Spark UI configuration
+        # Spark UI
         if self._enable_spark_ui:
             default_args["--enable-spark-ui"] = "true"
             default_args["--spark-event-logs-path"] = (
@@ -213,24 +287,40 @@ class GlueStack(Stack):
 
         return default_args
 
+    # ------------------------------------------------------------------
+    # Glue job
+    # ------------------------------------------------------------------
     def _create_build_graph_job(self) -> glue.CfnJob:
-        """Create the main Glue job for the knowledge graph pipeline.
+        """Create the main Glue job.
 
-        The job name is stable (no version suffix) to support in-place
-        updates during blue/green deployment. CodeDeploy updates the
-        script location and extra-py-files to point to the new version.
+        The job defines default WorkerType and NumberOfWorkers, but
+        notebooks can override both at run time:
+
+            glue_client.start_job_run(
+                JobName='pyg-...-build-graph',
+                WorkerType='G.4X',
+                NumberOfWorkers=20,
+                Arguments={
+                    '--mode': 'pyg_only',
+                    '--time_period': '2024-12',
+                    '--pyg_output_key': 'pyg/year=2024/month=12/abc123/hetero_data.pt',
+                    '--pyg_config': '{"node_types": ["cpi_Index"]}',
+                },
+            )
+
+        max_concurrent_runs > 1 allows parallel experiments from
+        notebooks (e.g., different PyG configs on same enriched data).
         """
-        job_name = f"{self._project_name}-{self._environment}-build-graph"
-
-        job = glue.CfnJob(
+        return glue.CfnJob(
             self,
             "BuildGraphJob",
-            name=job_name,
+            name=self._job_name,
             description=(
                 "Builds enriched RDF knowledge graphs and constructs "
                 "PyTorch Geometric HeteroData objects from multi-source "
                 "economic, financial, market, and environmental data. "
-                "Supports full, enrichment-only, and PyG-only modes."
+                "Supports full, enrichment_only, and pyg_only modes. "
+                "All parameters overridable at run time from notebooks."
             ),
             role=self._glue_role.role_arn,
             command=glue.CfnJob.JobCommandProperty(
@@ -239,8 +329,8 @@ class GlueStack(Stack):
                 script_location=self._get_script_location(),
             ),
             glue_version=self._glue_version,
-            worker_type=self._worker_type,
-            number_of_workers=self._number_of_workers,
+            worker_type=self._default_worker_type,
+            number_of_workers=self._default_number_of_workers,
             timeout=self._timeout_minutes,
             max_retries=self._max_retries,
             execution_property=glue.CfnJob.ExecutionPropertyProperty(
@@ -254,30 +344,17 @@ class GlueStack(Stack):
             },
         )
 
-        # Store job name in SSM for CodeDeploy integration
-        ssm.StringParameter(
-            self,
-            "BuildGraphJobNameParam",
-            parameter_name=(
-                f"/{self._project_name}/{self._environment}"
-                f"/glue-job-name/build-graph"
-            ),
-            string_value=job_name,
-            description=(
-                f"Glue job name for build-graph in {self._environment}. "
-                f"Used by CodeDeploy for blue/green updates."
-            ),
-        )
-
-        return job
-
+    # ------------------------------------------------------------------
+    # Outputs
+    # ------------------------------------------------------------------
     def _add_outputs(self) -> None:
         cdk.CfnOutput(
             self,
             "BuildGraphJobName",
-            value=self._build_graph_job.name,
+            value=self._job_name,
             export_name=(
-                f"{self._project_name}-{self._environment}-build-graph-job-name"
+                f"{self._project_name}-{self._environment}"
+                f"-build-graph-job-name"
             ),
         )
 
@@ -286,7 +363,8 @@ class GlueStack(Stack):
             "ActiveVersionParamName",
             value=self._version_param.parameter_name,
             export_name=(
-                f"{self._project_name}-{self._environment}-active-version-param"
+                f"{self._project_name}-{self._environment}"
+                f"-active-version-param"
             ),
         )
 
@@ -301,7 +379,8 @@ class GlueStack(Stack):
                 "Append <version>/build_graph.py for specific version."
             ),
             export_name=(
-                f"{self._project_name}-{self._environment}-script-base-path"
+                f"{self._project_name}-{self._environment}"
+                f"-script-base-path"
             ),
         )
 
@@ -316,13 +395,38 @@ class GlueStack(Stack):
                 "Append <version>/*.whl for specific version."
             ),
             export_name=(
-                f"{self._project_name}-{self._environment}-wheels-base-path"
+                f"{self._project_name}-{self._environment}"
+                f"-wheels-base-path"
+            ),
+        )
+
+        cdk.CfnOutput(
+            self,
+            "DefaultWorkerType",
+            value=self._default_worker_type,
+            export_name=(
+                f"{self._project_name}-{self._environment}"
+                f"-default-worker-type"
+            ),
+        )
+
+        cdk.CfnOutput(
+            self,
+            "DefaultNumberOfWorkers",
+            value=str(self._default_number_of_workers),
+            export_name=(
+                f"{self._project_name}-{self._environment}"
+                f"-default-number-of-workers"
             ),
         )
 
     @property
     def build_graph_job(self) -> glue.CfnJob:
         return self._build_graph_job
+
+    @property
+    def build_graph_job_name(self) -> str:
+        return self._job_name
 
     @property
     def version_parameter(self) -> ssm.StringParameter:

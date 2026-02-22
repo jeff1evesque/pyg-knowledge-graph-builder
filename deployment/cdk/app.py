@@ -22,7 +22,6 @@ def main():
 
     stack_prefix = f"{project_name}-{environment}"
 
-    # S3 buckets for artifacts, data, and outputs
     s3_stack = S3Stack(
         app,
         f"{stack_prefix}-s3",
@@ -31,7 +30,6 @@ def main():
         env=env,
     )
 
-    # IAM roles and policies for Glue
     iam_stack = IAMStack(
         app,
         f"{stack_prefix}-iam",
@@ -43,7 +41,6 @@ def main():
         env=env,
     )
 
-    # Glue jobs, connections, and catalog
     glue_stack = GlueStack(
         app,
         f"{stack_prefix}-glue",
@@ -59,7 +56,6 @@ def main():
     glue_stack.add_dependency(s3_stack)
     glue_stack.add_dependency(iam_stack)
 
-    # Apply tags to all stacks
     for key, value in tags.items():
         cdk.Tags.of(app).add(key, value)
 

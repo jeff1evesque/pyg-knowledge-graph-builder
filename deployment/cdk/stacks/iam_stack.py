@@ -12,9 +12,16 @@ class IAMStack(Stack):
 
     Creates a Glue service role with:
         - Glue service permissions
-        - S3 read/write to artifacts, data, and output buckets
+        - S3 read/write scoped to project buckets
         - CloudWatch Logs for continuous logging
         - CloudWatch Metrics for job metrics
+
+    Note: The SageMaker Studio execution role is managed outside this
+    stack (typically by the Studio domain/profile setup). That role
+    needs:
+        - glue:StartJobRun, glue:GetJobRun, glue:GetJob on project jobs
+        - s3:GetObject on output bucket (to load .pt files)
+        - ssm:GetParameter on project SSM parameters
     """
 
     def __init__(
@@ -37,14 +44,20 @@ class IAMStack(Stack):
         self._output_bucket = output_bucket
 
         self._glue_role = self._create_glue_role()
+        self._studio_policy = self._create_studio_managed_policy()
 
         self._add_outputs()
 
+    # ------------------------------------------------------------------
+    # Glue role
+    # ------------------------------------------------------------------
     def _create_glue_role(self) -> iam.Role:
         role = iam.Role(
             self,
             "GlueJobRole",
-            role_name=f"{self._project_name}-{self._environment}-glue-role",
+            role_name=(
+                f"{self._project_name}-{self._environment}-glue-role"
+            ),
             assumed_by=iam.ServicePrincipal("glue.amazonaws.com"),
             description=(
                 f"Execution role for {self._project_name} Glue jobs "
@@ -52,36 +65,27 @@ class IAMStack(Stack):
             ),
         )
 
-        # AWS managed policy for basic Glue service permissions
         role.add_managed_policy(
             iam.ManagedPolicy.from_aws_managed_policy_name(
                 "service-role/AWSGlueServiceRole"
             )
         )
 
-        # S3 permissions scoped to project buckets
-        self._add_s3_permissions(role)
-
-        # CloudWatch permissions for continuous logging and metrics
+        self._add_glue_s3_permissions(role)
         self._add_cloudwatch_permissions(role)
 
         return role
 
-    def _add_s3_permissions(self, role: iam.Role) -> None:
-        """Grant S3 access scoped to project buckets only."""
-
-        # Artifacts bucket: read scripts and wheels, write Spark UI logs
+    def _add_glue_s3_permissions(self, role: iam.Role) -> None:
+        """Grant S3 access scoped to project buckets."""
         self._artifacts_bucket.grant_read(role)
         self._artifacts_bucket.grant_write(role, "spark-ui-logs/*")
 
-        # Data bucket: read raw RDF, read/write enriched Parquet
         self._data_bucket.grant_read(role, "raw/*")
         self._data_bucket.grant_read_write(role, "enriched/*")
 
-        # Output bucket: write PyG .pt files
-        self._output_bucket.grant_write(role, "pyg/*")
-        # Also allow read for PyG-only mode (reads existing enriched data)
-        self._output_bucket.grant_read(role, "pyg/*")
+        self._output_bucket.grant_read_write(role, "pyg/*")
+        self._output_bucket.grant_read_write(role, "manifests/*")
 
     def _add_cloudwatch_permissions(self, role: iam.Role) -> None:
         """CloudWatch permissions for Glue continuous logging and metrics."""
@@ -98,7 +102,10 @@ class IAMStack(Stack):
                     "logs:GetLogEvents",
                 ],
                 resources=[
-                    f"arn:aws:logs:{self.region}:{self.account}:log-group:/aws-glue/*",
+                    (
+                        f"arn:aws:logs:{self.region}:{self.account}"
+                        f":log-group:/aws-glue/*"
+                    ),
                 ],
             )
         )
@@ -119,20 +126,140 @@ class IAMStack(Stack):
             )
         )
 
+    # ------------------------------------------------------------------
+    # SageMaker Studio managed policy
+    # ------------------------------------------------------------------
+    def _create_studio_managed_policy(self) -> iam.ManagedPolicy:
+        """Managed policy to attach to a SageMaker Studio execution role.
+
+        This policy grants the minimum permissions a Studio notebook
+        needs to invoke and monitor this project's Glue jobs, read
+        outputs from S3, and discover configuration from SSM.
+
+        Attach this policy to your Studio domain/profile execution role:
+            - Via the AWS console, or
+            - Via a separate CDK stack that manages Studio, or
+            - Via CLI:
+              aws iam attach-role-policy \\
+                --role-name <studio-execution-role> \\
+                --policy-arn <this policy ARN>
+        """
+        policy = iam.ManagedPolicy(
+            self,
+            "StudioGlueInvocationPolicy",
+            managed_policy_name=(
+                f"{self._project_name}-{self._environment}"
+                f"-studio-glue-policy"
+            ),
+            description=(
+                f"Allows SageMaker Studio to invoke and monitor "
+                f"{self._project_name} Glue jobs in {self._environment}. "
+                f"Attach to your Studio execution role."
+            ),
+            statements=[
+                # Glue job invocation — scoped to project jobs
+                iam.PolicyStatement(
+                    sid="GlueJobInvocation",
+                    effect=iam.Effect.ALLOW,
+                    actions=[
+                        "glue:StartJobRun",
+                        "glue:GetJobRun",
+                        "glue:GetJobRuns",
+                        "glue:BatchStopJobRun",
+                        "glue:GetJob",
+                    ],
+                    resources=[
+                        (
+                            f"arn:aws:glue:{self.region}:{self.account}"
+                            f":job/{self._project_name}"
+                            f"-{self._environment}-*"
+                        ),
+                    ],
+                ),
+                # SSM parameter read — discover job names, buckets, defaults
+                iam.PolicyStatement(
+                    sid="SSMParameterRead",
+                    effect=iam.Effect.ALLOW,
+                    actions=[
+                        "ssm:GetParameter",
+                        "ssm:GetParameters",
+                        "ssm:GetParametersByPath",
+                    ],
+                    resources=[
+                        (
+                            f"arn:aws:ssm:{self.region}:{self.account}"
+                            f":parameter/{self._project_name}/"
+                            f"{self._environment}/*"
+                        ),
+                    ],
+                ),
+                # CloudWatch logs read — tail Glue job output in notebook
+                iam.PolicyStatement(
+                    sid="CloudWatchLogsRead",
+                    effect=iam.Effect.ALLOW,
+                    actions=[
+                        "logs:GetLogEvents",
+                        "logs:DescribeLogGroups",
+                        "logs:DescribeLogStreams",
+                        "logs:FilterLogEvents",
+                    ],
+                    resources=[
+                        (
+                            f"arn:aws:logs:{self.region}:{self.account}"
+                            f":log-group:/aws-glue/*"
+                        ),
+                    ],
+                ),
+            ],
+        )
+
+        # S3 read on output bucket (load .pt files back into notebook)
+        self._output_bucket.grant_read(policy)
+
+        # S3 read on data bucket (inspect enriched artifacts)
+        self._data_bucket.grant_read(policy)
+
+        return policy
+
+    # ------------------------------------------------------------------
+    # Outputs
+    # ------------------------------------------------------------------
     def _add_outputs(self) -> None:
         cdk.CfnOutput(
             self,
             "GlueRoleArn",
             value=self._glue_role.role_arn,
-            export_name=f"{self._project_name}-{self._environment}-glue-role-arn",
+            export_name=(
+                f"{self._project_name}-{self._environment}-glue-role-arn"
+            ),
         )
         cdk.CfnOutput(
             self,
             "GlueRoleName",
             value=self._glue_role.role_name,
-            export_name=f"{self._project_name}-{self._environment}-glue-role-name",
+            export_name=(
+                f"{self._project_name}-{self._environment}-glue-role-name"
+            ),
+        )
+        cdk.CfnOutput(
+            self,
+            "StudioPolicyArn",
+            value=self._studio_policy.managed_policy_arn,
+            description=(
+                "Attach this managed policy to your SageMaker Studio "
+                "execution role to enable Glue job invocation from "
+                "notebooks."
+            ),
+            export_name=(
+                f"{self._project_name}-{self._environment}"
+                f"-studio-policy-arn"
+            ),
         )
 
     @property
     def glue_role(self) -> iam.Role:
         return self._glue_role
+
+    @property
+    def studio_policy(self) -> iam.ManagedPolicy:
+        return self._studio_policy
