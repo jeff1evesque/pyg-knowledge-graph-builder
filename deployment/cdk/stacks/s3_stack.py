@@ -16,7 +16,7 @@ class S3Stack(Stack):
             glue-scripts/
                 <version>/
                     build_graph.py
-                    glue_jobs.zip          # zipped package
+                    glue_jobs.zip
             glue-wheels/
                 <version>/
                     rdflib-x.y.z.whl
@@ -26,13 +26,19 @@ class S3Stack(Stack):
 
         data_bucket/
             raw/
-                bls/ sec/ market/ noaa/    # raw RDF N-Triples
+                bls/ sec/ market/ noaa/
             enriched/
-                <run_id>/                  # enriched Parquet
+                <run_id>/
 
         output_bucket/
             pyg/
-                <run_id>/                  # HeteroData .pt files
+                year=YYYY/
+                    month=MM/
+                        <run_id>/
+                            hetero_data.pt
+            manifests/
+                YYYY-MM/
+                    <mode>_<timestamp>.json
     """
 
     def __init__(
@@ -59,7 +65,10 @@ class S3Stack(Stack):
         return s3.Bucket(
             self,
             "ArtifactsBucket",
-            bucket_name=f"{self._project_name}-{self._environment}-artifacts-{self.account}",
+            bucket_name=(
+                f"{self._project_name}-{self._environment}"
+                f"-artifacts-{self.account}"
+            ),
             versioned=True,
             encryption=s3.BucketEncryption.S3_MANAGED,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
@@ -85,7 +94,10 @@ class S3Stack(Stack):
         return s3.Bucket(
             self,
             "DataBucket",
-            bucket_name=f"{self._project_name}-{self._environment}-data-{self.account}",
+            bucket_name=(
+                f"{self._project_name}-{self._environment}"
+                f"-data-{self.account}"
+            ),
             versioned=False,
             encryption=s3.BucketEncryption.S3_MANAGED,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
@@ -107,11 +119,18 @@ class S3Stack(Stack):
         )
 
     def _create_output_bucket(self) -> s3.Bucket:
-        """Bucket for PyG HeteroData .pt output files."""
+        """Bucket for PyG HeteroData .pt output files and manifests.
+
+        Output structure uses date partitions:
+            pyg/year=YYYY/month=MM/<run_id>/hetero_data.pt
+        """
         return s3.Bucket(
             self,
             "OutputBucket",
-            bucket_name=f"{self._project_name}-{self._environment}-output-{self.account}",
+            bucket_name=(
+                f"{self._project_name}-{self._environment}"
+                f"-output-{self.account}"
+            ),
             versioned=True,
             encryption=s3.BucketEncryption.S3_MANAGED,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
@@ -123,6 +142,17 @@ class S3Stack(Stack):
                     noncurrent_version_expiration=Duration.days(60),
                     enabled=True,
                 ),
+                s3.LifecycleRule(
+                    id="archive-old-pyg-outputs",
+                    prefix="pyg/",
+                    transitions=[
+                        s3.Transition(
+                            storage_class=s3.StorageClass.INTELLIGENT_TIERING,
+                            transition_after=Duration.days(90),
+                        ),
+                    ],
+                    enabled=True,
+                ),
             ],
         )
 
@@ -131,19 +161,25 @@ class S3Stack(Stack):
             self,
             "ArtifactsBucketName",
             value=self._artifacts_bucket.bucket_name,
-            export_name=f"{self._project_name}-{self._environment}-artifacts-bucket",
+            export_name=(
+                f"{self._project_name}-{self._environment}-artifacts-bucket"
+            ),
         )
         cdk.CfnOutput(
             self,
             "DataBucketName",
             value=self._data_bucket.bucket_name,
-            export_name=f"{self._project_name}-{self._environment}-data-bucket",
+            export_name=(
+                f"{self._project_name}-{self._environment}-data-bucket"
+            ),
         )
         cdk.CfnOutput(
             self,
             "OutputBucketName",
             value=self._output_bucket.bucket_name,
-            export_name=f"{self._project_name}-{self._environment}-output-bucket",
+            export_name=(
+                f"{self._project_name}-{self._environment}-output-bucket"
+            ),
         )
 
     @property
