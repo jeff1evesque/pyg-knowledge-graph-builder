@@ -562,6 +562,16 @@ pyg-knowledge-graph-builder/
 │       └── features.ipynb                  # Experiment with features
 ├── tests/                                  # Unit and integration tests
 ├── deployment/                             # Deployment scripts
+│   └── cdk/
+│       ├── app.py
+│       ├── cdk.json
+│       ├── requirements.txt
+│       ├── README.md
+│       └── stacks/
+│           ├── __init__.py
+│           ├── glue_stack.py
+│           ├── s3_stack.py
+│           └── iam_stack.py
 ├── .gitignore
 ├── README.md
 ├── requirements.txt
