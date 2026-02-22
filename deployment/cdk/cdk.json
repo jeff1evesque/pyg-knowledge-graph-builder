@@ -1,0 +1,29 @@
+{
+  "app": "python3 app.py",
+  "context": {
+    "project_name": "pyg-knowledge-graph-builder",
+    "environment": "dev",
+    "glue_version": "4.0",
+    "python_version": "3",
+    "worker_type": "G.2X",
+    "number_of_workers": 10,
+    "timeout_minutes": 120,
+    "max_retries": 0,
+    "max_concurrent_runs": 1,
+    "enable_continuous_logging": true,
+    "enable_metrics": true,
+    "enable_spark_ui": true,
+    "spark_ui_log_prefix": "spark-ui-logs/",
+    "default_arguments": {
+      "--TempDir": "",
+      "--enable-continuous-cloudwatch-log": "true",
+      "--enable-metrics": "true",
+      "--enable-spark-ui": "true",
+      "--conf": "spark.serializer=org.apache.spark.serializer.KryoSerializer"
+    },
+    "tags": {
+      "Project": "pyg-knowledge-graph-builder",
+      "ManagedBy": "cdk"
+    }
+  }
+}
