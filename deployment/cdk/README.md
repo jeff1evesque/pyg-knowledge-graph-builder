@@ -82,7 +82,10 @@ data-bucket/
         noaa/YYYY/MM/
     enriched/
         year=YYYY/month=MM/<run_id>/        # merged across all sources
-            knowledge_graph.ttl
+            part-00000.snappy.parquet       # partitioned Parquet files
+            part-00001.snappy.parquet
+            ...
+            _SUCCESS
 
 output-bucket/
     pyg/
@@ -93,7 +96,23 @@ output-bucket/
             <mode>_<timestamp>.json
 ```
 
-Raw data is partitioned by source because it arrives from separate Lambda scrapers. Enrichment merges all sources into a single graph, so the source dimension collapses — only time period and run ID are preserved. PyG output and manifests mirror the same date partitions for lineage traceability.
+Raw data is partitioned by source because it arrives from separate Lambda scrapers. Enrichment merges all sources into a single triples DataFrame, so the source dimension collapses — only time period and run ID are preserved. PyG output and manifests mirror the same date partitions for lineage traceability.
+
+### Why Parquet for Enriched Artifacts
+
+The enriched output is stored as partitioned Parquet rather than a single RDF file:
+
+| Concern | Single TTL/NT file | Partitioned Parquet |
+|---------|-------------------|-------------------|
+| Write | Single-threaded `graph.serialize()` on driver | Distributed write across all executors |
+| Read (pyg_only mode) | Single-threaded rdflib parse on driver | Distributed `spark.read.parquet()` |
+| Size (30-50M triples) | 5-15 GB single object | Same total, split across ~100-500 files |
+| Compression | None (Turtle) or minimal | Snappy column compression (~3-5x) |
+| Schema | Implicit in RDF syntax | Explicit (subject, predicate, object) |
+| Predicate pushdown | Not possible | Filter on predicate before reading data |
+| Glue compatibility | Requires rdflib on driver | Native Spark, no extra dependencies |
+
+The enrichment pipeline operates entirely on a PySpark `triples_df` with schema `(subject: string, predicate: string, object: string)`. Writing this DataFrame as Parquet is a single `df.write.parquet()` call distributed across executors. Reading it back for `pyg_only` mode is a single `spark.read.parquet()` — no rdflib parsing, no driver bottleneck.
 
 ## SSM Parameters
 
@@ -167,11 +186,11 @@ run_id = invoker.start_run(
 ```
 
 ```python
-# Quick PyG experiment reusing existing enriched data
+# Quick PyG experiment reusing existing enriched Parquet
 run_id = invoker.start_run(
     mode='pyg_only',
     time_period='2024-12',
-    enriched_rdf_key='enriched/year=2024/month=12/abc123/knowledge_graph.ttl',
+    enriched_rdf_key='enriched/year=2024/month=12/abc123/',
     pyg_config={
         'node_types': ['cpi_Index', 'market_PriceObservation'],
         'feature_config': {'normalize': True},
@@ -184,7 +203,7 @@ hetero_data = invoker.load_pyg_output(run_id)
 Output paths are auto-generated with date partitions and a shared run ID:
 
 ```
-enriched/year=2024/month=12/a1b2c3d4/knowledge_graph.ttl
+enriched/year=2024/month=12/a1b2c3d4/       # Parquet directory
 pyg/year=2024/month=12/a1b2c3d4/hetero_data.pt
 ```
 
@@ -221,8 +240,8 @@ S3 (versioned artifacts):
 
 Glue Job (stable name, mutable script location):
   pyg-knowledge-graph-builder-dev-build-graph
-    script_location           → s3://artifacts/glue-scripts/<version>/build_graph.py
-    --extra-py-files          → s3://artifacts/glue-scripts/<version>/glue_jobs.zip
+    script_location             → s3://artifacts/glue-scripts/<version>/build_graph.py
+    --extra-py-files            → s3://artifacts/glue-scripts/<version>/glue_jobs.zip
     --additional-python-modules → s3://artifacts/glue-wheels/<version>/*.whl
 ```
 

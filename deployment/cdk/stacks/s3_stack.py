@@ -26,19 +26,16 @@ class S3Stack(Stack):
 
         data_bucket/
             raw/
-                bls/
-                    YYYY/MM/               # per-source, date-partitioned
-                sec/
-                    YYYY/MM/
-                market/
-                    YYYY/MM/
-                noaa/
-                    YYYY/MM/
+                bls/YYYY/MM/
+                sec/YYYY/MM/
+                market/YYYY/MM/
+                noaa/YYYY/MM/
             enriched/
                 year=YYYY/
                     month=MM/
-                        <run_id>/          # merged across all sources
-                            knowledge_graph.ttl
+                        <run_id>/
+                            part-*.snappy.parquet
+                            _SUCCESS
 
         output_bucket/
             pyg/
@@ -55,8 +52,10 @@ class S3Stack(Stack):
         - raw/ uses source/YYYY/MM/ because data arrives per-source
           from separate Lambda scrapers
         - enriched/ uses year=YYYY/month=MM/<run_id>/ because enrichment
-          merges all sources into a single graph — the source dimension
-          collapses, but time period and run identity are preserved
+          merges all sources into a single triples DataFrame — the source
+          dimension collapses, but time period and run identity are
+          preserved. Stored as partitioned Parquet for distributed
+          read/write and Snappy compression.
         - pyg/ mirrors enriched/ partitioning for lineage traceability
         - manifests/ mirrors the same date partitions for discoverability
     """
