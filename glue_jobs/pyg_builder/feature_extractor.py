@@ -7,47 +7,24 @@ constructs per-node-type feature tensors for PyG HeteroData.
 Responsibilities:
 1. Identify literal-valued triples (properties where object is not a node URI)
 2. Classify properties as numeric or categorical
-3. Pivot from long format (node_id, property, value) to wide format
-   (node_id, feat_1, feat_2, ...) per node type — all on Spark executors
-4. Optionally normalize numeric features
+3. Pivot from long format to wide format per node type — on Spark executors
+4. Optionally z-score normalize numeric features (single-pass on executors)
 5. Collect per-type [num_nodes, num_features] FloatTensors to the driver
 
 Feature isolation by node type:
     Each node type gets its own feature tensor containing only the
     properties that its entities actually use. A CPI Index node carries
-    CPI-specific features (indexValue, relativeImportance, ~5-10 columns),
-    not all 200+ properties from every ontology. This keeps per-type
-    tensors compact even with 100+ ontologies.
-
-Handling missing values:
-    Not every entity has every property. After pivoting, missing values
-    are filled with 0.0. This is standard for GNN input — the model
-    learns to ignore zero-padded features.
+    CPI-specific features (~5-10 columns), not all 200+ properties
+    from every ontology.
 
 Categorical encoding:
-    Categorical properties (e.g., hasCategory → cpi:Food_Entity) are
-    encoded as integer indices per property. The mapping is built on
-    executors via dense_rank(). One-hot encoding is NOT used to avoid
-    wide sparse matrices — integer encoding is more memory-efficient
-    and works with PyG's embedding layers.
-
-Expected config:
-    {
-        "feature_config": {
-            "numeric_properties": ["indexValue", "changeValue", ...],
-            "categorical_properties": ["hasCategory", "hasIndustry", ...],
-            "normalize": true
-        }
-    }
-
-If feature_config is absent, numeric properties are auto-discovered
-by checking which literal objects parse as floats. Categorical properties
-are not included unless explicitly listed (to avoid blowing up feature
-dimensionality with arbitrary URI-valued properties).
+    Categorical properties are encoded as integer indices via dense_rank()
+    on executors. 1-indexed (0 reserved for missing after fillna).
 """
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
+import numpy as np
 import torch
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
@@ -60,7 +37,6 @@ logger = logging.getLogger(__name__)
 # ============================================
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 
-# Properties that are never features — structural or identity predicates
 _NON_FEATURE_PREDICATES = {
     RDF_TYPE,
     "http://www.w3.org/2000/01/rdf-schema#label",
@@ -70,52 +46,12 @@ _NON_FEATURE_PREDICATES = {
     "http://www.w3.org/2002/07/owl#imports",
 }
 
-# XSD datatype suffixes that indicate numeric literals
-# Objects may appear as "295.8" or "295.8^^http://www.w3.org/2001/XMLSchema#decimal"
-_NUMERIC_XSD_SUFFIXES = (
-    "XMLSchema#decimal",
-    "XMLSchema#float",
-    "XMLSchema#double",
-    "XMLSchema#integer",
-    "XMLSchema#int",
-    "XMLSchema#long",
-    "XMLSchema#short",
-    "XMLSchema#nonNegativeInteger",
-    "XMLSchema#positiveInteger",
-)
-
-
-def _extract_numeric_value(raw_object: str) -> Optional[float]:
-    """
-    Extract a numeric value from an RDF literal object string.
-
-    Handles:
-        "295.8"                                          -> 295.8
-        "295.8^^http://www.w3.org/2001/XMLSchema#decimal" -> 295.8
-        "-0.3"                                           -> -0.3
-        "not a number"                                   -> None
-    """
-    if raw_object is None:
-        return None
-
-    # Strip XSD datatype suffix if present
-    value_str = raw_object.split("^^")[0].strip().strip('"')
-
-    try:
-        return float(value_str)
-    except (ValueError, TypeError):
-        return None
-
-
-_extract_numeric_udf = F.udf(_extract_numeric_value, "double")
-
 
 class FeatureExtractor:
     """
     Extracts features from RDF triples and builds per-node-type tensors.
 
-    All heavy work (filtering, joining, pivoting, normalization) runs on
-    Spark executors. Only compact [num_nodes, num_features] float arrays
+    All heavy work runs on Spark executors. Only compact float arrays
     are collected to the driver, one node type at a time.
     """
 
@@ -123,10 +59,13 @@ class FeatureExtractor:
         self.spark = spark
         self.config = config
 
-        # Parse feature config
         feat_config = config.get("feature_config", {})
-        self._numeric_properties = feat_config.get("numeric_properties", None)
-        self._categorical_properties = feat_config.get("categorical_properties", None)
+        self._numeric_properties = feat_config.get(
+            "numeric_properties", None
+        )
+        self._categorical_properties = feat_config.get(
+            "categorical_properties", None
+        )
         self._normalize = feat_config.get("normalize", False)
 
     def build_features(
@@ -134,39 +73,55 @@ class FeatureExtractor:
         triples_df: DataFrame,
         node_id_df: DataFrame,
         node_counts: Dict[str, int],
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Tuple[Dict[str, torch.Tensor], Dict[str, List[str]]]:
         """
         Build per-node-type feature tensors.
 
         Args:
             triples_df: Enriched triples DataFrame (subject, predicate, object)
-            node_id_df: Node ID table DataFrame (uri, node_id, node_type)
-                        — cached on executors, produced by NodeMapper
+            node_id_df: Node ID table (uri, node_id, node_type) — cached
             node_counts: Dict[str, int] of node type counts
 
         Returns:
-            Dict mapping node_type -> FloatTensor[num_nodes, num_features]
-            Only includes node types that have at least one feature.
+            Tuple of:
+            - Dict[node_type -> FloatTensor[num_nodes, num_features]]
+            - Dict[node_type -> List[str]] feature name lists
         """
         # ============================================
-        # Step 1: Build numeric features table (on executors)
+        # Step 1: Identify literal triples (not in node_id_df)
         # ============================================
-        numeric_features_df = self._extract_numeric_features(
-            triples_df, node_id_df
+        # Anti-join: keep triples whose object is NOT a known entity URI.
+        # This filters out edge triples, leaving only literal properties.
+        # Much more efficient than running a UDF on every triple.
+        literal_triples = triples_df.join(
+            node_id_df.select(F.col("uri").alias("_obj_uri")),
+            triples_df["object"] == F.col("_obj_uri"),
+            "left_anti",
+        )
+
+        # Exclude structural predicates
+        excluded_list = list(_NON_FEATURE_PREDICATES)
+        literal_triples = literal_triples.filter(
+            ~F.col("predicate").isin(excluded_list)
         )
 
         # ============================================
-        # Step 2: Build categorical features table (on executors)
+        # Step 2: Extract numeric features (pure Spark, no UDF)
+        # ============================================
+        numeric_features_df = self._extract_numeric_features(
+            literal_triples, node_id_df
+        )
+
+        # ============================================
+        # Step 3: Extract categorical features
         # ============================================
         categorical_features_df = self._extract_categorical_features(
             triples_df, node_id_df
         )
 
         # ============================================
-        # Step 3: Discover feature columns per node type (small collect)
+        # Step 4: Combine into long-format table
         # ============================================
-        # Combine numeric and categorical into one long-format table:
-        #   (node_type, node_id, feature_name, feature_value)
         feature_parts: List[DataFrame] = []
         if numeric_features_df is not None:
             feature_parts.append(numeric_features_df)
@@ -175,17 +130,17 @@ class FeatureExtractor:
 
         if not feature_parts:
             logger.info("  No features found")
-            return {}
+            return {}, {}
 
-        if len(feature_parts) == 1:
-            all_features_long = feature_parts[0]
-        else:
-            all_features_long = feature_parts[0].unionAll(feature_parts[1])
+        all_features_long = feature_parts[0]
+        for df in feature_parts[1:]:
+            all_features_long = all_features_long.unionAll(df)
 
         all_features_long = all_features_long.cache()
 
-        # Discover which feature columns exist per node type
-        # This is a small collect — bounded by (num_node_types × num_properties)
+        # ============================================
+        # Step 5: Discover feature columns per node type (small collect)
+        # ============================================
         type_feature_rows = (
             all_features_long
             .select("node_type", "feature_name")
@@ -193,7 +148,6 @@ class FeatureExtractor:
             .collect()
         )
 
-        # Group: node_type -> sorted list of feature names
         type_features: Dict[str, List[str]] = {}
         for row in type_feature_rows:
             ntype = row.node_type
@@ -205,72 +159,87 @@ class FeatureExtractor:
         for ntype in type_features:
             type_features[ntype] = sorted(type_features[ntype])
 
-        logger.info(f"  Feature columns per node type:")
+        logger.info("  Feature columns per node type:")
         for ntype, fnames in sorted(type_features.items()):
             logger.info(f"    {ntype}: {len(fnames)} features")
 
         # ============================================
-        # Step 4: Pivot and collect per node type
+        # Step 6: Pivot and collect per node type
         # ============================================
         feature_tensors: Dict[str, torch.Tensor] = {}
+        feature_names: Dict[str, List[str]] = {}
 
-        for node_type, feature_names in type_features.items():
+        for node_type, fnames in type_features.items():
             num_nodes = node_counts.get(node_type, 0)
             if num_nodes == 0:
                 continue
 
             tensor = self._pivot_and_collect(
-                all_features_long, node_type, feature_names, num_nodes
+                all_features_long, node_type, fnames, num_nodes
             )
 
             if tensor is not None:
                 feature_tensors[node_type] = tensor
+                feature_names[node_type] = fnames
 
         all_features_long.unpersist()
 
-        return feature_tensors
+        return feature_tensors, feature_names
 
     # ================================================================
-    # Numeric feature extraction
+    # Numeric feature extraction (pure Spark — no Python UDF)
     # ================================================================
 
     def _extract_numeric_features(
         self,
-        triples_df: DataFrame,
+        literal_triples: DataFrame,
         node_id_df: DataFrame,
     ) -> Optional[DataFrame]:
         """
         Extract numeric literal properties and join with node IDs.
 
-        Returns DataFrame: (node_type, node_id, feature_name, feature_value)
-        or None if no numeric features found.
-        """
-        # Filter out structural predicates
-        excluded_list = list(_NON_FEATURE_PREDICATES)
-        candidates = triples_df.filter(
-            ~F.col("predicate").isin(excluded_list)
-        )
+        Uses pure Spark cast("double") instead of a Python UDF.
+        Cast returns null for non-numeric strings, which we filter out.
 
-        # Try to parse object as numeric
-        candidates = candidates.withColumn(
-            "numeric_value", _extract_numeric_udf(F.col("object"))
+        Args:
+            literal_triples: Triples with literal objects only
+                             (already anti-joined against node_id_df)
+            node_id_df: Node ID table (uri, node_id, node_type)
+
+        Returns:
+            DataFrame(node_type, node_id, feature_name, feature_value)
+            or None if no numeric features found.
+        """
+        # Strip XSD datatype suffix if present, then cast to double.
+        # Pure Spark — no UDF.
+        #
+        # Handles:
+        #   "295.8"                                    -> 295.8
+        #   "295.8^^http://...XMLSchema#decimal"       -> 295.8
+        #   "-0.3"                                     -> -0.3
+        #   "not a number"                             -> null (filtered out)
+        #
+        # Note: build_graph.py's N-Triples parser already strips datatype
+        # suffixes, so most objects arrive as plain strings like "295.8".
+        # The split("^^") handles any that slip through.
+        candidates = literal_triples.withColumn(
+            "numeric_value",
+            F.split(F.col("object"), r"\^\^").getItem(0).cast("double"),
         ).filter(F.col("numeric_value").isNotNull())
 
-        if candidates.head(1) == []:
-            logger.info("  No numeric literals found")
-            return None
-
-        # If config specifies numeric properties, filter to those
+        # Apply config whitelist if specified
         if self._numeric_properties:
-            # Match by local name — predicate URI ends with the property name
             prop_conditions = F.lit(False)
             for prop in self._numeric_properties:
-                prop_conditions = prop_conditions | F.col("predicate").endswith(prop)
+                prop_conditions = prop_conditions | F.col(
+                    "predicate"
+                ).endswith(prop)
             candidates = candidates.filter(prop_conditions)
 
-            if candidates.head(1) == []:
-                logger.info("  No matching numeric properties found")
-                return None
+        # Check if any candidates remain (bounded — reads 1 partition)
+        if not candidates.head(1):
+            logger.info("  No numeric literals found")
+            return None
 
         # Join with node_id_df to get node_type and node_id
         node_lookup = node_id_df.select(
@@ -285,28 +254,22 @@ class FeatureExtractor:
             "inner",
         ).drop("_node_uri")
 
-        # Extract feature name from predicate URI (local name after last / or #)
+        # Extract feature name from predicate URI (local name)
         numeric_df = numeric_df.withColumn(
             "feature_name",
             F.coalesce(
-                F.regexp_extract(F.col("predicate"), r"[#/]([^#/]+)$", 1),
+                F.regexp_extract(
+                    F.col("predicate"), r"[#/]([^#/]+)$", 1
+                ),
                 F.col("predicate"),
             ),
         )
 
-        # Select final columns
-        result = numeric_df.select(
-            "node_type",
-            "node_id",
-            "feature_name",
-            F.col("numeric_value").alias("feature_value"),
-        )
-
         # Handle duplicate properties per node (take mean)
         result = (
-            result
+            numeric_df
             .groupBy("node_type", "node_id", "feature_name")
-            .agg(F.mean("feature_value").alias("feature_value"))
+            .agg(F.mean("numeric_value").alias("feature_value"))
         )
 
         logger.info("  Numeric features extracted (lazy)")
@@ -325,26 +288,26 @@ class FeatureExtractor:
         Extract categorical properties and encode as integer indices.
 
         Only runs if categorical_properties are explicitly listed in config.
-        Each categorical property gets its own integer encoding (0-indexed).
 
-        Returns DataFrame: (node_type, node_id, feature_name, feature_value)
-        or None if no categorical features configured/found.
+        Returns:
+            DataFrame(node_type, node_id, feature_name, feature_value)
+            or None.
         """
         if not self._categorical_properties:
             return None
 
-        # Filter to configured categorical predicates (match by local name)
         prop_conditions = F.lit(False)
         for prop in self._categorical_properties:
-            prop_conditions = prop_conditions | F.col("predicate").endswith(prop)
+            prop_conditions = prop_conditions | F.col(
+                "predicate"
+            ).endswith(prop)
 
         candidates = triples_df.filter(prop_conditions)
 
-        if candidates.head(1) == []:
+        if not candidates.head(1):
             logger.info("  No matching categorical properties found")
             return None
 
-        # Join with node_id_df
         node_lookup = node_id_df.select(
             F.col("uri").alias("_node_uri"),
             F.col("node_id"),
@@ -357,29 +320,32 @@ class FeatureExtractor:
             "inner",
         ).drop("_node_uri")
 
-        # Extract feature name from predicate URI
         cat_df = cat_df.withColumn(
             "feature_name",
             F.concat(
                 F.lit("cat_"),
                 F.coalesce(
-                    F.regexp_extract(F.col("predicate"), r"[#/]([^#/]+)$", 1),
+                    F.regexp_extract(
+                        F.col("predicate"), r"[#/]([^#/]+)$", 1
+                    ),
                     F.col("predicate"),
                 ),
             ),
         )
 
-        # Encode categorical values as integers per (node_type, feature_name)
-        # Using dense_rank so values are 1-indexed (0 reserved for missing)
+        # Integer-encode per (node_type, feature_name) via dense_rank
         cat_df = cat_df.withColumn(
             "feature_value",
-            F.dense_rank().over(
-                Window.partitionBy("node_type", "feature_name")
-                .orderBy("object")
-            ).cast("double"),
+            F.dense_rank()
+            .over(
+                Window.partitionBy("node_type", "feature_name").orderBy(
+                    "object"
+                )
+            )
+            .cast("double"),
         )
 
-        # Handle multiple values per node+property (take first/min rank)
+        # Multiple values per node+property: take min rank
         result = (
             cat_df
             .groupBy("node_type", "node_id", "feature_name")
@@ -408,10 +374,11 @@ class FeatureExtractor:
         Only the final [num_nodes, num_features] float array is collected.
 
         Args:
-            all_features_long: DataFrame(node_type, node_id, feature_name, feature_value)
+            all_features_long: DataFrame(node_type, node_id, feature_name,
+                               feature_value)
             node_type: The node type to pivot
-            feature_names: Sorted list of feature column names for this type
-            num_nodes: Total number of nodes of this type (for zero-padding)
+            feature_names: Sorted list of feature column names
+            num_nodes: Total nodes of this type (for zero-padding)
 
         Returns:
             FloatTensor[num_nodes, num_features] or None
@@ -424,9 +391,7 @@ class FeatureExtractor:
             F.col("node_type") == node_type
         )
 
-        # Pivot: rows = node_id, columns = feature_name, values = feature_value
-        # Passing explicit feature_names list to pivot() avoids an extra
-        # distinct() scan — Spark knows the column set upfront.
+        # Pivot: rows=node_id, columns=feature_name, values=feature_value
         pivoted = (
             type_features
             .groupBy("node_id")
@@ -434,58 +399,60 @@ class FeatureExtractor:
             .agg(F.first("feature_value"))
         )
 
-        # Fill missing values with 0.0
+        # Fill missing values
         pivoted = pivoted.fillna(0.0)
 
-        # Optional normalization (z-score per column, on executors)
-        if self._normalize:
+        # Optional z-score normalization — single pass for all columns
+        if self._normalize and feature_names:
+            # Compute mean and stddev for all feature columns in one action
+            agg_exprs = []
             for fname in feature_names:
                 col = F.col(f"`{fname}`")
-                stats = pivoted.select(
-                    F.mean(col).alias("mu"),
-                    F.stddev(col).alias("sigma"),
-                ).head(1)[0]
+                agg_exprs.append(F.mean(col).alias(f"_mu_{fname}"))
+                agg_exprs.append(F.stddev(col).alias(f"_sigma_{fname}"))
 
-                mu = stats.mu or 0.0
-                sigma = stats.sigma or 1.0
+            stats_row = pivoted.agg(*agg_exprs).head(1)[0]
+
+            for fname in feature_names:
+                mu = stats_row[f"_mu_{fname}"] or 0.0
+                sigma = stats_row[f"_sigma_{fname}"] or 1.0
                 if sigma == 0.0:
                     sigma = 1.0
 
                 pivoted = pivoted.withColumn(
                     f"`{fname}`",
-                    (col - F.lit(mu)) / F.lit(sigma),
+                    (F.col(f"`{fname}`") - F.lit(mu)) / F.lit(sigma),
                 )
 
-        # Select feature columns in deterministic order
+        # Select feature columns in deterministic order + node_id
         select_cols = [F.col("node_id").cast("long")] + [
             F.col(f"`{fname}`").cast("float") for fname in feature_names
         ]
         pivoted = pivoted.select(*select_cols)
 
-        # Collect via Arrow-optimized toPandas()
+        # Collect via Arrow-optimized toPandas — only numeric columns
         pdf = pivoted.toPandas()
 
         if pdf.empty:
             return None
 
-        # Build dense tensor — ensure all node_ids 0..num_nodes-1 are present
-        # Nodes without any features get all-zero rows
-        import numpy as np
-
+        # Build dense tensor with all node IDs 0..num_nodes-1
         num_features = len(feature_names)
         tensor = np.zeros((num_nodes, num_features), dtype=np.float32)
 
-        # Fill in rows that have data
         node_ids = pdf["node_id"].values
         feature_values = pdf[feature_names].values.astype(np.float32)
         tensor[node_ids] = feature_values
 
-        result = torch.from_numpy(tensor)
+        result = torch.from_numpy(tensor).contiguous()
 
+        populated_pct = node_ids.shape[0] / max(num_nodes, 1) * 100
         logger.info(
             f"    [{node_type}] {num_nodes:,} nodes × "
             f"{num_features} features, "
-            f"{(node_ids.shape[0] / num_nodes * 100):.1f}% populated"
+            f"{populated_pct:.1f}% populated"
         )
+
+        del pdf  # release Pandas memory immediately
 
         return result
