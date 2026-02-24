@@ -20,16 +20,7 @@ Usage (AWS Glue):
         --enable_ontology_mapping: true | false (default: false)
         --time_period:             Time period label (e.g., "2024-12") for output naming
         --pyg_config:              Optional JSON string with PyG construction config
-
-Usage (Local / Testing):
-    python build_graph.py \
-        --mode full \
-        --source_bucket my-bucket \
-        --source_prefix rdf/2024/12/ \
-        --output_bucket my-bucket \
-        --enriched_parquet_prefix enriched/2024-12/triples/ \
-        --pyg_output_key pyg/2024-12/hetero_data.pt \
-        --time_period 2024-12
+        --parquet_partitions:      Number of Parquet output partitions (default: 200)
 
 Example Glue job parameters:
     {
@@ -40,7 +31,8 @@ Example Glue job parameters:
         "--enriched_parquet_prefix": "enriched/2024-12/triples/",
         "--pyg_output_key": "pyg/2024-12/hetero_data.pt",
         "--enable_ontology_mapping": "true",
-        "--time_period": "2024-12"
+        "--time_period": "2024-12",
+        "--parquet_partitions": "200"
     }
 """
 import sys
@@ -49,7 +41,7 @@ import logging
 import time
 import io
 from datetime import datetime
-from typing import Dict, Optional, Any
+from typing import Dict, Any
 
 # ============================================
 # AWS Glue imports (graceful fallback for local)
@@ -71,10 +63,9 @@ import boto3
 # ============================================
 # Project imports
 # ============================================
-from glue_jobs.enrichment.pipeline import enrich_graph
+from glue_jobs.enrichment.pipeline import EnrichmentPipeline
 
-# PyG builder - imported conditionally since enrichment_only mode doesn't need it
-# and PyG/torch may not be available in all environments
+# PyG builder — imported conditionally since enrichment_only mode doesn't need it
 _pyg_builder_available = False
 try:
     from glue_jobs.pyg_builder.constructor import build_hetero_data
@@ -104,19 +95,18 @@ TRIPLES_SCHEMA = StructType([
     StructField("object", StringType(), nullable=False),
 ])
 
+# Default number of Parquet output partitions.
+# Targets ~128 MB per partition for 30-50M triples (~2-4 GB total Parquet).
+DEFAULT_PARQUET_PARTITIONS = 200
+
 
 # ============================================
 # Parameter parsing
 # ============================================
 class JobConfig:
-    """
-    Parsed and validated job configuration.
-
-    Handles both AWS Glue resolved options and local CLI arguments.
-    """
+    """Parsed and validated job configuration."""
 
     def __init__(self, args: Dict[str, str]):
-        # Required
         self.mode = args.get("mode", "full").lower().strip()
         self.output_bucket = args.get("output_bucket", "")
 
@@ -132,59 +122,65 @@ class JobConfig:
         self.enable_ontology_mapping = (
             args.get("enable_ontology_mapping", "false").lower() == "true"
         )
-        self.time_period = args.get("time_period", datetime.now().strftime("%Y-%m"))
+        self.time_period = args.get(
+            "time_period", datetime.now().strftime("%Y-%m")
+        )
         self.pyg_config = self._parse_pyg_config(args.get("pyg_config", ""))
+        self.parquet_partitions = int(
+            args.get("parquet_partitions", str(DEFAULT_PARQUET_PARTITIONS))
+        )
 
         # Derived defaults
         if not self.enriched_parquet_prefix:
-            self.enriched_parquet_prefix = f"enriched/{self.time_period}/triples/"
-
+            self.enriched_parquet_prefix = (
+                f"enriched/{self.time_period}/triples/"
+            )
         if not self.pyg_output_key:
             self.pyg_output_key = f"pyg/{self.time_period}/hetero_data.pt"
 
-        # Validate
         self._validate()
 
     def _parse_pyg_config(self, config_str: str) -> Dict[str, Any]:
-        """Parse optional PyG construction configuration from JSON string."""
         if not config_str or config_str.strip() == "":
             return {}
         try:
             return json.loads(config_str)
         except json.JSONDecodeError as e:
-            logger.warning(f"Could not parse pyg_config JSON, using defaults: {e}")
+            logger.warning(
+                f"Could not parse pyg_config JSON, using defaults: {e}"
+            )
             return {}
 
     def _validate(self):
-        """Validate configuration."""
         if self.mode not in VALID_MODES:
             raise ValueError(
-                f"Invalid mode '{self.mode}'. Must be one of: {', '.join(VALID_MODES)}"
+                f"Invalid mode '{self.mode}'. "
+                f"Must be one of: {', '.join(VALID_MODES)}"
             )
-
         if not self.output_bucket:
             raise ValueError("output_bucket is required")
-
-        # Mode-specific validation
         if self.mode in ("full", "enrichment_only"):
             if not self.source_bucket:
-                raise ValueError(f"source_bucket is required for mode '{self.mode}'")
+                raise ValueError(
+                    f"source_bucket is required for mode '{self.mode}'"
+                )
             if not self.source_prefix:
-                raise ValueError(f"source_prefix is required for mode '{self.mode}'")
-
+                raise ValueError(
+                    f"source_prefix is required for mode '{self.mode}'"
+                )
         if self.mode in ("full", "pyg_only"):
             if not _pyg_builder_available:
                 raise ImportError(
                     f"PyG builder not available. Mode '{self.mode}' requires "
-                    "glue_jobs.pyg_builder.constructor. Install PyTorch Geometric "
-                    "or use mode 'enrichment_only'."
+                    "glue_jobs.pyg_builder.constructor."
                 )
-
         if self.mode == "pyg_only":
             if not self.enriched_parquet_prefix:
                 raise ValueError(
                     "enriched_parquet_prefix is required for mode 'pyg_only'"
                 )
+        if self.parquet_partitions < 1:
+            raise ValueError("parquet_partitions must be >= 1")
 
     def __repr__(self):
         return (
@@ -193,17 +189,13 @@ class JobConfig:
             f"output={self.output_bucket}, "
             f"enriched_parquet={self.enriched_parquet_prefix}, "
             f"pyg_output={self.pyg_output_key}, "
-            f"ontology_mapping={self.enable_ontology_mapping})"
+            f"ontology_mapping={self.enable_ontology_mapping}, "
+            f"parquet_partitions={self.parquet_partitions})"
         )
 
 
 def parse_args() -> JobConfig:
-    """
-    Parse job arguments from Glue or CLI.
-
-    Returns:
-        Validated JobConfig instance
-    """
+    """Parse job arguments from Glue or CLI."""
     if RUNNING_IN_GLUE:
         args = getResolvedOptions(
             sys.argv,
@@ -218,6 +210,7 @@ def parse_args() -> JobConfig:
                 "enable_ontology_mapping",
                 "time_period",
                 "pyg_config",
+                "parquet_partitions",
             ],
         )
     else:
@@ -227,38 +220,19 @@ def parse_args() -> JobConfig:
             description="PyTorch Geometric Knowledge Graph Builder"
         )
         parser.add_argument(
-            "--mode",
-            choices=list(VALID_MODES),
-            default="full",
-            help="Execution mode",
+            "--mode", choices=list(VALID_MODES), default="full"
         )
+        parser.add_argument("--source_bucket", default="")
+        parser.add_argument("--source_prefix", default="")
+        parser.add_argument("--output_bucket", required=True)
+        parser.add_argument("--enriched_parquet_prefix", default="")
+        parser.add_argument("--pyg_output_key", default="")
+        parser.add_argument("--enable_ontology_mapping", default="false")
+        parser.add_argument("--time_period", default="")
+        parser.add_argument("--pyg_config", default="")
         parser.add_argument(
-            "--source_bucket", default="", help="S3 bucket for raw RDF"
-        )
-        parser.add_argument(
-            "--source_prefix", default="", help="S3 prefix for raw RDF files"
-        )
-        parser.add_argument(
-            "--output_bucket", required=True, help="S3 bucket for outputs"
-        )
-        parser.add_argument(
-            "--enriched_parquet_prefix",
-            default="",
-            help="S3 prefix for enriched Parquet triples",
-        )
-        parser.add_argument(
-            "--pyg_output_key", default="", help="S3 key for PyG output"
-        )
-        parser.add_argument(
-            "--enable_ontology_mapping",
-            default="false",
-            help="Enable ontology mapping",
-        )
-        parser.add_argument(
-            "--time_period", default="", help="Time period label"
-        )
-        parser.add_argument(
-            "--pyg_config", default="", help="PyG config JSON"
+            "--parquet_partitions",
+            default=str(DEFAULT_PARQUET_PARTITIONS),
         )
 
         parsed = parser.parse_args()
@@ -276,91 +250,82 @@ def load_ntriples_to_dataframe(
     """
     Load N-Triples files from S3 into a PySpark triples DataFrame.
 
-    N-Triples format: each line is a single triple:
-        <subject_uri> <predicate_uri> <object_uri_or_literal> .
-
-    This reads the raw text lines, parses subject/predicate/object
-    using regex, and returns a DataFrame with schema:
-        (subject: string, predicate: string, object: string)
-
     Runs entirely on Spark executors — no driver-side parsing.
+
+    N-Triples format (one triple per line):
+        <subject> <predicate> <object> .
+
+    Object can be a URI (<...>) or a literal ("..."^^<type> or "..."@lang).
 
     Args:
         spark: Active SparkSession
-        source_path: S3 path (e.g., "s3://bucket/prefix/") containing .nt files
+        source_path: S3 path containing .nt files
 
     Returns:
-        DataFrame with columns (subject, predicate, object)
+        DataFrame with columns (subject: string, predicate: string, object: string)
     """
     logger.info(f"Loading N-Triples from {source_path}")
 
-    # Read raw text lines across all .nt files under the path
     raw_lines = spark.read.text(source_path)
 
-    # Filter out blank lines and comments
+    # Filter blank lines and comments (executor-side)
     raw_lines = raw_lines.filter(
-        (F.trim(F.col("value")) != "") & (~F.col("value").startswith("#"))
+        (F.trim(F.col("value")) != "")
+        & (~F.col("value").startswith("#"))
     )
 
-    # Parse N-Triples lines using regex
-    # N-Triples format:
-    #   URI:     <http://example.org/subject>
-    #   Literal: "value"^^<datatype> or "value"@lang or "value"
+    # Parse N-Triples using regex on executors.
     #
-    # Pattern: <subject> <predicate> <object_or_literal> .
+    # Subject and predicate are always URIs: <http://...>
+    # Object is either a URI or a literal.
     #
-    # We extract:
-    #   subject:   content between first < >
-    #   predicate: content between second < >
-    #   object:    everything after predicate up to the final " ."
+    # Regex strategy:
+    #   - Match subject: first <...>
+    #   - Match predicate: second <...>
+    #   - Match raw_object: everything after predicate up to trailing " ."
     #
-    # For URIs as objects: <http://...>
-    # For literals: "value"^^<type> or "value"
+    # The raw_object regex uses a non-greedy match with an anchor on
+    # the final " ." to avoid truncating literals that contain dots.
     triples_df = raw_lines.select(
-        # Subject: first <...> on the line
         F.regexp_extract("value", r"<([^>]+)>", 1).alias("subject"),
-        # Predicate: second <...> on the line
-        F.regexp_extract("value", r"<[^>]+>\s+<([^>]+)>", 1).alias("predicate"),
-        # Object: everything between the predicate and the trailing " ."
-        # This captures both URI objects (<...>) and literal objects ("...")
+        F.regexp_extract("value", r"<[^>]+>\s+<([^>]+)>", 1).alias(
+            "predicate"
+        ),
+        # Non-greedy: capture everything between predicate and final " ."
+        # The (?s) flag is not needed since we read line-by-line.
         F.regexp_extract(
-            "value", r"<[^>]+>\s+<[^>]+>\s+(.*)\s+\.\s*$", 1
+            "value", r"<[^>]+>\s+<[^>]+>\s+(.+?)\s*\.\s*$", 1
         ).alias("raw_object"),
     )
 
-    # Clean up the object field:
-    # - URI objects: strip angle brackets  <http://...> → http://...
-    # - Literal objects: strip quotes and optional datatype/lang
-    #   "295.8"^^<xsd:decimal> → 295.8
-    #   "Food"@en → Food
-    #   "plain string" → plain string
+    # Clean object field (executor-side):
+    #   URI:            <http://...>           → http://...
+    #   Typed literal:  "value"^^<datatype>    → value
+    #   Lang literal:   "value"@en             → value
+    #   Plain literal:  "value"                → value
     triples_df = triples_df.withColumn(
         "object",
         F.when(
-            # URI object: starts with <
             F.col("raw_object").startswith("<"),
             F.regexp_extract("raw_object", r"<([^>]+)>", 1),
-        ).when(
-            # Typed literal: "value"^^<datatype>
+        )
+        .when(
             F.col("raw_object").contains("^^"),
-            F.regexp_extract("raw_object", r'"([^"]*)"', 1),
-        ).when(
-            # Language-tagged literal: "value"@lang
+            F.regexp_extract("raw_object", r'"((?:[^"\\]|\\.)*)"', 1),
+        )
+        .when(
             F.col("raw_object").rlike(r'"[^"]*"@'),
-            F.regexp_extract("raw_object", r'"([^"]*)"', 1),
-        ).otherwise(
-            # Plain literal: "value"
-            F.regexp_extract("raw_object", r'"([^"]*)"', 1)
+            F.regexp_extract("raw_object", r'"((?:[^"\\]|\\.)*)"', 1),
+        )
+        .otherwise(
+            F.regexp_extract("raw_object", r'"((?:[^"\\]|\\.)*)"', 1)
         ),
     ).drop("raw_object")
 
-    # Filter out any rows where parsing failed (empty subject or predicate)
+    # Drop rows where parsing failed (executor-side)
     triples_df = triples_df.filter(
         (F.col("subject") != "") & (F.col("predicate") != "")
     )
-
-    count = triples_df.count()
-    logger.info(f"Parsed {count:,} triples from N-Triples files")
 
     return triples_df
 
@@ -369,29 +334,32 @@ def load_ntriples_to_dataframe(
 # Parquet I/O for enriched triples
 # ============================================
 def save_enriched_parquet(
-    triples_df: DataFrame, output_path: str
-) -> int:
+    triples_df: DataFrame, output_path: str, num_partitions: int
+) -> None:
     """
     Save enriched triples DataFrame to S3 as Parquet.
 
-    Uses Spark's distributed write — data flows directly from
-    executors to S3 without passing through the driver.
+    Data flows directly from executors to S3 — nothing passes
+    through the driver. Repartitions to control output file count
+    and size for efficient downstream reads.
 
     Args:
         triples_df: Enriched triples DataFrame (subject, predicate, object)
         output_path: S3 path (e.g., "s3://bucket/enriched/2024-12/triples/")
-
-    Returns:
-        Number of triples saved
+        num_partitions: Number of output Parquet partitions
     """
-    count = triples_df.count()
-
-    triples_df.write.mode("overwrite").parquet(output_path)
+    (
+        triples_df
+        .repartition(num_partitions)
+        .write
+        .mode("overwrite")
+        .parquet(output_path)
+    )
 
     logger.info(
-        f"Saved enriched triples ({count:,} triples) to {output_path}"
+        f"Saved enriched triples ({num_partitions} partitions) "
+        f"to {output_path}"
     )
-    return count
 
 
 def load_enriched_parquet(
@@ -405,17 +373,12 @@ def load_enriched_parquet(
     Args:
         spark: Active SparkSession
         input_path: S3 path to enriched Parquet
-                    (e.g., "s3://bucket/enriched/2024-12/triples/")
 
     Returns:
         DataFrame with columns (subject, predicate, object)
     """
+    logger.info(f"Loading enriched Parquet from {input_path}")
     triples_df = spark.read.parquet(input_path)
-
-    count = triples_df.count()
-    logger.info(
-        f"Loaded enriched triples ({count:,} triples) from {input_path}"
-    )
     return triples_df
 
 
@@ -426,8 +389,10 @@ def save_pyg_to_s3(s3_client, hetero_data, bucket: str, key: str):
     """
     Save PyTorch Geometric HeteroData to S3.
 
-    Serializes using torch.save to a BytesIO buffer, then uploads to S3.
-    This runs on the driver — only compact tensors are in memory at this point.
+    Serializes using torch.save to a BytesIO buffer, then uploads
+    via S3 multipart upload to avoid holding multiple copies in memory.
+
+    This runs on the driver — only compact tensors are in memory.
 
     Args:
         s3_client: Boto3 S3 client
@@ -437,18 +402,21 @@ def save_pyg_to_s3(s3_client, hetero_data, bucket: str, key: str):
     """
     import torch
 
+    # Serialize to buffer — single copy in memory alongside HeteroData
     buffer = io.BytesIO()
     torch.save(hetero_data, buffer)
+    size_bytes = buffer.tell()
+    size_mb = size_bytes / (1024 * 1024)
     buffer.seek(0)
 
-    s3_client.put_object(
+    # Upload using the buffer directly (no .getvalue() copy)
+    s3_client.upload_fileobj(
+        Fileobj=buffer,
         Bucket=bucket,
         Key=key,
-        Body=buffer.getvalue(),
-        ContentType="application/octet-stream",
+        ExtraArgs={"ContentType": "application/octet-stream"},
     )
 
-    size_mb = len(buffer.getvalue()) / (1024 * 1024)
     logger.info(
         f"Saved PyG HeteroData ({size_mb:.2f} MB) to s3://{bucket}/{key}"
     )
@@ -473,15 +441,12 @@ def run_enrichment(
         enable_ontology_mapping: Whether to run ontology mapping
 
     Returns:
-        Tuple of (enriched_triples_df, enrichment_stats)
+        Tuple of (enriched_triples_df, enrichment_stats_dict)
     """
     logger.info("")
     logger.info("=" * 80)
     logger.info("PHASE: RDF ENRICHMENT")
     logger.info("=" * 80)
-
-    initial_count = triples_df.count()
-    logger.info(f"Input triples: {initial_count:,}")
     logger.info(
         f"Ontology mapping: "
         f"{'enabled' if enable_ontology_mapping else 'disabled'}"
@@ -489,10 +454,6 @@ def run_enrichment(
     logger.info("")
 
     start_time = time.time()
-
-    # enrich_graph returns stats; the pipeline mutates triples_df internally
-    # and we retrieve the final enriched DataFrame from the pipeline object
-    from glue_jobs.enrichment.pipeline import EnrichmentPipeline
 
     pipeline = EnrichmentPipeline(spark, triples_df)
     stats = pipeline.run(enable_ontology_mapping=enable_ontology_mapping)
@@ -512,31 +473,27 @@ def run_pyg_construction(
     """
     Run PyG HeteroData construction from enriched triples DataFrame.
 
-    Heavy computation (node ID assignment, edge resolution, feature extraction)
-    runs on Spark executors. Only compact tensors cross to the driver for
-    final HeteroData assembly.
+    Heavy computation (node ID assignment, edge resolution, feature
+    extraction) runs on Spark executors. Only compact tensors cross
+    to the driver for final HeteroData assembly.
 
     Args:
         spark: Active SparkSession
-        triples_df: Enriched triples DataFrame (subject, predicate, object)
-        pyg_config: Optional configuration for PyG construction
+        triples_df: Enriched triples DataFrame
+        pyg_config: Optional PyG construction configuration
 
     Returns:
-        PyG HeteroData object
+        PyG HeteroData object (on driver)
     """
     if not _pyg_builder_available:
         raise ImportError(
-            "PyG builder not available. Install PyTorch Geometric and ensure "
-            "glue_jobs.pyg_builder.constructor is importable."
+            "PyG builder not available. Install PyTorch Geometric."
         )
 
     logger.info("")
     logger.info("=" * 80)
     logger.info("PHASE: PyG CONSTRUCTION")
     logger.info("=" * 80)
-
-    triple_count = triples_df.count()
-    logger.info(f"Input triples: {triple_count:,}")
     if pyg_config:
         logger.info(f"PyG config: {json.dumps(pyg_config, indent=2)}")
     logger.info("")
@@ -548,16 +505,20 @@ def run_pyg_construction(
 
     elapsed = time.time() - start_time
 
-    # Log HeteroData summary
     logger.info(f"PyG construction completed in {elapsed:.1f}s")
+    _log_hetero_data_summary(hetero_data)
+
+    return hetero_data
+
+
+def _log_hetero_data_summary(hetero_data):
+    """Log HeteroData node/edge type summary."""
     logger.info("HeteroData summary:")
     logger.info(f"  Node types: {hetero_data.node_types}")
     logger.info(f"  Edge types: {hetero_data.edge_types}")
     for node_type in hetero_data.node_types:
         store = hetero_data[node_type]
-        num_nodes = (
-            store.num_nodes if hasattr(store, "num_nodes") else "unknown"
-        )
+        num_nodes = getattr(store, "num_nodes", "unknown")
         num_features = (
             store.x.shape[1]
             if hasattr(store, "x") and store.x is not None
@@ -575,8 +536,6 @@ def run_pyg_construction(
         )
         logger.info(f"  [{edge_type}] edges={num_edges}")
 
-    return hetero_data
-
 
 # ============================================
 # Spark session initialization
@@ -585,11 +544,8 @@ def get_spark_session() -> SparkSession:
     """
     Get or create a SparkSession.
 
-    In AWS Glue, the SparkSession is created from the GlueContext.
-    In local mode, a local SparkSession is created.
-
-    Returns:
-        Active SparkSession
+    In AWS Glue, created from GlueContext.
+    In local mode, creates a local SparkSession.
     """
     if RUNNING_IN_GLUE:
         sc = SparkContext.getOrCreate()
@@ -597,28 +553,26 @@ def get_spark_session() -> SparkSession:
         return glue_context.spark_session
     else:
         return (
-            SparkSession.builder
-            .appName("PyG-Knowledge-Graph-Builder")
-            .getOrCreate()
+            SparkSession.builder.appName(
+                "PyG-Knowledge-Graph-Builder"
+            ).getOrCreate()
         )
 
 
 # ============================================
-# Main execution modes
+# Execution modes
 # ============================================
 def execute_full_pipeline(
     config: JobConfig, spark: SparkSession, s3_client
 ):
     """
     Mode: full
-    Raw RDF (N-Triples) → triples_df → Enrich → Save Parquet → Build PyG → Save .pt
-
-    This is the default end-to-end mode.
+    Raw N-Triples → triples_df → Enrich → Save Parquet → Build PyG → Save .pt
     """
     logger.info("Executing FULL PIPELINE mode")
     logger.info("")
 
-    # Step 1: Load raw N-Triples from S3 into triples DataFrame
+    # Step 1: Load raw N-Triples → distributed DataFrame
     logger.info("=" * 80)
     logger.info("PHASE: LOADING RAW RDF (N-Triples → DataFrame)")
     logger.info("=" * 80)
@@ -629,21 +583,24 @@ def execute_full_pipeline(
     triples_df = triples_df.cache()
     initial_count = triples_df.count()
 
-    load_elapsed = time.time() - start_time
-    logger.info(f"Loading completed in {load_elapsed:.1f}s")
-    logger.info("")
-
     if initial_count == 0:
         raise FileNotFoundError(
             f"No triples parsed from N-Triples files at {source_path}"
         )
+
+    load_elapsed = time.time() - start_time
+    logger.info(f"Loaded {initial_count:,} triples in {load_elapsed:.1f}s")
+    logger.info("")
 
     # Step 2: Enrich (all on executors)
     enriched_df, enrichment_stats = run_enrichment(
         spark, triples_df, config.enable_ontology_mapping
     )
 
-    # Step 3: Save enriched triples as Parquet
+    # Unpersist raw triples — enriched_df is independently cached
+    triples_df.unpersist()
+
+    # Step 3: Save enriched Parquet (executors → S3, no driver)
     logger.info("")
     logger.info("=" * 80)
     logger.info("PHASE: SAVING ENRICHED TRIPLES (Parquet)")
@@ -651,12 +608,16 @@ def execute_full_pipeline(
     enriched_path = (
         f"s3://{config.output_bucket}/{config.enriched_parquet_prefix}"
     )
-    save_enriched_parquet(enriched_df, enriched_path)
+    save_enriched_parquet(
+        enriched_df, enriched_path, config.parquet_partitions
+    )
 
-    # Step 4: Build PyG (heavy work on executors, tensors to driver)
-    hetero_data = run_pyg_construction(spark, enriched_df, config.pyg_config)
+    # Step 4: Build PyG (executors → compact tensors → driver)
+    hetero_data = run_pyg_construction(
+        spark, enriched_df, config.pyg_config
+    )
 
-    # Step 5: Save PyG HeteroData
+    # Step 5: Save PyG (driver → S3)
     logger.info("")
     logger.info("=" * 80)
     logger.info("PHASE: SAVING PyG HETERODATA")
@@ -681,15 +642,14 @@ def execute_enrichment_only(
 ):
     """
     Mode: enrichment_only
-    Raw RDF (N-Triples) → triples_df → Enrich → Save enriched Parquet to S3
+    Raw N-Triples → triples_df → Enrich → Save enriched Parquet to S3
 
-    Creates a reusable enriched Parquet artifact that can be used
-    for multiple PyG experiments without re-enrichment.
+    Creates a reusable Parquet artifact for multiple PyG experiments.
     """
     logger.info("Executing ENRICHMENT ONLY mode")
     logger.info("")
 
-    # Step 1: Load raw N-Triples from S3 into triples DataFrame
+    # Step 1: Load raw N-Triples → distributed DataFrame
     logger.info("=" * 80)
     logger.info("PHASE: LOADING RAW RDF (N-Triples → DataFrame)")
     logger.info("=" * 80)
@@ -700,21 +660,24 @@ def execute_enrichment_only(
     triples_df = triples_df.cache()
     initial_count = triples_df.count()
 
-    load_elapsed = time.time() - start_time
-    logger.info(f"Loading completed in {load_elapsed:.1f}s")
-    logger.info("")
-
     if initial_count == 0:
         raise FileNotFoundError(
             f"No triples parsed from N-Triples files at {source_path}"
         )
+
+    load_elapsed = time.time() - start_time
+    logger.info(f"Loaded {initial_count:,} triples in {load_elapsed:.1f}s")
+    logger.info("")
 
     # Step 2: Enrich (all on executors)
     enriched_df, enrichment_stats = run_enrichment(
         spark, triples_df, config.enable_ontology_mapping
     )
 
-    # Step 3: Save enriched triples as Parquet
+    # Unpersist raw triples
+    triples_df.unpersist()
+
+    # Step 3: Save enriched Parquet (executors → S3 directly)
     logger.info("")
     logger.info("=" * 80)
     logger.info("PHASE: SAVING ENRICHED TRIPLES (Parquet)")
@@ -722,14 +685,15 @@ def execute_enrichment_only(
     enriched_path = (
         f"s3://{config.output_bucket}/{config.enriched_parquet_prefix}"
     )
-    saved_count = save_enriched_parquet(enriched_df, enriched_path)
+    save_enriched_parquet(
+        enriched_df, enriched_path, config.parquet_partitions
+    )
 
     return {
         "mode": "enrichment_only",
         "initial_triples": initial_count,
         "enrichment": enrichment_stats,
         "enriched_parquet_location": enriched_path,
-        "enriched_triple_count": saved_count,
     }
 
 
@@ -738,16 +702,16 @@ def execute_pyg_only(
 ):
     """
     Mode: pyg_only
-    Enriched Parquet (S3) → triples_df → Build PyG → Save PyG to S3
+    Enriched Parquet (S3) → triples_df → Build PyG → Save .pt to S3
 
-    Rapid experimentation mode: loads existing enriched Parquet
-    and constructs PyG with different configurations.
-    Typically completes in 5-10 minutes.
+    Rapid experimentation: loads existing enriched Parquet,
+    constructs PyG with different configurations.
+    Typically 5-10 minutes.
     """
     logger.info("Executing PyG ONLY mode")
     logger.info("")
 
-    # Step 1: Load enriched triples from Parquet
+    # Step 1: Load enriched Parquet → distributed DataFrame
     logger.info("=" * 80)
     logger.info("PHASE: LOADING ENRICHED TRIPLES (Parquet)")
     logger.info("=" * 80)
@@ -758,16 +722,20 @@ def execute_pyg_only(
     )
     triples_df = load_enriched_parquet(spark, enriched_path)
     triples_df = triples_df.cache()
-    triples_df.count()  # materialize cache
+    triple_count = triples_df.count()
 
     load_elapsed = time.time() - start_time
-    logger.info(f"Loading completed in {load_elapsed:.1f}s")
+    logger.info(
+        f"Loaded {triple_count:,} enriched triples in {load_elapsed:.1f}s"
+    )
     logger.info("")
 
-    # Step 2: Build PyG (heavy work on executors, tensors to driver)
-    hetero_data = run_pyg_construction(spark, triples_df, config.pyg_config)
+    # Step 2: Build PyG (executors → compact tensors → driver)
+    hetero_data = run_pyg_construction(
+        spark, triples_df, config.pyg_config
+    )
 
-    # Step 3: Save PyG HeteroData
+    # Step 3: Save PyG (driver → S3)
     logger.info("")
     logger.info("=" * 80)
     logger.info("PHASE: SAVING PyG HETERODATA")
@@ -779,6 +747,7 @@ def execute_pyg_only(
     return {
         "mode": "pyg_only",
         "enriched_parquet_source": enriched_path,
+        "enriched_triple_count": triple_count,
         "pyg_location": (
             f"s3://{config.output_bucket}/{config.pyg_output_key}"
         ),
@@ -791,11 +760,7 @@ def execute_pyg_only(
 def save_job_manifest(
     s3_client, config: JobConfig, result: Dict, elapsed: float
 ):
-    """
-    Save a JSON manifest with job metadata to S3.
-
-    Useful for tracking experiment lineage and reproducing results.
-    """
+    """Save a JSON manifest with job metadata to S3."""
     manifest = {
         "job_timestamp": datetime.utcnow().isoformat() + "Z",
         "time_period": config.time_period,
@@ -808,6 +773,7 @@ def save_job_manifest(
             "pyg_output_key": config.pyg_output_key,
             "enable_ontology_mapping": config.enable_ontology_mapping,
             "pyg_config": config.pyg_config,
+            "parquet_partitions": config.parquet_partitions,
         },
         "result": _make_json_serializable(result),
         "elapsed_seconds": round(elapsed, 2),
@@ -870,15 +836,15 @@ def print_final_banner(config: JobConfig, result: Dict, elapsed: float):
         logger.info("")
         logger.info(
             f"  Initial triples:  "
-            f"{stats.get('initial_triples', 'N/A'):>10}"
+            f"{stats.get('initial_triples', 'N/A'):>12,}"
         )
         logger.info(
             f"  Final triples:    "
-            f"{stats.get('final_triples', 'N/A'):>10}"
+            f"{stats.get('final_triples', 'N/A'):>12,}"
         )
         logger.info(
             f"  Total enrichment: "
-            f"{stats.get('total_enrichment', 'N/A'):>10}"
+            f"{stats.get('total_enrichment', 'N/A'):>12,}"
         )
 
     logger.info("")
@@ -892,8 +858,8 @@ def main():
     """
     Main entry point for the Glue job.
 
-    Parses arguments, initializes Spark and AWS clients, and dispatches
-    to the appropriate execution mode.
+    Parses arguments, initializes Spark and AWS clients,
+    dispatches to the appropriate execution mode.
     """
     job_start_time = time.time()
 
@@ -904,9 +870,7 @@ def main():
     logger.info(f"Running in: {'AWS Glue' if RUNNING_IN_GLUE else 'Local'}")
     logger.info("")
 
-    # ----------------------------------------
     # Parse and validate arguments
-    # ----------------------------------------
     try:
         config = parse_args()
     except (ValueError, ImportError) as e:
@@ -916,9 +880,7 @@ def main():
     logger.info(f"Configuration: {config}")
     logger.info("")
 
-    # ----------------------------------------
     # Initialize Spark and AWS clients
-    # ----------------------------------------
     spark = get_spark_session()
     s3_client = boto3.client("s3")
 
@@ -928,9 +890,7 @@ def main():
     )
     logger.info("")
 
-    # ----------------------------------------
     # Execute pipeline
-    # ----------------------------------------
     try:
         mode_handlers = {
             "full": execute_full_pipeline,
@@ -951,17 +911,11 @@ def main():
         logger.error(f"Pipeline failed: {e}", exc_info=True)
         sys.exit(1)
 
-    # ----------------------------------------
     # Save manifest and print summary
-    # ----------------------------------------
     elapsed = time.time() - job_start_time
-
     save_job_manifest(s3_client, config, result, elapsed)
     print_final_banner(config, result, elapsed)
 
-    # ----------------------------------------
-    # Spark cleanup
-    # ----------------------------------------
     logger.info("Done.")
     return result
 
