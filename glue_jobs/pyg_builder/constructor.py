@@ -7,21 +7,17 @@ from an enriched triples DataFrame.
 Architecture:
 - All filtering, joining, ID assignment, and aggregation runs on Spark
   executors using DataFrame operations
-- Node URI → integer ID mapping is done via Spark Window functions
-  (row_number / dense_rank), never collected as a Python dict
-- Only compact numeric tensors (edge indices, feature matrices) are
-  collected to the driver via Arrow-optimized toPandas()
-- Final HeteroData assembly happens on the driver (PyG is not distributed)
+- Node URI → integer ID mapping uses Spark Window functions, never
+  collected as a Python dict
+- Only compact numeric tensors are collected to the driver via
+  Arrow-optimized toPandas()
+- Final HeteroData assembly happens on the driver
 
-Scaling characteristics:
-- Spark-side: scales horizontally with DPUs, handles 100M+ triples
-- Driver-side: only receives integer tensors, not URI strings
-  - Edge indices: [2, num_edges] int64 — ~16 bytes per edge
-  - Feature matrices: [num_nodes, num_features] float32 — ~4 bytes per cell
-  - Per-type feature isolation: each node type carries only its ontology-
-    relevant features (5-20 columns), not a wide matrix across all ontologies
-  - Total driver memory for PyG object: typically 2-8 GB for 30-50M triples
-  - Fits on Glue G.2X (32 GB) or G.4X (64 GB) workers
+Scaling:
+- Spark-side: scales horizontally with DPUs
+- Driver-side: receives only integer/float tensors, not URI strings
+  - Typical total: 2-8 GB for 30-50M triples
+  - Fits on Glue G.2X (32 GB) or G.4X (64 GB)
 """
 import logging
 from typing import Dict, Any, Optional, Tuple
@@ -47,14 +43,13 @@ def build_hetero_data(
     DataFrame.
 
     All heavy computation runs on Spark executors. Only compact
-    integer/float tensors cross the Spark → driver boundary for
-    final HeteroData assembly.
+    integer/float tensors cross the Spark → driver boundary.
 
     Args:
         spark: Active SparkSession
         triples_df: Enriched triples DataFrame (subject, predicate, object).
                     Should already be cached by the caller.
-        config: Optional configuration dict. If None or empty, defaults
+        config: Optional configuration dict. If None/empty, defaults
                 are inferred from the data.
 
     Returns:
@@ -70,13 +65,13 @@ def build_hetero_data(
         f"Config keys: {list(config.keys()) if config else 'defaults'}"
     )
 
-    # Ensure triples_df is cached for repeated reads across mappers.
-    # If already cached by the caller, this is a no-op.
-    if triples_df.storageLevel.useMemory or triples_df.storageLevel.useDisk:
-        logger.info("triples_df already cached")
-    else:
+    # Ensure triples_df is cached — if already cached, this is a no-op
+    if not (
+        triples_df.storageLevel.useMemory
+        or triples_df.storageLevel.useDisk
+    ):
         triples_df = triples_df.cache()
-        triples_df.count()  # materialize
+        triples_df.count()
         logger.info("Cached triples_df")
 
     # ============================================
@@ -87,8 +82,6 @@ def build_hetero_data(
     node_mapper = NodeMapper(spark, config)
     node_id_df, node_counts = node_mapper.build_node_id_table(triples_df)
 
-    # node_id_df: DataFrame(uri, node_id, node_type) — cached on executors
-    # node_counts: Dict[str, int] — small, one entry per node type
     total_nodes = sum(node_counts.values())
     logger.info(
         f"  {len(node_counts)} node types, {total_nodes:,} total nodes"
@@ -100,7 +93,6 @@ def build_hetero_data(
 
     # ============================================
     # STEP 2: Build edge index tensors
-    #         (join on executors, collect int tensors to driver)
     # ============================================
     logger.info("Step 2/4: Building edge indices...")
 
@@ -116,7 +108,6 @@ def build_hetero_data(
 
     # ============================================
     # STEP 3: Build feature tensors
-    #         (pivot on executors, collect float tensors to driver)
     # ============================================
     logger.info("Step 3/4: Building feature tensors...")
 
@@ -149,7 +140,7 @@ def build_hetero_data(
     for (src_type, rel, dst_type), edge_index in edge_indices.items():
         data[src_type, rel, dst_type].edge_index = edge_index
 
-    # Release executor memory
+    # Release executor memory for node ID table
     node_id_df.unpersist()
 
     logger.info("HeteroData assembly complete")
