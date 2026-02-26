@@ -5,7 +5,7 @@ Foundation for CPI data processing
 
 from rdflib import Graph, Namespace, URIRef, Literal
 from rdflib.namespace import RDF, RDFS, OWL, XSD
-from typing import List, Dict, Set
+from typing import List, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
@@ -71,6 +71,57 @@ SEC_ENRICHMENT = Namespace("https://www.sec.gov/enrichment/")
 NOAA_ENRICHMENT = Namespace("https://www.noaa.gov/enrichment/")
 MARKET_ENRICHMENT = Namespace("https://financial-data.org/enrichment/")
 UNIFIED = Namespace("https://example.org/unified/")
+
+# ============================================
+# CANONICAL NAMESPACE → PREFIX MAPPING
+# ============================================
+# Single source of truth for all PyG builder modules (node_mapper,
+# edge_mapper, feature_extractor). Each entry is (namespace_uri, prefix).
+#
+# Order matters for node_mapper and edge_mapper: longer/more-specific
+# namespaces must appear before shorter ones so that startsWith matching
+# picks the most specific prefix (e.g., "https://financial-data.org/options/"
+# before "https://financial-data.org/").
+#
+# The index position in this list is used by feature_extractor for
+# ontology source membership encoding.
+
+NAMESPACE_PREFIXES: List[Tuple[str, str]] = [
+    (str(CPI), "cpi"),
+    (str(PPI), "ppi"),
+    (str(ECI), "eci"),
+    (str(EMPSIT), "empsit"),
+    (str(JOLTS), "jolts"),
+    (str(LAUS), "laus"),
+    (str(METRO), "metro"),
+    (str(REALER), "realer"),
+    (str(WKYENG), "wkyeng"),
+    (str(XIMPIM), "ximpim"),
+    (str(BLS_ENRICHMENT), "bls_enrichment"),
+    (str(SEC_FILINGS), "filings"),
+    (str(SEC_ADMIN), "sec_admin"),
+    (str(SEC_LIT), "sec_lit"),
+    (str(SEC_SUSP), "sec_susp"),
+    (str(SEC_ENRICHMENT), "sec_enrichment"),
+    (str(MARKET_OPTIONS), "market_options"),
+    (str(MARKET_ENRICHMENT), "market_enrichment"),
+    (str(MARKET), "market"),
+    (str(CAP), "cap"),
+    (str(NWS), "nws"),
+    (str(ALERT), "alert"),
+    (str(NOAA_ENRICHMENT), "noaa_enrichment"),
+    (str(NOAA), "noaa"),
+    (str(UNIFIED), "unified"),
+    (str(OWL), "owl"),
+    (str(RDFS), "rdfs"),
+]
+
+# Derived: namespace → integer index for feature_extractor ontology
+# source membership encoding. Built automatically from NAMESPACE_PREFIXES.
+ONTOLOGY_NAMESPACE_INDICES: List[Tuple[str, int]] = [
+    (ns, idx) for idx, (ns, _prefix) in enumerate(NAMESPACE_PREFIXES)
+]
+
 
 # ============================================
 # HELPER FUNCTIONS

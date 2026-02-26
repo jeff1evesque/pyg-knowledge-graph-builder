@@ -24,11 +24,13 @@ Filtering:
 - Config edge_types whitelist filters by relation name
 """
 import logging
-from typing import Dict, Any, Tuple, List
+from typing import Dict, Any, Tuple
 
 import torch
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
+
+from glue_jobs.utils.rdf_utils import NAMESPACE_PREFIXES
 
 logger = logging.getLogger(__name__)
 
@@ -45,39 +47,6 @@ _EXCLUDED_PREDICATES = {
     "http://www.w3.org/2002/07/owl#imports",
 }
 
-# ============================================
-# Namespace → prefix mappings (same as node_mapper)
-# ============================================
-_NAMESPACE_PREFIXES: List[Tuple[str, str]] = [
-    ("https://www.bls.gov/cpi/", "cpi"),
-    ("https://www.bls.gov/ppi/", "ppi"),
-    ("https://www.bls.gov/eci/", "eci"),
-    ("https://www.bls.gov/empsit/", "empsit"),
-    ("https://www.bls.gov/jolts/", "jolts"),
-    ("https://www.bls.gov/laus/", "laus"),
-    ("https://www.bls.gov/metro/", "metro"),
-    ("https://www.bls.gov/realer/", "realer"),
-    ("https://www.bls.gov/wkyeng/", "wkyeng"),
-    ("https://www.bls.gov/ximpim/", "ximpim"),
-    ("https://www.bls.gov/enrichment/", "bls_enrichment"),
-    ("http://www.sec.gov/filings#", "filings"),
-    ("https://www.sec.gov/ontology/administrative-proceedings#", "sec_admin"),
-    ("https://www.sec.gov/ontology/litigation#", "sec_lit"),
-    ("https://www.sec.gov/ontology/trading-suspensions#", "sec_susp"),
-    ("https://www.sec.gov/enrichment/", "sec_enrichment"),
-    ("https://financial-data.org/options/", "market_options"),
-    ("https://financial-data.org/enrichment/", "market_enrichment"),
-    ("https://financial-data.org/", "market"),
-    ("http://www.oasis-open.org/committees/emergency/cap/1.2/", "cap"),
-    ("http://api.weather.gov/ontology/", "nws"),
-    ("http://api.weather.gov/alerts/", "alert"),
-    ("https://www.noaa.gov/enrichment/", "noaa_enrichment"),
-    ("https://www.noaa.gov/", "noaa"),
-    ("https://example.org/unified/", "unified"),
-    ("http://www.w3.org/2002/07/owl#", "owl"),
-    ("http://www.w3.org/2000/01/rdf-schema#", "rdfs"),
-]
-
 
 def _build_predicate_to_relation_expr(
     pred_col: str = "predicate",
@@ -92,7 +61,7 @@ def _build_predicate_to_relation_expr(
     col = F.col(pred_col)
     expr = None
 
-    for namespace, prefix in _NAMESPACE_PREFIXES:
+    for namespace, prefix in NAMESPACE_PREFIXES:
         ns_len = len(namespace)
         local_name = F.substring(col, ns_len + 1, 1000)
         local_name = F.regexp_replace(local_name, r"^[/#]+|[/#]+$", "")

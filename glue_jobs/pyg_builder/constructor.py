@@ -13,20 +13,43 @@ Architecture:
   Arrow-optimized toPandas()
 - Final HeteroData assembly happens on the driver
 
+Feature vectors:
+- Universal 1024-d ontology-aware vectors for all node types
+- Segment 1 (dims 0–255):   Ontology structure (class identity,
+                             hierarchy, source membership)
+- Segment 2 (dims 256–639): Property schema (presence, domain/range,
+                             property hierarchy)
+- Segment 3 (dims 640–1023): Literal values (numeric hashed slots,
+                              categorical multi-hot)
+- Same width across all node types enables shared GNN layers
+
+Driver memory safety:
+- Feature tensors are built one type at a time, largest first
+- Large types use chunked collection to bound Pandas intermediaries
+- gc.collect() runs between types to reclaim fragmented memory
+- Edge indices are collected one type at a time with immediate Pandas
+  release
+- HeteroData assembly only references existing tensors (no copies)
+- Final .pt serialization streams to S3 via upload_fileobj
+
 Scaling:
 - Spark-side: scales horizontally with DPUs
 - Driver-side: receives only integer/float tensors, not URI strings
   - Typical total: 2-8 GB for 30-50M triples
   - Fits on Glue G.2X (32 GB) or G.4X (64 GB)
 """
+import gc
 import logging
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional
 
 from pyspark.sql import SparkSession, DataFrame
 
 from glue_jobs.pyg_builder.node_mapper import NodeMapper
 from glue_jobs.pyg_builder.edge_mapper import EdgeMapper
-from glue_jobs.pyg_builder.feature_extractor import FeatureExtractor
+from glue_jobs.pyg_builder.feature_extractor import (
+    FeatureExtractor,
+    VECTOR_DIM,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +67,12 @@ def build_hetero_data(
 
     All heavy computation runs on Spark executors. Only compact
     integer/float tensors cross the Spark → driver boundary.
+
+    Feature vectors are universal 1024-d ontology-aware vectors:
+    - Same width for all node types (enables shared GNN layers)
+    - Encodes ontology structure, property schema, and literal values
+    - Large types use chunked collection to prevent driver OOM
+    - See feature_extractor.py for segment layout
 
     Args:
         spark: Active SparkSession
@@ -64,6 +93,11 @@ def build_hetero_data(
     logger.info(
         f"Config keys: {list(config.keys()) if config else 'defaults'}"
     )
+
+    vector_dim = config.get("feature_config", {}).get(
+        "vector_dim", VECTOR_DIM
+    )
+    logger.info(f"Feature vector dimension: {vector_dim}")
 
     # Ensure triples_df is cached — if already cached, this is a no-op
     if not (
@@ -91,6 +125,15 @@ def build_hetero_data(
         logger.warning("No nodes found — returning empty HeteroData")
         return HeteroData()
 
+    # Log estimated driver memory for feature tensors
+    total_feature_bytes = sum(
+        n * vector_dim * 4 for n in node_counts.values()
+    )
+    total_feature_mb = total_feature_bytes / (1024 * 1024)
+    logger.info(
+        f"  Estimated feature tensor memory: {total_feature_mb:,.1f} MB"
+    )
+
     # ============================================
     # STEP 2: Build edge index tensors
     # ============================================
@@ -102,14 +145,19 @@ def build_hetero_data(
     )
 
     total_edges = sum(t.shape[1] for t in edge_indices.values())
+    total_edge_bytes = sum(
+        t.numel() * 8 for t in edge_indices.values()
+    )
+    total_edge_mb = total_edge_bytes / (1024 * 1024)
     logger.info(
-        f"  {len(edge_indices)} edge types, {total_edges:,} total edges"
+        f"  {len(edge_indices)} edge types, {total_edges:,} total edges "
+        f"({total_edge_mb:,.1f} MB)"
     )
 
     # ============================================
-    # STEP 3: Build feature tensors
+    # STEP 3: Build feature tensors (ontology-aware)
     # ============================================
-    logger.info("Step 3/4: Building feature tensors...")
+    logger.info("Step 3/4: Building ontology-aware feature tensors...")
 
     feature_extractor = FeatureExtractor(spark, config)
     feature_tensors, feature_names = feature_extractor.build_features(
@@ -117,10 +165,10 @@ def build_hetero_data(
     )
 
     for ntype, tensor in feature_tensors.items():
-        names = feature_names.get(ntype, [])
+        segments = feature_names.get(ntype, [])
         logger.info(
             f"  [{ntype}] shape: {list(tensor.shape)}, "
-            f"features: {names[:5]}{'...' if len(names) > 5 else ''}"
+            f"segments: {segments}"
         )
 
     # ============================================
@@ -134,7 +182,11 @@ def build_hetero_data(
         if node_type in feature_tensors:
             data[node_type].x = feature_tensors[node_type]
         else:
-            data[node_type].x = torch.zeros(num_nodes, 1)
+            # All node types get the same vector width — zeros for types
+            # with no extractable features
+            data[node_type].x = torch.zeros(
+                num_nodes, vector_dim, dtype=torch.float32
+            )
         data[node_type].num_nodes = num_nodes
 
     for (src_type, rel, dst_type), edge_index in edge_indices.items():
@@ -143,8 +195,33 @@ def build_hetero_data(
     # Release executor memory for node ID table
     node_id_df.unpersist()
 
+    # Release references to intermediate dicts — HeteroData now owns
+    # the tensors. The dicts held duplicate references.
+    del feature_tensors
+    del edge_indices
+    gc.collect()
+
     logger.info("HeteroData assembly complete")
     logger.info(f"  Node types: {data.node_types}")
     logger.info(f"  Edge types: {data.edge_types}")
+    logger.info(
+        f"  Universal feature dim: {vector_dim} "
+        f"(all node types share same width)"
+    )
+
+    # Log final driver memory estimate
+    total_bytes = 0
+    for node_type in data.node_types:
+        store = data[node_type]
+        if hasattr(store, "x") and store.x is not None:
+            total_bytes += store.x.numel() * store.x.element_size()
+    for edge_type in data.edge_types:
+        store = data[edge_type]
+        if hasattr(store, "edge_index") and store.edge_index is not None:
+            total_bytes += (
+                store.edge_index.numel() * store.edge_index.element_size()
+            )
+    total_mb = total_bytes / (1024 * 1024)
+    logger.info(f"  Total HeteroData tensor memory: {total_mb:,.1f} MB")
 
     return data
