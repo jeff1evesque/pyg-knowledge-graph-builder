@@ -15,7 +15,7 @@ The pipeline processes data from **100+ domain-specific ontologies** spanning ec
 
 PyG construction also leverages Spark executors for all heavy computation (node ID assignment, edge resolution, feature extraction). Only compact integer and float tensors cross the Spark → driver boundary for final `HeteroData` assembly. All URI-to-name conversions use **pure Spark Column expressions** (JVM-native `WHEN` chains), not Python UDFs, eliminating serialization overhead.
 
-Node feature vectors are **universal 1024-dimensional ontology-aware vectors** that encode three layers of information: ontology structure (class identity, hierarchy, source membership), property schema (presence, domain/range, property hierarchy), and literal values (numeric hashed slots, categorical multi-hot). All node types share the same vector width, enabling **shared GNN layers across heterogeneous types** and natural cross-type message passing.
+Node feature vectors are **universal 1024-dimensional ontology-aware vectors** that encode three layers of information: ontology structure (class identity, hierarchy, source membership), property schema (presence, domain/range, property hierarchy), and literal values (numeric hashed slots, categorical multi-hot). All node types share the same vector width, enabling **shared GNN layers across heterogeneous types** and natural cross-type message passing. The vector dimension is configurable — all segment boundaries **scale proportionally** with `vector_dim`, so passing 512 produces a half-resolution vector with the same three-segment structure.
 
 The pipeline supports three execution modes:
 
@@ -29,8 +29,9 @@ The pipeline supports three execution modes:
 - **Distributed Enrichment**: All enrichment runs as PySpark DataFrame operations across Spark executors
 - **Distributed PyG Construction**: Node ID assignment, edge resolution, and feature extraction run on Spark executors — only compact tensors are collected to the driver
 - **No Python UDFs in PyG Builder**: URI-to-name conversions use pure Spark `WHEN` expressions (JVM-native), not row-at-a-time Python UDFs
-- **Ontology-Aware Feature Vectors**: Universal 1024-d vectors encoding class hierarchy, property schema, and literal values — not flat bags of literals
-- **Universal Feature Width**: All node types share the same 1024-d vector, enabling shared GNN layers and cross-type message passing
+- **Ontology-Aware Feature Vectors**: Universal fixed-width vectors encoding class hierarchy, property schema, and literal values — not flat bags of literals
+- **Universal Feature Width**: All node types share the same vector dimension, enabling shared GNN layers and cross-type message passing
+- **Proportionally Scalable Dimensions**: Overriding `vector_dim` (e.g., 512, 2048) automatically rescales all segment and sub-segment boundaries via `VectorLayout` — no hardcoded dim indices
 - **Driver Memory Safety**: Large node types use chunked collection with explicit memory management to prevent OOM
 - **Temporal Unification**: Unified temporal entities across all data sources
 - **Intra-Source Linking**: Automatic relationship discovery within data source families
@@ -133,105 +134,190 @@ A naive approach encodes each node as a flat bag of its literal property values 
 - **Ambiguous zeros**: A zero in a column is indistinguishable between "missing value" and "property doesn't apply to this type"
 - **Per-type isolation**: Each node type has a different feature width, requiring type-specific linear layers in the GNN and preventing cross-type weight sharing
 
-### The Solution: 1024-d Ontology-Structure + Literal Hybrid Vector
+### The Solution: Ontology-Structure + Literal Hybrid Vector
 
-Every node gets a fixed-width 1024-dimensional vector with three segments encoding progressively more specific information:
+Every node gets a fixed-width vector (default 1024-d) with three segments encoding progressively more specific information. All segment boundaries are computed proportionally by `VectorLayout`, so the structure scales to any `vector_dim`:
 
 ```
-1024-dimensional node feature vector
+Default 1024-dimensional node feature vector
 ┌─────────────────────┬──────────────────────┬─────────────────────┐
 │ Ontology Structure  │ Property Presence &  │ Literal Values      │
 │ (class hierarchy,   │ Schema Signals       │ (numeric + encoded  │
 │  type identity)     │ (which properties    │  categorical)       │
 │                     │  are defined/present)│                     │
-│ dims 0–255          │ dims 256–639         │ dims 640–1023       │
-│ 256 dimensions      │ 384 dimensions       │ 384 dimensions      │
+│ 25% of vector_dim   │ 37.5% of vector_dim  │ 37.5% of vector_dim │
+│ (256 dims @ 1024)   │ (384 dims @ 1024)    │ (384 dims @ 1024)   │
 └─────────────────────┴──────────────────────┴─────────────────────┘
 ```
 
-#### Segment 1: Ontology Structure (dims 0–255)
+#### Segment 1: Ontology Structure (25% of vector_dim)
 
 Encodes **what the node is** in the ontology hierarchy — its class, its superclasses, and its ontology membership. Gives the GNN a structural fingerprint consistent across all nodes of the same type.
 
 ```
-Segment 1: Ontology Structure [256 dims]
+Segment 1: Ontology Structure [25% of vector_dim]
 ┌────────────────────┬────────────────────┬────────────────────┐
 │ Class Identity     │ Class Hierarchy    │ Ontology/Source    │
 │ (multi-hot hash    │ (rdfs:subClassOf   │ (which ontology    │
 │  of rdf:type URIs) │  chain, depth-     │  namespace, multi- │
 │                    │  weighted hashing) │  hot encoding)     │
-│ dims 0–63          │ dims 64–191        │ dims 192–255       │
-│ 64 dims            │ 128 dims           │ 64 dims            │
+│ 25% of segment     │ 50% of segment     │ 25% of segment     │
+│ (64 dims @ 1024)   │ (128 dims @ 1024)  │ (64 dims @ 1024)   │
 └────────────────────┴────────────────────┴────────────────────┘
 ```
 
-- **Class Identity (dims 0–63)**: Each `rdf:type` URI is hashed into 4 deterministic slots. Nodes of the same type share identical bits.
-- **Class Hierarchy (dims 64–191)**: `rdfs:subClassOf` chains are traversed (transitive closure up to depth 10). Superclass URIs are hashed with depth-weighted values (direct superclass = 1.0, grandparent = 0.5, etc.). Nodes sharing a superclass share bits in this segment.
-- **Ontology/Source Membership (dims 192–255)**: Multi-hot encoding of which ontology namespace(s) the node belongs to, derived from both the type URI and the node URI itself. Uses the canonical namespace registry from `rdf_utils.py`.
+- **Class Identity**: Each `rdf:type` URI is hashed into 4 deterministic slots. Nodes of the same type share identical bits.
+- **Class Hierarchy**: `rdfs:subClassOf` chains are traversed (transitive closure up to depth 10). Superclass URIs are hashed with depth-weighted values (direct superclass = 1.0, grandparent = 0.5, etc.). Nodes sharing a superclass share bits in this segment.
+- **Ontology/Source Membership**: Multi-hot encoding of which ontology namespace(s) the node belongs to, derived from both the type URI and the node URI itself. Uses the canonical namespace registry from `rdf_utils.py`.
 
-#### Segment 2: Property Schema (dims 256–639)
+#### Segment 2: Property Schema (37.5% of vector_dim)
 
 Encodes **which ontology-defined properties are present** for this node, regardless of their values. This tells the GNN about schema conformance and distinguishes "missing because not observed" from "missing because inapplicable."
 
 ```
-Segment 2: Property Schema [384 dims]
+Segment 2: Property Schema [37.5% of vector_dim]
 ┌─────────────────────┬─────────────────────┬─────────────────────┐
 │ Property Presence   │ Domain/Range Signals│ Property Hierarchy  │
 │ (which properties   │ (rdfs:domain and    │ (rdfs:subPropertyOf │
 │  this node has,     │  rdfs:range of      │  chains)            │
 │  multi-hot hashed)  │  properties)        │                     │
-│ dims 256–447        │ dims 448–559        │ dims 560–639        │
-│ 192 dims            │ 112 dims            │ 80 dims             │
+│ 50% of segment      │ 29% of segment      │ 21% of segment      │
+│ (192 dims @ 1024)   │ (112 dims @ 1024)   │ (80 dims @ 1024)    │
 └─────────────────────┴─────────────────────┴─────────────────────┘
 ```
 
-- **Property Presence (dims 256–447)**: Each predicate URI the node has is hashed into 3 slots. A CPI Index node with `indexValue`, `percentChange`, `hasMonth` gets different bits than a JOLTS node with `jobOpeningsLevel`, `hasIndustry`.
-- **Domain/Range Signals (dims 448–559)**: For each property this node has, the `rdfs:domain` and `rdfs:range` types declared in the ontology are hashed. This tells the GNN what types of relationships this node can participate in.
-- **Property Hierarchy (dims 560–639)**: `rdfs:subPropertyOf` relationships are hashed, connecting specific properties to their abstract parents.
+- **Property Presence**: Each predicate URI the node has is hashed into 3 slots. A CPI Index node with `indexValue`, `percentChange`, `hasMonth` gets different bits than a JOLTS node with `jobOpeningsLevel`, `hasIndustry`.
+- **Domain/Range Signals**: For each property this node has, the `rdfs:domain` and `rdfs:range` types declared in the ontology are hashed. This tells the GNN what types of relationships this node can participate in.
+- **Property Hierarchy**: `rdfs:subPropertyOf` relationships are hashed, connecting specific properties to their abstract parents.
 
-#### Segment 3: Literal Values (dims 640–1023)
+#### Segment 3: Literal Values (37.5% of vector_dim)
 
 Carries the actual numeric and categorical values in a fixed-width format with proper encoding.
 
 ```
-Segment 3: Literal Values [384 dims]
+Segment 3: Literal Values [37.5% of vector_dim]
 ┌─────────────────────┬─────────────────────┐
 │ Numeric Values      │ Categorical Values  │
 │ (z-score normalized │ (multi-hot hash     │
 │  into hashed slots) │  encoding)          │
-│ dims 640–895        │ dims 896–1023       │
-│ 256 dims            │ 128 dims            │
+│ 67% of segment      │ 33% of segment      │
+│ (256 dims @ 1024)   │ (128 dims @ 1024)   │
 └─────────────────────┴─────────────────────┘
 ```
 
-- **Numeric Values (dims 640–895)**: Each numeric property's predicate URI hashes to a fixed slot. The value is z-score normalized (per-predicate stats computed in a single pass on executors) and placed at that slot. Hash collisions sum — rare with 256 dims and ~10 properties per type.
-- **Categorical Values (dims 896–1023)**: Multi-hot hash encoding instead of `dense_rank`. Each `(predicate, value)` pair hashes to 4 slots. No ordinal assumption.
+- **Numeric Values**: Each numeric property's predicate URI hashes to a fixed slot. The value is z-score normalized (per-predicate stats computed in a single pass on executors) and placed at that slot. Hash collisions sum — rare with 256 dims and ~10 properties per type.
+- **Categorical Values**: Multi-hot hash encoding instead of `dense_rank`. Each `(predicate, value)` pair hashes to 4 slots. No ordinal assumption.
+
+### Proportional Dimension Scaling via VectorLayout
+
+All segment and sub-segment boundaries are computed at runtime by the `VectorLayout` class from the configured `vector_dim`. No dim indices are hardcoded in the encoding logic. This means overriding `vector_dim` from a notebook invocation automatically produces a correctly structured vector at the requested resolution:
+
+```
+VectorLayout(1024) — default, production:
+  Segment 1: Ontology Structure [0–255]     (256 dims)
+    Class Identity:     [0–63]              (64 dims)
+    Class Hierarchy:    [64–191]            (128 dims)
+    Ontology Source:    [192–255]           (64 dims)
+  Segment 2: Property Schema    [256–639]   (384 dims)
+    Property Presence:  [256–447]           (192 dims)
+    Domain/Range:       [448–559]           (112 dims)
+    Property Hierarchy: [560–639]           (80 dims)
+  Segment 3: Literal Values     [640–1023]  (384 dims)
+    Numeric Values:     [640–895]           (256 dims)
+    Categorical Values: [896–1023]          (128 dims)
+
+VectorLayout(512) — half resolution, faster experiments:
+  Segment 1: Ontology Structure [0–127]     (128 dims)
+    Class Identity:     [0–31]              (32 dims)
+    Class Hierarchy:    [32–95]             (64 dims)
+    Ontology Source:    [96–127]            (32 dims)
+  Segment 2: Property Schema    [128–319]   (192 dims)
+    Property Presence:  [128–223]           (96 dims)
+    Domain/Range:       [224–279]           (56 dims)
+    Property Hierarchy: [280–319]           (40 dims)
+  Segment 3: Literal Values     [320–511]   (192 dims)
+    Numeric Values:     [320–448]           (129 dims)
+    Categorical Values: [449–511]           (63 dims)
+
+VectorLayout(256) — quarter resolution, rapid prototyping:
+  Segment 1: Ontology Structure [0–63]      (64 dims)
+    Class Identity:     [0–15]              (16 dims)
+    Class Hierarchy:    [16–47]             (32 dims)
+    Ontology Source:    [48–63]             (16 dims)
+  Segment 2: Property Schema    [64–159]    (96 dims)
+    Property Presence:  [64–111]            (48 dims)
+    Domain/Range:       [112–139]           (28 dims)
+    Property Hierarchy: [140–159]           (20 dims)
+  Segment 3: Literal Values     [160–255]   (96 dims)
+    Numeric Values:     [160–223]           (64 dims)
+    Categorical Values: [224–255]           (32 dims)
+
+VectorLayout(2048) — double resolution, maximum fidelity:
+  Segment 1: Ontology Structure [0–511]     (512 dims)
+    Class Identity:     [0–127]             (128 dims)
+    Class Hierarchy:    [128–383]           (256 dims)
+    Ontology Source:    [384–511]           (128 dims)
+  Segment 2: Property Schema    [512–1279]  (768 dims)
+    Property Presence:  [512–895]           (384 dims)
+    Domain/Range:       [896–1119]          (224 dims)
+    Property Hierarchy: [1120–1279]         (160 dims)
+  Segment 3: Literal Values     [1280–2047] (768 dims)
+    Numeric Values:     [1280–1793]         (514 dims)
+    Categorical Values: [1794–2047]         (254 dims)
+```
+
+`VectorLayout` validates at construction time that all sub-segments are contiguous, non-overlapping, each has at least 1 dimension, and they sum exactly to `vector_dim`. If `vector_dim` is too small (< 32), it raises immediately with a clear error rather than silently producing a degenerate vector.
+
+**Tradeoffs when reducing `vector_dim`:**
+
+| vector_dim | Hash collision risk | Driver memory per 1M nodes | Use case |
+|-----------|-------------------|--------------------------|----------|
+| 2048 | Very low | ~8 GB | Maximum fidelity, large cluster |
+| 1024 | Low (~10 properties/type vs 256 numeric slots) | ~4 GB | Production default |
+| 512 | Moderate (128 numeric slots) | ~2 GB | Fast experiments on G.2X |
+| 256 | Higher (64 numeric slots) | ~1 GB | Rapid prototyping, small datasets |
+
+**Notebook invocation example:**
+
+```python
+# Quick experiment with half-resolution vectors on G.2X
+config = {
+    "feature_config": {
+        "vector_dim": 512,
+        "normalize": True
+    }
+}
+
+# The Glue job parameter:
+"--pyg_config": json.dumps(config)
+```
 
 ### Why This Is Better for GNNs
 
 ```
 OLD approach (flat literal vectors):
-┌──────────────────────────────────────────────────┐
-│ cpi_Index:  [295.8, 0.3, 2.1, 0.05, 3.0, 1.0]    │  6 dims, only literals
-│ ppi_Index:  [187.2, 0.1, 1.5, 0.03, 2.0, 1.0]    │  6 dims, only literals
-│                                                  │
-│ SEPARATE tensors per type (different widths)     │
-│ GNN needs type-specific linear layers            │
-│ No cross-type weight sharing possible            │
-│ Zero = missing? or inapplicable? GNN can't tell  │
-└──────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────┐
+│ cpi_Index:  [295.8, 0.3, 2.1, 0.05, 3.0, 1.0]          │  6 dims, only literals
+│ ppi_Index:  [187.2, 0.1, 1.5, 0.03, 2.0, 1.0]          │  6 dims, only literals
+│                                                        │
+│ SEPARATE tensors per type (different widths)           │
+│ GNN needs type-specific linear layers                  │
+│ No cross-type weight sharing possible                  │
+│ Zero = missing? or inapplicable? GNN can't tell        │
+└────────────────────────────────────────────────────────┘
 
 NEW approach (ontology-aware vectors):
-┌──────────────────────────────────────────────────┐
-│ cpi_Index:  [ontology:256 | schema:384 | lit:384]│  1024 dims, universal
-│ ppi_Index:  [ontology:256 | schema:384 | lit:384]│  1024 dims, universal
-│                                                  │
-│ SAME tensor width for ALL node types             │
-│ Shared ontology bits where types share ancestry  │
-│ GNN can use SHARED layers across all types       │
-│ Cross-type message passing works naturally       │
-│ Property presence distinguishes missing vs N/A   │
-└──────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────┐
+│ cpi_Index:  [ontology:25% | schema:37.5% | lit:37.5%]  │  1024-d, universal
+│ ppi_Index:  [ontology:25% | schema:37.5% | lit:37.5%]  │  1024-d, universal
+│                                                        │
+│ SAME tensor width for ALL node types                   │
+│ Shared ontology bits where types share ancestry        │
+│ GNN can use SHARED layers across all types             │
+│ Cross-type message passing works naturally             │
+│ Property presence distinguishes missing vs N/A         │
+│ Override vector_dim for memory/fidelity tradeoff       │
+└────────────────────────────────────────────────────────┘
 ```
 
 ### All Encoding Runs on Spark Executors
@@ -240,14 +326,16 @@ Every encoding operation uses pure Spark expressions — no Python UDFs:
 
 | Encoding | Spark Operation | Example |
 |----------|----------------|---------|
-| Class identity hash | `F.abs(F.hash(col, lit(seed))) % dim + offset` | `rdf:type` URI → 4 slots in dims 0–63 |
+| Class identity hash | `F.abs(F.hash(col, lit(seed))) % dim + offset` | `rdf:type` URI → 4 slots in class identity sub-segment |
 | Hierarchy traversal | Iterative self-join on `rdfs:subClassOf` | Transitive closure up to depth 10 |
 | Depth weighting | `F.lit(1.0) / F.col("depth").cast("double")` | Direct superclass = 1.0, grandparent = 0.5 |
-| Namespace membership | `F.col("type_uri").startswith(namespace)` | Multi-hot encoding in dims 192–255 |
-| Property presence hash | `F.abs(F.hash(col, lit(seed))) % dim + offset` | Predicate URI → 3 slots in dims 256–447 |
+| Namespace membership | `F.col("type_uri").startswith(namespace)` | Multi-hot encoding in ontology source sub-segment |
+| Property presence hash | `F.abs(F.hash(col, lit(seed))) % dim + offset` | Predicate URI → 3 slots in property presence sub-segment |
 | Numeric normalization | `F.broadcast(stats)` join + arithmetic | Per-predicate z-score in single pass |
-| Numeric slot hashing | `F.abs(F.hash(predicate, lit(500))) % 256 + 640` | Predicate → fixed slot in dims 640–895 |
-| Categorical multi-hot | `F.hash(F.concat(predicate, "::", value), lit(seed))` | (predicate, value) → 4 slots in dims 896–1023 |
+| Numeric slot hashing | `F.abs(F.hash(predicate, lit(500))) % dim + offset` | Predicate → fixed slot in numeric sub-segment |
+| Categorical multi-hot | `F.hash(F.concat(predicate, "::", value), lit(seed))` | (predicate, value) → 4 slots in categorical sub-segment |
+
+All `dim` and `offset` values in the table above are read from `VectorLayout` at runtime — they scale with `vector_dim`.
 
 ## PyG Construction Pipeline
 
@@ -277,6 +365,8 @@ triples_df (enriched, on executors)
     │   └── Output: Dict[(src_type, relation, dst_type) → LongTensor]
     │
     ├── Step 3: FeatureExtractor (on executors → driver tensors)
+    │   ├── Compute VectorLayout from configured vector_dim (all boundaries
+    │   │   scale proportionally — no hardcoded dim indices)
     │   ├── Extract ontology structure from triples (rdfs:subClassOf chains,
     │   │   rdfs:domain/range, rdfs:subPropertyOf) — all on executors
     │   ├── Compute per-node property presence via join — on executors
@@ -292,11 +382,11 @@ triples_df (enriched, on executors)
     │   │   ├── Collect sparse entries via toPandas() (chunked for large types)
     │   │   ├── Scatter into dense array, delete Pandas, gc.collect()
     │   │   └── Convert numpy → torch (zero-copy via from_numpy)
-    │   └── Output: Dict[node_type → FloatTensor[num_nodes, 1024]]
+    │   └── Output: Dict[node_type → FloatTensor[num_nodes, vector_dim]]
     │
     └── Step 4: Assemble HeteroData (on driver)
         ├── Only compact tensors on driver — no URI strings
-        ├── Attach 1024-d feature tensors per type (same width for all)
+        ├── Attach feature tensors per type (same width for all)
         ├── Attach edge_index tensors per (src, rel, dst) type
         ├── Release intermediate dicts, gc.collect()
         ├── Release node_id_df from executor cache
@@ -324,7 +414,7 @@ Step 2: Edge indices (collected one type at a time)
 Step 3: Feature tensors (collected one type at a time, largest first)
   Driver holds: feature_tensors dict (accumulating) + edge_indices
   Per type:
-    a) Pre-allocate dense numpy: num_nodes × 1024 × 4 bytes
+    a) Pre-allocate dense numpy: num_nodes × vector_dim × 4 bytes
     b) Collect sparse entries via toPandas():
        - Small types (<500K nodes): single collect, ~120 MB peak
        - Large types (>500K nodes): chunked by node_id range,
@@ -364,27 +454,26 @@ Step 5: Save to S3 (in build_graph.py)
 | Literal isolation | Spark executors | Anti-join against node_id_df filters out edge triples |
 | Ontology structure extraction | Spark executors | `rdfs:subClassOf` transitive closure via iterative joins |
 | Property schema extraction | Spark executors | `rdfs:domain`/`rdfs:range` join, cached on executors |
+| VectorLayout computation | Driver (init) | Pure Python arithmetic from `vector_dim`, ~1 μs |
 | Hash-based encoding | Spark executors | `F.hash()`, `F.abs()`, `F.lit()` — JVM-native, no Python UDF |
 | Feature normalization | Spark executors | Single-pass `agg()` for per-predicate stats, broadcast joined |
 | Sparse entry aggregation | Spark executors | `groupBy(node_id, dim).agg(sum)` — handles hash collisions |
 | Edge index collection | Driver | Per-edge-type [2, N] int64 — ~16 bytes/edge |
-| Feature collection | Driver | Per-type sparse entries → dense [N, 1024] float32, chunked for large types |
+| Feature collection | Driver | Per-type sparse entries → dense [N, vector_dim] float32, chunked for large types |
 | HeteroData assembly | Driver | Only compact tensors, no strings |
 | Enriched Parquet write | Spark executors | `repartition` + `write.parquet` — executors write directly to S3 |
 | PyG .pt upload | Driver | `upload_fileobj` streams buffer to S3 (no extra copy) |
 
-**Universal feature width**: HeteroData stores 1024-d feature tensors for every node type. The ontology-aware encoding keeps vectors informative even for types with few literal properties — the ontology structure and property schema segments still carry meaningful signal.
+**Universal feature width**: HeteroData stores feature tensors of the same `vector_dim` for every node type. The ontology-aware encoding keeps vectors informative even for types with few literal properties — the ontology structure and property schema segments still carry meaningful signal.
 
-| Node type example | Typical nodes | Vector dim | Memory | Key signals |
-|-------------------|--------------|-----------|--------|-------------|
-| cpi_Index | ~50K | 1024 | ~200 MB | CPI class hierarchy, index/change properties, BLS source |
-| market_PriceObservation | ~500K-1M | 1024 | ~2-4 GB | Market class, price/volume properties, ticker source |
-| market_options_OptionQuote | ~1-2M | 1024 | ~4-8 GB | Options subclass, strike/expiry/greeks properties |
-| jolts_JobOpeningsLevel | ~10K | 1024 | ~40 MB | JOLTS hierarchy, level/rate properties, BLS source |
-| filings_Form4 | ~50K | 1024 | ~200 MB | SEC filing class, transaction properties, SEC source |
-| unified_UnifiedMonth | ~12 | 1024 | ~48 KB | Temporal class, cross-source membership |
-
-**Total driver memory** for PyG object: typically 8-15 GB for 30-50M triples with 1024-d vectors. Fits on Glue G.4X (64 GB) workers. For smaller datasets or reduced vector dimensions, G.2X (32 GB) is sufficient.
+| Node type example | Typical nodes | Memory @ 1024-d | Memory @ 512-d | Key signals |
+|-------------------|--------------|-----------------|----------------|-------------|
+| cpi_Index | ~50K | ~200 MB | ~100 MB | CPI class hierarchy, index/change properties, BLS source |
+| market_PriceObservation | ~500K-1M | ~2-4 GB | ~1-2 GB | Market class, price/volume properties, ticker source |
+| market_options_OptionQuote | ~1-2M | ~4-8 GB | ~2-4 GB | Options subclass, strike/expiry/greeks properties |
+| jolts_JobOpeningsLevel | ~10K | ~40 MB | ~20 MB | JOLTS hierarchy, level/rate properties, BLS source |
+| filings_Form4 | ~50K | ~200 MB | ~100 MB | SEC filing class, transaction properties, SEC source |
+| unified_UnifiedMonth | ~12 | ~48 KB | ~24 KB | Temporal class, cross-source membership |
 
 ### Memory Budget by Glue Worker Type
 
@@ -393,7 +482,8 @@ Glue G.2X (32 GB driver):
   JVM + Spark overhead:     ~8-10 GB
   Python interpreter:       ~1-2 GB
   Available for tensors:    ~20-22 GB
-  → Suitable for <1M total nodes or reduced vector_dim
+  → Suitable for <1M total nodes at 1024-d
+  → Or <2M total nodes at 512-d
 
 Glue G.4X (64 GB driver):
   JVM + Spark overhead:     ~10-12 GB
@@ -402,6 +492,8 @@ Glue G.4X (64 GB driver):
   → Suitable for 2-5M total nodes at 1024-d
   → Recommended for production with intraday market data
 ```
+
+Reducing `vector_dim` from 1024 to 512 **halves driver memory** for feature tensors while preserving the same three-segment structure. This enables running on G.2X workers for rapid experimentation before committing to full-resolution production runs on G.4X.
 
 ### PyG Configuration
 
@@ -426,7 +518,7 @@ The PyG builder accepts an optional configuration dict:
 | `node_types` | All rdf:type classes | Whitelist of PyG node type names to include |
 | `edge_types` | All entity-to-entity predicates | Whitelist of relation names to include |
 | `feature_config.normalize` | `true` | Z-score normalize numeric features (single-pass per-predicate) |
-| `feature_config.vector_dim` | `1024` | Feature vector dimension (all segments scale proportionally) |
+| `feature_config.vector_dim` | `1024` | Feature vector dimension — all segments scale proportionally. Minimum 32. |
 | `feature_config.chunk_node_threshold` | `500000` | Node count above which chunked collection is used |
 | `include_temporal_nodes` | `true` | Include Month/Year/Quarter node types |
 | `include_sector_nodes` | `true` | Include EconomicSector node types |
@@ -462,6 +554,19 @@ When config is empty, sensible defaults are inferred from the data.
     "--time_period": "2024-12",
     "--parquet_partitions": "200",
     "--pyg_config": "{\"feature_config\": {\"normalize\": true, \"vector_dim\": 1024}}"
+}
+```
+
+**Notebook experiment with reduced dimensions:**
+
+```json
+{
+    "--mode": "pyg_only",
+    "--output_bucket": "my-data-lake",
+    "--enriched_parquet_prefix": "enriched/2024-12/triples/",
+    "--pyg_output_key": "pyg/2024-12/hetero_data_512d.pt",
+    "--time_period": "2024-12",
+    "--pyg_config": "{\"feature_config\": {\"vector_dim\": 512, \"normalize\": true}}"
 }
 ```
 
@@ -811,8 +916,7 @@ pyg-knowledge-graph-builder/
 │   │   ├── constructor.py                  # Orchestrates HeteroData construction
 │   │   ├── node_mapper.py                  # Assigns per-type integer node IDs on executors
 │   │   ├── edge_mapper.py                  # Resolves edges to integer index tensors on executors
-│   │   ├── feature_extractor.py            # Ontology-aware 1024-d feature vectors
-│   │   └── _legacy_feature_extractor.py    # Deprecated: per-type variable-width literals
+│   │   └── feature_extractor.py            # Ontology-aware feature vectors with VectorLayout
 │   └── utils/
 │       ├── __init__.py
 │       └── rdf_utils.py                    # Namespace constants, URI helpers, canonical
@@ -860,8 +964,7 @@ pyg-knowledge-graph-builder/
 | `constructor.py` | Orchestrates PyG HeteroData construction from triples DataFrame | Yes (orchestration) |
 | `node_mapper.py` | Discovers node types, assigns per-type integer IDs via Window functions. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
 | `edge_mapper.py` | Double-joins triples with node IDs, collects edge index tensors. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
-| `feature_extractor.py` | Builds 1024-d ontology-aware vectors: extracts class hierarchy, property schema, and literal values on executors; collects sparse entries (chunked for large types); scatters into dense tensors on driver. Imports `ONTOLOGY_NAMESPACE_INDICES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
-| `_legacy_feature_extractor.py` | Deprecated per-type variable-width literal extraction. Kept for A/B comparison during migration | Yes |
+| `feature_extractor.py` | Builds ontology-aware vectors via `VectorLayout` (proportionally scaled segments): extracts class hierarchy, property schema, and literal values on executors; collects sparse entries (chunked for large types); scatters into dense tensors on driver. Imports `ONTOLOGY_NAMESPACE_INDICES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
 
 ### Scalability
 
@@ -873,6 +976,7 @@ The pipeline is designed to handle:
 - **Dynamic schema evolution** as new data sources are added
 - **Horizontal scaling** by adding Glue DPUs — enrichment and PyG construction work distributes automatically
 - **Bounded driver memory** — PyG construction collects only compact integer/float tensors, not URI strings. Chunked collection for large node types bounds peak Pandas memory. `gc.collect()` between types reclaims fragmented memory (safe because it runs on the driver process only, after all Spark executor work is complete).
+- **Configurable vector dimension** — reducing `vector_dim` from 1024 to 512 halves driver memory for feature tensors while preserving the same three-segment structure via proportional `VectorLayout` scaling
 - **No Python UDFs in the hot path** — URI-to-name conversions, hash-based encoding, and numeric parsing use pure Spark expressions (JVM-native), avoiding Python serialization overhead on 30-50M rows
 - **Controlled Parquet output** — configurable partition count prevents thousands of tiny files or few huge files on S3
 - **Efficient literal isolation** — anti-join against node_id_df filters out edge triples before numeric parsing, avoiding wasted computation on URI-valued objects
