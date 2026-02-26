@@ -1,27 +1,33 @@
 """
 Feature Extractor — Ontology-Aware Fixed-Width Node Feature Vectors
 
-Constructs universal 1024-dimensional feature vectors that encode three
-layers of information for every node:
+Constructs universal fixed-width feature vectors (default 1024-d) that
+encode three layers of information for every node:
 
-  Segment 1 — Ontology Structure  (dims 0–255):   class identity,
+  Segment 1 — Ontology Structure  (25% of dims):  class identity,
               class hierarchy (rdfs:subClassOf chains), ontology/source
               membership
 
-  Segment 2 — Property Schema     (dims 256–639):  property presence
+  Segment 2 — Property Schema     (37.5% of dims): property presence
               (which ontology-defined properties this node has),
               domain/range signals, property hierarchy
 
-  Segment 3 — Literal Values      (dims 640–1023): numeric values in
+  Segment 3 — Literal Values      (37.5% of dims): numeric values in
               hashed slots (z-score normalized), categorical values as
               multi-hot hash encodings
 
+All segment and sub-segment boundaries scale proportionally with
+vector_dim. Passing vector_dim=512 produces a 512-d vector with the
+same three-segment structure at half resolution. Passing vector_dim=2048
+doubles resolution. The default 1024 is recommended for production.
+
 All encoding runs on Spark executors using deterministic hash-based
 functions expressed as pure Spark column expressions. Only the final
-[num_nodes, 1024] float32 array per node type is collected to the driver.
+[num_nodes, vector_dim] float32 array per node type is collected to
+the driver.
 
 Driver memory safety:
-  The dense tensor for a node type is num_nodes × 1024 × 4 bytes.
+  The dense tensor for a node type is num_nodes × vector_dim × 4 bytes.
   For large types (>500K nodes), this can exceed available driver memory.
   To prevent OOM:
   - Sparse (node_id, dim, value) entries are collected via toPandas()
@@ -31,6 +37,12 @@ Driver memory safety:
     so that at most ~500K nodes' sparse entries are in Pandas at once
   - The dense tensor itself is unavoidable (PyG requires it), but we
     ensure only ONE type's tensor + its Pandas intermediary coexist
+
+Why this replaces the old per-type variable-width approach:
+  - Universal width enables shared GNN layers across all node types
+  - Ontology structure gives the GNN a type fingerprint beyond raw literals
+  - Property presence distinguishes "missing" from "inapplicable"
+  - Hash-based encoding avoids vocabulary management across 100+ ontologies
 """
 import logging
 import gc
@@ -40,44 +52,45 @@ import numpy as np
 import torch
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
-from pyspark.sql.window import Window
 
 from glue_jobs.utils.rdf_utils import ONTOLOGY_NAMESPACE_INDICES
 
 logger = logging.getLogger(__name__)
 
 # ============================================
-# Vector layout constants
+# Default vector dimension
 # ============================================
 VECTOR_DIM = 1024
 
-# Segment 1: Ontology Structure (dims 0–255)
-SEG1_START = 0
-SEG1_CLASS_IDENTITY_START = 0
-SEG1_CLASS_IDENTITY_DIM = 64
-SEG1_CLASS_HIERARCHY_START = 64
-SEG1_CLASS_HIERARCHY_DIM = 128
-SEG1_ONTOLOGY_SOURCE_START = 192
-SEG1_ONTOLOGY_SOURCE_DIM = 64
-SEG1_END = 256
+# ============================================
+# Segment proportions (fraction of total vector_dim)
+# ============================================
+# These ratios are applied to any vector_dim to compute boundaries.
+#
+# Segment 1: Ontology Structure — 25%
+#   Sub-segments: class_identity=25%, class_hierarchy=50%, ontology_source=25%
+#
+# Segment 2: Property Schema — 37.5%
+#   Sub-segments: property_presence=50%, domain_range=~29%, property_hierarchy=~21%
+#
+# Segment 3: Literal Values — 37.5%
+#   Sub-segments: numeric=~67%, categorical=~33%
+#
+_SEG1_FRAC = 0.25
+_SEG2_FRAC = 0.375
+_SEG3_FRAC = 0.375  # = 1.0 - 0.25 - 0.375
 
-# Segment 2: Property Schema (dims 256–639)
-SEG2_START = 256
-SEG2_PROPERTY_PRESENCE_START = 256
-SEG2_PROPERTY_PRESENCE_DIM = 192
-SEG2_DOMAIN_RANGE_START = 448
-SEG2_DOMAIN_RANGE_DIM = 112
-SEG2_PROPERTY_HIERARCHY_START = 560
-SEG2_PROPERTY_HIERARCHY_DIM = 80
-SEG2_END = 640
+# Sub-segment fractions within each segment
+_SEG1_CLASS_IDENTITY_FRAC = 0.25
+_SEG1_CLASS_HIERARCHY_FRAC = 0.50
+_SEG1_ONTOLOGY_SOURCE_FRAC = 0.25
 
-# Segment 3: Literal Values (dims 640–1023)
-SEG3_START = 640
-SEG3_NUMERIC_START = 640
-SEG3_NUMERIC_DIM = 256
-SEG3_CATEGORICAL_START = 896
-SEG3_CATEGORICAL_DIM = 128
-SEG3_END = 1024
+_SEG2_PROPERTY_PRESENCE_FRAC = 0.50
+_SEG2_DOMAIN_RANGE_FRAC = 0.29
+_SEG2_PROPERTY_HIERARCHY_FRAC = 0.21
+
+_SEG3_NUMERIC_FRAC = 0.67
+_SEG3_CATEGORICAL_FRAC = 0.33
 
 # ============================================
 # URI constants
@@ -106,9 +119,6 @@ _NON_FEATURE_PREDICATES = {
 # ============================================
 # Driver memory safety constants
 # ============================================
-# Maximum nodes per chunk when collecting sparse entries to driver.
-# At ~15 sparse entries per node × 16 bytes/row = ~240 bytes/node,
-# 500K nodes ≈ 120 MB Pandas overhead — safe alongside the dense tensor.
 _CHUNK_NODE_THRESHOLD = 500_000
 
 # Number of hash functions for multi-hot categorical encoding
@@ -118,15 +128,218 @@ _NUM_CATEGORICAL_HASHES = 4
 _HASH_SEEDS = [0, 7, 13, 31]
 
 
+class VectorLayout:
+    """
+    Computes all segment and sub-segment boundaries from a given
+    vector_dim. All boundaries are integer dim indices.
+
+    Guarantees:
+    - All sub-segments are contiguous and non-overlapping
+    - All sub-segments have at least 1 dimension (raises if vector_dim
+      is too small)
+    - Sub-segment dims sum exactly to vector_dim (no gaps, no overlap)
+
+    Usage:
+        layout = VectorLayout(1024)
+        layout.seg1_class_identity_start  # 0
+        layout.seg1_class_identity_dim    # 64
+        layout.seg3_categorical_start     # 896
+        layout.seg3_categorical_dim       # 128
+        layout.vector_dim                 # 1024
+    """
+
+    def __init__(self, vector_dim: int):
+        if vector_dim < 32:
+            raise ValueError(
+                f"vector_dim must be >= 32, got {vector_dim}. "
+                f"Minimum needed for all sub-segments to have >= 1 dim."
+            )
+
+        self.vector_dim = vector_dim
+
+        # --- Segment boundaries ---
+        seg1_total = max(1, int(round(vector_dim * _SEG1_FRAC)))
+        seg2_total = max(1, int(round(vector_dim * _SEG2_FRAC)))
+        seg3_total = vector_dim - seg1_total - seg2_total  # remainder
+
+        if seg3_total < 1:
+            raise ValueError(
+                f"vector_dim={vector_dim} too small: seg3 would have "
+                f"{seg3_total} dims"
+            )
+
+        self.seg1_start = 0
+        self.seg1_total = seg1_total
+        self.seg2_start = seg1_total
+        self.seg2_total = seg2_total
+        self.seg3_start = seg1_total + seg2_total
+        self.seg3_total = seg3_total
+
+        # --- Segment 1 sub-segments ---
+        ci_dim = max(1, int(round(seg1_total * _SEG1_CLASS_IDENTITY_FRAC)))
+        ch_dim = max(1, int(round(seg1_total * _SEG1_CLASS_HIERARCHY_FRAC)))
+        os_dim = seg1_total - ci_dim - ch_dim  # remainder
+
+        if os_dim < 1:
+            os_dim = 1
+            ch_dim = seg1_total - ci_dim - os_dim
+
+        self.seg1_class_identity_start = self.seg1_start
+        self.seg1_class_identity_dim = ci_dim
+        self.seg1_class_hierarchy_start = self.seg1_start + ci_dim
+        self.seg1_class_hierarchy_dim = ch_dim
+        self.seg1_ontology_source_start = self.seg1_start + ci_dim + ch_dim
+        self.seg1_ontology_source_dim = os_dim
+
+        # --- Segment 2 sub-segments ---
+        pp_dim = max(1, int(round(seg2_total * _SEG2_PROPERTY_PRESENCE_FRAC)))
+        dr_dim = max(1, int(round(seg2_total * _SEG2_DOMAIN_RANGE_FRAC)))
+        ph_dim = seg2_total - pp_dim - dr_dim  # remainder
+
+        if ph_dim < 1:
+            ph_dim = 1
+            dr_dim = seg2_total - pp_dim - ph_dim
+
+        self.seg2_property_presence_start = self.seg2_start
+        self.seg2_property_presence_dim = pp_dim
+        self.seg2_domain_range_start = self.seg2_start + pp_dim
+        self.seg2_domain_range_dim = dr_dim
+        self.seg2_property_hierarchy_start = self.seg2_start + pp_dim + dr_dim
+        self.seg2_property_hierarchy_dim = ph_dim
+
+        # --- Segment 3 sub-segments ---
+        num_dim = max(1, int(round(seg3_total * _SEG3_NUMERIC_FRAC)))
+        cat_dim = seg3_total - num_dim  # remainder
+
+        if cat_dim < 1:
+            cat_dim = 1
+            num_dim = seg3_total - cat_dim
+
+        self.seg3_numeric_start = self.seg3_start
+        self.seg3_numeric_dim = num_dim
+        self.seg3_categorical_start = self.seg3_start + num_dim
+        self.seg3_categorical_dim = cat_dim
+
+        self._validate()
+
+    def _validate(self):
+        """Verify all sub-segments tile the full vector with no gaps."""
+        total = (
+            self.seg1_class_identity_dim
+            + self.seg1_class_hierarchy_dim
+            + self.seg1_ontology_source_dim
+            + self.seg2_property_presence_dim
+            + self.seg2_domain_range_dim
+            + self.seg2_property_hierarchy_dim
+            + self.seg3_numeric_dim
+            + self.seg3_categorical_dim
+        )
+        assert total == self.vector_dim, (
+            f"Sub-segment dims sum to {total}, expected {self.vector_dim}"
+        )
+
+        # Verify contiguity
+        assert self.seg1_class_identity_start == 0
+        assert (
+            self.seg1_class_hierarchy_start
+            == self.seg1_class_identity_start + self.seg1_class_identity_dim
+        )
+        assert (
+            self.seg1_ontology_source_start
+            == self.seg1_class_hierarchy_start + self.seg1_class_hierarchy_dim
+        )
+        assert (
+            self.seg2_property_presence_start
+            == self.seg1_ontology_source_start + self.seg1_ontology_source_dim
+        )
+        assert (
+            self.seg2_domain_range_start
+            == self.seg2_property_presence_start
+            + self.seg2_property_presence_dim
+        )
+        assert (
+            self.seg2_property_hierarchy_start
+            == self.seg2_domain_range_start + self.seg2_domain_range_dim
+        )
+        assert (
+            self.seg3_numeric_start
+            == self.seg2_property_hierarchy_start
+            + self.seg2_property_hierarchy_dim
+        )
+        assert (
+            self.seg3_categorical_start
+            == self.seg3_numeric_start + self.seg3_numeric_dim
+        )
+        assert (
+            self.seg3_categorical_start + self.seg3_categorical_dim
+            == self.vector_dim
+        )
+
+        # Verify all dims >= 1
+        for attr_name in dir(self):
+            if attr_name.endswith("_dim") and not attr_name.startswith("_"):
+                val = getattr(self, attr_name)
+                assert val >= 1, f"{attr_name} = {val}, must be >= 1"
+
+    def summary(self) -> str:
+        """Human-readable layout summary."""
+        lines = [
+            f"VectorLayout(vector_dim={self.vector_dim})",
+            f"  Segment 1: Ontology Structure "
+            f"[{self.seg1_start}–{self.seg2_start - 1}] "
+            f"({self.seg1_total} dims)",
+            f"    Class Identity:    "
+            f"[{self.seg1_class_identity_start}–"
+            f"{self.seg1_class_identity_start + self.seg1_class_identity_dim - 1}] "
+            f"({self.seg1_class_identity_dim} dims)",
+            f"    Class Hierarchy:   "
+            f"[{self.seg1_class_hierarchy_start}–"
+            f"{self.seg1_class_hierarchy_start + self.seg1_class_hierarchy_dim - 1}] "
+            f"({self.seg1_class_hierarchy_dim} dims)",
+            f"    Ontology Source:   "
+            f"[{self.seg1_ontology_source_start}–"
+            f"{self.seg1_ontology_source_start + self.seg1_ontology_source_dim - 1}] "
+            f"({self.seg1_ontology_source_dim} dims)",
+            f"  Segment 2: Property Schema "
+            f"[{self.seg2_start}–{self.seg3_start - 1}] "
+            f"({self.seg2_total} dims)",
+            f"    Property Presence: "
+            f"[{self.seg2_property_presence_start}–"
+            f"{self.seg2_property_presence_start + self.seg2_property_presence_dim - 1}] "
+            f"({self.seg2_property_presence_dim} dims)",
+            f"    Domain/Range:      "
+            f"[{self.seg2_domain_range_start}–"
+            f"{self.seg2_domain_range_start + self.seg2_domain_range_dim - 1}] "
+            f"({self.seg2_domain_range_dim} dims)",
+            f"    Property Hierarchy:"
+            f"[{self.seg2_property_hierarchy_start}–"
+            f"{self.seg2_property_hierarchy_start + self.seg2_property_hierarchy_dim - 1}] "
+            f"({self.seg2_property_hierarchy_dim} dims)",
+            f"  Segment 3: Literal Values "
+            f"[{self.seg3_start}–{self.vector_dim - 1}] "
+            f"({self.seg3_total} dims)",
+            f"    Numeric Values:    "
+            f"[{self.seg3_numeric_start}–"
+            f"{self.seg3_numeric_start + self.seg3_numeric_dim - 1}] "
+            f"({self.seg3_numeric_dim} dims)",
+            f"    Categorical Values:"
+            f"[{self.seg3_categorical_start}–"
+            f"{self.seg3_categorical_start + self.seg3_categorical_dim - 1}] "
+            f"({self.seg3_categorical_dim} dims)",
+        ]
+        return "\n".join(lines)
+
+
 class FeatureExtractor:
     """
-    Builds universal 1024-d ontology-aware feature vectors for all nodes.
+    Builds universal fixed-width ontology-aware feature vectors for all
+    nodes.
 
     All heavy computation runs on Spark executors. Only compact float
     arrays are collected to the driver, one node type at a time.
 
     Driver memory safety:
-      - Dense tensor is pre-allocated once per type (num_nodes × 1024 × 4B)
+      - Dense tensor is pre-allocated once per type (num_nodes × vector_dim × 4B)
       - Sparse entries collected in chunks for large types
       - Pandas intermediaries freed immediately after scatter
       - Only one type's tensor is being built at a time
@@ -143,6 +356,10 @@ class FeatureExtractor:
         self._chunk_threshold = feat_config.get(
             "chunk_node_threshold", _CHUNK_NODE_THRESHOLD
         )
+
+        # Compute layout from vector_dim — all segment boundaries
+        # scale proportionally
+        self._layout = VectorLayout(self._vector_dim)
 
     def build_features(
         self,
@@ -163,11 +380,13 @@ class FeatureExtractor:
             - Dict[node_type -> FloatTensor[num_nodes, vector_dim]]
             - Dict[node_type -> List[str]] segment description lists
         """
-        vector_dim = self._vector_dim
+        layout = self._layout
+        vector_dim = layout.vector_dim
 
         logger.info(
             f"  Building {vector_dim}-d ontology-aware feature vectors"
         )
+        logger.info(f"  {layout.summary()}")
 
         # Log driver memory budget estimate
         total_dense_bytes = sum(
@@ -261,9 +480,12 @@ class FeatureExtractor:
 
             feature_tensors[node_type] = tensor
             feature_names[node_type] = [
-                f"ontology_structure[0:{SEG1_END}]",
-                f"property_schema[{SEG2_START}:{SEG2_END}]",
-                f"literal_values[{SEG3_START}:{SEG3_END}]",
+                f"ontology_structure"
+                f"[{layout.seg1_start}:{layout.seg2_start}]",
+                f"property_schema"
+                f"[{layout.seg2_start}:{layout.seg3_start}]",
+                f"literal_values"
+                f"[{layout.seg3_start}:{layout.vector_dim}]",
             ]
 
             # Force GC between types to reclaim Pandas/numpy intermediaries
@@ -669,20 +891,9 @@ class FeatureExtractor:
 
         For large types (>chunk_threshold nodes), collection is split
         into node_id ranges to bound peak Pandas memory on the driver.
-
-        Memory lifecycle on driver:
-          1. Pre-allocate dense array: num_nodes × vector_dim × 4 bytes
-          2. Collect sparse chunk via toPandas() (~120 MB per 500K nodes)
-          3. Scatter into dense array (in-place, no copy)
-          4. Delete Pandas DataFrame
-          5. Repeat for next chunk (if chunked)
-          6. Convert numpy → torch tensor (zero-copy via from_numpy)
-
-        Peak driver memory for this type:
-          dense_array + one_pandas_chunk
-          = (num_nodes × vector_dim × 4) + (~240 bytes × chunk_size)
         """
-        vector_dim = self._vector_dim
+        layout = self._layout
+        vector_dim = layout.vector_dim
 
         # Filter all inputs to this node type
         type_nodes = node_id_df.filter(
@@ -741,8 +952,6 @@ class FeatureExtractor:
             combined = combined.unionAll(df)
 
         # Aggregate on executors: sum values at same (node_id, dim)
-        # This handles hash collisions and multi-type/multi-property
-        # contributions gracefully
         combined = (
             combined
             .groupBy("node_id", "dim")
@@ -757,15 +966,11 @@ class FeatureExtractor:
         # ============================================
         # Collect to driver and scatter into dense array
         # ============================================
-        # Pre-allocate the dense tensor — this is the unavoidable cost
         tensor = np.zeros((num_nodes, vector_dim), dtype=np.float32)
 
         if num_nodes <= self._chunk_threshold:
-            # Small type: single collect
             self._collect_and_scatter(combined, tensor, vector_dim)
         else:
-            # Large type: chunked collect by node_id range to bound
-            # peak Pandas memory on the driver
             self._collect_and_scatter_chunked(
                 combined, tensor, num_nodes, vector_dim
             )
@@ -780,9 +985,7 @@ class FeatureExtractor:
     ) -> None:
         """
         Collect all sparse entries and scatter into dense array.
-
-        Used for small-to-medium node types where the full Pandas
-        DataFrame fits comfortably alongside the dense tensor.
+        Used for small-to-medium node types.
         """
         pdf = combined.toPandas()
 
@@ -809,19 +1012,9 @@ class FeatureExtractor:
         """
         Collect sparse entries in chunks by node_id range and scatter
         into the pre-allocated dense array incrementally.
-
-        This bounds peak Pandas memory to ~chunk_threshold nodes' worth
-        of sparse entries (~120 MB) regardless of total type size.
-
-        The combined DataFrame is cached once on executors. Each chunk
-        filters by node_id range, collects via toPandas(), scatters
-        into the dense array, and frees the Pandas memory before the
-        next chunk.
         """
         chunk_size = self._chunk_threshold
 
-        # Cache the aggregated sparse entries on executors — each chunk
-        # reads from this cached DataFrame with a simple range filter
         combined = combined.cache()
         total_entries = combined.count()
 
@@ -876,38 +1069,42 @@ class FeatureExtractor:
         class_hierarchy_df: DataFrame,
     ) -> Optional[DataFrame]:
         """
-        Encode Segment 1 (dims 0–255): class identity, class hierarchy,
-        and ontology/source membership.
+        Encode Segment 1: class identity, class hierarchy, and
+        ontology/source membership.
+
+        All dim indices are derived from self._layout.
 
         Returns DataFrame(node_id: long, dim: int, value: float) or None.
         """
+        layout = self._layout
         parts: List[DataFrame] = []
 
-        # --- Sub-segment 1a: Class Identity (dims 0–63) ---
-        # Hash each rdf:type URI into multiple dims within [0, 64)
-        # using deterministic hash functions. Multi-hot encoding.
+        # --- Sub-segment 1a: Class Identity ---
         class_identity = (
             type_type_uris
             .select("node_id", "type_uri")
             .distinct()
         )
 
+        ci_start = layout.seg1_class_identity_start
+        ci_dim = layout.seg1_class_identity_dim
+
         for seed_offset in _HASH_SEEDS:
             ci_encoded = class_identity.select(
                 F.col("node_id"),
                 (
                     F.abs(F.hash(F.col("type_uri"), F.lit(seed_offset)))
-                    % F.lit(SEG1_CLASS_IDENTITY_DIM)
-                    + F.lit(SEG1_CLASS_IDENTITY_START)
+                    % F.lit(ci_dim)
+                    + F.lit(ci_start)
                 ).alias("dim"),
                 F.lit(1.0).alias("value"),
             )
             parts.append(ci_encoded)
 
-        # --- Sub-segment 1b: Class Hierarchy (dims 64–191) ---
-        # For each node, find all superclasses via the hierarchy table
-        # and hash them into dims [64, 192). Depth-weighted: closer
-        # superclasses get higher values.
+        # --- Sub-segment 1b: Class Hierarchy ---
+        ch_start = layout.seg1_class_hierarchy_start
+        ch_dim = layout.seg1_class_hierarchy_dim
+
         if class_hierarchy_df.head(1):
             node_supers = (
                 type_type_uris
@@ -935,16 +1132,17 @@ class FeatureExtractor:
                                     F.lit(seed_offset + 100),
                                 )
                             )
-                            % F.lit(SEG1_CLASS_HIERARCHY_DIM)
-                            + F.lit(SEG1_CLASS_HIERARCHY_START)
+                            % F.lit(ch_dim)
+                            + F.lit(ch_start)
                         ).alias("dim"),
                         F.col("weight").alias("value"),
                     )
                     parts.append(hier_encoded)
 
-        # --- Sub-segment 1c: Ontology/Source Membership (dims 192–255) ---
-        # Multi-hot encoding of which ontology namespace(s) the node's
-        # type URI belongs to. Uses canonical list from rdf_utils.
+        # --- Sub-segment 1c: Ontology/Source Membership ---
+        os_start = layout.seg1_ontology_source_start
+        os_dim = layout.seg1_ontology_source_dim
+
         for namespace, onto_idx in ONTOLOGY_NAMESPACE_INDICES:
             ns_match = (
                 type_type_uris
@@ -953,17 +1151,16 @@ class FeatureExtractor:
                 .distinct()
                 .withColumn(
                     "dim",
-                    F.lit(
-                        SEG1_ONTOLOGY_SOURCE_START
-                        + (onto_idx % SEG1_ONTOLOGY_SOURCE_DIM)
-                    ),
+                    F.lit(os_start + (onto_idx % os_dim)),
                 )
                 .withColumn("value", F.lit(1.0))
             )
             parts.append(ns_match)
 
-        # Also encode ontology membership from the node URI itself
-        node_ns_parts = self._encode_node_uri_namespace(type_nodes)
+        # Also encode from node URI namespace
+        node_ns_parts = self._encode_node_uri_namespace(
+            type_nodes, os_start, os_dim
+        )
         if node_ns_parts is not None:
             parts.append(node_ns_parts)
 
@@ -981,11 +1178,13 @@ class FeatureExtractor:
         )
 
     def _encode_node_uri_namespace(
-        self, type_nodes: DataFrame
+        self,
+        type_nodes: DataFrame,
+        os_start: int,
+        os_dim: int,
     ) -> Optional[DataFrame]:
         """
         Encode ontology membership from the node's own URI namespace.
-        Adds a second signal beyond the type URI namespace.
         """
         parts = []
         for namespace, onto_idx in ONTOLOGY_NAMESPACE_INDICES:
@@ -997,11 +1196,8 @@ class FeatureExtractor:
                 .withColumn(
                     "dim",
                     F.lit(
-                        SEG1_ONTOLOGY_SOURCE_START
-                        + (
-                            (onto_idx + SEG1_ONTOLOGY_SOURCE_DIM // 2)
-                            % SEG1_ONTOLOGY_SOURCE_DIM
-                        )
+                        os_start
+                        + ((onto_idx + os_dim // 2) % os_dim)
                     ),
                 )
                 .withColumn("value", F.lit(0.5))
@@ -1031,14 +1227,20 @@ class FeatureExtractor:
         property_hierarchy_df: DataFrame,
     ) -> Optional[DataFrame]:
         """
-        Encode Segment 2 (dims 256–639): property presence, domain/range
-        signals, and property hierarchy.
+        Encode Segment 2: property presence, domain/range signals,
+        and property hierarchy.
+
+        All dim indices are derived from self._layout.
 
         Returns DataFrame(node_id: long, dim: int, value: float) or None.
         """
+        layout = self._layout
         parts: List[DataFrame] = []
 
-        # --- Sub-segment 2a: Property Presence (dims 256–447) ---
+        # --- Sub-segment 2a: Property Presence ---
+        pp_start = layout.seg2_property_presence_start
+        pp_dim = layout.seg2_property_presence_dim
+
         if type_node_props.head(1):
             for seed_offset in _HASH_SEEDS[:3]:
                 pp_encoded = type_node_props.select(
@@ -1050,14 +1252,18 @@ class FeatureExtractor:
                                 F.lit(seed_offset + 200),
                             )
                         )
-                        % F.lit(SEG2_PROPERTY_PRESENCE_DIM)
-                        + F.lit(SEG2_PROPERTY_PRESENCE_START)
+                        % F.lit(pp_dim)
+                        + F.lit(pp_start)
                     ).alias("dim"),
                     F.lit(1.0).alias("value"),
                 )
                 parts.append(pp_encoded)
 
-        # --- Sub-segment 2b: Domain/Range Signals (dims 448–559) ---
+        # --- Sub-segment 2b: Domain/Range Signals ---
+        dr_start = layout.seg2_domain_range_start
+        dr_dim = layout.seg2_domain_range_dim
+        dr_half = max(1, dr_dim // 2)
+
         if type_node_props.head(1) and property_schema_df.head(1):
             prop_with_schema = (
                 type_node_props
@@ -1081,8 +1287,8 @@ class FeatureExtractor:
                             F.abs(
                                 F.hash(F.col("domain_uri"), F.lit(300))
                             )
-                            % F.lit(SEG2_DOMAIN_RANGE_DIM // 2)
-                            + F.lit(SEG2_DOMAIN_RANGE_START)
+                            % F.lit(dr_half)
+                            + F.lit(dr_start)
                         ).alias("dim"),
                         F.lit(1.0).alias("value"),
                     )
@@ -1098,18 +1304,18 @@ class FeatureExtractor:
                             F.abs(
                                 F.hash(F.col("range_uri"), F.lit(301))
                             )
-                            % F.lit(SEG2_DOMAIN_RANGE_DIM // 2)
-                            + F.lit(
-                                SEG2_DOMAIN_RANGE_START
-                                + SEG2_DOMAIN_RANGE_DIM // 2
-                            )
+                            % F.lit(dr_dim - dr_half)
+                            + F.lit(dr_start + dr_half)
                         ).alias("dim"),
                         F.lit(1.0).alias("value"),
                     )
                 )
                 parts.append(range_entries)
 
-        # --- Sub-segment 2c: Property Hierarchy (dims 560–639) ---
+        # --- Sub-segment 2c: Property Hierarchy ---
+        ph_start = layout.seg2_property_hierarchy_start
+        ph_dim = layout.seg2_property_hierarchy_dim
+
         if (type_node_props.head(1)
                 and property_hierarchy_df.head(1)):
             prop_with_super = (
@@ -1135,8 +1341,8 @@ class FeatureExtractor:
                                     F.lit(seed_offset + 400),
                                 )
                             )
-                            % F.lit(SEG2_PROPERTY_HIERARCHY_DIM)
-                            + F.lit(SEG2_PROPERTY_HIERARCHY_START)
+                            % F.lit(ph_dim)
+                            + F.lit(ph_start)
                         ).alias("dim"),
                         F.lit(1.0).alias("value"),
                     )
@@ -1167,14 +1373,20 @@ class FeatureExtractor:
         norm_stats: Optional[DataFrame],
     ) -> Optional[DataFrame]:
         """
-        Encode Segment 3 (dims 640–1023): numeric values in hashed slots
-        and categorical values as multi-hot hash encoding.
+        Encode Segment 3: numeric values in hashed slots and categorical
+        values as multi-hot hash encoding.
+
+        All dim indices are derived from self._layout.
 
         Returns DataFrame(node_id: long, dim: int, value: float) or None.
         """
+        layout = self._layout
         parts: List[DataFrame] = []
 
-        # --- Sub-segment 3a: Numeric Values (dims 640–895) ---
+        # --- Sub-segment 3a: Numeric Values ---
+        num_start = layout.seg3_numeric_start
+        num_dim = layout.seg3_numeric_dim
+
         if numeric_df is not None:
             type_numeric = numeric_df.filter(
                 F.col("node_type") == node_type
@@ -1210,14 +1422,17 @@ class FeatureExtractor:
                     F.col("node_id"),
                     (
                         F.abs(F.hash(F.col("predicate"), F.lit(500)))
-                        % F.lit(SEG3_NUMERIC_DIM)
-                        + F.lit(SEG3_NUMERIC_START)
+                        % F.lit(num_dim)
+                        + F.lit(num_start)
                     ).alias("dim"),
                     F.col(value_col).alias("value"),
                 )
                 parts.append(num_encoded)
 
-        # --- Sub-segment 3b: Categorical Values (dims 896–1023) ---
+        # --- Sub-segment 3b: Categorical Values ---
+        cat_start = layout.seg3_categorical_start
+        cat_dim = layout.seg3_categorical_dim
+
         if categorical_df is not None:
             type_cat = categorical_df.filter(
                 F.col("node_type") == node_type
@@ -1238,8 +1453,8 @@ class FeatureExtractor:
                                     F.lit(seed_offset + 600),
                                 )
                             )
-                            % F.lit(SEG3_CATEGORICAL_DIM)
-                            + F.lit(SEG3_CATEGORICAL_START)
+                            % F.lit(cat_dim)
+                            + F.lit(cat_start)
                         ).alias("dim"),
                         F.lit(1.0).alias("value"),
                     )
@@ -1257,29 +1472,3 @@ class FeatureExtractor:
             F.col("dim").cast("int"),
             F.col("value").cast("float"),
         )
-
-    # ================================================================
-    # Backward-compatible public API (deprecated)
-    # ================================================================
-
-    def build_features_legacy(
-        self,
-        triples_df: DataFrame,
-        node_id_df: DataFrame,
-        node_counts: Dict[str, int],
-    ) -> Tuple[Dict[str, torch.Tensor], Dict[str, List[str]]]:
-        """
-        Legacy per-type variable-width feature extraction.
-
-        Deprecated — use build_features() for ontology-aware vectors.
-        Kept for A/B comparison during migration.
-        """
-        logger.warning(
-            "Using legacy per-type feature extraction. "
-            "Consider switching to ontology-aware vectors."
-        )
-        from glue_jobs.pyg_builder._legacy_feature_extractor import (
-            LegacyFeatureExtractor,
-        )
-        legacy = LegacyFeatureExtractor(self.spark, self.config)
-        return legacy.build_features(triples_df, node_id_df, node_counts)
