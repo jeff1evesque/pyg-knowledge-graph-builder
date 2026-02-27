@@ -22,6 +22,13 @@ Filtering:
 - Triples where subject or object is not in node_id_df are excluded
   (literal-valued properties are handled by feature_extractor)
 - Config edge_types whitelist filters by relation name
+
+Ordering contract:
+- Within each edge type, edges are collected in deterministic order
+  (src_id ASC, dst_id ASC). EdgeFeatureExtractor assigns edge_idx
+  using the same Window ordering on executors, ensuring feature tensor
+  rows align with edge_index tensor columns without any driver
+  round-trip.
 """
 import logging
 from typing import Dict, Any, Tuple
@@ -98,6 +105,11 @@ class EdgeMapper:
     All heavy work (joining URIs to integer IDs, grouping by edge type)
     runs on Spark executors. Only compact [2, num_edges] integer arrays
     are collected to the driver, one edge type at a time.
+
+    Ordering contract: within each edge type, edges are collected in
+    deterministic order (src_id ASC, dst_id ASC). This allows
+    EdgeFeatureExtractor to assign matching edge_idx values on
+    executors without any driver round-trip.
     """
 
     def __init__(self, spark: SparkSession, config: Dict[str, Any]):
@@ -117,6 +129,11 @@ class EdgeMapper:
         Joins triples with node_id_df on executors to resolve URIs to
         integer IDs, then collects per-edge-type [2, num_edges] tensors
         to the driver one type at a time.
+
+        Ordering: within each edge type, edges are sorted by
+        (src_id ASC, dst_id ASC) before collection. This deterministic
+        ordering is the contract that EdgeFeatureExtractor relies on
+        to align feature tensor rows with edge_index columns.
 
         Args:
             triples_df: Enriched triples DataFrame (subject, predicate, object)
@@ -213,6 +230,7 @@ class EdgeMapper:
 
         # ============================================
         # Step 6: Collect each edge type's indices to driver
+        #         in deterministic order (src_id, dst_id)
         # ============================================
         edge_indices: Dict[Tuple[str, str, str], torch.Tensor] = {}
 
@@ -222,7 +240,8 @@ class EdgeMapper:
             dst_type = row.dst_type
             edge_type_key = (src_type, relation, dst_type)
 
-            # Filter to this edge type, select only integer IDs
+            # Filter to this edge type, select only integer IDs,
+            # sort deterministically for alignment with edge features
             type_edges = (
                 edges_final
                 .filter(
@@ -231,6 +250,7 @@ class EdgeMapper:
                     & (F.col("dst_type") == dst_type)
                 )
                 .select("src_id", "dst_id")
+                .orderBy("src_id", "dst_id")
             )
 
             # Collect via Arrow-optimized toPandas — only int64 pairs
