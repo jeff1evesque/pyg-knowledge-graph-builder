@@ -13,7 +13,7 @@ Architecture:
   Arrow-optimized toPandas()
 - Final HeteroData assembly happens on the driver
 
-Feature vectors:
+Node feature vectors:
 - Universal 1024-d ontology-aware vectors for all node types
 - Segment 1 (dims 0–255):   Ontology structure (class identity,
                              hierarchy, source membership)
@@ -33,14 +33,18 @@ Edge feature vectors (selective, default 32-d):
   identity)
 - Dimension configurable via edge_feature_config.edge_vector_dim
 - Edge types without features use simpler GNN message-passing layers
+- Reuses cached resolved edges DataFrame from EdgeMapper — the
+  expensive double-join runs exactly once
 
 Driver memory safety:
-- Feature tensors are built one type at a time, largest first
+- Node feature tensors are built one type at a time, largest first
 - Large types use chunked collection to bound Pandas intermediaries
 - gc.collect() runs between types to reclaim fragmented memory
 - Edge indices are collected one type at a time with immediate Pandas
   release
 - Edge feature tensors are small (32-d) and collected per edge type
+- Resolved edges DataFrame is cached once by EdgeMapper, shared with
+  EdgeFeatureExtractor, then unpersisted by the constructor
 - HeteroData assembly only references existing tensors (no copies)
 - Final .pt serialization streams to S3 via upload_fileobj
 
@@ -93,6 +97,7 @@ def build_hetero_data(
     Edge feature vectors are selective 32-d derived vectors:
     - Only high-value edge types receive features
     - Derived from endpoint node properties (no enrichment changes)
+    - Reuses cached resolved edges from EdgeMapper (no double-join)
     - See edge_feature_extractor.py for segment layout
 
     Args:
@@ -162,16 +167,18 @@ def build_hetero_data(
     )
     total_feature_mb = total_feature_bytes / (1024 * 1024)
     logger.info(
-        f"  Estimated node feature tensor memory: {total_feature_mb:,.1f} MB"
+        f"  Estimated node feature tensor memory: "
+        f"{total_feature_mb:,.1f} MB"
     )
 
     # ============================================
     # STEP 2: Build edge index tensors
+    #         (returns cached edges_final_df for reuse)
     # ============================================
     logger.info("Step 2/5: Building edge indices...")
 
     edge_mapper = EdgeMapper(spark, config)
-    edge_indices = edge_mapper.build_edge_indices(
+    edge_indices, edges_final_df = edge_mapper.build_edge_indices(
         triples_df, node_id_df, node_counts
     )
 
@@ -204,6 +211,7 @@ def build_hetero_data(
 
     # ============================================
     # STEP 4: Build edge feature tensors (derived)
+    #         Reuses edges_final_df — no double-join
     # ============================================
     logger.info("Step 4/5: Building derived edge feature tensors...")
 
@@ -211,8 +219,10 @@ def build_hetero_data(
 
     if edge_features_enabled:
         edge_feature_extractor = EdgeFeatureExtractor(spark, config)
-        edge_feature_tensors = edge_feature_extractor.build_edge_features(
-            triples_df, node_id_df, edge_indices
+        edge_feature_tensors = (
+            edge_feature_extractor.build_edge_features(
+                triples_df, node_id_df, edges_final_df, edge_indices
+            )
         )
 
         for etype, tensor in edge_feature_tensors.items():
@@ -221,6 +231,9 @@ def build_hetero_data(
             )
     else:
         logger.info("  Edge features disabled — skipping")
+
+    # Release resolved edges — both consumers are done
+    edges_final_df.unpersist()
 
     # ============================================
     # STEP 5: Assemble HeteroData (on driver only)
@@ -233,8 +246,6 @@ def build_hetero_data(
         if node_type in feature_tensors:
             data[node_type].x = feature_tensors[node_type]
         else:
-            # All node types get the same vector width — zeros for types
-            # with no extractable features
             data[node_type].x = torch.zeros(
                 num_nodes, vector_dim, dtype=torch.float32
             )
@@ -244,15 +255,13 @@ def build_hetero_data(
         edge_key = (src_type, rel, dst_type)
         data[edge_key].edge_index = edge_index
 
-        # Attach edge features if available for this edge type
         if edge_key in edge_feature_tensors:
             data[edge_key].edge_attr = edge_feature_tensors[edge_key]
 
     # Release executor memory for node ID table
     node_id_df.unpersist()
 
-    # Release references to intermediate dicts — HeteroData now owns
-    # the tensors. The dicts held duplicate references.
+    # Release references to intermediate dicts
     del feature_tensors
     del edge_indices
     del edge_feature_tensors
@@ -298,11 +307,13 @@ def build_hetero_data(
         store = data[edge_type]
         if hasattr(store, "edge_index") and store.edge_index is not None:
             total_bytes += (
-                store.edge_index.numel() * store.edge_index.element_size()
+                store.edge_index.numel()
+                * store.edge_index.element_size()
             )
         if hasattr(store, "edge_attr") and store.edge_attr is not None:
             total_bytes += (
-                store.edge_attr.numel() * store.edge_attr.element_size()
+                store.edge_attr.numel()
+                * store.edge_attr.element_size()
             )
     total_mb = total_bytes / (1024 * 1024)
     logger.info(f"  Total HeteroData tensor memory: {total_mb:,.1f} MB")

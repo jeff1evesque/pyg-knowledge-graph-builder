@@ -29,21 +29,29 @@ Vector structure (default 32-d, configurable via edge_vector_dim):
 
 All segment and sub-segment boundaries scale proportionally with
 edge_vector_dim via EdgeVectorLayout. Passing edge_vector_dim=64
-doubles resolution; passing edge_vector_dim=16 halves it.
+doubles resolution; passing edge_vector_dim=16 halves it. The default
+32 is recommended for production.
 
 All encoding runs on Spark executors using pure Spark column
 expressions. Only compact [num_edges, edge_vector_dim] float32 arrays
 are collected to the driver, one edge type at a time.
 
-Architecture — no driver round-trip:
-  Edge resolution (triples × node_id_df double-join) is reconstructed
-  on executors from the same inputs EdgeMapper uses. The resolved edge
-  DataFrame stays on executors throughout feature computation. Only
-  the final dense float32 tensor per edge type crosses to the driver.
-  The edge_index tensor (already on the driver from EdgeMapper) is used
-  solely for ordering alignment — a monotonic edge_idx column assigned
-  via Window functions on executors ensures the feature tensor rows
-  match the edge_index columns.
+Architecture — no double-join, no driver round-trip:
+  EdgeFeatureExtractor receives the cached resolved edges DataFrame
+  directly from EdgeMapper (via constructor.py). The expensive
+  double-join (triples × node_id_df) runs exactly once in EdgeMapper.
+  A deterministic edge_idx is assigned via Window functions on executors
+  using the same sort order (src_id ASC, dst_id ASC) that EdgeMapper
+  used for collection, ensuring feature tensor rows align with
+  edge_index tensor columns. No data round-trips through the driver.
+
+Driver memory safety:
+  Edge feature tensors are much smaller than node features (32-d vs
+  1024-d). At 32 dims × 4 bytes × 2M edges, a single edge type's
+  tensor is ~256 MB — well within driver memory. For very large edge
+  types (>1M edges), chunked collection is available to bound peak
+  Pandas memory. Collection is per-edge-type with immediate Pandas
+  release and gc.collect() between types.
 
 Which edge types get features (configurable, defaults below):
 
@@ -59,6 +67,14 @@ Which edge types get features (configurable, defaults below):
 
   No features (always skip):
     - belongsToSector, owl:sameAs, hasParent, rdf:type
+
+Why this requires zero enrichment changes:
+  During PyG construction, the EdgeMapper already joins each edge's
+  subject and object against the node ID table. At that point, both
+  endpoint nodes are resolved. The EdgeFeatureExtractor receives this
+  cached resolved edges DataFrame and joins against the literal triples
+  to access endpoint node properties — all on Spark executors, all
+  without touching a single enrichment module.
 """
 import logging
 import gc
@@ -82,6 +98,8 @@ EDGE_VECTOR_DIM = 32
 # ============================================
 # Segment proportions (fraction of total edge_vector_dim)
 # ============================================
+# These ratios are applied to any edge_vector_dim to compute boundaries.
+#
 # Segment 1: Temporal Signals — 37.5%
 #   Sub-segments: time_delta=40%, period_flags=35%, direction=25%
 #
@@ -113,14 +131,6 @@ _EDGE_SEG3_RELATION_IDENTITY_FRAC = 0.25
 # ============================================
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 
-_EXCLUDED_PREDICATES = {
-    RDF_TYPE,
-    "http://www.w3.org/2000/01/rdf-schema#label",
-    "http://www.w3.org/2000/01/rdf-schema#comment",
-    "http://www.w3.org/2000/01/rdf-schema#isDefinedBy",
-    "http://www.w3.org/2002/07/owl#imports",
-}
-
 _NON_FEATURE_PREDICATES = {
     RDF_TYPE,
     "http://www.w3.org/2000/01/rdf-schema#label",
@@ -139,31 +149,38 @@ _NON_FEATURE_PREDICATES = {
 # ============================================
 # Edge type classification
 # ============================================
+# Relation name fragments that identify temporal edges
 _TEMPORAL_RELATION_FRAGMENTS = (
     "precedes", "follows", "hasNext", "hasPrevious",
     "temporallyRelated",
 )
 
+# Relation name fragments that identify option-stock edges
 _OPTION_STOCK_RELATION_FRAGMENTS = (
     "hasUnderlyingPriceObservation", "hasUnderlying",
 )
 
+# Relation name fragments that identify escalation edges
 _ESCALATION_RELATION_FRAGMENTS = (
     "escalatesTo", "escalatesFrom", "severityChange",
 )
 
+# Relation name fragments that identify correlation edges
 _CORRELATION_RELATION_FRAGMENTS = (
     "correlatesWith", "relatedTo",
 )
 
+# Relation name fragments that identify causal edges
 _CAUSAL_RELATION_FRAGMENTS = (
     "leadsTo", "impacts", "causes", "affects",
 )
 
+# Relation name fragments that identify option strategy edges
 _STRATEGY_RELATION_FRAGMENTS = (
     "straddleWith", "spreadWith", "strangleWith",
 )
 
+# Edge types that should never get features
 _SKIP_RELATION_FRAGMENTS = (
     "belongsToSector", "sameAs", "hasParent", "hasChild",
     "equivalentClass", "equivalentProperty", "imports",
@@ -174,7 +191,9 @@ _SKIP_RELATION_FRAGMENTS = (
 # Hash seeds for deterministic encoding
 _EDGE_HASH_SEEDS = [0, 7, 13, 31]
 
+# ============================================
 # Driver memory safety constants
+# ============================================
 _CHUNK_EDGE_THRESHOLD = 1_000_000
 
 
@@ -188,7 +207,8 @@ class EdgeVectorLayout:
     - All sub-segments are contiguous and non-overlapping
     - All sub-segments have at least 1 dimension (raises if
       edge_vector_dim is too small)
-    - Sub-segment dims sum exactly to edge_vector_dim
+    - Sub-segment dims sum exactly to edge_vector_dim (no gaps,
+      no overlap)
 
     Usage:
         layout = EdgeVectorLayout(32)
@@ -211,7 +231,7 @@ class EdgeVectorLayout:
         # --- Segment boundaries ---
         seg1_total = max(1, int(round(edge_vector_dim * _EDGE_SEG1_FRAC)))
         seg2_total = max(1, int(round(edge_vector_dim * _EDGE_SEG2_FRAC)))
-        seg3_total = edge_vector_dim - seg1_total - seg2_total
+        seg3_total = edge_vector_dim - seg1_total - seg2_total  # remainder
 
         if seg3_total < 1:
             raise ValueError(
@@ -231,7 +251,7 @@ class EdgeVectorLayout:
         pf_dim = max(
             1, int(round(seg1_total * _EDGE_SEG1_PERIOD_FLAGS_FRAC))
         )
-        dir_dim = seg1_total - td_dim - pf_dim
+        dir_dim = seg1_total - td_dim - pf_dim  # remainder
 
         if dir_dim < 1:
             dir_dim = 1
@@ -249,7 +269,7 @@ class EdgeVectorLayout:
             1, int(round(seg2_total * _EDGE_SEG2_DIFFERENCE_FRAC))
         )
         rat_dim = max(1, int(round(seg2_total * _EDGE_SEG2_RATIO_FRAC)))
-        mag_dim = seg2_total - diff_dim - rat_dim
+        mag_dim = seg2_total - diff_dim - rat_dim  # remainder
 
         if mag_dim < 1:
             mag_dim = 1
@@ -270,7 +290,7 @@ class EdgeVectorLayout:
             1,
             int(round(seg3_total * _EDGE_SEG3_LABEL_SIMILARITY_FRAC)),
         )
-        ri_dim = seg3_total - ns_dim - ls_dim
+        ri_dim = seg3_total - ns_dim - ls_dim  # remainder
 
         if ri_dim < 1:
             ri_dim = 1
@@ -411,6 +431,10 @@ def _classify_relation(relation: str) -> str:
 
     Returns one of: 'temporal', 'option_stock', 'escalation',
     'correlation', 'causal', 'strategy', 'skip', 'generic'.
+
+    Classification is based on substring matching against known
+    relation name fragments. The order of checks matters — skip
+    is checked first to ensure structural edges are never featurized.
     """
     rel_lower = relation.lower()
 
@@ -445,49 +469,6 @@ def _classify_relation(relation: str) -> str:
     return "generic"
 
 
-def _build_predicate_to_relation_expr(
-    pred_col: str = "predicate",
-) -> F.Column:
-    """
-    Build a pure-Spark Column expression that converts a predicate URI
-    to a PyG-compatible relation name. No Python UDF.
-
-    Identical to edge_mapper._build_predicate_to_relation_expr — we
-    replicate it here to avoid a circular import and because both
-    modules need the same conversion independently.
-    """
-    col = F.col(pred_col)
-    expr = None
-
-    for namespace, prefix in NAMESPACE_PREFIXES:
-        ns_len = len(namespace)
-        local_name = F.substring(col, ns_len + 1, 1000)
-        local_name = F.regexp_replace(local_name, r"^[/#]+|[/#]+$", "")
-        relation_name = F.concat(F.lit(f"{prefix}_"), local_name)
-
-        condition = col.startswith(namespace) & (F.length(local_name) > 0)
-
-        if expr is None:
-            expr = F.when(condition, relation_name)
-        else:
-            expr = expr.when(condition, relation_name)
-
-    fallback_local = F.regexp_extract(col, r"[#/]([^#/]+)$", 1)
-    fallback_name = F.concat(F.lit("unknown_"), fallback_local)
-
-    expr = expr.otherwise(
-        F.when(
-            F.length(fallback_local) > 0, fallback_name
-        ).otherwise(
-            F.concat(
-                F.lit("unknown_"), F.abs(F.hash(col)).cast("string")
-            )
-        )
-    )
-
-    return expr
-
-
 class EdgeFeatureExtractor:
     """
     Builds fixed-width edge feature vectors derived from endpoint node
@@ -496,24 +477,28 @@ class EdgeFeatureExtractor:
     All heavy computation runs on Spark executors. Only compact float
     arrays are collected to the driver, one edge type at a time.
 
-    Architecture — no driver round-trip:
-      The resolved edge DataFrame is reconstructed on executors by
-      replaying the same double-join that EdgeMapper performs (triples
-      × node_id_df). This avoids pushing driver-side tensors back to
-      Spark. A deterministic edge_idx is assigned via Window functions
-      on executors using the same sort order (src_id, dst_id) that
-      EdgeMapper used for deduplication, ensuring the feature tensor
-      rows align with the edge_index tensor columns.
+    Architecture — no double-join, no driver round-trip:
+      Receives the cached resolved edges DataFrame directly from
+      EdgeMapper (via constructor.py). The expensive double-join
+      (triples × node_id_df) runs exactly once in EdgeMapper. A
+      deterministic edge_idx is assigned via Window functions on
+      executors using the same sort order (src_id ASC, dst_id ASC)
+      that EdgeMapper used for collection, ensuring feature tensor
+      rows align with edge_index tensor columns. No data round-trips
+      through the driver.
 
     Edge features are selective — only edge types with meaningful
     per-instance variation get feature vectors. The set of featurized
-    edge types is configurable.
+    edge types is configurable via enabled_categories.
 
     Driver memory safety:
       - Edge feature tensors are much smaller than node features
         (32-d vs 1024-d, and edges are just pairs)
+      - At 32 dims × 4 bytes × 2M edges, a single type is ~256 MB
       - Collection is per-edge-type with immediate Pandas release
-      - For very large edge types, chunked collection is available
+      - For very large edge types (>1M edges), chunked collection
+        bounds peak Pandas memory
+      - gc.collect() between types reclaims fragmented memory
     """
 
     def __init__(self, spark: SparkSession, config: Dict[str, Any]):
@@ -529,7 +514,8 @@ class EdgeFeatureExtractor:
             "chunk_edge_threshold", _CHUNK_EDGE_THRESHOLD
         )
 
-        # Which categories of edge types to featurize
+        # Which categories of edge types to featurize.
+        # Default: only the three highest-value categories.
         self._enabled_categories: Set[str] = set(
             edge_feat_config.get(
                 "enabled_categories",
@@ -537,35 +523,45 @@ class EdgeFeatureExtractor:
             )
         )
 
+        # Compute layout from edge_vector_dim — all segment boundaries
+        # scale proportionally
         self._layout = EdgeVectorLayout(self._edge_vector_dim)
 
     def build_edge_features(
         self,
         triples_df: DataFrame,
         node_id_df: DataFrame,
+        edges_final_df: DataFrame,
         edge_indices: Dict[Tuple[str, str, str], torch.Tensor],
     ) -> Dict[Tuple[str, str, str], torch.Tensor]:
         """
         Build edge feature vectors for eligible edge types.
 
-        Reconstructs the resolved edge DataFrame on executors (same
-        double-join as EdgeMapper), then derives per-edge features
-        from endpoint literal properties. Only compact float tensors
-        cross to the driver.
+        Uses the cached resolved edges DataFrame from EdgeMapper
+        directly — no double-join replay. Joins endpoint literal
+        properties on executors to derive per-edge features. Only
+        compact float tensors cross to the driver.
 
         Args:
             triples_df: Enriched triples DataFrame
                 (subject, predicate, object)
             node_id_df: Node ID table (uri, node_id, node_type) — cached
+                on executors
+            edges_final_df: Resolved edges DataFrame from EdgeMapper
+                (src_type, src_id, relation, dst_type, dst_id) — cached
+                on executors. Reused here to avoid replaying the
+                expensive double-join.
             edge_indices: Dict from EdgeMapper — maps
                 (src_type, relation, dst_type) -> LongTensor[2, N].
-                Used only for edge counts and ordering validation,
+                Used only for edge counts and eligibility checking,
                 not pushed back to Spark.
 
         Returns:
             Dict mapping (src_type, relation, dst_type) ->
                 FloatTensor[num_edges, edge_vector_dim]
             Only contains entries for edge types that received features.
+            Edge types not in this dict should not have edge_attr set
+            in HeteroData.
         """
         if not self._enabled:
             logger.info("  Edge features disabled by config")
@@ -582,7 +578,9 @@ class EdgeFeatureExtractor:
             f"  Enabled categories: {sorted(self._enabled_categories)}"
         )
 
+        # ============================================
         # Classify each edge type — determine which need features
+        # ============================================
         eligible_types: List[Tuple[Tuple[str, str, str], str]] = []
         skipped = 0
 
@@ -609,17 +607,33 @@ class EdgeFeatureExtractor:
             return {}
 
         # ============================================
-        # Reconstruct resolved edges on executors
-        # (same double-join as EdgeMapper, stays on executors)
+        # Assign deterministic edge_idx on executors.
+        # Same ordering (src_id ASC, dst_id ASC) as EdgeMapper's
+        # collection sort, ensuring feature tensor rows align with
+        # edge_index tensor columns.
         # ============================================
-        logger.info("  Reconstructing resolved edges on executors...")
-
-        resolved_edges_df = self._reconstruct_resolved_edges(
-            triples_df, node_id_df
+        logger.info(
+            "  Assigning deterministic edge_idx on executors..."
         )
+
+        edges_with_idx = edges_final_df.withColumn(
+            "edge_idx",
+            (
+                F.row_number().over(
+                    Window.partitionBy(
+                        "src_type", "relation", "dst_type"
+                    ).orderBy("src_id", "dst_id")
+                )
+                - 1
+            ).cast("long"),
+        )
+
+        edges_with_idx = edges_with_idx.cache()
+        edges_with_idx.count()  # force materialization
 
         # ============================================
         # Pre-extract endpoint literal properties (on executors)
+        # These are reused across all edge types.
         # ============================================
         logger.info("  Extracting endpoint literal properties...")
 
@@ -646,7 +660,7 @@ class EdgeFeatureExtractor:
                 edge_type_key=edge_type_key,
                 num_edges=num_edges,
                 category=category,
-                resolved_edges_df=resolved_edges_df,
+                edges_with_idx=edges_with_idx,
                 numeric_props_df=numeric_props_df,
                 label_df=label_df,
             )
@@ -659,10 +673,15 @@ class EdgeFeatureExtractor:
                     f"{feat_mb:.1f} MB"
                 )
 
+            # Force GC between edge types to reclaim Pandas/numpy
+            # intermediaries. Safe because it runs on the driver
+            # process only — all Spark executor work is complete
+            # before collection.
             gc.collect()
 
-        # Cleanup
-        for df in [resolved_edges_df, numeric_props_df, label_df]:
+        # Cleanup cached intermediates
+        edges_with_idx.unpersist()
+        for df in [numeric_props_df, label_df]:
             if df is not None:
                 try:
                     df.unpersist()
@@ -681,108 +700,7 @@ class EdgeFeatureExtractor:
         return edge_features
 
     # ================================================================
-    # Resolved edge reconstruction (entirely on executors)
-    # ================================================================
-
-    def _reconstruct_resolved_edges(
-        self,
-        triples_df: DataFrame,
-        node_id_df: DataFrame,
-    ) -> DataFrame:
-        """
-        Reconstruct the resolved edge DataFrame on executors by
-        replaying the same double-join that EdgeMapper performs.
-
-        Returns a cached DataFrame with columns:
-            (src_type, src_id, relation, dst_type, dst_id, edge_idx)
-
-        The edge_idx column is a deterministic 0-indexed integer per
-        (src_type, relation, dst_type) group, assigned via Window
-        functions using the same sort order (src_id, dst_id) that
-        EdgeMapper used. This ensures feature tensor rows align with
-        edge_index tensor columns.
-
-        All work runs on executors — no data crosses to the driver.
-        """
-        excluded_list = list(_EXCLUDED_PREDICATES)
-        edge_triples = triples_df.filter(
-            ~F.col("predicate").isin(excluded_list)
-        )
-
-        src_lookup = node_id_df.select(
-            F.col("uri").alias("_src_uri"),
-            F.col("node_id").alias("src_id"),
-            F.col("node_type").alias("src_type"),
-        )
-
-        dst_lookup = node_id_df.select(
-            F.col("uri").alias("_dst_uri"),
-            F.col("node_id").alias("dst_id"),
-            F.col("node_type").alias("dst_type"),
-        )
-
-        edges_resolved = (
-            edge_triples
-            .join(
-                src_lookup,
-                edge_triples["subject"] == src_lookup["_src_uri"],
-                "inner",
-            )
-            .drop("_src_uri")
-            .join(
-                dst_lookup,
-                F.col("object") == dst_lookup["_dst_uri"],
-                "inner",
-            )
-            .drop("_dst_uri")
-        )
-
-        # Derive relation names (pure Spark, no UDF)
-        edges_resolved = edges_resolved.withColumn(
-            "relation", _build_predicate_to_relation_expr("predicate")
-        )
-
-        # Select, deduplicate, and assign deterministic edge_idx
-        edges_deduped = (
-            edges_resolved
-            .select(
-                "src_type",
-                F.col("src_id").cast("long"),
-                "relation",
-                "dst_type",
-                F.col("dst_id").cast("long"),
-            )
-            .dropDuplicates(
-                ["src_type", "src_id", "relation", "dst_type", "dst_id"]
-            )
-        )
-
-        # Assign per-edge-type 0-indexed edge_idx using the same
-        # deterministic ordering (src_id, dst_id) that EdgeMapper
-        # collects in. This ensures row i of the feature tensor
-        # corresponds to column i of the edge_index tensor.
-        edges_with_idx = edges_deduped.withColumn(
-            "edge_idx",
-            (
-                F.row_number().over(
-                    Window.partitionBy(
-                        "src_type", "relation", "dst_type"
-                    ).orderBy("src_id", "dst_id")
-                )
-                - 1
-            ).cast("long"),
-        )
-
-        edges_with_idx = edges_with_idx.cache()
-        total = edges_with_idx.count()
-        logger.info(
-            f"    Reconstructed {total:,} resolved edges on executors"
-        )
-
-        return edges_with_idx
-
-    # ================================================================
-    # Endpoint property extraction (on executors)
+    # Endpoint property extraction (all on executors)
     # ================================================================
 
     def _extract_node_numeric_properties(
@@ -795,17 +713,26 @@ class EdgeFeatureExtractor:
         (node_type, node_id, predicate, numeric_value).
 
         Used to derive numeric contrast signals between edge endpoints.
+
+        Isolates literal triples via anti-join against node URIs (same
+        pattern as feature_extractor.py), then parses numeric values
+        via cast("double"). Aggregates multiple values per
+        (node, predicate) pair by mean.
+
+        Returns a cached DataFrame on executors.
         """
         excluded_list = list(_NON_FEATURE_PREDICATES)
 
-        # Isolate literal triples via anti-join against node URIs
+        # Isolate literal triples via anti-join against node URIs.
+        # Triples where the object is a known node URI are edge triples,
+        # not literal properties.
         literal_triples = triples_df.join(
             node_id_df.select(F.col("uri").alias("_obj_uri")),
             triples_df["object"] == F.col("_obj_uri"),
             "left_anti",
         ).filter(~F.col("predicate").isin(excluded_list))
 
-        # Parse numeric values
+        # Parse numeric values — strip datatype suffix before casting
         candidates = literal_triples.withColumn(
             "numeric_value",
             F.split(F.col("object"), r"\^\^").getItem(0).cast("double"),
@@ -817,6 +744,7 @@ class EdgeFeatureExtractor:
             F.col("node_type"),
         )
 
+        # Join with node IDs and aggregate per (node, predicate)
         numeric_df = (
             candidates
             .join(
@@ -847,7 +775,11 @@ class EdgeFeatureExtractor:
         Extract rdfs:label values for all nodes, keyed by
         (node_type, node_id, label).
 
-        Used for label similarity signals on correlation edges.
+        Used for label similarity signals on correlation and causal
+        edges. Labels are lowercased for case-insensitive word overlap
+        computation.
+
+        Returns a cached DataFrame on executors.
         """
         rdfs_label = "http://www.w3.org/2000/01/rdf-schema#label"
 
@@ -881,7 +813,7 @@ class EdgeFeatureExtractor:
         return label_df
 
     # ================================================================
-    # Per-edge-type vector assembly
+    # Per-edge-type vector assembly (on executors, collect to driver)
     # ================================================================
 
     def _build_edge_type_vectors(
@@ -889,20 +821,24 @@ class EdgeFeatureExtractor:
         edge_type_key: Tuple[str, str, str],
         num_edges: int,
         category: str,
-        resolved_edges_df: DataFrame,
+        edges_with_idx: DataFrame,
         numeric_props_df: DataFrame,
         label_df: DataFrame,
     ) -> Optional[torch.Tensor]:
         """
-        Build feature vectors for all edges of one type.
+        Build the full vector for all edges of one type.
 
-        Filters the resolved_edges_df to this edge type (on executors),
-        joins endpoint properties, computes derived features as sparse
-        (edge_idx, dim, value) entries, aggregates on executors, then
-        collects to driver.
+        Each segment is computed on executors as a DataFrame of
+        (edge_idx, dim, value) sparse entries. These are aggregated on
+        executors (sum at same edge_idx+dim), then collected to the
+        driver and scattered into a pre-allocated dense numpy array.
 
-        No data round-trips through the driver — resolved_edges_df
-        was reconstructed entirely on executors.
+        For large edge types (>chunk_threshold edges), collection is
+        split into edge_idx ranges to bound peak Pandas memory on the
+        driver.
+
+        No data round-trips through the driver — edges_with_idx was
+        received from EdgeMapper's cache, not reconstructed.
         """
         layout = self._layout
         edge_vector_dim = layout.edge_vector_dim
@@ -917,7 +853,7 @@ class EdgeFeatureExtractor:
         # Filter resolved edges to this type (on executors)
         # ============================================
         edge_df = (
-            resolved_edges_df
+            edges_with_idx
             .filter(
                 (F.col("src_type") == src_type)
                 & (F.col("relation") == relation)
@@ -972,7 +908,9 @@ class EdgeFeatureExtractor:
         for df in all_parts[1:]:
             combined = combined.unionAll(df)
 
-        # Aggregate on executors: sum values at same (edge_idx, dim)
+        # Aggregate on executors: sum values at same (edge_idx, dim).
+        # Hash collisions from different sub-segments landing on the
+        # same dim are summed — same pattern as node feature vectors.
         combined = (
             combined
             .groupBy("edge_idx", "dim")
@@ -1019,9 +957,14 @@ class EdgeFeatureExtractor:
         direction between edge endpoints.
 
         For temporal edges: computes month/year delta from endpoint
-        properties.
+        properties. Month and year values are extracted by regex-matching
+        predicate URIs containing "month" or "year" patterns.
+
         For non-temporal edges: encodes a hash of the relation category
-        into the time delta sub-segment as a type indicator.
+        into the time delta sub-segment as a type indicator, so the GNN
+        can still distinguish edge categories in this segment.
+
+        All dim indices are derived from self._layout.
 
         Returns DataFrame(edge_idx: long, dim: int, value: float)
         or None.
@@ -1034,7 +977,9 @@ class EdgeFeatureExtractor:
         td_dim = layout.seg1_time_delta_dim
 
         if category == "temporal":
-            # Join source endpoint month/year properties
+            # Find month/year numeric properties by predicate pattern.
+            # These patterns match predicates like cpi:hasMonth,
+            # market:monthNumber, etc.
             month_preds = numeric_props_df.filter(
                 F.col("predicate").rlike(
                     "(?i)(hasMonth|month|hasMonthNum|monthNumber)"
@@ -1082,7 +1027,9 @@ class EdgeFeatureExtractor:
                 )
             )
 
-            # Join temporal properties to edges (on executors)
+            # Join temporal properties to edges (on executors).
+            # Left joins ensure edges without temporal properties
+            # still get zero-valued features rather than being dropped.
             temporal_edges = (
                 edge_df
                 .join(
@@ -1113,6 +1060,8 @@ class EdgeFeatureExtractor:
 
             # Compute month delta: (dst_year - src_year) * 12
             #                       + (dst_month - src_month)
+            # This gives a signed integer representing the number of
+            # months between endpoints. Positive = dst is later.
             temporal_edges = temporal_edges.withColumn(
                 "month_delta",
                 F.when(
@@ -1129,13 +1078,14 @@ class EdgeFeatureExtractor:
             )
 
             # Normalize month delta: divide by 12 to put in
-            # ~[-1, 1] range for typical monthly data
+            # ~[-1, 1] range for typical monthly data.
+            # A 1-month gap = 0.083, a 1-year gap = 1.0.
             temporal_edges = temporal_edges.withColumn(
                 "norm_delta",
                 F.col("month_delta") / F.lit(12.0),
             )
 
-            # Hash the normalized delta into time_delta sub-segment
+            # Signed normalized delta in a hashed slot
             td_encoded = temporal_edges.select(
                 F.col("edge_idx"),
                 (
@@ -1147,7 +1097,8 @@ class EdgeFeatureExtractor:
             )
             parts.append(td_encoded)
 
-            # Also encode absolute delta in a second slot
+            # Absolute delta in a second slot — useful for the GNN
+            # to learn "how far apart" regardless of direction
             if td_dim >= 2:
                 td_abs_encoded = temporal_edges.select(
                     F.col("edge_idx"),
@@ -1164,7 +1115,7 @@ class EdgeFeatureExtractor:
             pf_start = layout.seg1_period_flags_start
             pf_dim = layout.seg1_period_flags_dim
 
-            # Same-year flag
+            # Same-year flag: 1.0 if both endpoints are in the same year
             same_year = temporal_edges.select(
                 F.col("edge_idx"),
                 F.lit(pf_start).alias("dim"),
@@ -1177,7 +1128,8 @@ class EdgeFeatureExtractor:
             )
             parts.append(same_year)
 
-            # Consecutive-month flag
+            # Consecutive-month flag: 1.0 if endpoints are exactly
+            # 1 month apart (the most common temporal edge pattern)
             if pf_dim >= 2:
                 consecutive = temporal_edges.select(
                     F.col("edge_idx"),
@@ -1189,7 +1141,8 @@ class EdgeFeatureExtractor:
                 )
                 parts.append(consecutive)
 
-            # Same-quarter flag
+            # Same-quarter flag: 1.0 if both endpoints are in the
+            # same calendar quarter and year
             if pf_dim >= 3:
                 same_quarter = temporal_edges.select(
                     F.col("edge_idx"),
@@ -1214,8 +1167,8 @@ class EdgeFeatureExtractor:
             # --- Sub-segment 1c: Direction ---
             dir_start = layout.seg1_direction_start
 
-            # Forward direction indicator (+1 if dst is later, -1 if
-            # earlier, 0 if same or unknown)
+            # Forward direction indicator: +1 if dst is later in time,
+            # -1 if earlier, 0 if same or unknown
             direction = temporal_edges.select(
                 F.col("edge_idx"),
                 F.lit(dir_start).alias("dim"),
@@ -1229,7 +1182,8 @@ class EdgeFeatureExtractor:
 
         else:
             # Non-temporal edges: encode category as a hash indicator
-            # in the time delta sub-segment
+            # in the time delta sub-segment so the GNN can still
+            # distinguish edge categories in this segment
             cat_indicator = edge_df.select(
                 F.col("edge_idx"),
                 (
@@ -1270,10 +1224,18 @@ class EdgeFeatureExtractor:
         Encode Segment 2: numeric differences, ratios, and magnitudes
         between edge endpoints.
 
-        For each numeric property shared by both endpoints, computes:
+        For each numeric property shared by both endpoints (same
+        predicate URI), computes:
         - Difference (dst - src) hashed into difference sub-segment
-        - Ratio (dst / src, clamped) hashed into ratio sub-segment
+        - Ratio (dst / src, clamped to [-10, 10]) hashed into ratio
+          sub-segment
         - Average magnitude hashed into magnitude sub-segment
+
+        If no shared properties exist, falls back to cross-property
+        derivation for specific categories (e.g., moneyness for
+        option-stock edges, severity delta for escalation edges).
+
+        All dim indices are derived from self._layout.
 
         Returns DataFrame(edge_idx: long, dim: int, value: float)
         or None.
@@ -1302,8 +1264,9 @@ class EdgeFeatureExtractor:
             )
         )
 
-        # Join edge endpoints with their numeric properties
-        # Only keep properties that both endpoints share (same predicate)
+        # Join edge endpoints with their numeric properties.
+        # Inner join on predicate ensures we only get properties
+        # that both endpoints share.
         edge_with_src = (
             edge_df
             .join(
@@ -1328,12 +1291,13 @@ class EdgeFeatureExtractor:
 
         if not edge_with_both.head(1):
             # No shared numeric properties — try cross-property
-            # derivation for specific categories
+            # derivation for specific categories (e.g., moneyness
+            # for option-stock, severity delta for escalation)
             return self._encode_cross_property_contrast(
                 edge_df, src_type, dst_type, category, numeric_props_df
             )
 
-        # --- Sub-segment 2a: Difference ---
+        # --- Sub-segment 2a: Difference (dst - src) ---
         diff_start = layout.seg2_difference_start
         diff_dim = layout.seg2_difference_dim
 
@@ -1348,11 +1312,12 @@ class EdgeFeatureExtractor:
         )
         parts.append(diff_entries)
 
-        # --- Sub-segment 2b: Ratio ---
+        # --- Sub-segment 2b: Ratio (dst / src, clamped) ---
         rat_start = layout.seg2_ratio_start
         rat_dim = layout.seg2_ratio_dim
 
         # Safe ratio: clamp to [-10, 10] to avoid extreme values
+        # from near-zero denominators. Division by zero returns 0.0.
         ratio_entries = edge_with_both.select(
             F.col("edge_idx"),
             (
@@ -1373,7 +1338,7 @@ class EdgeFeatureExtractor:
         )
         parts.append(ratio_entries)
 
-        # --- Sub-segment 2c: Magnitude ---
+        # --- Sub-segment 2c: Magnitude (average absolute value) ---
         mag_start = layout.seg2_magnitude_start
         mag_dim = layout.seg2_magnitude_dim
 
@@ -1416,14 +1381,30 @@ class EdgeFeatureExtractor:
         Derive numeric contrast from different properties on source
         and destination endpoints for specific edge categories.
 
-        For option_stock edges: moneyness = strike_price / observed_price
-        For escalation edges: severity delta from severity level properties
+        This handles the case where endpoints don't share the same
+        predicate URI but have semantically related properties that
+        can be meaningfully compared:
+
+        For option_stock edges:
+          - Source (option node): strikePrice property
+          - Destination (stock node): observedPrice property
+          - Derived: moneyness = strike / stock_price
+          - Derived: log-moneyness = log(moneyness)
+          - Derived: strike-stock difference
+
+        For escalation edges:
+          - Source (alert node): severity/severityLevel property
+          - Destination (alert node): severity/severityLevel property
+          - Derived: severity delta = dst_severity - src_severity
+
+        Returns DataFrame(edge_idx: long, dim: int, value: float)
+        or None.
         """
         layout = self._layout
         parts: List[DataFrame] = []
 
         if category == "option_stock":
-            # Source (option): look for strike price
+            # Source (option): look for strike price property
             src_strike = (
                 numeric_props_df
                 .filter(F.col("node_type") == src_type)
@@ -1438,7 +1419,7 @@ class EdgeFeatureExtractor:
                 )
             )
 
-            # Destination (stock): look for observed price
+            # Destination (stock): look for observed price property
             dst_price = (
                 numeric_props_df
                 .filter(F.col("node_type") == dst_type)
@@ -1470,10 +1451,11 @@ class EdgeFeatureExtractor:
             )
 
             if moneyness_edges.head(1):
-                # Moneyness = strike / stock_price
                 diff_start = layout.seg2_difference_start
                 diff_dim = layout.seg2_difference_dim
 
+                # Moneyness = strike / stock_price
+                # ATM ≈ 1.0, ITM call < 1.0, OTM call > 1.0
                 moneyness = moneyness_edges.withColumn(
                     "moneyness",
                     F.when(
@@ -1494,7 +1476,8 @@ class EdgeFeatureExtractor:
                 )
                 parts.append(m_entry)
 
-                # Log-moneyness in ratio sub-segment
+                # Log-moneyness in ratio sub-segment — more useful
+                # for GNNs because it's symmetric around ATM (log(1)=0)
                 rat_start = layout.seg2_ratio_start
                 rat_dim = layout.seg2_ratio_dim
 
@@ -1513,7 +1496,8 @@ class EdgeFeatureExtractor:
                 )
                 parts.append(log_m)
 
-                # Strike-stock difference in magnitude sub-segment
+                # Strike-stock absolute difference in magnitude
+                # sub-segment — raw dollar distance
                 mag_start = layout.seg2_magnitude_start
                 mag_dim = layout.seg2_magnitude_dim
 
@@ -1536,7 +1520,8 @@ class EdgeFeatureExtractor:
 
         elif category == "escalation":
             # Look for severity-related numeric properties on both
-            # endpoints
+            # endpoints. NOAA alerts may encode severity as a numeric
+            # level (1=Minor, 2=Moderate, 3=Severe, 4=Extreme).
             src_severity = (
                 numeric_props_df
                 .filter(F.col("node_type") == src_type)
@@ -1585,6 +1570,8 @@ class EdgeFeatureExtractor:
                 diff_start = layout.seg2_difference_start
                 diff_dim = layout.seg2_difference_dim
 
+                # Severity delta: positive means escalation (dst is
+                # more severe), negative means de-escalation
                 sev_delta = sev_edges.select(
                     F.col("edge_idx"),
                     (
@@ -1630,6 +1617,21 @@ class EdgeFeatureExtractor:
         Encode Segment 3: namespace signals, label similarity, and
         relation type identity.
 
+        Namespace signals are derived from the PyG node type name
+        prefix (e.g., "cpi_Index" → "cpi"). This is a driver-side
+        string operation on the type name, not a Spark UDF — the
+        result is broadcast as a literal to all executors.
+
+        Label similarity is computed for correlation and causal edges
+        using Jaccard word overlap between endpoint rdfs:label values.
+        For other edge types, a category indicator hash is used instead.
+
+        Relation identity hashes the relation name and category into
+        fixed slots, giving the GNN a fingerprint of the relationship
+        type within the vector.
+
+        All dim indices are derived from self._layout.
+
         Returns DataFrame(edge_idx: long, dim: int, value: float)
         or None.
         """
@@ -1641,7 +1643,9 @@ class EdgeFeatureExtractor:
         ns_dim = layout.seg3_namespace_dim
 
         # Same-namespace flag: are src and dst from the same ontology?
-        # Derive from node_type prefix (e.g., "cpi_Index" → "cpi")
+        # Derive from node_type prefix (e.g., "cpi_Index" → "cpi").
+        # This is a driver-side string operation — the result is
+        # broadcast as F.lit() to all executors.
         src_prefix = (
             src_type.split("_")[0] if "_" in src_type else src_type
         )
@@ -1667,7 +1671,7 @@ class EdgeFeatureExtractor:
             parts.append(cross_source_entry)
 
         # Hash source and destination namespace prefixes into remaining
-        # namespace slots
+        # namespace slots for finer-grained namespace identity
         if ns_dim >= 3:
             for seed_offset in _EDGE_HASH_SEEDS[:2]:
                 src_ns_hash = edge_df.select(
@@ -1707,7 +1711,10 @@ class EdgeFeatureExtractor:
         ls_dim = layout.seg3_label_similarity_dim
 
         if category in ("correlation", "causal"):
-            # Join labels for both endpoints
+            # Join labels for both endpoints to compute word overlap.
+            # This distinguishes strong correlations (exact keyword
+            # match like "Energy" ↔ "Energy") from weak ones
+            # ("Food at Home" ↔ "Food Manufacturing").
             src_labels = (
                 label_df
                 .filter(F.col("node_type") == src_type)
@@ -1741,8 +1748,11 @@ class EdgeFeatureExtractor:
                 .drop("_dst_nid")
             )
 
-            # Compute word overlap as a simple similarity measure:
-            # Split labels into words, count shared words / total words
+            # Compute Jaccard word overlap as a simple similarity
+            # measure: |intersection| / |union| of word sets.
+            # This is a rough approximation — good enough for a
+            # feature signal. All computed via Spark array functions
+            # on executors.
             label_edges = (
                 label_edges
                 .withColumn(
@@ -1781,6 +1791,7 @@ class EdgeFeatureExtractor:
                 )
             )
 
+            # Jaccard similarity in the first label similarity slot
             sim_entry = label_edges.select(
                 F.col("edge_idx"),
                 F.lit(ls_start).alias("dim"),
@@ -1788,7 +1799,8 @@ class EdgeFeatureExtractor:
             )
             parts.append(sim_entry)
 
-            # Hash shared words into remaining label similarity slots
+            # Hash the concatenated labels into remaining slots for
+            # finer-grained label pair identity
             if ls_dim >= 2:
                 shared_hash = label_edges.select(
                     F.col("edge_idx"),
@@ -1815,6 +1827,8 @@ class EdgeFeatureExtractor:
                 parts.append(shared_hash)
         else:
             # Non-correlation edges: encode a category indicator
+            # so the GNN can still distinguish categories in this
+            # sub-segment
             cat_label_entry = edge_df.select(
                 F.col("edge_idx"),
                 (
@@ -1830,7 +1844,8 @@ class EdgeFeatureExtractor:
         ri_start = layout.seg3_relation_identity_start
         ri_dim = layout.seg3_relation_identity_dim
 
-        # Hash the relation name into the relation identity sub-segment
+        # Hash the relation name into the relation identity sub-segment.
+        # Two hash functions for reduced collision probability.
         for seed_offset in _EDGE_HASH_SEEDS[:2]:
             rel_hash = edge_df.select(
                 F.col("edge_idx"),
@@ -1845,7 +1860,9 @@ class EdgeFeatureExtractor:
             )
             parts.append(rel_hash)
 
-        # Hash the category into a separate slot
+        # Hash the category into a separate slot at half weight,
+        # so edges of the same category share bits but edges of the
+        # same specific relation share stronger bits
         cat_hash = edge_df.select(
             F.col("edge_idx"),
             (
@@ -1883,6 +1900,9 @@ class EdgeFeatureExtractor:
         """
         Collect all sparse entries and scatter into dense array.
         Used for small-to-medium edge types.
+
+        The Pandas DataFrame is deleted immediately after scatter
+        to free driver memory.
         """
         pdf = combined.toPandas()
 
@@ -1909,6 +1929,10 @@ class EdgeFeatureExtractor:
         """
         Collect sparse entries in chunks by edge_idx range and scatter
         into the pre-allocated dense array incrementally.
+
+        Each chunk's Pandas DataFrame is scattered into the dense array
+        and immediately freed. This bounds peak Pandas memory to
+        ~chunk_size edges' sparse entries regardless of total edge count.
         """
         chunk_size = self._chunk_threshold
 
