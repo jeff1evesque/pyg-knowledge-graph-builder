@@ -10,6 +10,8 @@ Responsibilities:
 2. Join subject/object URIs against node_id_df to resolve integer IDs
 3. Derive PyG edge types as (src_node_type, relation_name, dst_node_type)
 4. Collect per-edge-type [2, num_edges] LongTensors to the driver
+5. Return the cached resolved edges DataFrame for downstream consumers
+   (EdgeFeatureExtractor) to avoid replaying the expensive double-join
 
 Edge type naming:
     Predicate URI: https://www.bls.gov/enrichment/precedes
@@ -106,6 +108,11 @@ class EdgeMapper:
     runs on Spark executors. Only compact [2, num_edges] integer arrays
     are collected to the driver, one edge type at a time.
 
+    The resolved edges DataFrame is returned alongside the tensors so
+    that EdgeFeatureExtractor can reuse it without replaying the
+    expensive double-join. The caller (constructor.py) is responsible
+    for unpersisting it after all consumers are done.
+
     Ordering contract: within each edge type, edges are collected in
     deterministic order (src_id ASC, dst_id ASC). This allows
     EdgeFeatureExtractor to assign matching edge_idx values on
@@ -122,7 +129,10 @@ class EdgeMapper:
         triples_df: DataFrame,
         node_id_df: DataFrame,
         node_counts: Dict[str, int],
-    ) -> Dict[Tuple[str, str, str], torch.Tensor]:
+    ) -> Tuple[
+        Dict[Tuple[str, str, str], torch.Tensor],
+        DataFrame,
+    ]:
         """
         Build edge_index tensors for all edge types.
 
@@ -130,18 +140,27 @@ class EdgeMapper:
         integer IDs, then collects per-edge-type [2, num_edges] tensors
         to the driver one type at a time.
 
+        The resolved edges DataFrame (edges_final) is returned cached
+        on executors for reuse by EdgeFeatureExtractor. The caller
+        must unpersist it when all downstream consumers are done.
+
         Ordering: within each edge type, edges are sorted by
         (src_id ASC, dst_id ASC) before collection. This deterministic
         ordering is the contract that EdgeFeatureExtractor relies on
         to align feature tensor rows with edge_index columns.
 
         Args:
-            triples_df: Enriched triples DataFrame (subject, predicate, object)
+            triples_df: Enriched triples DataFrame (subject, predicate,
+                        object)
             node_id_df: Node ID table (uri, node_id, node_type) — cached
             node_counts: Dict[str, int] for validation
 
         Returns:
-            Dict mapping (src_type, relation, dst_type) -> LongTensor[2, N]
+            Tuple of:
+            - Dict mapping (src_type, relation, dst_type) ->
+              LongTensor[2, N]
+            - edges_final DataFrame (cached on executors) with columns
+              (src_type, src_id, relation, dst_type, dst_id)
         """
         # ============================================
         # Step 1: Filter to edge-candidate triples
@@ -269,7 +288,9 @@ class EdgeMapper:
             dst_ids = torch.from_numpy(
                 pdf["dst_id"].values.astype(np.int64)
             )
-            edge_index = torch.stack([src_ids, dst_ids], dim=0).contiguous()
+            edge_index = torch.stack(
+                [src_ids, dst_ids], dim=0
+            ).contiguous()
 
             edge_indices[edge_type_key] = edge_index
 
@@ -279,6 +300,8 @@ class EdgeMapper:
 
             del pdf  # release Pandas memory immediately
 
-        edges_final.unpersist()
+        # NOTE: edges_final is NOT unpersisted here — it is returned
+        # for reuse by EdgeFeatureExtractor. The caller (constructor.py)
+        # is responsible for unpersisting it after all consumers finish.
 
-        return edge_indices
+        return edge_indices, edges_final
