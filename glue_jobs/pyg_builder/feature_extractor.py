@@ -222,6 +222,13 @@ class VectorLayout:
 
         self._validate()
 
+        # Metadata artifacts — populated during build_features()
+        # by _collect_* methods. Small Python objects only.
+        self._collected_norm_stats: Optional[List[Dict[str, Any]]] = None
+        self._collected_zero_variance: List[str] = []
+        self._collected_ontology_schema: Optional[Dict[str, Any]] = None
+        self._collected_slot_mapping: Optional[Dict[str, Any]] = None
+
     def _validate(self):
         """Verify all sub-segments tile the full vector with no gaps."""
         total = (
@@ -280,6 +287,52 @@ class VectorLayout:
             if attr_name.endswith("_dim") and not attr_name.startswith("_"):
                 val = getattr(self, attr_name)
                 assert val >= 1, f"{attr_name} = {val}, must be >= 1"
+
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Serialize layout to a JSON-compatible dict.
+
+        Used by MetadataCollector for feature_spec.json and
+        encoding_config.json. Contains all segment and sub-segment
+        boundaries needed to reconstruct the layout.
+        """
+        return {
+            "vector_dim": self.vector_dim,
+            "seg1_start": self.seg1_start,
+            "seg1_total": self.seg1_total,
+            "seg1_class_identity_start": self.seg1_class_identity_start,
+            "seg1_class_identity_dim": self.seg1_class_identity_dim,
+            "seg1_class_hierarchy_start": (
+                self.seg1_class_hierarchy_start
+            ),
+            "seg1_class_hierarchy_dim": self.seg1_class_hierarchy_dim,
+            "seg1_ontology_source_start": (
+                self.seg1_ontology_source_start
+            ),
+            "seg1_ontology_source_dim": self.seg1_ontology_source_dim,
+            "seg2_start": self.seg2_start,
+            "seg2_total": self.seg2_total,
+            "seg2_property_presence_start": (
+                self.seg2_property_presence_start
+            ),
+            "seg2_property_presence_dim": (
+                self.seg2_property_presence_dim
+            ),
+            "seg2_domain_range_start": self.seg2_domain_range_start,
+            "seg2_domain_range_dim": self.seg2_domain_range_dim,
+            "seg2_property_hierarchy_start": (
+                self.seg2_property_hierarchy_start
+            ),
+            "seg2_property_hierarchy_dim": (
+                self.seg2_property_hierarchy_dim
+            ),
+            "seg3_start": self.seg3_start,
+            "seg3_total": self.seg3_total,
+            "seg3_numeric_start": self.seg3_numeric_start,
+            "seg3_numeric_dim": self.seg3_numeric_dim,
+            "seg3_categorical_start": self.seg3_categorical_start,
+            "seg3_categorical_dim": self.seg3_categorical_dim,
+        }
 
     def summary(self) -> str:
         """Human-readable layout summary."""
@@ -361,6 +414,108 @@ class FeatureExtractor:
         # scale proportionally
         self._layout = VectorLayout(self._vector_dim)
 
+    def get_layout(self) -> "VectorLayout":
+        """Return the VectorLayout instance for metadata registration."""
+        return self._layout
+
+    def get_encoding_config(self) -> Dict[str, Any]:
+        """
+        Return the complete encoding configuration needed to
+        deterministically reproduce the hash-based encoding.
+
+        All values here are the same constants used in the encoding
+        methods below. If any of these change, the same ontology class
+        or property hashes to different vector positions and the
+        trained model breaks.
+
+        Called by constructor.py after build_features() to register
+        with MetadataCollector.
+        """
+        layout = self._layout
+        return {
+            "version": "1.0",
+            "hash_algorithm": "spark_murmur3",
+            "node_features": {
+                "total_dim": layout.vector_dim,
+                "segment_proportions": {
+                    "ontology_structure": _SEG1_FRAC,
+                    "property_schema": _SEG2_FRAC,
+                    "literal_values": _SEG3_FRAC,
+                },
+                "class_identity": {
+                    "dim": layout.seg1_class_identity_dim,
+                    "num_hashes": len(_HASH_SEEDS),
+                    "seeds": list(_HASH_SEEDS),
+                },
+                "class_hierarchy": {
+                    "dim": layout.seg1_class_hierarchy_dim,
+                    "num_hashes": 2,
+                    "seeds": [
+                        _HASH_SEEDS[0] + 100,
+                        _HASH_SEEDS[1] + 100,
+                    ],
+                    "decay_function": "inverse_depth",
+                    "max_depth": 10,
+                },
+                "ontology_source": {
+                    "dim": layout.seg1_ontology_source_dim,
+                    "method": "index_modulo",
+                    "node_uri_weight": 0.5,
+                },
+                "property_presence": {
+                    "dim": layout.seg2_property_presence_dim,
+                    "num_hashes": 3,
+                    "seeds": [s + 200 for s in _HASH_SEEDS[:3]],
+                    "encoding_convention": {
+                        "present": 1.0,
+                        "absent": -1.0,
+                        "not_in_schema": 0.0,
+                    },
+                },
+                "domain_range": {
+                    "dim": layout.seg2_domain_range_dim,
+                    "seeds": [300, 301],
+                },
+                "property_hierarchy": {
+                    "dim": layout.seg2_property_hierarchy_dim,
+                    "num_hashes": 2,
+                    "seeds": [s + 400 for s in _HASH_SEEDS[:2]],
+                },
+                "numeric_values": {
+                    "dim": layout.seg3_numeric_dim,
+                    "seed": 500,
+                },
+                "categorical_values": {
+                    "dim": layout.seg3_categorical_dim,
+                    "num_hashes": _NUM_CATEGORICAL_HASHES,
+                    "seeds": [s + 600 for s in _HASH_SEEDS],
+                },
+            },
+            "checksum": {
+                "total_node_feature_dim": layout.vector_dim,
+            },
+        }
+
+    def get_metadata_artifacts(self) -> Dict[str, Any]:
+        """
+        Return all metadata artifacts collected during build_features().
+
+        Returns a dict with keys:
+          - normalization_stats: list of per-predicate stat dicts
+          - zero_variance_properties: list of predicate URIs
+          - ontology_schema: frozen ontology structure dict
+          - slot_mapping: dimension-to-meaning mapping dict
+
+        All values are small Python objects — no tensors, no DataFrames.
+        Populated by _collect_* methods called during build_features().
+        """
+        return {
+            "normalization_stats": self._collected_norm_stats,
+            "zero_variance_properties": self._collected_zero_variance,
+            "ontology_schema": self._collected_ontology_schema,
+            "slot_mapping": self._collected_slot_mapping,
+        }
+
     def build_features(
         self,
         triples_df: DataFrame,
@@ -434,10 +589,28 @@ class FeatureExtractor:
             logger.info("  Computing normalization statistics...")
             norm_stats = self._compute_normalization_stats(numeric_df)
 
+            # Collect stats for metadata — small collect, one row per
+            # predicate (typically <200 predicates across all ontologies)
+            self._collect_normalization_metadata(numeric_df)
+
         # ============================================
         # Get type URIs for ontology encoding
         # ============================================
         type_uri_df = self._get_type_uri_mapping(triples_df, node_id_df)
+
+        # ============================================
+        # Collect ontology schema and slot mapping for metadata.
+        # All collect() calls here target small aggregated/distinct
+        # DataFrames — never raw triples or per-node data.
+        # ============================================
+        self._collect_ontology_schema_metadata(
+            triples_df, node_id_df, node_counts,
+            class_hierarchy_df, property_schema_df,
+        )
+        self._collect_slot_mapping_metadata(
+            numeric_df, categorical_df, type_uri_df,
+            class_hierarchy_df,
+        )
 
         # ============================================
         # Build vectors per node type (on executors, collect per type)
@@ -1058,6 +1231,402 @@ class FeatureExtractor:
         combined.unpersist()
 
     # ================================================================
+    # Metadata collection helpers
+    # ================================================================
+    # These methods collect small aggregated data to the driver for
+    # the six metadata files. All collect() calls target DataFrames
+    # with at most a few hundred rows (per-predicate stats, per-type
+    # URIs, per-class hierarchy entries). No per-node or per-edge
+    # data is ever collected here.
+
+    def _collect_normalization_metadata(
+        self, numeric_df: DataFrame
+    ) -> None:
+        """
+        Collect normalization statistics to driver for metadata.
+
+        Small collect — one row per predicate (typically <200
+        predicates across all ontologies).
+        """
+        stats_with_counts = (
+            numeric_df
+            .groupBy("predicate")
+            .agg(
+                F.mean("numeric_value").alias("mu"),
+                F.stddev("numeric_value").alias("sigma"),
+                F.count("numeric_value").alias("count"),
+            )
+        )
+
+        rows = stats_with_counts.collect()
+
+        collected = []
+        zero_variance = []
+        for row in rows:
+            mu = float(row.mu) if row.mu is not None else 0.0
+            sigma = float(row.sigma) if row.sigma is not None else 0.0
+            count = int(row["count"])
+
+            if sigma == 0.0:
+                zero_variance.append(row.predicate)
+                sigma = 1.0
+
+            collected.append({
+                "predicate": row.predicate,
+                "mu": mu,
+                "sigma": sigma,
+                "count": count,
+            })
+
+        self._collected_norm_stats = collected
+        self._collected_zero_variance = zero_variance
+
+        logger.info(
+            f"    Collected normalization stats for "
+            f"{len(collected)} predicates "
+            f"({len(zero_variance)} zero-variance)"
+        )
+
+    def _collect_ontology_schema_metadata(
+        self,
+        triples_df: DataFrame,
+        node_id_df: DataFrame,
+        node_counts: Dict[str, int],
+        class_hierarchy_df: DataFrame,
+        property_schema_df: DataFrame,
+    ) -> None:
+        """
+        Collect ontology schema snapshot for metadata.
+
+        All collect() calls here are on small distinct/aggregated
+        DataFrames:
+        - type_uri distinct: ~500 rows (one per type URI)
+        - type_uri per node_type: ~1000 rows (types × multi-type)
+        - class_hierarchy: ~5000 rows (classes × depth, transitive)
+        - property_schema: ~500 rows (properties with domain/range)
+        """
+        from glue_jobs.utils.rdf_utils import NAMESPACE_PREFIXES
+
+        # Collect type URI → PyG name mapping.
+        # One row per distinct type URI — typically <500.
+        type_mapping_rows = (
+            triples_df
+            .filter(F.col("predicate") == RDF_TYPE)
+            .select(F.col("object").alias("type_uri"))
+            .distinct()
+            .collect()
+        )
+
+        uri_to_pyg: Dict[str, str] = {}
+        for row in type_mapping_rows:
+            uri = row.type_uri
+            for ns, prefix in NAMESPACE_PREFIXES:
+                if uri.startswith(ns):
+                    local = uri[len(ns):].strip("/#")
+                    if local:
+                        uri_to_pyg[uri] = f"{prefix}_{local}"
+                    break
+
+        # Collect per-node-type source URI.
+        # One row per (node_type, type_uri) — typically <1000.
+        type_uri_rows = (
+            triples_df
+            .filter(F.col("predicate") == RDF_TYPE)
+            .select(
+                F.col("subject").alias("_subj"),
+                F.col("object").alias("type_uri"),
+            )
+            .join(
+                node_id_df.select(
+                    F.col("uri").alias("_subj"),
+                    F.col("node_type"),
+                ),
+                "_subj",
+                "inner",
+            )
+            .select("node_type", "type_uri")
+            .distinct()
+            .collect()
+        )
+
+        type_uri_map: Dict[str, str] = {}
+        for row in type_uri_rows:
+            if row.node_type not in type_uri_map:
+                type_uri_map[row.node_type] = row.type_uri
+
+        # Collect class hierarchy — transitive closure.
+        # Typically ~5000 rows (500 classes × avg depth ~10).
+        hierarchy_rows = (
+            class_hierarchy_df.collect()
+            if class_hierarchy_df.head(1)
+            else []
+        )
+        hierarchy_map: Dict[str, List[Tuple[str, int]]] = {}
+        for row in hierarchy_rows:
+            cls = row.class_uri
+            if cls not in hierarchy_map:
+                hierarchy_map[cls] = []
+            hierarchy_map[cls].append(
+                (row.superclass_uri, int(row.depth))
+            )
+
+        # Collect property schema — one row per property.
+        # Typically <500 rows.
+        prop_schema_rows = (
+            property_schema_df.collect()
+            if property_schema_df.head(1)
+            else []
+        )
+        prop_schema_map: Dict[str, Dict[str, Optional[str]]] = {}
+        for row in prop_schema_rows:
+            prop_schema_map[row.property_uri] = {
+                "domain": (
+                    row.domain_uri if row.domain_uri else None
+                ),
+                "range": (
+                    row.range_uri if row.range_uri else None
+                ),
+            }
+
+        # Build per-node-type schema entries
+        node_type_schemas: Dict[str, Dict[str, Any]] = {}
+        for pyg_name in node_counts:
+            source_uri = type_uri_map.get(pyg_name, "")
+            namespace = ""
+            for ns, prefix in NAMESPACE_PREFIXES:
+                if source_uri.startswith(ns):
+                    namespace = ns
+                    break
+
+            superclass_chain = []
+            if source_uri in hierarchy_map:
+                sorted_supers = sorted(
+                    hierarchy_map[source_uri], key=lambda x: x[1]
+                )
+                superclass_chain = [
+                    {"uri": uri, "depth": depth}
+                    for uri, depth in sorted_supers
+                ]
+
+            defined_properties = []
+            for prop_uri, schema in prop_schema_map.items():
+                if schema.get("domain") == source_uri:
+                    defined_properties.append({
+                        "property_uri": prop_uri,
+                        "range": schema.get("range"),
+                    })
+
+            node_type_schemas[pyg_name] = {
+                "source_type_uri": source_uri,
+                "superclass_chain": superclass_chain,
+                "namespace": namespace,
+                "defined_properties": defined_properties,
+            }
+
+        self._collected_ontology_schema = {
+            "version": "1.0",
+            "node_types": node_type_schemas,
+            "uri_to_pyg_name": uri_to_pyg,
+            "namespace_prefixes": {
+                prefix: ns for ns, prefix in NAMESPACE_PREFIXES
+            },
+        }
+
+        logger.info(
+            f"    Collected ontology schema for "
+            f"{len(node_type_schemas)} node types, "
+            f"{len(uri_to_pyg)} URI mappings"
+        )
+
+    def _collect_slot_mapping_metadata(
+        self,
+        numeric_df: Optional[DataFrame],
+        categorical_df: Optional[DataFrame],
+        type_uri_df: DataFrame,
+        class_hierarchy_df: DataFrame,
+    ) -> None:
+        """
+        Collect slot mapping metadata — maps vector dimensions back
+        to their semantic meaning.
+
+        All collect() calls are on distinct single-column DataFrames:
+        - numeric predicates: typically <100
+        - categorical predicates: typically <100
+        - type URIs: typically <500
+        - superclass URIs: typically <200
+
+        Hash computation is done on the driver using a Python
+        approximation of Spark's murmur3. This is NOT used during
+        encoding (which uses Spark's F.hash on executors). The
+        slot_mapping file is for interpretability only — training
+        and inference code never depends on it.
+        """
+        layout = self._layout
+
+        # --- Numeric property slots ---
+        numeric_slots = []
+        if numeric_df is not None:
+            pred_rows = (
+                numeric_df
+                .select("predicate")
+                .distinct()
+                .collect()
+            )
+            for row in pred_rows:
+                pred = row.predicate
+                local_name = (
+                    pred.rsplit("/", 1)[-1].rsplit("#", 1)[-1]
+                )
+                slot = (
+                    abs(_hash_approx(pred, 500))
+                    % layout.seg3_numeric_dim
+                )
+                global_dim = slot + layout.seg3_numeric_start
+                numeric_slots.append({
+                    "predicate_uri": pred,
+                    "local_name": local_name,
+                    "hash_slot": slot,
+                    "global_dim": global_dim,
+                })
+
+        # --- Categorical property slots ---
+        categorical_slots = []
+        if categorical_df is not None:
+            cat_pred_rows = (
+                categorical_df
+                .select("predicate")
+                .distinct()
+                .collect()
+            )
+            for row in cat_pred_rows:
+                pred = row.predicate
+                local_name = (
+                    pred.rsplit("/", 1)[-1].rsplit("#", 1)[-1]
+                )
+                slots = []
+                global_dims = []
+                for seed_offset in _HASH_SEEDS:
+                    slot = (
+                        abs(_hash_approx(
+                            pred, seed_offset + 600
+                        ))
+                        % layout.seg3_categorical_dim
+                    )
+                    slots.append(slot)
+                    global_dims.append(
+                        slot + layout.seg3_categorical_start
+                    )
+                categorical_slots.append({
+                    "predicate_uri": pred,
+                    "local_name": local_name,
+                    "hash_slots": slots,
+                    "global_dims": global_dims,
+                })
+
+        # --- Class identity slots ---
+        class_slots = []
+        class_uri_rows = (
+            type_uri_df.select("type_uri").distinct().collect()
+        )
+        for row in class_uri_rows:
+            uri = row.type_uri
+            pyg_name = ""
+            for ns, prefix in NAMESPACE_PREFIXES:
+                if uri.startswith(ns):
+                    local = uri[len(ns):].strip("/#")
+                    if local:
+                        pyg_name = f"{prefix}_{local}"
+                    break
+
+            slots = []
+            global_dims = []
+            for seed_offset in _HASH_SEEDS:
+                slot = (
+                    abs(_hash_approx(uri, seed_offset))
+                    % layout.seg1_class_identity_dim
+                )
+                slots.append(slot)
+                global_dims.append(
+                    slot + layout.seg1_class_identity_start
+                )
+            class_slots.append({
+                "class_uri": uri,
+                "pyg_name": pyg_name,
+                "hash_slots": slots,
+                "global_dims": global_dims,
+            })
+
+        # --- Namespace slots ---
+        namespace_slots = []
+        for namespace, onto_idx in ONTOLOGY_NAMESPACE_INDICES:
+            prefix = ""
+            for ns, p in NAMESPACE_PREFIXES:
+                if ns == namespace:
+                    prefix = p
+                    break
+            slot = onto_idx % layout.seg1_ontology_source_dim
+            global_dim = slot + layout.seg1_ontology_source_start
+            namespace_slots.append({
+                "namespace": namespace,
+                "prefix": prefix,
+                "slot": slot,
+                "global_dim": global_dim,
+            })
+
+        # --- Superclass hierarchy slots ---
+        hierarchy_slots = []
+        if class_hierarchy_df.head(1):
+            super_rows = (
+                class_hierarchy_df
+                .select("superclass_uri")
+                .distinct()
+                .collect()
+            )
+            for row in super_rows:
+                uri = row.superclass_uri
+                slots = []
+                global_dims = []
+                for seed_offset in _HASH_SEEDS[:2]:
+                    slot = (
+                        abs(_hash_approx(uri, seed_offset + 100))
+                        % layout.seg1_class_hierarchy_dim
+                    )
+                    slots.append(slot)
+                    global_dims.append(
+                        slot + layout.seg1_class_hierarchy_start
+                    )
+                hierarchy_slots.append({
+                    "superclass_uri": uri,
+                    "hash_slots": slots,
+                    "global_dims": global_dims,
+                })
+
+        # --- Collision report ---
+        collision_report = _compute_collision_report(
+            numeric_slots, categorical_slots, class_slots,
+            namespace_slots, hierarchy_slots,
+        )
+
+        self._collected_slot_mapping = {
+            "version": "1.0",
+            "numeric_properties": numeric_slots,
+            "categorical_properties": categorical_slots,
+            "classes": class_slots,
+            "superclasses": hierarchy_slots,
+            "namespaces": namespace_slots,
+            "collision_report": collision_report,
+        }
+
+        logger.info(
+            f"    Collected slot mappings: "
+            f"{len(numeric_slots)} numeric, "
+            f"{len(categorical_slots)} categorical, "
+            f"{len(class_slots)} classes, "
+            f"{len(hierarchy_slots)} superclasses, "
+            f"{len(namespace_slots)} namespaces"
+        )
+
+    # ================================================================
     # Segment 1: Ontology Structure encoding
     # ================================================================
 
@@ -1472,3 +2041,88 @@ class FeatureExtractor:
             F.col("dim").cast("int"),
             F.col("value").cast("float"),
         )
+
+# ================================================================
+# Module-level helpers for metadata collection
+# ================================================================
+
+def _hash_approx(value: str, seed: int) -> int:
+    """
+    Approximate Spark's murmur3 hash on the driver side for slot
+    mapping metadata.
+
+    This is NOT used during encoding (which uses Spark's F.hash on
+    executors). It's used only for the slot_mapping metadata file to
+    predict which slots each property/class occupies.
+
+    Note: Spark's hash() uses a specific murmur3 variant. This Python
+    approximation may not match exactly for all inputs. The slot_mapping
+    file is for interpretability only — training and inference code
+    never depends on it.
+    """
+    import hashlib
+
+    combined = f"{value}:{seed}"
+    h = hashlib.md5(combined.encode("utf-8")).hexdigest()
+    return int(h[:8], 16)
+
+
+def _compute_collision_report(
+    numeric_slots: List[Dict],
+    categorical_slots: List[Dict],
+    class_slots: List[Dict],
+    namespace_slots: List[Dict],
+    hierarchy_slots: List[Dict],
+) -> Dict[str, Any]:
+    """
+    Compute hash collision statistics across all slot assignments.
+
+    Returns a report with collision counts and rates per sub-segment.
+    """
+    report: Dict[str, Any] = {}
+
+    if numeric_slots:
+        dims_used = [s["global_dim"] for s in numeric_slots]
+        unique_dims = len(set(dims_used))
+        total = len(dims_used)
+        collisions = total - unique_dims
+        report["numeric_properties"] = {
+            "total_properties": total,
+            "unique_slots": unique_dims,
+            "collisions": collisions,
+            "collision_rate": (
+                round(collisions / total, 4) if total > 0 else 0.0
+            ),
+        }
+
+    if class_slots:
+        all_dims: List[int] = []
+        for s in class_slots:
+            all_dims.extend(s["global_dims"])
+        unique_dims = len(set(all_dims))
+        total = len(all_dims)
+        collisions = total - unique_dims
+        report["class_identity"] = {
+            "total_hash_entries": total,
+            "unique_slots": unique_dims,
+            "collisions": collisions,
+            "collision_rate": (
+                round(collisions / total, 4) if total > 0 else 0.0
+            ),
+        }
+
+    if namespace_slots:
+        dims_used = [s["global_dim"] for s in namespace_slots]
+        unique_dims = len(set(dims_used))
+        total = len(dims_used)
+        collisions = total - unique_dims
+        report["namespaces"] = {
+            "total_namespaces": total,
+            "unique_slots": unique_dims,
+            "collisions": collisions,
+            "collision_rate": (
+                round(collisions / total, 4) if total > 0 else 0.0
+            ),
+        }
+
+    return report
