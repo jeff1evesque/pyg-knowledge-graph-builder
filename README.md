@@ -565,16 +565,16 @@ WITHOUT edge features:
 
 WITH selective edge features:
 ┌────────────────────────────────────────────────────────────┐
-│ precedes edge (1 month):  [delta=0.08 | same_yr=1 | ...]  │  32-d
-│ precedes edge (12 month): [delta=1.00 | same_yr=0 | ...]  │  32-d
+│ precedes edge (1 month):  [delta=0.08 | same_yr=1 | ...]   │  32-d
+│ precedes edge (12 month): [delta=1.00 | same_yr=0 | ...]   │  32-d
 │ → GNN can learn time-decay attention weights               │
 │                                                            │
-│ option→stock (deep ITM):  [moneyness=0.7 | log_m=-0.36]   │  32-d
-│ option→stock (far OTM):   [moneyness=1.5 | log_m=0.41]    │  32-d
+│ option→stock (deep ITM):  [moneyness=0.7 | log_m=-0.36]    │  32-d
+│ option→stock (far OTM):   [moneyness=1.5 | log_m=0.41]     │  32-d
 │ → GNN can modulate option-stock messages by moneyness      │
 │                                                            │
-│ correlatesWith (CPI↔CPI): [same_ns=1 | sim=0.8 | ...]     │  32-d
-│ correlatesWith (CPI↔PPI): [same_ns=0 | sim=0.3 | ...]     │  32-d
+│ correlatesWith (CPI↔CPI): [same_ns=1 | sim=0.8 | ...]      │  32-d
+│ correlatesWith (CPI↔PPI): [same_ns=0 | sim=0.3 | ...]      │  32-d
 │ → GNN can weight intra-source correlations differently     │
 │                                                            │
 │ belongsToSector:           no features (not needed)        │
