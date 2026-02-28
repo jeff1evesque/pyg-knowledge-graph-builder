@@ -17,6 +17,8 @@ PyG construction also leverages Spark executors for all heavy computation (node 
 
 Node feature vectors are **universal 1024-dimensional ontology-aware vectors** that encode three layers of information: ontology structure (class identity, hierarchy, source membership), property schema (presence, domain/range, property hierarchy), and literal values (numeric hashed slots, categorical multi-hot). All node types share the same vector width, enabling **shared GNN layers across heterogeneous types** and natural cross-type message passing. The vector dimension is configurable — all segment boundaries **scale proportionally** with `vector_dim`, so passing 512 produces a half-resolution vector with the same three-segment structure.
 
+Edge feature vectors are **selective 32-dimensional derived vectors** that encode per-instance signals for high-value edge types. Only edges with meaningful per-instance variation (temporal sequences, option-stock links, severity escalations) receive features — structural edges like `belongsToSector` and `owl:sameAs` are left featureless. Edge features encode three layers: temporal signals (time delta, period flags, direction), numeric contrast (differences, ratios, magnitudes between endpoints), and relational context (namespace, label similarity, relation identity). The edge vector dimension is configurable via `edge_vector_dim`, and all segment boundaries **scale proportionally** via `EdgeVectorLayout`. Edge features are derived entirely from endpoint node properties already present in the triples — **no enrichment changes are required**.
+
 The pipeline supports three execution modes:
 
 - **Full Pipeline**: End-to-end RDF enrichment and PyG graph construction
@@ -29,14 +31,17 @@ The pipeline supports three execution modes:
 - **Distributed Enrichment**: All enrichment runs as PySpark DataFrame operations across Spark executors
 - **Distributed PyG Construction**: Node ID assignment, edge resolution, and feature extraction run on Spark executors — only compact tensors are collected to the driver
 - **No Python UDFs in PyG Builder**: URI-to-name conversions use pure Spark `WHEN` expressions (JVM-native), not row-at-a-time Python UDFs
-- **Ontology-Aware Feature Vectors**: Universal fixed-width vectors encoding class hierarchy, property schema, and literal values — not flat bags of literals
-- **Universal Feature Width**: All node types share the same vector dimension, enabling shared GNN layers and cross-type message passing
-- **Proportionally Scalable Dimensions**: Overriding `vector_dim` (e.g., 512, 2048) automatically rescales all segment and sub-segment boundaries via `VectorLayout` — no hardcoded dim indices
+- **Ontology-Aware Node Feature Vectors**: Universal fixed-width vectors encoding class hierarchy, property schema, and literal values — not flat bags of literals
+- **Derived Edge Feature Vectors**: Selective fixed-width vectors encoding temporal signals, numeric contrast, and relational context between edge endpoints — no enrichment changes required
+- **Universal Node Feature Width**: All node types share the same vector dimension, enabling shared GNN layers and cross-type message passing
+- **Selective Edge Featurization**: Only high-value edge types receive feature vectors; structural edges use simpler GNN message-passing layers
+- **Proportionally Scalable Dimensions**: Overriding `vector_dim` or `edge_vector_dim` automatically rescales all segment and sub-segment boundaries via `VectorLayout` / `EdgeVectorLayout` — no hardcoded dim indices
+- **No Double-Join for Edge Features**: Edge features reuse the cached resolved edges DataFrame from EdgeMapper — the expensive double-join runs exactly once
 - **Driver Memory Safety**: Large node types use chunked collection with explicit memory management to prevent OOM
 - **Temporal Unification**: Unified temporal entities across all data sources
 - **Intra-Source Linking**: Automatic relationship discovery within data source families
 - **Cross-Source Linking**: Automatic relationship discovery across heterogeneous datasets
-- **PyTorch Geometric Output**: Native `HeteroData` objects with configurable node/edge types
+- **PyTorch Geometric Output**: Native `HeteroData` objects with configurable node/edge types and optional edge features
 - **Reusable Parquet Artifacts**: Enriched triples saved as Parquet for multiple PyG experiments without re-enrichment
 - **Flexible Graph Construction**: Experiment with different graph structures from existing Parquet (5-10 min per experiment)
 - **Serverless Architecture**: Fully managed AWS Glue, no infrastructure to maintain
@@ -108,7 +113,7 @@ Schema: (subject: string, predicate: string, object: string)
 
 **N-Triples Parsing**: Raw `.nt` files are read as text by `spark.read.text()` and parsed on executors using Spark regex functions (`regexp_extract`). Subject and predicate URIs are extracted from angle brackets, and object values are cleaned (URI angle brackets stripped, literal datatype suffixes and language tags removed). No data passes through the driver during parsing.
 
-Enrichment steps read from this DataFrame, produce new triples DataFrames, and union them back. The enriched DataFrame is saved as **Parquet** for reuse. PyG construction reads the enriched DataFrame, assigns integer node IDs, resolves edges, and extracts features — all on Spark executors. Only compact tensors cross to the driver for final `HeteroData` assembly.
+Enrichment steps read from this DataFrame, produce new triples DataFrames, and union them back. The enriched DataFrame is saved as **Parquet** for reuse. PyG construction reads the enriched DataFrame, assigns integer node IDs, resolves edges, extracts node and edge features — all on Spark executors. Only compact tensors cross to the driver for final `HeteroData` assembly.
 
 ### Why PySpark Instead of rdflib/SPARQL
 
@@ -123,7 +128,7 @@ Enrichment steps read from this DataFrame, produce new triples DataFrames, and u
 
 rdflib Namespace objects are used as **URI string constants** in the enrichment modules for readability — they produce plain strings and don't hold or query graph data. The PyG builder modules use **pure Spark Column expressions** for all URI-to-name conversions (no Python UDFs).
 
-## Ontology-Aware Feature Vectors
+## Ontology-Aware Node Feature Vectors
 
 ### The Problem With Flat Literal Vectors
 
@@ -296,7 +301,7 @@ config = {
 
 ```
 OLD approach (flat literal vectors):
-┌────────────────────────────────────────────────────────┐
+┌────────────────────────────────────────────────────────────┐
 │ cpi_Index:  [295.8, 0.3, 2.1, 0.05, 3.0, 1.0]          │  6 dims, only literals
 │ ppi_Index:  [187.2, 0.1, 1.5, 0.03, 2.0, 1.0]          │  6 dims, only literals
 │                                                        │
@@ -307,7 +312,7 @@ OLD approach (flat literal vectors):
 └────────────────────────────────────────────────────────┘
 
 NEW approach (ontology-aware vectors):
-┌────────────────────────────────────────────────────────┐
+┌────────────────────────────────────────────────────────────┐
 │ cpi_Index:  [ontology:25% | schema:37.5% | lit:37.5%]  │  1024-d, universal
 │ ppi_Index:  [ontology:25% | schema:37.5% | lit:37.5%]  │  1024-d, universal
 │                                                        │
@@ -320,7 +325,7 @@ NEW approach (ontology-aware vectors):
 └────────────────────────────────────────────────────────┘
 ```
 
-### All Encoding Runs on Spark Executors
+### All Node Encoding Runs on Spark Executors
 
 Every encoding operation uses pure Spark expressions — no Python UDFs:
 
@@ -337,9 +342,250 @@ Every encoding operation uses pure Spark expressions — no Python UDFs:
 
 All `dim` and `offset` values in the table above are read from `VectorLayout` at runtime — they scale with `vector_dim`.
 
+## Derived Edge Feature Vectors
+
+### The Problem With Featureless Edges
+
+In a basic heterogeneous graph, edges carry only their type label (e.g., `("cpi_Index", "bls_enrichment_precedes", "cpi_Index")`). The GNN learns a single weight matrix per edge type, applied identically to all edges of that type. This has limitations:
+
+- **No per-instance variation**: A `precedes` edge spanning 1 month is treated identically to one spanning 12 months
+- **No endpoint contrast**: An option-stock edge where the option is deep in-the-money looks the same as one that is far out-of-the-money
+- **No cross-source signal**: A `correlatesWith` edge between two CPI categories is indistinguishable from one linking CPI to PPI
+- **Wasted information**: Endpoint node properties that could inform message passing are ignored until the GNN aggregates them — edge features let the GNN modulate messages *before* aggregation
+
+### The Solution: Selective Derived Edge Feature Vectors
+
+Edge features are **selective** — only edge types with meaningful per-instance variation receive feature vectors. Edge types where the relation name alone carries sufficient signal are left featureless. This is a deliberate design choice: adding features to `belongsToSector` or `owl:sameAs` edges would waste memory on constant vectors that carry no information beyond what the edge type already encodes.
+
+Every featurized edge gets a fixed-width vector (default 32-d) with three segments derived entirely from endpoint node properties. All segment boundaries are computed proportionally by `EdgeVectorLayout`, so the structure scales to any `edge_vector_dim`:
+
+```
+Default 32-dimensional edge feature vector
+┌─────────────────────┬──────────────────────┬─────────────────────┐
+│ Temporal Signals    │ Numeric Contrast     │ Relational Context  │
+│ (time delta,        │ (differences, ratios,│ (namespace, label   │
+│  period flags,      │  magnitudes between  │  similarity,        │
+│  direction)         │  endpoints)          │  relation identity) │
+│                     │                      │                     │
+│ 37.5% of edge_dim   │ 37.5% of edge_dim    │ 25% of edge_dim     │
+│ (12 dims @ 32)      │ (12 dims @ 32)       │ (8 dims @ 32)       │
+└─────────────────────┴──────────────────────┴─────────────────────┘
+```
+
+#### Which Edge Types Get Features
+
+Edge types are classified by relation name into categories. Only categories in the enabled set receive feature vectors:
+
+| Category | Example Relations | Default | Key Signals |
+|----------|------------------|---------|-------------|
+| **temporal** | `precedes`, `follows`, `hasNext` | **ON** | Month delta, same-year flag, consecutive-month flag, direction |
+| **option_stock** | `hasUnderlyingPriceObservation` | **ON** | Moneyness (strike/stock), log-moneyness, strike-stock difference |
+| **escalation** | `escalatesTo`, `severityChange` | **ON** | Severity delta between alerts |
+| **correlation** | `correlatesWith`, `relatedTo` | OFF | Label Jaccard similarity, same-namespace flag |
+| **causal** | `leadsTo`, `impacts`, `affects` | OFF | Label similarity, cross-source indicator |
+| **strategy** | `straddleWith`, `spreadWith` | OFF | Strike distance, same-expiry flag |
+| **skip** (never featurized) | `belongsToSector`, `owl:sameAs`, `hasParent` | — | Relation name alone is sufficient |
+
+#### Segment 1: Temporal Signals (37.5% of edge_vector_dim)
+
+Encodes **when** the edge endpoints exist relative to each other. For temporal edges, this captures the time gap, periodicity, and direction. For non-temporal edges, a category indicator hash is placed in this segment so the GNN can still distinguish edge categories.
+
+```
+Segment 1: Temporal Signals [37.5% of edge_vector_dim]
+┌────────────────────┬────────────────────┬────────────────────┐
+│ Time Delta         │ Period Flags       │ Direction          │
+│ (signed normalized │ (same-year,        │ (forward/backward  │
+│  month delta,      │  consecutive-month,│  temporal direction│
+│  absolute delta)   │  same-quarter)     │  indicator)        │
+│ 40% of segment     │ 35% of segment     │ 25% of segment     │
+│ (5 dims @ 32)      │ (4 dims @ 32)      │ (3 dims @ 32)      │
+└────────────────────┴────────────────────┴────────────────────┘
+```
+
+- **Time Delta**: Month delta between endpoints computed as `(dst_year - src_year) * 12 + (dst_month - src_month)`, normalized by dividing by 12. Both signed and absolute values are encoded in hashed slots. A 1-month gap = 0.083, a 1-year gap = 1.0.
+- **Period Flags**: Binary indicators — same-year (1.0 if both endpoints share the same year), consecutive-month (1.0 if exactly 1 month apart), same-quarter (1.0 if same calendar quarter and year).
+- **Direction**: +1.0 if destination is later in time, -1.0 if earlier, 0.0 if same or unknown.
+
+#### Segment 2: Numeric Contrast (37.5% of edge_vector_dim)
+
+Encodes **how** the numeric properties of the two endpoints differ. For edges where both endpoints share the same predicate URI (e.g., two `cpi:Index` nodes both having `indexValue`), computes differences, ratios, and magnitudes. For edges with semantically related but differently-named properties (e.g., option `strikePrice` vs. stock `observedPrice`), uses cross-property derivation.
+
+```
+Segment 2: Numeric Contrast [37.5% of edge_vector_dim]
+┌─────────────────────┬─────────────────────┬─────────────────────┐
+│ Difference          │ Ratio               │ Magnitude           │
+│ (dst_val - src_val  │ (dst_val / src_val, │ (average absolute   │
+│  per shared         │  clamped to         │  value of both      │
+│  property)          │  [-10, 10])         │  endpoints)         │
+│ 40% of segment      │ 35% of segment      │ 25% of segment      │
+│ (5 dims @ 32)       │ (4 dims @ 32)       │ (3 dims @ 32)       │
+└─────────────────────┴─────────────────────┴─────────────────────┘
+```
+
+- **Difference**: `dst_value - src_value` for each shared numeric property, hashed into a fixed slot by predicate URI. For temporal edges, this captures how much an indicator changed. For option-stock edges (cross-property), this encodes the strike-stock price difference.
+- **Ratio**: `dst_value / src_value`, clamped to [-10, 10] to avoid extreme values from near-zero denominators. For option-stock edges, this encodes moneyness (strike/stock_price) and log-moneyness.
+- **Magnitude**: Average absolute value of both endpoints — provides scale context so the GNN can distinguish a 1-point change on a 300-point index from a 1-point change on a 10-point index.
+
+**Cross-property derivation** for specific edge categories:
+
+| Category | Source Property | Destination Property | Derived Signals |
+|----------|----------------|---------------------|-----------------|
+| option_stock | `strikePrice` | `observedPrice` | Moneyness, log-moneyness, strike-stock difference |
+| escalation | `severity` / `severityLevel` | `severity` / `severityLevel` | Severity delta (positive = escalation) |
+
+#### Segment 3: Relational Context (25% of edge_vector_dim)
+
+Encodes **what kind** of relationship this edge represents and whether it crosses ontology boundaries.
+
+```
+Segment 3: Relational Context [25% of edge_vector_dim]
+┌─────────────────────┬─────────────────────┬─────────────────────┐
+│ Namespace Signals   │ Label Similarity    │ Relation Identity   │
+│ (same-namespace     │ (Jaccard word       │ (relation name +    │
+│  flag, cross-source │  overlap of         │  category hash)     │
+│  flag, ns hashes)   │  endpoint labels)   │                     │
+│ 40% of segment      │ 35% of segment      │ 25% of segment      │
+│ (3 dims @ 32)       │ (3 dims @ 32)       │ (2 dims @ 32)       │
+└─────────────────────┴─────────────────────┴─────────────────────┘
+```
+
+- **Namespace Signals**: Same-namespace flag (1.0 if both endpoints are from the same ontology, derived from PyG node type prefix), cross-source flag (inverse), and hashed namespace identity for finer-grained source encoding. These are driver-side string operations on type names, broadcast as literals — not Spark UDFs.
+- **Label Similarity**: For correlation and causal edges, Jaccard word overlap between endpoint `rdfs:label` values computed via Spark array functions (`array_intersect`, `array_union`). Distinguishes strong correlations (exact keyword match like "Energy" ↔ "Energy") from weak ones ("Food at Home" ↔ "Food Manufacturing"). For other edge types, a category indicator hash is used instead.
+- **Relation Identity**: The relation name and category are each hashed into fixed slots (relation at weight 1.0, category at weight 0.5). Edges of the same specific relation share strong bits; edges of the same category share weaker bits.
+
+### Proportional Dimension Scaling via EdgeVectorLayout
+
+All segment and sub-segment boundaries are computed at runtime by the `EdgeVectorLayout` class from the configured `edge_vector_dim`. No dim indices are hardcoded in the encoding logic:
+
+```
+EdgeVectorLayout(32) — default, production:
+  Segment 1: Temporal Signals  [0–11]    (12 dims)
+    Time Delta:        [0–4]             (5 dims)
+    Period Flags:      [5–8]             (4 dims)
+    Direction:         [9–11]            (3 dims)
+  Segment 2: Numeric Contrast  [12–23]   (12 dims)
+    Difference:        [12–16]           (5 dims)
+    Ratio:             [17–20]           (4 dims)
+    Magnitude:         [21–23]           (3 dims)
+  Segment 3: Relational Context [24–31]  (8 dims)
+    Namespace:         [24–26]           (3 dims)
+    Label Similarity:  [27–29]           (3 dims)
+    Relation Identity: [30–31]           (2 dims)
+
+EdgeVectorLayout(64) — double resolution:
+  Segment 1: Temporal Signals  [0–23]    (24 dims)
+    Time Delta:        [0–9]             (10 dims)
+    Period Flags:      [10–17]           (8 dims)
+    Direction:         [18–23]           (6 dims)
+  Segment 2: Numeric Contrast  [24–47]   (24 dims)
+    Difference:        [24–33]           (10 dims)
+    Ratio:             [34–41]           (8 dims)
+    Magnitude:         [42–47]           (6 dims)
+  Segment 3: Relational Context [48–63]  (16 dims)
+    Namespace:         [48–53]           (6 dims)
+    Label Similarity:  [54–59]           (6 dims)
+    Relation Identity: [60–63]           (4 dims)
+
+EdgeVectorLayout(16) — half resolution, minimal overhead:
+  Segment 1: Temporal Signals  [0–5]     (6 dims)
+    Time Delta:        [0–1]             (2 dims)
+    Period Flags:      [2–3]             (2 dims)
+    Direction:         [4–5]             (2 dims)
+  Segment 2: Numeric Contrast  [6–11]    (6 dims)
+    Difference:        [6–7]             (2 dims)
+    Ratio:             [8–9]             (2 dims)
+    Magnitude:         [10–11]           (2 dims)
+  Segment 3: Relational Context [12–15]  (4 dims)
+    Namespace:         [12–12]           (1 dim)
+    Label Similarity:  [13–13]           (1 dim)
+    Relation Identity: [14–15]           (2 dims)
+```
+
+`EdgeVectorLayout` validates at construction time that all sub-segments are contiguous, non-overlapping, each has at least 1 dimension, and they sum exactly to `edge_vector_dim`. If `edge_vector_dim` is too small (< 9), it raises immediately with a clear error.
+
+**Tradeoffs when adjusting `edge_vector_dim`:**
+
+| edge_vector_dim | Driver memory per 1M edges | Hash collision risk | Use case |
+|----------------|---------------------------|-------------------|----------|
+| 64 | ~256 MB | Very low | Maximum edge signal fidelity |
+| 32 | ~128 MB | Low | Production default |
+| 16 | ~64 MB | Moderate | Minimal overhead, large edge counts |
+
+### Why Edge Features Require Zero Enrichment Changes
+
+Edge features are derived entirely from properties already present in the enriched triples:
+
+1. **EdgeMapper** resolves each edge's subject and object URIs to integer node IDs via a double-join against the node ID table. This produces a cached resolved edges DataFrame with `(src_type, src_id, relation, dst_type, dst_id)`.
+
+2. **EdgeFeatureExtractor** receives this cached DataFrame directly from the constructor — **no double-join replay**. It joins endpoint node IDs against the literal triples to access numeric properties and labels, all on Spark executors.
+
+3. Temporal signals are derived from month/year properties that nodes already have (e.g., `cpi:hasMonth`, `cpi:hasYear`). Numeric contrast is derived from literal properties (e.g., `cpi:indexValue`, `market:strikePrice`). Label similarity uses existing `rdfs:label` values.
+
+No new triples, no new predicates, no changes to any enrichment module.
+
+### All Edge Encoding Runs on Spark Executors
+
+Every edge encoding operation uses pure Spark expressions — no Python UDFs:
+
+| Encoding | Spark Operation | Example |
+|----------|----------------|---------|
+| Month delta | `(dst_year - src_year) * 12 + (dst_month - src_month)` | Signed month distance between endpoints |
+| Delta normalization | `F.col("month_delta") / F.lit(12.0)` | Normalize to ~[-1, 1] range |
+| Period flags | `F.when(condition, F.lit(1.0)).otherwise(F.lit(0.0))` | Same-year, consecutive-month, same-quarter |
+| Direction indicator | `F.when(delta > 0, 1.0).when(delta < 0, -1.0).otherwise(0.0)` | Forward/backward temporal direction |
+| Numeric difference | `F.col("dst_val") - F.col("src_val")` | Per-property difference between endpoints |
+| Safe ratio | `F.greatest(F.lit(-10.0), F.least(F.lit(10.0), dst/src))` | Clamped ratio avoiding division by zero |
+| Moneyness | `F.col("strike_price") / F.col("stock_price")` | Option-stock cross-property derivation |
+| Log-moneyness | `F.log(F.greatest(moneyness, F.lit(1e-8)))` | Symmetric around ATM (log(1) = 0) |
+| Namespace flag | `F.lit(1.0)` / `F.lit(0.0)` (driver-side string compare, broadcast) | Same-namespace indicator |
+| Label Jaccard | `F.size(F.array_intersect(...)) / F.size(F.array_union(...))` | Word overlap between endpoint labels |
+| Relation hash | `F.abs(F.hash(F.lit(relation), F.lit(seed))) % dim + offset` | Relation name → fixed slots |
+| Category hash | `F.abs(F.hash(F.lit(category), F.lit(seed))) % dim + offset` | Category → fixed slots at half weight |
+| Edge idx assignment | `F.row_number().over(Window.partitionBy(...).orderBy("src_id", "dst_id")) - 1` | Deterministic alignment with edge_index |
+
+All `dim` and `offset` values are read from `EdgeVectorLayout` at runtime — they scale with `edge_vector_dim`.
+
+### Why This Is Better for GNNs
+
+```
+WITHOUT edge features:
+┌────────────────────────────────────────────────────────────┐
+│ precedes edge (1 month gap):   no features                 │
+│ precedes edge (12 month gap):  no features                 │
+│ → GNN treats both identically during message passing       │
+│                                                            │
+│ option→stock (deep ITM):       no features                 │
+│ option→stock (far OTM):        no features                 │
+│ → GNN cannot modulate messages by moneyness                │
+│                                                            │
+│ correlatesWith (CPI↔CPI):      no features                 │
+│ correlatesWith (CPI↔PPI):      no features                 │
+│ → GNN cannot distinguish intra-source from cross-source    │
+└────────────────────────────────────────────────────────────┘
+
+WITH selective edge features:
+┌────────────────────────────────────────────────────────────┐
+│ precedes edge (1 month):  [delta=0.08 | same_yr=1 | ...]  │  32-d
+│ precedes edge (12 month): [delta=1.00 | same_yr=0 | ...]  │  32-d
+│ → GNN can learn time-decay attention weights               │
+│                                                            │
+│ option→stock (deep ITM):  [moneyness=0.7 | log_m=-0.36]   │  32-d
+│ option→stock (far OTM):   [moneyness=1.5 | log_m=0.41]    │  32-d
+│ → GNN can modulate option-stock messages by moneyness      │
+│                                                            │
+│ correlatesWith (CPI↔CPI): [same_ns=1 | sim=0.8 | ...]     │  32-d
+│ correlatesWith (CPI↔PPI): [same_ns=0 | sim=0.3 | ...]     │  32-d
+│ → GNN can weight intra-source correlations differently     │
+│                                                            │
+│ belongsToSector:           no features (not needed)        │
+│ owl:sameAs:                no features (not needed)        │
+│ → Structural edges use simpler message-passing layers      │
+└────────────────────────────────────────────────────────────┘
+```
+
 ## PyG Construction Pipeline
 
-The PyG builder converts the enriched triples DataFrame into a PyTorch Geometric `HeteroData` object through four steps, with all heavy computation on Spark executors:
+The PyG builder converts the enriched triples DataFrame into a PyTorch Geometric `HeteroData` object through five steps, with all heavy computation on Spark executors:
 
 ```
 triples_df (enriched, on executors)
@@ -354,15 +600,18 @@ triples_df (enriched, on executors)
     │   └── Output: node_id_df (uri, node_id, node_type) — cached on executors
     │              node_counts Dict[str, int] — small collect to driver
     │
-    ├── Step 2: EdgeMapper (on executors → driver tensors)
+    ├── Step 2: EdgeMapper (on executors → driver tensors + cached DataFrame)
     │   ├── Exclude structural predicates (rdf:type, rdfs:label, etc.)
     │   ├── Double-join triples with node_id_df (subject → src_id, object → dst_id)
     │   ├── Inner join on object naturally filters out literal properties
     │   ├── Derive relation names via pure Spark WHEN expressions (no UDF)
-    │   ├── Cache resolved edges, discover distinct edge types (small collect)
+    │   ├── Cache resolved edges DataFrame (reused by EdgeFeatureExtractor)
+    │   ├── Discover distinct edge types (small collect)
     │   ├── Collect per-edge-type [2, num_edges] int64 arrays via toPandas()
+    │   │   in deterministic order (src_id ASC, dst_id ASC)
     │   ├── Release Pandas memory after each edge type conversion
     │   └── Output: Dict[(src_type, relation, dst_type) → LongTensor]
+    │              edges_final_df — cached on executors for Step 4
     │
     ├── Step 3: FeatureExtractor (on executors → driver tensors)
     │   ├── Compute VectorLayout from configured vector_dim (all boundaries
@@ -384,11 +633,41 @@ triples_df (enriched, on executors)
     │   │   └── Convert numpy → torch (zero-copy via from_numpy)
     │   └── Output: Dict[node_type → FloatTensor[num_nodes, vector_dim]]
     │
-    └── Step 4: Assemble HeteroData (on driver)
+    ├── Step 4: EdgeFeatureExtractor (on executors → driver tensors)
+    │   ├── Compute EdgeVectorLayout from configured edge_vector_dim
+    │   │   (all boundaries scale proportionally)
+    │   ├── Classify each edge type by relation name into categories
+    │   │   (temporal, option_stock, escalation, correlation, causal,
+    │   │    strategy, skip, generic)
+    │   ├── Filter to eligible edge types (enabled categories only)
+    │   ├── Assign deterministic edge_idx via Window functions on executors
+    │   │   (same sort order as EdgeMapper: src_id ASC, dst_id ASC)
+    │   ├── Extract endpoint numeric properties via anti-join — on executors
+    │   ├── Extract endpoint labels (rdfs:label) — on executors
+    │   ├── For each eligible edge type:
+    │   │   ├── Filter resolved edges to this type (on executors)
+    │   │   ├── Encode Segment 1: temporal signals (time delta, period flags,
+    │   │   │   direction) or category indicator for non-temporal edges
+    │   │   ├── Encode Segment 2: numeric contrast (difference, ratio,
+    │   │   │   magnitude) or cross-property derivation (moneyness, severity)
+    │   │   ├── Encode Segment 3: namespace signals + label similarity +
+    │   │   │   relation identity hash
+    │   │   ├── Union segments, aggregate (sum at same edge_idx+dim) — on executors
+    │   │   ├── Pre-allocate dense numpy array on driver
+    │   │   ├── Collect sparse entries via toPandas() (chunked for large types)
+    │   │   ├── Scatter into dense array, delete Pandas, gc.collect()
+    │   │   └── Convert numpy → torch (zero-copy via from_numpy)
+    │   ├── Reuses cached edges_final_df from EdgeMapper — no double-join replay
+    │   └── Output: Dict[(src_type, rel, dst_type) → FloatTensor[num_edges, edge_vector_dim]]
+    │              Only contains entries for edge types that received features
+    │
+    └── Step 5: Assemble HeteroData (on driver)
         ├── Only compact tensors on driver — no URI strings
-        ├── Attach feature tensors per type (same width for all)
+        ├── Attach node feature tensors per type (same width for all)
         ├── Attach edge_index tensors per (src, rel, dst) type
+        ├── Attach edge_attr tensors for featurized edge types
         ├── Release intermediate dicts, gc.collect()
+        ├── Release edges_final_df from executor cache
         ├── Release node_id_df from executor cache
         └── Output: HeteroData ready for torch.save() and GNN training
 ```
@@ -410,6 +689,7 @@ Step 2: Edge indices (collected one type at a time)
     Per type: [2, N] int64 → ~16 bytes/edge
     Total: ~200-500 MB for 15-30M edges
   Peak per-type: Pandas DataFrame + tensor → Pandas freed immediately
+  Executors hold: edges_final_df (cached for Step 4)
 
 Step 3: Feature tensors (collected one type at a time, largest first)
   Driver holds: feature_tensors dict (accumulating) + edge_indices
@@ -423,25 +703,46 @@ Step 3: Feature tensors (collected one type at a time, largest first)
     d) Delete Pandas DataFrame, gc.collect()
     e) Convert numpy → torch (zero-copy via from_numpy)
 
+Step 4: Edge feature tensors (collected one type at a time)
+  Driver holds: edge_feature_tensors dict (accumulating)
+    + feature_tensors + edge_indices
+  Per type:
+    a) Pre-allocate dense numpy: num_edges × edge_vector_dim × 4 bytes
+       (much smaller than node features: 32-d vs 1024-d)
+    b) Collect sparse entries via toPandas():
+       - Small types (<1M edges): single collect
+       - Large types (>1M edges): chunked by edge_idx range
+    c) Scatter into dense array, delete Pandas, gc.collect()
+    d) Convert numpy → torch (zero-copy via from_numpy)
+  Typical total: 32 dims × 4 bytes × 2M edges = ~256 MB per type
+  Reuses cached edges_final_df — no additional executor memory
+
   gc.collect() is safe here because it runs on the driver process
   only — all Spark executor work is complete before collection.
   It reclaims Pandas/numpy circular references that CPython's
   reference counting alone may not free.
 
-Step 4: Assemble HeteroData
+Step 5: Assemble HeteroData
   HeteroData stores references to existing tensors (no copy)
+  Attach edge_attr for featurized edge types (reference only)
   Delete intermediate dicts → only HeteroData holds references
+  Unpersist edges_final_df (executor cache freed)
+  Unpersist node_id_df (executor cache freed)
   gc.collect() to reclaim dict overhead
 
-Step 5: Save to S3 (in build_graph.py)
+Step 6: Save to S3 (in build_graph.py)
   torch.save() to BytesIO buffer → upload_fileobj streams to S3
   Peak: HeteroData + serialized buffer (same size)
   Buffer freed after upload
 ```
 
-**Chunked collection for large types**: When a node type has more than 500K nodes (configurable via `chunk_node_threshold`), the sparse `(node_id, dim, value)` entries are collected in chunks by node_id range. Each chunk's Pandas DataFrame is scattered into the pre-allocated dense array and immediately freed. This bounds peak Pandas memory to ~120 MB per chunk regardless of total type size.
+**Chunked collection for large node types**: When a node type has more than 500K nodes (configurable via `chunk_node_threshold`), the sparse `(node_id, dim, value)` entries are collected in chunks by node_id range. Each chunk's Pandas DataFrame is scattered into the pre-allocated dense array and immediately freed. This bounds peak Pandas memory to ~120 MB per chunk regardless of total type size.
 
-**Largest types processed first**: Types are sorted by node count (descending) so that if a type is too large for available driver memory, the job fails fast rather than after processing all smaller types.
+**Chunked collection for large edge types**: When an edge type has more than 1M edges (configurable via `chunk_edge_threshold`), the sparse `(edge_idx, dim, value)` entries are collected in chunks by edge_idx range, following the same pattern as node features.
+
+**Largest types processed first**: Node types are sorted by node count (descending) so that if a type is too large for available driver memory, the job fails fast rather than after processing all smaller types.
+
+**Edge feature tensors are much smaller than node features**: At 32 dims × 4 bytes per edge vs. 1024 dims × 4 bytes per node, edge feature tensors are ~32× smaller per element. A 2M-edge type's tensor is ~256 MB at 32-d, compared to ~8 GB for a 2M-node type at 1024-d.
 
 ### Scaling Characteristics
 
@@ -455,16 +756,28 @@ Step 5: Save to S3 (in build_graph.py)
 | Ontology structure extraction | Spark executors | `rdfs:subClassOf` transitive closure via iterative joins |
 | Property schema extraction | Spark executors | `rdfs:domain`/`rdfs:range` join, cached on executors |
 | VectorLayout computation | Driver (init) | Pure Python arithmetic from `vector_dim`, ~1 μs |
-| Hash-based encoding | Spark executors | `F.hash()`, `F.abs()`, `F.lit()` — JVM-native, no Python UDF |
-| Feature normalization | Spark executors | Single-pass `agg()` for per-predicate stats, broadcast joined |
-| Sparse entry aggregation | Spark executors | `groupBy(node_id, dim).agg(sum)` — handles hash collisions |
+| EdgeVectorLayout computation | Driver (init) | Pure Python arithmetic from `edge_vector_dim`, ~1 μs |
+| Hash-based node encoding | Spark executors | `F.hash()`, `F.abs()`, `F.lit()` — JVM-native, no Python UDF |
+| Node feature normalization | Spark executors | Single-pass `agg()` for per-predicate stats, broadcast joined |
+| Sparse entry aggregation (nodes) | Spark executors | `groupBy(node_id, dim).agg(sum)` — handles hash collisions |
+| Edge type classification | Driver | Substring matching on relation names, ~1 μs per type |
+| Edge idx assignment | Spark executors | `Window.partitionBy(...).orderBy("src_id", "dst_id")` — deterministic |
+| Endpoint property extraction | Spark executors | Anti-join + cast + groupBy — reuses literal isolation pattern |
+| Temporal signal encoding | Spark executors | Regex-matched month/year properties, arithmetic on executors |
+| Numeric contrast encoding | Spark executors | Inner join on shared predicates, difference/ratio/magnitude |
+| Cross-property derivation | Spark executors | Regex-matched property names (strikePrice, observedPrice, etc.) |
+| Label similarity (Jaccard) | Spark executors | `F.array_intersect` / `F.array_union` — JVM-native array ops |
+| Sparse entry aggregation (edges) | Spark executors | `groupBy(edge_idx, dim).agg(sum)` — handles hash collisions |
 | Edge index collection | Driver | Per-edge-type [2, N] int64 — ~16 bytes/edge |
-| Feature collection | Driver | Per-type sparse entries → dense [N, vector_dim] float32, chunked for large types |
+| Node feature collection | Driver | Per-type sparse entries → dense [N, vector_dim] float32, chunked for large types |
+| Edge feature collection | Driver | Per-type sparse entries → dense [N, edge_vector_dim] float32, chunked for large types |
 | HeteroData assembly | Driver | Only compact tensors, no strings |
 | Enriched Parquet write | Spark executors | `repartition` + `write.parquet` — executors write directly to S3 |
 | PyG .pt upload | Driver | `upload_fileobj` streams buffer to S3 (no extra copy) |
 
-**Universal feature width**: HeteroData stores feature tensors of the same `vector_dim` for every node type. The ontology-aware encoding keeps vectors informative even for types with few literal properties — the ontology structure and property schema segments still carry meaningful signal.
+**Universal node feature width**: HeteroData stores node feature tensors of the same `vector_dim` for every node type. The ontology-aware encoding keeps vectors informative even for types with few literal properties — the ontology structure and property schema segments still carry meaningful signal.
+
+**Selective edge feature width**: HeteroData stores edge feature tensors (`edge_attr`) only for edge types that received features. Edge types without features have no `edge_attr` attribute, allowing the GNN to use simpler message-passing layers for those types.
 
 | Node type example | Typical nodes | Memory @ 1024-d | Memory @ 512-d | Key signals |
 |-------------------|--------------|-----------------|----------------|-------------|
@@ -475,6 +788,15 @@ Step 5: Save to S3 (in build_graph.py)
 | filings_Form4 | ~50K | ~200 MB | ~100 MB | SEC filing class, transaction properties, SEC source |
 | unified_UnifiedMonth | ~12 | ~48 KB | ~24 KB | Temporal class, cross-source membership |
 
+| Edge type example | Typical edges | Memory @ 32-d | Key signals |
+|-------------------|--------------|---------------|-------------|
+| (cpi_Index, precedes, cpi_Index) | ~50K | ~6 MB | Month delta, same-year, direction |
+| (market_PriceObservation, precedes, market_PriceObservation) | ~500K-1M | ~64-128 MB | Intraday time delta, consecutive flag |
+| (market_options_OptionQuote, hasUnderlyingPriceObservation, market_PriceObservation) | ~500K-1M | ~64-128 MB | Moneyness, log-moneyness, strike-stock diff |
+| (noaa_Alert, escalatesTo, noaa_Alert) | ~1K | ~128 KB | Severity delta |
+| (cpi_Index, belongsToSector, unified_EconomicSector) | ~5K | — (no features) | Relation name sufficient |
+| (cpi_Index, correlatesWith, ppi_Index) | ~10K | — (OFF by default) | Label similarity, cross-source flag |
+
 ### Memory Budget by Glue Worker Type
 
 ```
@@ -482,18 +804,20 @@ Glue G.2X (32 GB driver):
   JVM + Spark overhead:     ~8-10 GB
   Python interpreter:       ~1-2 GB
   Available for tensors:    ~20-22 GB
-  → Suitable for <1M total nodes at 1024-d
-  → Or <2M total nodes at 512-d
+  → Node features: suitable for <1M total nodes at 1024-d
+  → Edge features: adds ~0.5-1 GB for typical temporal + option edges at 32-d
+  → Or <2M total nodes at 512-d with edge features
 
 Glue G.4X (64 GB driver):
   JVM + Spark overhead:     ~10-12 GB
   Python interpreter:       ~1-2 GB
   Available for tensors:    ~50-52 GB
-  → Suitable for 2-5M total nodes at 1024-d
+  → Node features: suitable for 2-5M total nodes at 1024-d
+  → Edge features: adds ~1-3 GB for all featurized edge types at 32-d
   → Recommended for production with intraday market data
 ```
 
-Reducing `vector_dim` from 1024 to 512 **halves driver memory** for feature tensors while preserving the same three-segment structure. This enables running on G.2X workers for rapid experimentation before committing to full-resolution production runs on G.4X.
+Reducing `vector_dim` from 1024 to 512 **halves driver memory** for node feature tensors while preserving the same three-segment structure. Edge feature tensors at 32-d are already compact — reducing `edge_vector_dim` to 16 halves their memory but is rarely necessary since they are ~32× smaller per element than node features. This enables running on G.2X workers for rapid experimentation before committing to full-resolution production runs on G.4X.
 
 ### PyG Configuration
 
@@ -508,6 +832,12 @@ The PyG builder accepts an optional configuration dict:
         "vector_dim": 1024,
         "chunk_node_threshold": 500000
     },
+    "edge_feature_config": {
+        "enabled": true,
+        "edge_vector_dim": 32,
+        "chunk_edge_threshold": 1000000,
+        "enabled_categories": ["temporal", "option_stock", "escalation"]
+    },
     "include_temporal_nodes": true,
     "include_sector_nodes": true
 }
@@ -518,8 +848,12 @@ The PyG builder accepts an optional configuration dict:
 | `node_types` | All rdf:type classes | Whitelist of PyG node type names to include |
 | `edge_types` | All entity-to-entity predicates | Whitelist of relation names to include |
 | `feature_config.normalize` | `true` | Z-score normalize numeric features (single-pass per-predicate) |
-| `feature_config.vector_dim` | `1024` | Feature vector dimension — all segments scale proportionally. Minimum 32. |
+| `feature_config.vector_dim` | `1024` | Node feature vector dimension — all segments scale proportionally. Minimum 32. |
 | `feature_config.chunk_node_threshold` | `500000` | Node count above which chunked collection is used |
+| `edge_feature_config.enabled` | `true` | Enable/disable edge feature extraction entirely |
+| `edge_feature_config.edge_vector_dim` | `32` | Edge feature vector dimension — all segments scale proportionally. Minimum 9. |
+| `edge_feature_config.chunk_edge_threshold` | `1000000` | Edge count above which chunked collection is used |
+| `edge_feature_config.enabled_categories` | `["temporal", "option_stock", "escalation"]` | Which edge categories receive features. Options: `temporal`, `option_stock`, `escalation`, `correlation`, `causal`, `strategy` |
 | `include_temporal_nodes` | `true` | Include Month/Year/Quarter node types |
 | `include_sector_nodes` | `true` | Include EconomicSector node types |
 
@@ -553,7 +887,7 @@ When config is empty, sensible defaults are inferred from the data.
     "--enable_ontology_mapping": "true",
     "--time_period": "2024-12",
     "--parquet_partitions": "200",
-    "--pyg_config": "{\"feature_config\": {\"normalize\": true, \"vector_dim\": 1024}}"
+    "--pyg_config": "{\"feature_config\": {\"normalize\": true, \"vector_dim\": 1024}, \"edge_feature_config\": {\"enabled\": true, \"edge_vector_dim\": 32}}"
 }
 ```
 
@@ -566,7 +900,33 @@ When config is empty, sensible defaults are inferred from the data.
     "--enriched_parquet_prefix": "enriched/2024-12/triples/",
     "--pyg_output_key": "pyg/2024-12/hetero_data_512d.pt",
     "--time_period": "2024-12",
-    "--pyg_config": "{\"feature_config\": {\"vector_dim\": 512, \"normalize\": true}}"
+    "--pyg_config": "{\"feature_config\": {\"vector_dim\": 512, \"normalize\": true}, \"edge_feature_config\": {\"edge_vector_dim\": 16}}"
+}
+```
+
+**Notebook experiment with additional edge feature categories:**
+
+```json
+{
+    "--mode": "pyg_only",
+    "--output_bucket": "my-data-lake",
+    "--enriched_parquet_prefix": "enriched/2024-12/triples/",
+    "--pyg_output_key": "pyg/2024-12/hetero_data_full_edge_features.pt",
+    "--time_period": "2024-12",
+    "--pyg_config": "{\"edge_feature_config\": {\"enabled_categories\": [\"temporal\", \"option_stock\", \"escalation\", \"correlation\", \"causal\"]}}"
+}
+```
+
+**Notebook experiment with edge features disabled:**
+
+```json
+{
+    "--mode": "pyg_only",
+    "--output_bucket": "my-data-lake",
+    "--enriched_parquet_prefix": "enriched/2024-12/triples/",
+    "--pyg_output_key": "pyg/2024-12/hetero_data_no_edge_features.pt",
+    "--time_period": "2024-12",
+    "--pyg_config": "{\"edge_feature_config\": {\"enabled\": false}}"
 }
 ```
 
@@ -826,16 +1186,18 @@ jolts:Industry_LeisureAndHospitality_FoodServices_Industry
 
 ### Benefits for GNN Training
 
-This enriched structure combined with ontology-aware feature vectors enables GNNs to learn:
-- **Temporal Patterns**: How indicators evolve and correlate over time across 100+ sources
-- **Cross-Domain Relationships**: How economic, financial, employment, and environmental factors interact
+This enriched structure combined with ontology-aware node feature vectors and derived edge feature vectors enables GNNs to learn:
+- **Temporal Patterns**: How indicators evolve and correlate over time across 100+ sources, with edge features encoding the exact time gap and direction
+- **Cross-Domain Relationships**: How economic, financial, employment, and environmental factors interact, with edge features distinguishing intra-source from cross-source correlations
 - **Sector Dynamics**: How sector-wide shocks propagate across different data types
-- **Lead-Lag Relationships**: Which indicators predict changes in others
+- **Lead-Lag Relationships**: Which indicators predict changes in others, with temporal edge features encoding the lag magnitude
 - **Geographic Effects**: How regional factors affect economic and market outcomes
 - **Company-Specific Patterns**: How company fundamentals relate to market performance
-- **Intraday Dynamics**: How market prices and options evolve within trading sessions
+- **Intraday Dynamics**: How market prices and options evolve within trading sessions, with edge features encoding moneyness and time-to-expiry signals
 - **Ontology-Aware Similarity**: Nodes sharing superclasses or property schemas are naturally similar in feature space, even before training
-- **Cross-Type Reasoning**: Universal feature width enables shared GNN layers that learn patterns across all 100+ ontologies simultaneously
+- **Cross-Type Reasoning**: Universal node feature width enables shared GNN layers that learn patterns across all 100+ ontologies simultaneously
+- **Edge-Modulated Message Passing**: Edge features allow the GNN to modulate messages based on per-instance signals (time gap, moneyness, severity delta) rather than treating all edges of the same type identically
+- **Severity Escalation Detection**: Edge features on escalation edges encode the severity delta, enabling the GNN to learn escalation patterns in weather alert sequences
 
 ## Data Sources
 
@@ -913,10 +1275,13 @@ pyg-knowledge-graph-builder/
 │   │           └── patterns.py             # NOAA alert patterns
 │   ├── pyg_builder/                        # PyG construction modules
 │   │   ├── __init__.py
-│   │   ├── constructor.py                  # Orchestrates HeteroData construction
+│   │   ├── constructor.py                  # Orchestrates HeteroData construction (5 steps)
 │   │   ├── node_mapper.py                  # Assigns per-type integer node IDs on executors
-│   │   ├── edge_mapper.py                  # Resolves edges to integer index tensors on executors
-│   │   └── feature_extractor.py            # Ontology-aware feature vectors with VectorLayout
+│   │   ├── edge_mapper.py                  # Resolves edges to integer index tensors on executors;
+│   │   │                                   # returns cached resolved edges for edge feature reuse
+│   │   ├── feature_extractor.py            # Ontology-aware node feature vectors with VectorLayout
+│   │   └── edge_feature_extractor.py       # Derived edge feature vectors with EdgeVectorLayout;
+│   │                                       # reuses cached resolved edges from EdgeMapper
 │   └── utils/
 │       ├── __init__.py
 │       └── rdf_utils.py                    # Namespace constants, URI helpers, canonical
@@ -961,10 +1326,11 @@ pyg-knowledge-graph-builder/
 | `cross_source_linker.py` | Produces cross-source enrichment triples | Yes |
 | `ontology_mapper.py` | Produces equivalence mapping triples | Yes |
 | `build_graph.py` | Parses N-Triples, orchestrates pipeline modes, saves Parquet and .pt | Yes (orchestration) |
-| `constructor.py` | Orchestrates PyG HeteroData construction from triples DataFrame | Yes (orchestration) |
+| `constructor.py` | Orchestrates PyG HeteroData construction from triples DataFrame (5 steps: node IDs, edge indices, node features, edge features, assembly) | Yes (orchestration) |
 | `node_mapper.py` | Discovers node types, assigns per-type integer IDs via Window functions. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
-| `edge_mapper.py` | Double-joins triples with node IDs, collects edge index tensors. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
-| `feature_extractor.py` | Builds ontology-aware vectors via `VectorLayout` (proportionally scaled segments): extracts class hierarchy, property schema, and literal values on executors; collects sparse entries (chunked for large types); scatters into dense tensors on driver. Imports `ONTOLOGY_NAMESPACE_INDICES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
+| `edge_mapper.py` | Double-joins triples with node IDs, collects edge index tensors. Returns cached resolved edges DataFrame for reuse by `edge_feature_extractor.py`. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
+| `feature_extractor.py` | Builds ontology-aware node feature vectors via `VectorLayout` (proportionally scaled segments): extracts class hierarchy, property schema, and literal values on executors; collects sparse entries (chunked for large types); scatters into dense tensors on driver. Imports `ONTOLOGY_NAMESPACE_INDICES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
+| `edge_feature_extractor.py` | Builds derived edge feature vectors via `EdgeVectorLayout` (proportionally scaled segments): classifies edge types by category, extracts endpoint properties, encodes temporal signals / numeric contrast / relational context on executors; collects sparse entries per edge type; scatters into dense tensors on driver. Reuses cached resolved edges from `edge_mapper.py` — no double-join replay. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
 
 ### Scalability
 
@@ -975,9 +1341,14 @@ The pipeline is designed to handle:
 - **Multiple temporal granularities** (intraday, daily, weekly, monthly, quarterly)
 - **Dynamic schema evolution** as new data sources are added
 - **Horizontal scaling** by adding Glue DPUs — enrichment and PyG construction work distributes automatically
-- **Bounded driver memory** — PyG construction collects only compact integer/float tensors, not URI strings. Chunked collection for large node types bounds peak Pandas memory. `gc.collect()` between types reclaims fragmented memory (safe because it runs on the driver process only, after all Spark executor work is complete).
-- **Configurable vector dimension** — reducing `vector_dim` from 1024 to 512 halves driver memory for feature tensors while preserving the same three-segment structure via proportional `VectorLayout` scaling
+- **Bounded driver memory** — PyG construction collects only compact integer/float tensors, not URI strings. Chunked collection for large node types bounds peak Pandas memory. Chunked collection for large edge types follows the same pattern. `gc.collect()` between types reclaims fragmented memory (safe because it runs on the driver process only, after all Spark executor work is complete).
+- **Configurable node vector dimension** — reducing `vector_dim` from 1024 to 512 halves driver memory for node feature tensors while preserving the same three-segment structure via proportional `VectorLayout` scaling
+- **Configurable edge vector dimension** — reducing `edge_vector_dim` from 32 to 16 halves driver memory for edge feature tensors while preserving the same three-segment structure via proportional `EdgeVectorLayout` scaling
+- **Selective edge featurization** — only high-value edge types receive feature vectors, avoiding wasted memory on constant vectors for structural edges
+- **No double-join for edge features** — the expensive double-join (triples × node_id_df) runs exactly once in EdgeMapper; EdgeFeatureExtractor reuses the cached result
 - **No Python UDFs in the hot path** — URI-to-name conversions, hash-based encoding, and numeric parsing use pure Spark expressions (JVM-native), avoiding Python serialization overhead on 30-50M rows
 - **Controlled Parquet output** — configurable partition count prevents thousands of tiny files or few huge files on S3
 - **Efficient literal isolation** — anti-join against node_id_df filters out edge triples before numeric parsing, avoiding wasted computation on URI-valued objects
-- **Canonical namespace registry** — `NAMESPACE_PREFIXES` and `ONTOLOGY_NAMESPACE_INDICES` in `rdf_utils.py` are the single source of truth, imported by `node_mapper.py`, `edge_mapper.py`, and `feature_extractor.py` to eliminate duplication
+- **Canonical namespace registry** — `NAMESPACE_PREFIXES` and `ONTOLOGY_NAMESPACE_INDICES` in `rdf_utils.py` are the single source of truth, imported by `node_mapper.py`, `edge_mapper.py`, `feature_extractor.py`, and `edge_feature_extractor.py` to eliminate duplication
+
+---
