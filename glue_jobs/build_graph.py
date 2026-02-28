@@ -41,7 +41,7 @@ import logging
 import time
 import io
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
 
 # ============================================
 # AWS Glue imports (graceful fallback for local)
@@ -64,6 +64,11 @@ import boto3
 # Project imports
 # ============================================
 from glue_jobs.enrichment.pipeline import EnrichmentPipeline
+
+from glue_jobs.pyg_builder.metadata_writer import (
+    write_metadata_to_s3,
+    derive_metadata_prefix,
+)
 
 # PyG builder — imported conditionally since enrichment_only mode doesn't need it
 _pyg_builder_available = False
@@ -469,7 +474,8 @@ def run_pyg_construction(
     spark: SparkSession,
     triples_df: DataFrame,
     pyg_config: Dict[str, Any] = None,
-) -> Any:
+    time_period: str = "",
+) -> Tuple:
     """
     Run PyG HeteroData construction from enriched triples DataFrame.
 
@@ -477,13 +483,18 @@ def run_pyg_construction(
     extraction) runs on Spark executors. Only compact tensors cross
     to the driver for final HeteroData assembly.
 
+    Also collects metadata artifacts during construction for the six
+    metadata JSON files. All metadata collect() calls target small
+    aggregated DataFrames — no driver memory concern.
+
     Args:
         spark: Active SparkSession
         triples_df: Enriched triples DataFrame
         pyg_config: Optional PyG construction configuration
+        time_period: Time period label for metadata
 
     Returns:
-        PyG HeteroData object (on driver)
+        Tuple of (HeteroData, MetadataCollector)
     """
     if not _pyg_builder_available:
         raise ImportError(
@@ -501,14 +512,16 @@ def run_pyg_construction(
     start_time = time.time()
 
     config = pyg_config or {}
-    hetero_data = build_hetero_data(spark, triples_df, config)
+    hetero_data, metadata = build_hetero_data(
+        spark, triples_df, config, time_period=time_period
+    )
 
     elapsed = time.time() - start_time
 
     logger.info(f"PyG construction completed in {elapsed:.1f}s")
     _log_hetero_data_summary(hetero_data)
 
-    return hetero_data
+    return hetero_data, metadata
 
 
 def _log_hetero_data_summary(hetero_data):
@@ -567,7 +580,7 @@ def execute_full_pipeline(
 ):
     """
     Mode: full
-    Raw N-Triples → triples_df → Enrich → Save Parquet → Build PyG → Save .pt
+    Raw N-Triples → triples_df → Enrich → Save Parquet → Build PyG → Save .pt → Save metadata
     """
     logger.info("Executing FULL PIPELINE mode")
     logger.info("")
@@ -613,8 +626,9 @@ def execute_full_pipeline(
     )
 
     # Step 4: Build PyG (executors → compact tensors → driver)
-    hetero_data = run_pyg_construction(
-        spark, enriched_df, config.pyg_config
+    hetero_data, metadata = run_pyg_construction(
+        spark, enriched_df, config.pyg_config,
+        time_period=config.time_period,
     )
 
     # Step 5: Save PyG (driver → S3)
@@ -626,6 +640,18 @@ def execute_full_pipeline(
         s3_client, hetero_data, config.output_bucket, config.pyg_output_key
     )
 
+    # Step 6: Save metadata (small JSON files → S3)
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("PHASE: SAVING METADATA")
+    logger.info("=" * 80)
+    metadata_prefix = derive_metadata_prefix(config.pyg_output_key)
+    metadata_files = metadata.to_metadata_files()
+    write_metadata_to_s3(
+        s3_client, metadata_files,
+        config.output_bucket, metadata_prefix,
+    )
+
     return {
         "mode": "full",
         "initial_triples": initial_count,
@@ -633,6 +659,9 @@ def execute_full_pipeline(
         "enriched_parquet_location": enriched_path,
         "pyg_location": (
             f"s3://{config.output_bucket}/{config.pyg_output_key}"
+        ),
+        "metadata_location": (
+            f"s3://{config.output_bucket}/{metadata_prefix}"
         ),
     }
 
@@ -702,7 +731,7 @@ def execute_pyg_only(
 ):
     """
     Mode: pyg_only
-    Enriched Parquet (S3) → triples_df → Build PyG → Save .pt to S3
+    Enriched Parquet (S3) → triples_df → Build PyG → Save .pt → Save metadata
 
     Rapid experimentation: loads existing enriched Parquet,
     constructs PyG with different configurations.
@@ -731,8 +760,9 @@ def execute_pyg_only(
     logger.info("")
 
     # Step 2: Build PyG (executors → compact tensors → driver)
-    hetero_data = run_pyg_construction(
-        spark, triples_df, config.pyg_config
+    hetero_data, metadata = run_pyg_construction(
+        spark, triples_df, config.pyg_config,
+        time_period=config.time_period,
     )
 
     # Step 3: Save PyG (driver → S3)
@@ -744,12 +774,27 @@ def execute_pyg_only(
         s3_client, hetero_data, config.output_bucket, config.pyg_output_key
     )
 
+    # Step 4: Save metadata (small JSON files → S3)
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("PHASE: SAVING METADATA")
+    logger.info("=" * 80)
+    metadata_prefix = derive_metadata_prefix(config.pyg_output_key)
+    metadata_files = metadata.to_metadata_files()
+    write_metadata_to_s3(
+        s3_client, metadata_files,
+        config.output_bucket, metadata_prefix,
+    )
+
     return {
         "mode": "pyg_only",
         "enriched_parquet_source": enriched_path,
         "enriched_triple_count": triple_count,
         "pyg_location": (
             f"s3://{config.output_bucket}/{config.pyg_output_key}"
+        ),
+        "metadata_location": (
+            f"s3://{config.output_bucket}/{metadata_prefix}"
         ),
     }
 
