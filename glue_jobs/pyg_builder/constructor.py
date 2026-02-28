@@ -36,6 +36,15 @@ Edge feature vectors (selective, default 32-d):
 - Reuses cached resolved edges DataFrame from EdgeMapper — the
   expensive double-join runs exactly once
 
+Metadata collection:
+- During each step, metadata artifacts are collected into a
+  MetadataCollector instance for the six metadata JSON files
+- All metadata collect() calls target small aggregated/distinct
+  DataFrames (per-predicate stats, per-type URIs, per-class hierarchy)
+  — never raw triples or per-node/per-edge data
+- MetadataCollector holds only small Python dicts — no tensors,
+  no DataFrames, no Spark references
+
 Driver memory safety:
 - Node feature tensors are built one type at a time, largest first
 - Large types use chunked collection to bound Pandas intermediaries
@@ -47,6 +56,7 @@ Driver memory safety:
   EdgeFeatureExtractor, then unpersisted by the constructor
 - HeteroData assembly only references existing tensors (no copies)
 - Final .pt serialization streams to S3 via upload_fileobj
+- Metadata collection adds negligible driver memory (<1 MB total)
 
 Scaling:
 - Spark-side: scales horizontally with DPUs
@@ -56,7 +66,7 @@ Scaling:
 """
 import gc
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 
 from pyspark.sql import SparkSession, DataFrame
 
@@ -70,6 +80,7 @@ from glue_jobs.pyg_builder.edge_feature_extractor import (
     EdgeFeatureExtractor,
     EDGE_VECTOR_DIM,
 )
+from glue_jobs.pyg_builder.metadata_writer import MetadataCollector
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +91,8 @@ def build_hetero_data(
     spark: SparkSession,
     triples_df: DataFrame,
     config: Optional[Dict[str, Any]] = None,
-):
+    time_period: str = "",
+) -> Tuple[Any, MetadataCollector]:
     """
     Build a PyTorch Geometric HeteroData object from an enriched triples
     DataFrame.
@@ -100,15 +112,23 @@ def build_hetero_data(
     - Reuses cached resolved edges from EdgeMapper (no double-join)
     - See edge_feature_extractor.py for segment layout
 
+    Metadata collection:
+    - During each step, metadata artifacts are deposited into a
+      MetadataCollector for the six metadata JSON files
+    - All metadata collect() calls target small aggregated DataFrames
+    - MetadataCollector is returned alongside HeteroData for the
+      caller to write to S3
+
     Args:
         spark: Active SparkSession
         triples_df: Enriched triples DataFrame (subject, predicate, object).
                     Should already be cached by the caller.
         config: Optional configuration dict. If None/empty, defaults
                 are inferred from the data.
+        time_period: Time period label (e.g., "2024-12") for metadata.
 
     Returns:
-        torch_geometric.data.HeteroData
+        Tuple of (HeteroData, MetadataCollector)
     """
     import torch
     from torch_geometric.data import HeteroData
@@ -135,6 +155,16 @@ def build_hetero_data(
         f"({'enabled' if edge_features_enabled else 'disabled'})"
     )
 
+    # Initialize metadata collector — holds only small Python dicts,
+    # no tensors, no DataFrames, no Spark references
+    metadata = MetadataCollector(
+        time_period=time_period,
+        vector_dim=vector_dim,
+        edge_vector_dim=edge_vector_dim,
+        edge_features_enabled=edge_features_enabled,
+        config=config,
+    )
+
     # Ensure triples_df is cached — if already cached, this is a no-op
     if not (
         triples_df.storageLevel.useMemory
@@ -159,7 +189,7 @@ def build_hetero_data(
 
     if total_nodes == 0:
         logger.warning("No nodes found — returning empty HeteroData")
-        return HeteroData()
+        return HeteroData(), metadata
 
     # Log estimated driver memory for feature tensors
     total_feature_bytes = sum(
@@ -169,6 +199,18 @@ def build_hetero_data(
     logger.info(
         f"  Estimated node feature tensor memory: "
         f"{total_feature_mb:,.1f} MB"
+    )
+
+    # Collect node type URI mapping for metadata.
+    # Small collect — one row per (node_type, type_uri), typically <1000.
+    node_type_uris = node_mapper.get_type_uri_mapping(
+        triples_df, node_id_df
+    )
+
+    # Register node types with metadata collector
+    metadata.register_node_types(
+        node_counts=node_counts,
+        node_type_uris=node_type_uris,
     )
 
     # ============================================
@@ -192,6 +234,12 @@ def build_hetero_data(
         f"({total_edge_mb:,.1f} MB)"
     )
 
+    # Collect edge predicate URI mapping for metadata.
+    # Small collect — one row per distinct relation, typically <100.
+    edge_predicate_uris = edge_mapper.get_predicate_uri_mapping(
+        edges_final_df
+    )
+
     # ============================================
     # STEP 3: Build node feature tensors (ontology-aware)
     # ============================================
@@ -209,6 +257,28 @@ def build_hetero_data(
             f"segments: {segments}"
         )
 
+    # Register node feature metadata — all from small Python objects
+    # already collected during build_features()
+    metadata.register_node_feature_layout(
+        feature_extractor.get_layout().to_dict()
+    )
+
+    artifacts = feature_extractor.get_metadata_artifacts()
+    if artifacts["normalization_stats"] is not None:
+        metadata.register_normalization_stats(
+            stats=artifacts["normalization_stats"],
+            zero_variance_properties=artifacts[
+                "zero_variance_properties"
+            ],
+        )
+    if artifacts["ontology_schema"] is not None:
+        metadata.register_ontology_schema(artifacts["ontology_schema"])
+    if artifacts["slot_mapping"] is not None:
+        metadata.register_slot_mapping(artifacts["slot_mapping"])
+
+    # Build combined encoding config from node + edge extractors
+    encoding_config = feature_extractor.get_encoding_config()
+
     # ============================================
     # STEP 4: Build edge feature tensors (derived)
     #         Reuses edges_final_df — no double-join
@@ -217,8 +287,9 @@ def build_hetero_data(
 
     edge_feature_tensors: Dict = {}
 
+    edge_feature_extractor = EdgeFeatureExtractor(spark, config)
+
     if edge_features_enabled:
-        edge_feature_extractor = EdgeFeatureExtractor(spark, config)
         edge_feature_tensors = (
             edge_feature_extractor.build_edge_features(
                 triples_df, node_id_df, edges_final_df, edge_indices
@@ -231,6 +302,46 @@ def build_hetero_data(
             )
     else:
         logger.info("  Edge features disabled — skipping")
+
+    # Register edge feature metadata
+    metadata.register_edge_feature_layout(
+        edge_feature_extractor.get_layout().to_dict()
+    )
+
+    # Merge edge encoding config into combined config
+    edge_enc_config = edge_feature_extractor.get_encoding_config()
+    encoding_config.update(edge_enc_config)
+    metadata.register_encoding_config(encoding_config)
+
+    # Classify edge types for metadata — lightweight driver-side
+    # substring matching, ~1 μs per type
+    categories, types_with, types_without = (
+        edge_feature_extractor.get_edge_classification(edge_indices)
+    )
+    metadata.register_edge_feature_classification(
+        categories=categories,
+        types_with_features=types_with,
+        types_without_features=types_without,
+    )
+
+    # Register edge types with metadata collector
+    edge_counts = {
+        k: t.shape[1] for k, t in edge_indices.items()
+    }
+    edge_feature_flags = {}
+    edge_feature_dims = {}
+    for (src, rel, dst) in edge_indices:
+        has_feat = (src, rel, dst) in edge_feature_tensors
+        edge_feature_flags[rel] = has_feat
+        edge_feature_dims[rel] = (
+            edge_vector_dim if has_feat else 0
+        )
+    metadata.register_edge_types(
+        edge_counts=edge_counts,
+        edge_predicate_uris=edge_predicate_uris,
+        edge_feature_flags=edge_feature_flags,
+        edge_feature_dims=edge_feature_dims,
+    )
 
     # Release resolved edges — both consumers are done
     edges_final_df.unpersist()
@@ -318,4 +429,4 @@ def build_hetero_data(
     total_mb = total_bytes / (1024 * 1024)
     logger.info(f"  Total HeteroData tensor memory: {total_mb:,.1f} MB")
 
-    return data
+    return data, metadata

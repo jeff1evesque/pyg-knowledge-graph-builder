@@ -238,6 +238,51 @@ class NodeMapper:
 
         return node_id_df, node_counts
 
+    # Add this method to the existing NodeMapper class,
+    # after build_node_id_table
+
+    def get_type_uri_mapping(
+        self,
+        triples_df: DataFrame,
+        node_id_df: DataFrame,
+    ) -> Dict[str, str]:
+        """
+        Return a mapping from PyG node type name to source type URI.
+
+        Small collect — one row per (node_type, type_uri) pair,
+        deduplicated to one URI per type. Typically <500 rows.
+
+        Called by constructor.py for metadata registration.
+        """
+        type_uri_rows = (
+            triples_df
+            .filter(F.col("predicate") == RDF_TYPE)
+            .select(
+                F.col("subject").alias("_subj"),
+                F.col("object").alias("type_uri"),
+            )
+            .join(
+                node_id_df.select(
+                    F.col("uri").alias("_subj"),
+                    F.col("node_type"),
+                ),
+                "_subj",
+                "inner",
+            )
+            .select("node_type", "type_uri")
+            .distinct()
+            .collect()
+        )
+
+        # Keep first URI per type (most common would require a count,
+        # but for metadata purposes first-encountered is sufficient)
+        result: Dict[str, str] = {}
+        for row in type_uri_rows:
+            if row.node_type not in result:
+                result[row.node_type] = row.type_uri
+
+        return result
+
     def _apply_config_filters(self, type_triples: DataFrame) -> DataFrame:
         """Apply configuration-based filters to type triples."""
         if self._requested_node_types:

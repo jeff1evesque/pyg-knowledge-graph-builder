@@ -305,3 +305,45 @@ class EdgeMapper:
         # is responsible for unpersisting it after all consumers finish.
 
         return edge_indices, edges_final
+
+    # Add this method to the existing EdgeMapper class,
+    # after build_edge_indices
+
+    def get_predicate_uri_mapping(
+        self,
+        edges_final_df: DataFrame,
+    ) -> Dict[str, str]:
+        """
+        Return a mapping from PyG relation name to source predicate URI.
+
+        Small collect — one row per distinct relation name, typically
+        <100 rows. Uses the already-cached edges_final_df.
+
+        Called by constructor.py for metadata registration.
+
+        Note: edges_final_df has 'relation' (PyG name) but not the
+        original predicate URI. We reconstruct the mapping from the
+        relation name using the inverse of the namespace prefix table.
+        This is a driver-side string operation on ~100 relation names.
+        """
+        relation_rows = (
+            edges_final_df
+            .select("relation")
+            .distinct()
+            .collect()
+        )
+
+        result: Dict[str, str] = {}
+        for row in relation_rows:
+            rel = row.relation
+            # Reverse the prefix_localName → namespace/localName mapping
+            for namespace, prefix in NAMESPACE_PREFIXES:
+                if rel.startswith(f"{prefix}_"):
+                    local = rel[len(prefix) + 1:]
+                    result[rel] = f"{namespace}{local}"
+                    break
+            else:
+                # Unknown prefix — store relation name as-is
+                result[rel] = rel
+
+        return result
