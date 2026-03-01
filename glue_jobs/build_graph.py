@@ -2,7 +2,11 @@
 PyTorch Geometric Knowledge Graph Builder - Main Glue Job Entry Point
 
 AWS Glue job that orchestrates the complete pipeline:
-  Raw RDF (N-Triples, S3) → PySpark triples_df → Enrich → Build PyG HeteroData → Save to S3
+  Raw RDF (S3) → PySpark triples_df → Enrich → Build PyG HeteroData → Save to S3
+
+Supports two source formats:
+  - ntriples:       One triple per line in .nt files (default)
+  - turtle_parquet: Self-contained Turtle blobs in a Parquet column
 
 Supports three execution modes:
   - full:            End-to-end RDF enrichment + PyG graph construction
@@ -13,7 +17,7 @@ Usage (AWS Glue):
     Parameters:
         --mode:                    full | enrichment_only | pyg_only
         --source_bucket:           S3 bucket containing raw RDF files
-        --source_prefix:           S3 prefix for raw RDF files (e.g., "rdf/2024/12/")
+        --source_prefix:           S3 prefix for raw RDF files
         --output_bucket:           S3 bucket for outputs
         --enriched_parquet_prefix: S3 prefix for enriched Parquet artifact
         --pyg_output_key:          S3 key for PyG HeteroData output (.pt)
@@ -21,8 +25,11 @@ Usage (AWS Glue):
         --time_period:             Time period label (e.g., "2024-12") for output naming
         --pyg_config:              Optional JSON string with PyG construction config
         --parquet_partitions:      Number of Parquet output partitions (default: 200)
+        --source_format:           ntriples | turtle_parquet (default: ntriples)
+        --turtle_column:           Column name containing Turtle strings when
+                                   source_format=turtle_parquet (default: triples)
 
-Example Glue job parameters:
+Example Glue job parameters (N-Triples source):
     {
         "--mode": "full",
         "--source_bucket": "my-data-lake",
@@ -31,6 +38,19 @@ Example Glue job parameters:
         "--enriched_parquet_prefix": "enriched/2024-12/triples/",
         "--pyg_output_key": "pyg/2024-12/hetero_data.pt",
         "--enable_ontology_mapping": "true",
+        "--time_period": "2024-12",
+        "--parquet_partitions": "200"
+    }
+
+Example Glue job parameters (Turtle Parquet source):
+    {
+        "--mode": "enrichment_only",
+        "--source_bucket": "my-data-lake",
+        "--source_prefix": "raw/sec/filings/2024-12/",
+        "--output_bucket": "my-data-lake",
+        "--enriched_parquet_prefix": "enriched/2024-12/triples/",
+        "--source_format": "turtle_parquet",
+        "--turtle_column": "triples",
         "--time_period": "2024-12",
         "--parquet_partitions": "200"
     }
@@ -93,6 +113,7 @@ logger = logging.getLogger("build_graph")
 # Constants
 # ============================================
 VALID_MODES = {"full", "enrichment_only", "pyg_only"}
+VALID_SOURCE_FORMATS = {"ntriples", "turtle_parquet"}
 
 TRIPLES_SCHEMA = StructType([
     StructField("subject", StringType(), nullable=False),
@@ -119,8 +140,22 @@ class JobConfig:
         self.source_bucket = args.get("source_bucket", "")
         self.source_prefix = args.get("source_prefix", "")
 
+        # Source format:
+        #   "ntriples":       one triple per line in .nt files
+        #   "turtle_parquet": self-contained Turtle blobs in a Parquet column
+        self.source_format = (
+            args.get("source_format", "ntriples").lower().strip()
+        )
+
+        # Column name containing Turtle strings when
+        # source_format=turtle_parquet. Configurable so that different
+        # source Parquet schemas can be handled without code changes.
+        self.turtle_column = args.get("turtle_column", "triples")
+
         # Output keys / prefixes
-        self.enriched_parquet_prefix = args.get("enriched_parquet_prefix", "")
+        self.enriched_parquet_prefix = args.get(
+            "enriched_parquet_prefix", ""
+        )
         self.pyg_output_key = args.get("pyg_output_key", "")
 
         # Optional
@@ -164,6 +199,13 @@ class JobConfig:
             )
         if not self.output_bucket:
             raise ValueError("output_bucket is required")
+
+        if self.source_format not in VALID_SOURCE_FORMATS:
+            raise ValueError(
+                f"Invalid source_format '{self.source_format}'. "
+                f"Must be one of: {', '.join(VALID_SOURCE_FORMATS)}"
+            )
+
         if self.mode in ("full", "enrichment_only"):
             if not self.source_bucket:
                 raise ValueError(
@@ -191,6 +233,8 @@ class JobConfig:
         return (
             f"JobConfig(mode={self.mode}, "
             f"source={self.source_bucket}/{self.source_prefix}, "
+            f"source_format={self.source_format}, "
+            f"turtle_column={self.turtle_column}, "
             f"output={self.output_bucket}, "
             f"enriched_parquet={self.enriched_parquet_prefix}, "
             f"pyg_output={self.pyg_output_key}, "
@@ -216,6 +260,8 @@ def parse_args() -> JobConfig:
                 "time_period",
                 "pyg_config",
                 "parquet_partitions",
+                "source_format",
+                "turtle_column",
             ],
         )
     else:
@@ -239,6 +285,12 @@ def parse_args() -> JobConfig:
             "--parquet_partitions",
             default=str(DEFAULT_PARQUET_PARTITIONS),
         )
+        parser.add_argument(
+            "--source_format",
+            choices=list(VALID_SOURCE_FORMATS),
+            default="ntriples",
+        )
+        parser.add_argument("--turtle_column", default="triples")
 
         parsed = parser.parse_args()
         args = vars(parsed)
@@ -336,6 +388,261 @@ def load_ntriples_to_dataframe(
 
 
 # ============================================
+# Turtle Parquet parsing (source Parquet → triples DataFrame)
+# ============================================
+def load_turtle_parquet_to_dataframe(
+    spark: SparkSession,
+    source_path: str,
+    turtle_column: str = "triples",
+) -> DataFrame:
+    """
+    Load RDF Turtle strings from a Parquet file column into a PySpark
+    triples DataFrame.
+
+    Each row in the source Parquet contains a self-contained Turtle
+    blob in `turtle_column`. Each blob may contain multiple subjects,
+    predicate lists (;), object lists (,), prefix declarations (@prefix),
+    and XSD-typed literals. A Python UDF calls rdflib to parse each
+    blob correctly — this is the one place a UDF is appropriate because
+    the input is a small string per row, not a per-triple operation.
+    All downstream enrichment and PyG construction steps remain pure
+    Spark expressions.
+
+    The UDF emits fully-expanded (subject, predicate, object) triples
+    with all prefixed names resolved to absolute URIs. The output
+    DataFrame has the same schema as load_ntriples_to_dataframe() and
+    is compatible with all downstream pipeline steps.
+
+    Object values are normalized to match the pipeline's existing
+    convention:
+      - URI objects:     full URI string (angle brackets stripped)
+      - Typed literals:  the lexical value only (^^datatype stripped)
+      - Lang literals:   the string value only (@lang stripped)
+      - Plain literals:  the string value as-is
+      - Blank nodes:     kept as "_:identifier" strings
+
+    Requires rdflib on Glue workers. Add to the Glue job configuration:
+      --additional-python-modules rdflib==6.3.2
+
+    Args:
+        spark: Active SparkSession
+        source_path: S3 path to source Parquet files
+        turtle_column: Name of the column containing Turtle strings.
+                       Default "triples". Configurable via
+                       --turtle_column Glue job parameter.
+
+    Returns:
+        DataFrame with columns (subject: string, predicate: string,
+        object: string), one row per triple. Compatible with all
+        downstream pipeline steps.
+
+    Raises:
+        ValueError: If turtle_column is not found in the Parquet schema.
+    """
+    from pyspark.sql.types import ArrayType
+
+    logger.info(
+        f"Loading Turtle Parquet from {source_path}, "
+        f"column='{turtle_column}'"
+    )
+
+    raw_df = spark.read.parquet(source_path)
+
+    if turtle_column not in raw_df.columns:
+        raise ValueError(
+            f"Column '{turtle_column}' not found in Parquet schema. "
+            f"Available columns: {raw_df.columns}. "
+            f"Set --turtle_column to the correct column name."
+        )
+
+    # Select only the turtle column — all other metadata columns
+    # (scraped content, timestamps, etc.) are not needed for the
+    # triples DataFrame
+    turtle_df = raw_df.select(F.col(turtle_column)).filter(
+        F.col(turtle_column).isNotNull()
+        & (F.trim(F.col(turtle_column)) != "")
+    )
+
+    # ============================================
+    # UDF: parse one Turtle blob → list of (s, p, o) structs
+    # ============================================
+    # rdflib is used here because Turtle has prefix resolution,
+    # predicate lists (;), object lists (,), and typed literals that
+    # cannot be correctly parsed with regex. The UDF runs per-row on
+    # executors — each blob is small (~60 triples), so the per-row
+    # overhead is acceptable. All downstream operations remain
+    # pure Spark expressions.
+    #
+    # Object normalization matches the pipeline convention established
+    # in load_ntriples_to_dataframe():
+    #   - URIRef  → str(uri)
+    #   - Literal → str(literal.toPython()) for numerics,
+    #               str(literal) for strings (lexical form, no ^^datatype)
+    #   - BNode   → f"_:{bnode}" (kept as blank node identifier)
+    #
+    # Malformed blobs return an empty list so that parse errors skip
+    # the row rather than failing the job. The zero-triple contribution
+    # is visible in the final triple count logged after loading.
+
+    triple_schema = ArrayType(
+        StructType([
+            StructField("subject", StringType(), nullable=False),
+            StructField("predicate", StringType(), nullable=False),
+            StructField("object", StringType(), nullable=False),
+        ])
+    )
+
+    @F.udf(returnType=triple_schema)
+    def parse_turtle_blob(turtle_str):
+        """
+        Parse a self-contained Turtle string into a list of
+        (subject, predicate, object) dicts with fully-expanded URIs.
+        """
+        if not turtle_str or not turtle_str.strip():
+            return []
+
+        try:
+            from rdflib import Graph, URIRef, Literal, BNode
+
+            g = Graph()
+            g.parse(data=turtle_str, format="turtle")
+
+            triples = []
+            for s, p, o in g:
+                # Subject
+                if isinstance(s, URIRef):
+                    subj = str(s)
+                elif isinstance(s, BNode):
+                    subj = f"_:{str(s)}"
+                else:
+                    # Skip unexpected subject types (should not occur
+                    # in well-formed Turtle)
+                    continue
+
+                # Predicate — always a URIRef in valid RDF
+                pred = str(p)
+
+                # Object — normalize to pipeline convention
+                if isinstance(o, URIRef):
+                    obj = str(o)
+                elif isinstance(o, BNode):
+                    obj = f"_:{str(o)}"
+                elif isinstance(o, Literal):
+                    # toPython() returns a Python native type for
+                    # numeric/date XSD types; str() of that matches
+                    # what the pipeline expects for numeric literals.
+                    # For plain strings, str(literal) returns the
+                    # lexical form without ^^datatype or @lang.
+                    py_val = o.toPython()
+                    obj = str(py_val)
+                else:
+                    obj = str(o)
+
+                triples.append({
+                    "subject": subj,
+                    "predicate": pred,
+                    "object": obj,
+                })
+
+            return triples
+
+        except Exception:
+            # Malformed Turtle — skip this row silently.
+            # The zero-triple contribution will be visible in the
+            # final triple count logged after loading.
+            return []
+
+    # ============================================
+    # Apply UDF and explode into one row per triple
+    # ============================================
+    parsed_df = turtle_df.withColumn(
+        "_triples", parse_turtle_blob(F.col(turtle_column))
+    )
+
+    exploded_df = parsed_df.select(
+        F.explode(F.col("_triples")).alias("_triple")
+    )
+
+    triples_df = exploded_df.select(
+        F.col("_triple.subject").alias("subject"),
+        F.col("_triple.predicate").alias("predicate"),
+        F.col("_triple.object").alias("object"),
+    ).filter(
+        (F.col("subject") != "")
+        & (F.col("predicate") != "")
+    )
+
+    return triples_df
+
+
+# ============================================
+# Source loader dispatcher
+# ============================================
+def load_source_triples(
+    spark: SparkSession,
+    config: "JobConfig",
+) -> Tuple[DataFrame, int]:
+    """
+    Load raw source data into a triples DataFrame.
+
+    Dispatches to the correct loader based on config.source_format:
+      - "ntriples":       load_ntriples_to_dataframe()
+      - "turtle_parquet": load_turtle_parquet_to_dataframe()
+
+    Caches the resulting DataFrame and forces materialization so that
+    downstream steps do not re-trigger the parse UDF.
+
+    Args:
+        spark: Active SparkSession
+        config: Parsed job configuration
+
+    Returns:
+        Tuple of (triples_df cached on executors, triple_count)
+
+    Raises:
+        FileNotFoundError: If no triples are parsed from the source.
+        ValueError: If turtle_column is not found (turtle_parquet only).
+    """
+    source_path = (
+        f"s3://{config.source_bucket}/{config.source_prefix}"
+    )
+
+    if config.source_format == "ntriples":
+        logger.info(
+            f"Source format: N-Triples (.nt files) from {source_path}"
+        )
+        triples_df = load_ntriples_to_dataframe(spark, source_path)
+    else:
+        logger.info(
+            f"Source format: Turtle Parquet from {source_path}, "
+            f"column='{config.turtle_column}'"
+        )
+        triples_df = load_turtle_parquet_to_dataframe(
+            spark,
+            source_path,
+            turtle_column=config.turtle_column,
+        )
+
+    triples_df = triples_df.cache()
+    count = triples_df.count()
+
+    if count == 0:
+        raise FileNotFoundError(
+            f"No triples parsed from {config.source_format} source "
+            f"at {source_path}."
+            + (
+                f" Check that column '{config.turtle_column}' contains "
+                f"valid Turtle strings."
+                if config.source_format == "turtle_parquet"
+                else " Check that .nt files exist at the source prefix."
+            )
+        )
+
+    logger.info(f"Loaded {count:,} triples")
+    return triples_df, count
+
+
+# ============================================
 # Parquet I/O for enriched triples
 # ============================================
 def save_enriched_parquet(
@@ -374,6 +681,8 @@ def load_enriched_parquet(
     Load enriched triples from Parquet on S3.
 
     Reads directly into a distributed DataFrame on executors.
+    This loads Parquet that this pipeline previously wrote
+    (schema: subject, predicate, object) — not source Parquet.
 
     Args:
         spark: Active SparkSession
@@ -580,26 +889,21 @@ def execute_full_pipeline(
 ):
     """
     Mode: full
-    Raw N-Triples → triples_df → Enrich → Save Parquet → Build PyG → Save .pt → Save metadata
+    Raw source → triples_df → Enrich → Save Parquet → Build PyG → Save .pt → Save metadata
+
+    Supports both N-Triples (.nt files) and Turtle Parquet sources
+    via config.source_format.
     """
     logger.info("Executing FULL PIPELINE mode")
     logger.info("")
 
-    # Step 1: Load raw N-Triples → distributed DataFrame
+    # Step 1: Load source → distributed triples DataFrame
     logger.info("=" * 80)
-    logger.info("PHASE: LOADING RAW RDF (N-Triples → DataFrame)")
+    logger.info("PHASE: LOADING SOURCE TRIPLES")
     logger.info("=" * 80)
     start_time = time.time()
 
-    source_path = f"s3://{config.source_bucket}/{config.source_prefix}"
-    triples_df = load_ntriples_to_dataframe(spark, source_path)
-    triples_df = triples_df.cache()
-    initial_count = triples_df.count()
-
-    if initial_count == 0:
-        raise FileNotFoundError(
-            f"No triples parsed from N-Triples files at {source_path}"
-        )
+    triples_df, initial_count = load_source_triples(spark, config)
 
     load_elapsed = time.time() - start_time
     logger.info(f"Loaded {initial_count:,} triples in {load_elapsed:.1f}s")
@@ -654,6 +958,7 @@ def execute_full_pipeline(
 
     return {
         "mode": "full",
+        "source_format": config.source_format,
         "initial_triples": initial_count,
         "enrichment": enrichment_stats,
         "enriched_parquet_location": enriched_path,
@@ -671,28 +976,22 @@ def execute_enrichment_only(
 ):
     """
     Mode: enrichment_only
-    Raw N-Triples → triples_df → Enrich → Save enriched Parquet to S3
+    Raw source → triples_df → Enrich → Save enriched Parquet to S3
 
     Creates a reusable Parquet artifact for multiple PyG experiments.
+    Supports both N-Triples (.nt files) and Turtle Parquet sources
+    via config.source_format.
     """
     logger.info("Executing ENRICHMENT ONLY mode")
     logger.info("")
 
-    # Step 1: Load raw N-Triples → distributed DataFrame
+    # Step 1: Load source → distributed triples DataFrame
     logger.info("=" * 80)
-    logger.info("PHASE: LOADING RAW RDF (N-Triples → DataFrame)")
+    logger.info("PHASE: LOADING SOURCE TRIPLES")
     logger.info("=" * 80)
     start_time = time.time()
 
-    source_path = f"s3://{config.source_bucket}/{config.source_prefix}"
-    triples_df = load_ntriples_to_dataframe(spark, source_path)
-    triples_df = triples_df.cache()
-    initial_count = triples_df.count()
-
-    if initial_count == 0:
-        raise FileNotFoundError(
-            f"No triples parsed from N-Triples files at {source_path}"
-        )
+    triples_df, initial_count = load_source_triples(spark, config)
 
     load_elapsed = time.time() - start_time
     logger.info(f"Loaded {initial_count:,} triples in {load_elapsed:.1f}s")
@@ -720,6 +1019,7 @@ def execute_enrichment_only(
 
     return {
         "mode": "enrichment_only",
+        "source_format": config.source_format,
         "initial_triples": initial_count,
         "enrichment": enrichment_stats,
         "enriched_parquet_location": enriched_path,
@@ -736,6 +1036,10 @@ def execute_pyg_only(
     Rapid experimentation: loads existing enriched Parquet,
     constructs PyG with different configurations.
     Typically 5-10 minutes.
+
+    Note: pyg_only always reads from enriched Parquet previously
+    written by this pipeline (schema: subject, predicate, object).
+    source_format and turtle_column do not apply in this mode.
     """
     logger.info("Executing PyG ONLY mode")
     logger.info("")
@@ -813,6 +1117,8 @@ def save_job_manifest(
         "config": {
             "source_bucket": config.source_bucket,
             "source_prefix": config.source_prefix,
+            "source_format": config.source_format,
+            "turtle_column": config.turtle_column,
             "output_bucket": config.output_bucket,
             "enriched_parquet_prefix": config.enriched_parquet_prefix,
             "pyg_output_key": config.pyg_output_key,
@@ -865,6 +1171,7 @@ def print_final_banner(config: JobConfig, result: Dict, elapsed: float):
     logger.info("JOB COMPLETE")
     logger.info("=" * 80)
     logger.info(f"  Mode:          {config.mode}")
+    logger.info(f"  Source format: {config.source_format}")
     logger.info(f"  Time period:   {config.time_period}")
     logger.info(f"  Duration:      {elapsed:.1f}s ({elapsed / 60:.1f}m)")
     logger.info("")
@@ -875,6 +1182,8 @@ def print_final_banner(config: JobConfig, result: Dict, elapsed: float):
         )
     if "pyg_location" in result:
         logger.info(f"  PyG output:       {result['pyg_location']}")
+    if "metadata_location" in result:
+        logger.info(f"  Metadata:         {result['metadata_location']}")
 
     if "enrichment" in result and isinstance(result["enrichment"], dict):
         stats = result["enrichment"]
@@ -948,6 +1257,9 @@ def main():
 
     except FileNotFoundError as e:
         logger.error(f"File not found: {e}")
+        sys.exit(1)
+    except ValueError as e:
+        logger.error(f"Value error: {e}")
         sys.exit(1)
     except ImportError as e:
         logger.error(f"Import error: {e}")
