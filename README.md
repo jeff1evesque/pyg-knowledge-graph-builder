@@ -1106,7 +1106,7 @@ When config is empty, sensible defaults are inferred from the data.
 |-----------|----------|---------|-------------|
 | `--mode` | Yes | `full` | `full`, `enrichment_only`, or `pyg_only` |
 | `--source_bucket` | Modes 1,2 | — | S3 bucket containing raw RDF files |
-| `--source_prefix` | Modes 1,2 | — | S3 prefix for raw RDF files |
+| `--source_prefix` | Modes 1,2 | — | S3 prefix for raw RDF files within `source_bucket`. Accepts a single prefix or a comma-separated list of prefixes: `"raw/sec/filings/2024-12/,raw/sec/proceedings/2024-12/"`. Each prefix is loaded independently and the results are unioned into a single triples DataFrame before enrichment |
 | `--output_bucket` | Yes | — | S3 bucket for all outputs |
 | `--enriched_parquet_prefix` | Modes 1,2,3 | `enriched/{time_period}/triples/` | S3 prefix for enriched Parquet. Modes 1 and 2 write to this prefix; mode 3 reads from it |
 | `--pyg_output_key` | Modes 1,3 | `pyg/{time_period}/hetero_data.pt` | S3 key for PyG output. Also determines metadata directory: `metadata/` for the default key, `{stem}_metadata/` for experiment variants |
