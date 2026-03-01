@@ -79,14 +79,14 @@ The pipeline supports three execution modes:
 │                                                            │
 │ Mode 1: Full Pipeline                                      │
 │   N-Triples → triples_df → Enrich → Save Parquet           │
-│   → Build PyG HeteroData → Save .pt → Save metadata JSON  │
+│   → Build PyG HeteroData → Save .pt → Save metadata JSON   │
 │                                                            │
 │ Mode 2: Enrichment Only                                    │
 │   N-Triples → triples_df → Enrich → Save Parquet to S3     │
 │                                                            │
 │ Mode 3: PyG Only                                           │
 │   Enriched Parquet (S3) → triples_df → Build PyG HeteroData│
-│   → Save .pt → Save metadata JSON                         │
+│   → Save .pt → Save metadata JSON                          │
 └────────────────────────────────────────────────────────────┘
                             ↓
 ┌────────────────────────────────────────────────────────────┐
@@ -308,26 +308,26 @@ config = {
 ```
 OLD approach (flat literal vectors):
 ┌────────────────────────────────────────────────────────────┐
-│ cpi_Index:  [295.8, 0.3, 2.1, 0.05, 3.0, 1.0]          │  6 dims, only literals
-│ ppi_Index:  [187.2, 0.1, 1.5, 0.03, 2.0, 1.0]          │  6 dims, only literals
-│                                                        │
-│ SEPARATE tensors per type (different widths)           │
-│ GNN needs type-specific linear layers                  │
-│ No cross-type weight sharing possible                  │
-│ Zero = missing? or inapplicable? GNN can't tell        │
+│ cpi_Index:  [295.8, 0.3, 2.1, 0.05, 3.0, 1.0]              │  6 dims, only literals
+│ ppi_Index:  [187.2, 0.1, 1.5, 0.03, 2.0, 1.0]              │  6 dims, only literals
+│                                                            │
+│ SEPARATE tensors per type (different widths)               │
+│ GNN needs type-specific linear layers                      │
+│ No cross-type weight sharing possible                      │
+│ Zero = missing? or inapplicable? GNN can't tell            │
 └────────────────────────────────────────────────────────────┘
 
 NEW approach (ontology-aware vectors):
 ┌────────────────────────────────────────────────────────────┐
-│ cpi_Index:  [ontology:25% | schema:37.5% | lit:37.5%]  │  1024-d, universal
-│ ppi_Index:  [ontology:25% | schema:37.5% | lit:37.5%]  │  1024-d, universal
-│                                                        │
-│ SAME tensor width for ALL node types                   │
-│ Shared ontology bits where types share ancestry        │
-│ GNN can use SHARED layers across all types             │
-│ Cross-type message passing works naturally             │
-│ Property presence distinguishes missing vs N/A         │
-│ Override vector_dim for memory/fidelity tradeoff       │
+│ cpi_Index:  [ontology:25% | schema:37.5% | lit:37.5%]      │  1024-d, universal
+│ ppi_Index:  [ontology:25% | schema:37.5% | lit:37.5%]      │  1024-d, universal
+│                                                            │
+│ SAME tensor width for ALL node types                       │
+│ Shared ontology bits where types share ancestry            │
+│ GNN can use SHARED layers across all types                 │
+│ Cross-type message passing works naturally                 │
+│ Property presence distinguishes missing vs N/A             │
+│ Override vector_dim for memory/fidelity tradeoff           │
 └────────────────────────────────────────────────────────────┘
 ```
 
