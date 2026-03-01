@@ -19,6 +19,8 @@ Node feature vectors are **universal 1024-dimensional ontology-aware vectors** t
 
 Edge feature vectors are **selective 32-dimensional derived vectors** that encode per-instance signals for high-value edge types. Only edges with meaningful per-instance variation (temporal sequences, option-stock links, severity escalations) receive features — structural edges like `belongsToSector` and `owl:sameAs` are left featureless. Edge features encode three layers: temporal signals (time delta, period flags, direction), numeric contrast (differences, ratios, magnitudes between endpoints), and relational context (namespace, label similarity, relation identity). The edge vector dimension is configurable via `edge_vector_dim`, and all segment boundaries **scale proportionally** via `EdgeVectorLayout`. Edge features are derived entirely from endpoint node properties already present in the triples — **no enrichment changes are required**.
 
+After each PyG build, the pipeline writes **six metadata JSON files** alongside the `.pt` file. These files capture the complete graph inventory, feature vector structure, normalization statistics, encoding parameters, ontology structure, and dimension-to-meaning mappings needed for downstream GNN training and inference.
+
 The pipeline supports three execution modes:
 
 - **Full Pipeline**: End-to-end RDF enrichment and PyG graph construction
@@ -38,6 +40,7 @@ The pipeline supports three execution modes:
 - **Proportionally Scalable Dimensions**: Overriding `vector_dim` or `edge_vector_dim` automatically rescales all segment and sub-segment boundaries via `VectorLayout` / `EdgeVectorLayout` — no hardcoded dim indices
 - **No Double-Join for Edge Features**: Edge features reuse the cached resolved edges DataFrame from EdgeMapper — the expensive double-join runs exactly once
 - **Driver Memory Safety**: Large node types use chunked collection with explicit memory management to prevent OOM
+- **Six Metadata Files Per Build**: `graph_schema.json`, `feature_spec.json`, `normalization.json`, `encoding_config.json`, `ontology_schema.json`, and `slot_mapping.json` written to S3 alongside every `.pt` file — enabling consistent training, inference, and experiment tracking
 - **Temporal Unification**: Unified temporal entities across all data sources
 - **Intra-Source Linking**: Automatic relationship discovery within data source families
 - **Cross-Source Linking**: Automatic relationship discovery across heterogeneous datasets
@@ -76,19 +79,22 @@ The pipeline supports three execution modes:
 │                                                            │
 │ Mode 1: Full Pipeline                                      │
 │   N-Triples → triples_df → Enrich → Save Parquet           │
-│   → Build PyG HeteroData → Save .pt                        │
+│   → Build PyG HeteroData → Save .pt → Save metadata JSON   │
 │                                                            │
 │ Mode 2: Enrichment Only                                    │
 │   N-Triples → triples_df → Enrich → Save Parquet to S3     │
 │                                                            │
 │ Mode 3: PyG Only                                           │
 │   Enriched Parquet (S3) → triples_df → Build PyG HeteroData│
+│   → Save .pt → Save metadata JSON                          │
 └────────────────────────────────────────────────────────────┘
                             ↓
 ┌────────────────────────────────────────────────────────────┐
 │ Outputs (S3)                                               │
 │ ├── Enriched Triples (Parquet) - Reusable artifact         │
-│ └── PyTorch Geometric HeteroData (.pt files) - GNN ready   │
+│ ├── PyTorch Geometric HeteroData (.pt files) - GNN ready   │
+│ └── Metadata JSON files (6 files per build) - Training /   │
+│     inference support                                      │
 └────────────────────────────────────────────────────────────┘
 ```
 
@@ -113,7 +119,7 @@ Schema: (subject: string, predicate: string, object: string)
 
 **N-Triples Parsing**: Raw `.nt` files are read as text by `spark.read.text()` and parsed on executors using Spark regex functions (`regexp_extract`). Subject and predicate URIs are extracted from angle brackets, and object values are cleaned (URI angle brackets stripped, literal datatype suffixes and language tags removed). No data passes through the driver during parsing.
 
-Enrichment steps read from this DataFrame, produce new triples DataFrames, and union them back. The enriched DataFrame is saved as **Parquet** for reuse. PyG construction reads the enriched DataFrame, assigns integer node IDs, resolves edges, extracts node and edge features — all on Spark executors. Only compact tensors cross to the driver for final `HeteroData` assembly.
+Enrichment steps read from this DataFrame, produce new triples DataFrames, and union them back. The enriched DataFrame is saved as **Parquet** for reuse. PyG construction reads the enriched DataFrame, assigns integer node IDs, resolves edges, extracts node and edge features — all on Spark executors. Only compact tensors cross to the driver for final `HeteroData` assembly. After the `.pt` file is saved, six metadata JSON files are written to a `metadata/` subdirectory alongside it.
 
 ### Why PySpark Instead of rdflib/SPARQL
 
@@ -302,27 +308,27 @@ config = {
 ```
 OLD approach (flat literal vectors):
 ┌────────────────────────────────────────────────────────────┐
-│ cpi_Index:  [295.8, 0.3, 2.1, 0.05, 3.0, 1.0]          │  6 dims, only literals
-│ ppi_Index:  [187.2, 0.1, 1.5, 0.03, 2.0, 1.0]          │  6 dims, only literals
-│                                                        │
-│ SEPARATE tensors per type (different widths)           │
-│ GNN needs type-specific linear layers                  │
-│ No cross-type weight sharing possible                  │
-│ Zero = missing? or inapplicable? GNN can't tell        │
-└────────────────────────────────────────────────────────┘
+│ cpi_Index:  [295.8, 0.3, 2.1, 0.05, 3.0, 1.0]              │  6 dims, only literals
+│ ppi_Index:  [187.2, 0.1, 1.5, 0.03, 2.0, 1.0]              │  6 dims, only literals
+│                                                            │
+│ SEPARATE tensors per type (different widths)               │
+│ GNN needs type-specific linear layers                      │
+│ No cross-type weight sharing possible                      │
+│ Zero = missing? or inapplicable? GNN can't tell            │
+└────────────────────────────────────────────────────────────┘
 
 NEW approach (ontology-aware vectors):
 ┌────────────────────────────────────────────────────────────┐
-│ cpi_Index:  [ontology:25% | schema:37.5% | lit:37.5%]  │  1024-d, universal
-│ ppi_Index:  [ontology:25% | schema:37.5% | lit:37.5%]  │  1024-d, universal
-│                                                        │
-│ SAME tensor width for ALL node types                   │
-│ Shared ontology bits where types share ancestry        │
-│ GNN can use SHARED layers across all types             │
-│ Cross-type message passing works naturally             │
-│ Property presence distinguishes missing vs N/A         │
-│ Override vector_dim for memory/fidelity tradeoff       │
-└────────────────────────────────────────────────────────┘
+│ cpi_Index:  [ontology:25% | schema:37.5% | lit:37.5%]      │  1024-d, universal
+│ ppi_Index:  [ontology:25% | schema:37.5% | lit:37.5%]      │  1024-d, universal
+│                                                            │
+│ SAME tensor width for ALL node types                       │
+│ Shared ontology bits where types share ancestry            │
+│ GNN can use SHARED layers across all types                 │
+│ Cross-type message passing works naturally                 │
+│ Property presence distinguishes missing vs N/A             │
+│ Override vector_dim for memory/fidelity tradeoff           │
+└────────────────────────────────────────────────────────────┘
 ```
 
 ### All Node Encoding Runs on Spark Executors
@@ -388,7 +394,7 @@ Edge types are classified by relation name into categories. Only categories in t
 
 #### Segment 1: Temporal Signals (37.5% of edge_vector_dim)
 
-Encodes **when** the edge endpoints exist relative to each other. For temporal edges, this captures the time gap, periodicity, and direction. For non-temporal edges, a category indicator hash is placed in this segment so the GNN can still distinguish edge categories.
+Encodes **when** the edge endpoints exist relative to each other. For temporal edges, this captures the time gap, periodicity, and direction. For non-temporal edges, a category indicator hash is placed in this segment so the GNN can still distinguish edge categories in this segment.
 
 ```
 Segment 1: Temporal Signals [37.5% of edge_vector_dim]
@@ -585,7 +591,7 @@ WITH selective edge features:
 
 ## PyG Construction Pipeline
 
-The PyG builder converts the enriched triples DataFrame into a PyTorch Geometric `HeteroData` object through five steps, with all heavy computation on Spark executors:
+The PyG builder converts the enriched triples DataFrame into a PyTorch Geometric `HeteroData` object through five steps, with all heavy computation on Spark executors. After the `.pt` file is saved, six metadata JSON files are written to S3:
 
 ```
 triples_df (enriched, on executors)
@@ -597,8 +603,10 @@ triples_df (enriched, on executors)
     │   ├── Assign canonical type per entity (most specific wins via type count)
     │   ├── Assign per-type 0-indexed integer IDs via Window functions
     │   ├── Cache and materialize node_id_df on executors
+    │   ├── Collect type URI mapping for metadata (small collect, <500 rows)
     │   └── Output: node_id_df (uri, node_id, node_type) — cached on executors
     │              node_counts Dict[str, int] — small collect to driver
+    │              node_type_uris Dict[str, str] — deposited into MetadataCollector
     │
     ├── Step 2: EdgeMapper (on executors → driver tensors + cached DataFrame)
     │   ├── Exclude structural predicates (rdf:type, rdfs:label, etc.)
@@ -610,8 +618,10 @@ triples_df (enriched, on executors)
     │   ├── Collect per-edge-type [2, num_edges] int64 arrays via toPandas()
     │   │   in deterministic order (src_id ASC, dst_id ASC)
     │   ├── Release Pandas memory after each edge type conversion
+    │   ├── Collect predicate URI mapping for metadata (small collect, <100 rows)
     │   └── Output: Dict[(src_type, relation, dst_type) → LongTensor]
     │              edges_final_df — cached on executors for Step 4
+    │              edge_predicate_uris Dict[str, str] — deposited into MetadataCollector
     │
     ├── Step 3: FeatureExtractor (on executors → driver tensors)
     │   ├── Compute VectorLayout from configured vector_dim (all boundaries
@@ -622,6 +632,11 @@ triples_df (enriched, on executors)
     │   ├── Extract numeric literals via anti-join + cast("double") — on executors
     │   ├── Extract categorical literals via anti-join + null cast filter — on executors
     │   ├── Compute per-predicate z-score stats (single-pass agg) — on executors
+    │   ├── Collect normalization stats for metadata (small collect, <200 rows)
+    │   ├── Collect ontology schema snapshot for metadata (small collects:
+    │   │   type URIs ~500 rows, class hierarchy ~5000 rows, property
+    │   │   schema ~500 rows)
+    │   ├── Compute slot mapping on driver (hash approximation, <1000 entries)
     │   ├── For each node type (largest first):
     │   │   ├── Encode Segment 1: class identity + hierarchy + source (hash-based)
     │   │   ├── Encode Segment 2: property presence + domain/range + prop hierarchy
@@ -632,6 +647,9 @@ triples_df (enriched, on executors)
     │   │   ├── Scatter into dense array, delete Pandas, gc.collect()
     │   │   └── Convert numpy → torch (zero-copy via from_numpy)
     │   └── Output: Dict[node_type → FloatTensor[num_nodes, vector_dim]]
+    │              VectorLayout.to_dict() — deposited into MetadataCollector
+    │              normalization_stats, ontology_schema, slot_mapping
+    │              — all deposited into MetadataCollector
     │
     ├── Step 4: EdgeFeatureExtractor (on executors → driver tensors)
     │   ├── Compute EdgeVectorLayout from configured edge_vector_dim
@@ -658,19 +676,224 @@ triples_df (enriched, on executors)
     │   │   ├── Scatter into dense array, delete Pandas, gc.collect()
     │   │   └── Convert numpy → torch (zero-copy via from_numpy)
     │   ├── Reuses cached edges_final_df from EdgeMapper — no double-join replay
+    │   ├── Deposit EdgeVectorLayout.to_dict(), encoding config, and edge
+    │   │   classification into MetadataCollector
     │   └── Output: Dict[(src_type, rel, dst_type) → FloatTensor[num_edges, edge_vector_dim]]
     │              Only contains entries for edge types that received features
     │
-    └── Step 5: Assemble HeteroData (on driver)
-        ├── Only compact tensors on driver — no URI strings
-        ├── Attach node feature tensors per type (same width for all)
-        ├── Attach edge_index tensors per (src, rel, dst) type
-        ├── Attach edge_attr tensors for featurized edge types
-        ├── Release intermediate dicts, gc.collect()
-        ├── Release edges_final_df from executor cache
-        ├── Release node_id_df from executor cache
-        └── Output: HeteroData ready for torch.save() and GNN training
+    ├── Step 5: Assemble HeteroData (on driver)
+    │   ├── Only compact tensors on driver — no URI strings
+    │   ├── Attach node feature tensors per type (same width for all)
+    │   ├── Attach edge_index tensors per (src, rel, dst) type
+    │   ├── Attach edge_attr tensors for featurized edge types
+    │   ├── Release intermediate dicts, gc.collect()
+    │   ├── Release edges_final_df from executor cache
+    │   ├── Release node_id_df from executor cache
+    │   └── Output: HeteroData ready for torch.save() and GNN training
+    │
+    └── Post-construction: Save outputs (build_graph.py)
+        ├── torch.save() → BytesIO → upload_fileobj → S3 (.pt file)
+        ├── MetadataCollector.to_metadata_files() → six JSON dicts
+        └── write_metadata_to_s3() → six JSON files → S3 (metadata/ dir)
 ```
+
+## Metadata Files
+
+Every PyG build produces six JSON metadata files written to S3 alongside the `.pt` file. These files enable downstream training and inference code to consistently use the `HeteroData` object without re-running the pipeline.
+
+### Output Location
+
+```
+s3://my-data-lake/pyg/2024-12/
+├── hetero_data.pt
+└── metadata/
+    ├── graph_schema.json
+    ├── feature_spec.json
+    ├── normalization.json
+    ├── encoding_config.json
+    ├── ontology_schema.json
+    └── slot_mapping.json
+```
+
+For experiment variants (non-default output keys), the metadata directory is named after the output file stem:
+
+```
+s3://my-data-lake/pyg/2024-12/
+├── hetero_data_512d.pt
+└── hetero_data_512d_metadata/
+    ├── graph_schema.json
+    └── ...
+```
+
+The metadata prefix is derived automatically from the `--pyg_output_key` parameter by `derive_metadata_prefix()` in `metadata_writer.py`. No additional configuration is required.
+
+### File Descriptions
+
+#### `graph_schema.json`
+
+Complete inventory of every node type and edge type in the graph. The entry point for any consumer of the graph.
+
+**Contents:**
+- Every node type with its count, source ontology URI, and category tag
+- Every edge type as a full three-part tuple with its count, predicate URI, origin, whether it has edge features, and if so the feature dimension
+- Summary statistics: total node types, total edge types, total nodes, total edges, edge types with features
+- Build metadata: time period, build timestamp, pipeline config
+
+**Generated by:** `constructor.py` after HeteroData assembly, from `node_mapper.node_counts`, `node_mapper.get_type_uri_mapping()`, `edge_mapper.build_edge_indices()`, and `edge_feature_extractor.get_edge_classification()`
+
+**Changes between builds:** Yes — counts change every time period; new types may appear when new data sources are added.
+
+---
+
+#### `feature_spec.json`
+
+Defines the structure of the 1024-d node feature vector and the 32-d edge feature vectors. Tells training code what each segment means and how to route dimensions through the model architecture.
+
+**Contents:**
+- Total node feature dimension with all segment and sub-segment boundaries (start index, end index, dim, name, type)
+- Flag indicating structural dimensions are shared within a node type
+- Total edge feature dimension with all segment and sub-segment boundaries
+- List of edge types that carry features and list that do not
+- Per-relation derivation method (temporal, option_stock, escalation, correlation)
+
+**Generated by:** `constructor.py` from `feature_extractor.get_layout().to_dict()` and `edge_feature_extractor.get_layout().to_dict()`
+
+**Changes between builds:** Rarely — only when the feature vector design changes (new segment layout, different dimensions).
+
+---
+
+#### `normalization.json`
+
+Per-property normalization statistics used to z-score numeric literal values during feature encoding. Required to encode new data into the same feature space the model was trained on.
+
+**Contents:**
+- Normalization method (z-score)
+- Per-property statistics: predicate URI, mean, standard deviation, count of non-null values
+- List of zero-variance properties (sigma was 0, set to constant 1.0)
+
+**Generated by:** `feature_extractor._collect_normalization_metadata()` during the stats aggregation pass — a single-pass `groupBy().agg()` on the numeric literals DataFrame, collecting one row per predicate (typically <200 rows)
+
+**Changes between builds:** Yes — distribution statistics shift every time period as new data arrives. A model trained on December 2024 normalization stats expects inference data normalized with those same stats.
+
+---
+
+#### `encoding_config.json`
+
+Every parameter needed to deterministically reproduce the hash-based encoding. If any of these values change, the same ontology class or property hashes to different vector positions and the trained model breaks.
+
+**Contents:**
+- Hash algorithm name (`spark_murmur3`)
+- Per-segment encoding parameters: dimension, number of hash functions, seed values
+- Class identity seeds, class hierarchy seeds and decay function, ontology membership method
+- Property presence seeds and encoding convention (1.0 present, -1.0 absent, 0.0 not in schema)
+- Domain/range seeds, numeric value hashing seed, categorical value hashing seeds
+- Edge feature encoding parameters: relation classification fragments, temporal normalization divisor, ratio clamp value, cross-property derivation seeds
+- Total node feature dimension and total edge feature dimension as checksums
+
+**Generated by:** `constructor.py` by merging `feature_extractor.get_encoding_config()` and `edge_feature_extractor.get_encoding_config()`
+
+**Changes between builds:** Rarely — only when the encoding scheme is redesigned. Should be identical across all time periods that feed the same model.
+
+---
+
+#### `ontology_schema.json`
+
+Frozen snapshot of the ontology structure at build time. Contains the class hierarchies, property definitions, domain/range declarations, and namespace mappings used to compute the structural and schema segments of the feature vector.
+
+**Contents:**
+- Per node type (keyed by PyG name): source type URI, ordered superclass chain with depths, namespace, defined properties with their range types
+- URI-to-PyG-name mapping for all type URIs encountered
+- Namespace prefix table
+
+**Generated by:** `feature_extractor._collect_ontology_schema_metadata()` — collects from small distinct/aggregated DataFrames: type URIs (~500 rows), class hierarchy transitive closure (~5000 rows), property schema (~500 rows). All collect calls target aggregated DataFrames, never raw triples.
+
+**Changes between builds:** Sometimes — when new data sources or ontologies are added. If the ontology structure changes between the training build and an inference build, the structural segment of the feature vector will differ. This file lets you detect that.
+
+---
+
+#### `slot_mapping.json`
+
+Maps specific vector dimensions back to their semantic meaning. Purely for interpretability — no training or inference code depends on this file.
+
+**Contents:**
+- Per numeric property: predicate URI, local name, hash slot within the numeric sub-segment, global dimension index
+- Per categorical property: predicate URI, local name, hash slots (multiple due to multi-hot), global dimension indices
+- Per class: class URI, PyG name, hash slots in the class identity sub-segment, global dimension indices
+- Per superclass: which slots in the hierarchy sub-segment each superclass contributes to
+- Per namespace: which slot in the ontology source sub-segment each namespace occupies
+- Hash collision report: collision counts and rates per sub-segment
+
+**Generated by:** `feature_extractor._collect_slot_mapping_metadata()` — computes approximate slot assignments on the driver using a Python hash approximation of Spark's murmur3. The approximation may not match exactly for all inputs; this file is for interpretability only and is never used by training or inference code.
+
+**Changes between builds:** Only when the encoding config or ontology schema changes. If neither changes, the slot mapping is identical across time periods.
+
+---
+
+### Consumer Matrix
+
+| File | Training (model init) | Inference (encode new data) | Inference (model load) | Human exploration | Experiment tracking |
+|---|---|---|---|---|---|
+| `graph_schema.json` | **Yes** — architecture decisions, data splits | **Yes** — validate compatible types | No | **Yes** — first file to read | **Yes** — what each experiment contained |
+| `feature_spec.json` | **Yes** — layer construction, conv routing | No | **Yes** — reconstruct same architecture | Occasionally | **Yes** — compare feature designs |
+| `normalization.json` | No | **Yes** — scale new data identically | No | No | Occasionally — detect distribution drift |
+| `encoding_config.json` | No | **Yes** — hash to same slots | No | No | **Yes** — verify identical encoding |
+| `ontology_schema.json` | No | **Yes** — encode new nodes with correct hierarchy | No | Occasionally | **Yes** — detect schema drift |
+| `slot_mapping.json` | No | No | No | **Yes** — interpret model attention | No |
+
+---
+
+### Build / Train / Inference Lifecycle
+
+```
+BUILD TIME (this codebase — pyg_builder)
+│
+├── graph_schema.json     ← constructor.py after HeteroData assembly
+├── feature_spec.json     ← VectorLayout.to_dict() + EdgeVectorLayout.to_dict()
+├── normalization.json    ← feature_extractor normalization stats pass
+├── encoding_config.json  ← feature_extractor + edge_feature_extractor configs
+├── ontology_schema.json  ← feature_extractor ontology structure collection
+└── slot_mapping.json     ← feature_extractor hash slot computation
+│
+▼
+TRAIN TIME (downstream GNN training code)
+│
+├── Reads graph_schema.json  → decides which node/edge types to include,
+│                              sets up data splits, validates .pt after loading
+├── Reads feature_spec.json  → builds model architecture (layer dims,
+│                              conv routing, segment projections)
+├── Loads hetero_data.pt     → validates against graph_schema.json
+└── Trains model             → saves checkpoint + references metadata path
+│
+▼
+INFERENCE TIME (deployed model serving)
+│
+├── Reads feature_spec.json    → reconstructs identical model architecture
+├── Reads encoding_config.json → configures feature encoder with same hash params
+├── Reads normalization.json   → applies same z-score stats to new data
+├── Reads ontology_schema.json → encodes new nodes with correct class hierarchy
+├── Reads graph_schema.json    → validates that new data produces compatible types
+├── Loads model checkpoint     → loads trained weights into reconstructed architecture
+└── Encodes new data → runs inference
+```
+
+### Driver Memory Impact
+
+Metadata collection adds negligible driver memory overhead. All `collect()` calls during metadata collection target small aggregated DataFrames:
+
+| Metadata collect | Rows collected | Timing |
+|-----------------|---------------|--------|
+| Node type URI mapping | <500 (one per type URI) | Step 1, after node_id_df is cached |
+| Edge predicate URI mapping | <100 (one per relation) | Step 2, from cached edges_final_df |
+| Normalization stats | <200 (one per predicate) | Step 3, single-pass agg |
+| Type URI → PyG name mapping | <500 (distinct type URIs) | Step 3, from triples_df |
+| Class hierarchy | <5000 (transitive closure) | Step 3, from class_hierarchy_df |
+| Property schema | <500 (properties with domain/range) | Step 3, from property_schema_df |
+| Numeric predicate list | <100 (distinct predicates) | Step 3, for slot mapping |
+| Categorical predicate list | <100 (distinct predicates) | Step 3, for slot mapping |
+| Class URI list | <500 (distinct type URIs) | Step 3, for slot mapping |
+| Superclass URI list | <200 (distinct superclasses) | Step 3, for slot mapping |
+
+No per-node or per-edge data is ever collected for metadata. The `MetadataCollector` object holds only small Python dicts — no tensors, no DataFrames, no Spark references. Total metadata memory is well under 1 MB.
 
 ### Driver Memory Safety
 
@@ -730,10 +953,14 @@ Step 5: Assemble HeteroData
   Unpersist node_id_df (executor cache freed)
   gc.collect() to reclaim dict overhead
 
-Step 6: Save to S3 (in build_graph.py)
+Post-construction: Save outputs
   torch.save() to BytesIO buffer → upload_fileobj streams to S3
   Peak: HeteroData + serialized buffer (same size)
   Buffer freed after upload
+
+  MetadataCollector.to_metadata_files() → six JSON dicts (<1 MB total)
+  write_metadata_to_s3() → six put_object calls → S3
+  MetadataCollector holds only small Python dicts throughout
 ```
 
 **Chunked collection for large node types**: When a node type has more than 500K nodes (configurable via `chunk_node_threshold`), the sparse `(node_id, dim, value)` entries are collected in chunks by node_id range. Each chunk's Pandas DataFrame is scattered into the pre-allocated dense array and immediately freed. This bounds peak Pandas memory to ~120 MB per chunk regardless of total type size.
@@ -772,6 +999,8 @@ Step 6: Save to S3 (in build_graph.py)
 | Node feature collection | Driver | Per-type sparse entries → dense [N, vector_dim] float32, chunked for large types |
 | Edge feature collection | Driver | Per-type sparse entries → dense [N, edge_vector_dim] float32, chunked for large types |
 | HeteroData assembly | Driver | Only compact tensors, no strings |
+| Metadata collection | Driver | Small aggregated DataFrames only (<5000 rows per collect), <1 MB total |
+| Metadata serialization | Driver | `json.dumps()` on small Python dicts, six `put_object` calls to S3 |
 | Enriched Parquet write | Spark executors | `repartition` + `write.parquet` — executors write directly to S3 |
 | PyG .pt upload | Driver | `upload_fileobj` streams buffer to S3 (no extra copy) |
 
@@ -807,6 +1036,7 @@ Glue G.2X (32 GB driver):
   → Node features: suitable for <1M total nodes at 1024-d
   → Edge features: adds ~0.5-1 GB for typical temporal + option edges at 32-d
   → Or <2M total nodes at 512-d with edge features
+  → Metadata: <1 MB, negligible
 
 Glue G.4X (64 GB driver):
   JVM + Spark overhead:     ~10-12 GB
@@ -815,6 +1045,7 @@ Glue G.4X (64 GB driver):
   → Node features: suitable for 2-5M total nodes at 1024-d
   → Edge features: adds ~1-3 GB for all featurized edge types at 32-d
   → Recommended for production with intraday market data
+  → Metadata: <1 MB, negligible
 ```
 
 Reducing `vector_dim` from 1024 to 512 **halves driver memory** for node feature tensors while preserving the same three-segment structure. Edge feature tensors at 32-d are already compact — reducing `edge_vector_dim` to 16 halves their memory but is rarely necessary since they are ~32× smaller per element than node features. This enables running on G.2X workers for rapid experimentation before committing to full-resolution production runs on G.4X.
@@ -868,11 +1099,13 @@ When config is empty, sensible defaults are inferred from the data.
 | `--source_prefix` | Modes 1,2 | — | S3 prefix for raw N-Triples files |
 | `--output_bucket` | Yes | — | S3 bucket for all outputs |
 | `--enriched_parquet_prefix` | Mode 3 | `enriched/{time_period}/triples/` | S3 prefix for enriched Parquet |
-| `--pyg_output_key` | Modes 1,3 | `pyg/{time_period}/hetero_data.pt` | S3 key for PyG output |
+| `--pyg_output_key` | Modes 1,3 | `pyg/{time_period}/hetero_data.pt` | S3 key for PyG output. Also determines metadata directory: `metadata/` for the default key, `{stem}_metadata/` for experiment variants |
 | `--enable_ontology_mapping` | No | `false` | Enable ontology equivalence mapping |
 | `--time_period` | No | Current `YYYY-MM` | Time period label for output paths |
 | `--pyg_config` | No | `{}` | JSON string with PyG construction config |
 | `--parquet_partitions` | No | `200` | Number of Parquet output partitions |
+
+Metadata files are always written when mode is `full` or `pyg_only`. Mode `enrichment_only` does not produce metadata files (no PyG graph is built in that mode).
 
 **Example Glue job parameters:**
 
@@ -891,6 +1124,17 @@ When config is empty, sensible defaults are inferred from the data.
 }
 ```
 
+Outputs:
+```
+s3://my-data-lake/pyg/2024-12/hetero_data.pt
+s3://my-data-lake/pyg/2024-12/metadata/graph_schema.json
+s3://my-data-lake/pyg/2024-12/metadata/feature_spec.json
+s3://my-data-lake/pyg/2024-12/metadata/normalization.json
+s3://my-data-lake/pyg/2024-12/metadata/encoding_config.json
+s3://my-data-lake/pyg/2024-12/metadata/ontology_schema.json
+s3://my-data-lake/pyg/2024-12/metadata/slot_mapping.json
+```
+
 **Notebook experiment with reduced dimensions:**
 
 ```json
@@ -902,6 +1146,14 @@ When config is empty, sensible defaults are inferred from the data.
     "--time_period": "2024-12",
     "--pyg_config": "{\"feature_config\": {\"vector_dim\": 512, \"normalize\": true}, \"edge_feature_config\": {\"edge_vector_dim\": 16}}"
 }
+```
+
+Outputs:
+```
+s3://my-data-lake/pyg/2024-12/hetero_data_512d.pt
+s3://my-data-lake/pyg/2024-12/hetero_data_512d_metadata/graph_schema.json
+s3://my-data-lake/pyg/2024-12/hetero_data_512d_metadata/feature_spec.json
+... (remaining four files)
 ```
 
 **Notebook experiment with additional edge feature categories:**
@@ -980,7 +1232,7 @@ triples_df (raw)
         └── owl:equivalentClass mappings
     │
     ▼
-triples_df (enriched) → Parquet (S3) + PyG HeteroData (.pt)
+triples_df (enriched) → Parquet (S3) + PyG HeteroData (.pt) + Metadata JSON (S3)
 ```
 
 ### Intra-Source Linking
@@ -1186,7 +1438,7 @@ jolts:Industry_LeisureAndHospitality_FoodServices_Industry
 
 ### Benefits for GNN Training
 
-This enriched structure combined with ontology-aware node feature vectors and derived edge feature vectors enables GNNs to learn:
+This enriched structure combined with ontology-aware node feature vectors, derived edge feature vectors, and the six metadata files enables GNNs to learn:
 - **Temporal Patterns**: How indicators evolve and correlate over time across 100+ sources, with edge features encoding the exact time gap and direction
 - **Cross-Domain Relationships**: How economic, financial, employment, and environmental factors interact, with edge features distinguishing intra-source from cross-source correlations
 - **Sector Dynamics**: How sector-wide shocks propagate across different data types
@@ -1198,6 +1450,7 @@ This enriched structure combined with ontology-aware node feature vectors and de
 - **Cross-Type Reasoning**: Universal node feature width enables shared GNN layers that learn patterns across all 100+ ontologies simultaneously
 - **Edge-Modulated Message Passing**: Edge features allow the GNN to modulate messages based on per-instance signals (time gap, moneyness, severity delta) rather than treating all edges of the same type identically
 - **Severity Escalation Detection**: Edge features on escalation edges encode the severity delta, enabling the GNN to learn escalation patterns in weather alert sequences
+- **Consistent Inference**: The six metadata files ensure that new data is encoded into the same feature space the model was trained on — same normalization stats, same hash seeds, same ontology structure
 
 ## Data Sources
 
@@ -1275,13 +1528,29 @@ pyg-knowledge-graph-builder/
 │   │           └── patterns.py             # NOAA alert patterns
 │   ├── pyg_builder/                        # PyG construction modules
 │   │   ├── __init__.py
-│   │   ├── constructor.py                  # Orchestrates HeteroData construction (5 steps)
-│   │   ├── node_mapper.py                  # Assigns per-type integer node IDs on executors
-│   │   ├── edge_mapper.py                  # Resolves edges to integer index tensors on executors;
-│   │   │                                   # returns cached resolved edges for edge feature reuse
-│   │   ├── feature_extractor.py            # Ontology-aware node feature vectors with VectorLayout
-│   │   └── edge_feature_extractor.py       # Derived edge feature vectors with EdgeVectorLayout;
-│   │                                       # reuses cached resolved edges from EdgeMapper
+│   │   ├── constructor.py                  # Orchestrates HeteroData construction
+│   │   │                                   # (5 steps) and MetadataCollector;
+│   │   │                                   # returns (HeteroData, MetadataCollector)
+│   │   ├── node_mapper.py                  # Assigns per-type integer node IDs on
+│   │   │                                   # executors; get_type_uri_mapping() for
+│   │   │                                   # metadata
+│   │   ├── edge_mapper.py                  # Resolves edges to integer index tensors
+│   │   │                                   # on executors; returns cached resolved
+│   │   │                                   # edges for edge feature reuse;
+│   │   │                                   # get_predicate_uri_mapping() for metadata
+│   │   ├── feature_extractor.py            # Ontology-aware node feature vectors with
+│   │   │                                   # VectorLayout; collects normalization stats,
+│   │   │                                   # ontology schema, and slot mapping for
+│   │   │                                   # metadata during build_features()
+│   │   ├── edge_feature_extractor.py       # Derived edge feature vectors with
+│   │   │                                   # EdgeVectorLayout; reuses cached resolved
+│   │   │                                   # edges from EdgeMapper; provides encoding
+│   │   │                                   # config and edge classification for metadata
+│   │   └── metadata_writer.py              # MetadataCollector (accumulates artifacts
+│   │                                       # during construction steps);
+│   │                                       # write_metadata_to_s3() (serializes six
+│   │                                       # JSON files to S3);
+│   │                                       # derive_metadata_prefix() (naming convention)
 │   └── utils/
 │       ├── __init__.py
 │       └── rdf_utils.py                    # Namespace constants, URI helpers, canonical
@@ -1325,12 +1594,13 @@ pyg-knowledge-graph-builder/
 | `bls_linker.py`, `sec_linker.py`, `market_linker.py`, `noaa_linker.py` | Produce intra-source enrichment triples | Yes |
 | `cross_source_linker.py` | Produces cross-source enrichment triples | Yes |
 | `ontology_mapper.py` | Produces equivalence mapping triples | Yes |
-| `build_graph.py` | Parses N-Triples, orchestrates pipeline modes, saves Parquet and .pt | Yes (orchestration) |
-| `constructor.py` | Orchestrates PyG HeteroData construction from triples DataFrame (5 steps: node IDs, edge indices, node features, edge features, assembly) | Yes (orchestration) |
-| `node_mapper.py` | Discovers node types, assigns per-type integer IDs via Window functions. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
-| `edge_mapper.py` | Double-joins triples with node IDs, collects edge index tensors. Returns cached resolved edges DataFrame for reuse by `edge_feature_extractor.py`. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
-| `feature_extractor.py` | Builds ontology-aware node feature vectors via `VectorLayout` (proportionally scaled segments): extracts class hierarchy, property schema, and literal values on executors; collects sparse entries (chunked for large types); scatters into dense tensors on driver. Imports `ONTOLOGY_NAMESPACE_INDICES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
-| `edge_feature_extractor.py` | Builds derived edge feature vectors via `EdgeVectorLayout` (proportionally scaled segments): classifies edge types by category, extracts endpoint properties, encodes temporal signals / numeric contrast / relational context on executors; collects sparse entries per edge type; scatters into dense tensors on driver. Reuses cached resolved edges from `edge_mapper.py` — no double-join replay. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
+| `build_graph.py` | Parses N-Triples, orchestrates pipeline modes, saves Parquet, `.pt`, and metadata JSON files to S3 | Yes (orchestration) |
+| `constructor.py` | Orchestrates PyG HeteroData construction from triples DataFrame (5 steps: node IDs, edge indices, node features, edge features, assembly); initializes `MetadataCollector`; calls `register_*` methods after each step; returns `(HeteroData, MetadataCollector)` | Yes (orchestration) |
+| `node_mapper.py` | Discovers node types, assigns per-type integer IDs via Window functions. `get_type_uri_mapping()` provides a small collect for metadata. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
+| `edge_mapper.py` | Double-joins triples with node IDs, collects edge index tensors. Returns cached resolved edges DataFrame for reuse by `edge_feature_extractor.py`. `get_predicate_uri_mapping()` provides a small collect for metadata. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
+| `feature_extractor.py` | Builds ontology-aware node feature vectors via `VectorLayout` (proportionally scaled segments): extracts class hierarchy, property schema, and literal values on executors; collects sparse entries (chunked for large types); scatters into dense tensors on driver. During `build_features()`, collects normalization stats, ontology schema snapshot, and slot mapping into small Python objects via `_collect_*` methods. `get_metadata_artifacts()` returns these for `MetadataCollector`. Imports `ONTOLOGY_NAMESPACE_INDICES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
+| `edge_feature_extractor.py` | Builds derived edge feature vectors via `EdgeVectorLayout` (proportionally scaled segments): classifies edge types by category, extracts endpoint properties, encodes temporal signals / numeric contrast / relational context on executors; collects sparse entries per edge type; scatters into dense tensors on driver. Reuses cached resolved edges from `edge_mapper.py` — no double-join replay. `get_encoding_config()` and `get_edge_classification()` provide metadata for `MetadataCollector`. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
+| `metadata_writer.py` | `MetadataCollector` accumulates metadata artifacts deposited by `constructor.py` during each step; `to_metadata_files()` produces six JSON-serializable dicts; `write_metadata_to_s3()` serializes and uploads them; `derive_metadata_prefix()` computes the S3 metadata directory from the PyG output key | No (pure Python) |
 
 ### Scalability
 
@@ -1350,5 +1620,4 @@ The pipeline is designed to handle:
 - **Controlled Parquet output** — configurable partition count prevents thousands of tiny files or few huge files on S3
 - **Efficient literal isolation** — anti-join against node_id_df filters out edge triples before numeric parsing, avoiding wasted computation on URI-valued objects
 - **Canonical namespace registry** — `NAMESPACE_PREFIXES` and `ONTOLOGY_NAMESPACE_INDICES` in `rdf_utils.py` are the single source of truth, imported by `node_mapper.py`, `edge_mapper.py`, `feature_extractor.py`, and `edge_feature_extractor.py` to eliminate duplication
-
----
+- **Negligible metadata overhead** — all metadata collect calls target small aggregated DataFrames (<5000 rows each); total metadata memory is under 1 MB; six JSON files are written to S3 after the `.pt` file with no impact on tensor collection or HeteroData assembly
