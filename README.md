@@ -55,11 +55,16 @@ The pipeline supports three execution modes:
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│ Raw Data Sources (S3) — N-Triples format                   │
-│ ├── BLS Economic Data (10 categories, ~100 mappers) - RDF  │
-│ ├── SEC Data (4 categories, 4 mappers) - RDF               │
-│ ├── Market Data (1 mapper, intraday snapshots) - RDF       │
-│ └── NOAA Weather Alerts (1 mapper) - RDF                   │
+│ Raw Data Sources (S3)                                      │
+│                                                            │
+│ N-Triples format (.nt files):                              │
+│ ├── BLS Economic Data (10 categories, ~100 mappers)        │
+│ ├── Market Data (1 mapper, intraday snapshots)             │
+│ └── NOAA Weather Alerts (1 mapper)                         │
+│                                                            │
+│ Turtle Parquet format (column of Turtle blobs):            │
+│ └── SEC Data (4 categories, 4 mappers)                     │
+│     (and any other source whose scraper writes Parquet)    │
 │                                                            │
 │ Total: 100+ mappers and ontologies                         │
 │ Volume: ~30-50M triples/month with intraday market data    │
@@ -70,19 +75,23 @@ The pipeline supports three execution modes:
 │                                                            │
 │  ┌──────────────┐   ┌───────────────┐   ┌──────────────┐   │
 │  │ Parse        │──▶│ Enrichment    │──▶│ Build PyG    │   │
-│  │ N-Triples    │   │ (PySpark      │   │ (PySpark     │   │
-│  │ (Spark regex │   │  DataFrames   │   │  executors   │   │
-│  │  on executors│   │  on executors)│   │  → driver    │   │
-│  │  → triples   │   │               │   │  tensors)    │   │
+│  │ Source RDF   │   │ (PySpark      │   │ (PySpark     │   │
+│  │ (N-Triples:  │   │  DataFrames   │   │  executors   │   │
+│  │  Spark regex │   │  on executors)│   │  → driver    │   │
+│  │  on executors│   │               │   │  tensors)    │   │
+│  │ Turtle Parq: │   │               │   │              │   │
+│  │  rdflib UDF  │   │               │   │              │   │
+│  │  on executors│   │               │   │              │   │
+│  │  → triples   │   │               │   │              │   │
 │  │  DataFrame)  │   │               │   │              │   │
 │  └──────────────┘   └───────────────┘   └──────────────┘   │
 │                                                            │
 │ Mode 1: Full Pipeline                                      │
-│   N-Triples → triples_df → Enrich → Save Parquet           │
+│   Source RDF → triples_df → Enrich → Save Parquet          │
 │   → Build PyG HeteroData → Save .pt → Save metadata JSON   │
 │                                                            │
 │ Mode 2: Enrichment Only                                    │
-│   N-Triples → triples_df → Enrich → Save Parquet to S3     │
+│   Source RDF → triples_df → Enrich → Save Parquet to S3    │
 │                                                            │
 │ Mode 3: PyG Only                                           │
 │   Enriched Parquet (S3) → triples_df → Build PyG HeteroData│
@@ -96,6 +105,7 @@ The pipeline supports three execution modes:
 │ └── Metadata JSON files (6 files per build) - Training /   │
 │     inference support                                      │
 └────────────────────────────────────────────────────────────┘
+
 ```
 
 ### Core Representation
@@ -1095,15 +1105,17 @@ When config is empty, sensible defaults are inferred from the data.
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
 | `--mode` | Yes | `full` | `full`, `enrichment_only`, or `pyg_only` |
-| `--source_bucket` | Modes 1,2 | — | S3 bucket containing raw N-Triples files |
-| `--source_prefix` | Modes 1,2 | — | S3 prefix for raw N-Triples files |
+| `--source_bucket` | Modes 1,2 | — | S3 bucket containing raw RDF files |
+| `--source_prefix` | Modes 1,2 | — | S3 prefix for raw RDF files |
 | `--output_bucket` | Yes | — | S3 bucket for all outputs |
-| `--enriched_parquet_prefix` | Mode 3 | `enriched/{time_period}/triples/` | S3 prefix for enriched Parquet |
+| `--enriched_parquet_prefix` | Modes 1,2,3 | `enriched/{time_period}/triples/` | S3 prefix for enriched Parquet. Modes 1 and 2 write to this prefix; mode 3 reads from it |
 | `--pyg_output_key` | Modes 1,3 | `pyg/{time_period}/hetero_data.pt` | S3 key for PyG output. Also determines metadata directory: `metadata/` for the default key, `{stem}_metadata/` for experiment variants |
 | `--enable_ontology_mapping` | No | `false` | Enable ontology equivalence mapping |
 | `--time_period` | No | Current `YYYY-MM` | Time period label for output paths |
 | `--pyg_config` | No | `{}` | JSON string with PyG construction config |
 | `--parquet_partitions` | No | `200` | Number of Parquet output partitions |
+| `--source_format` | No | `ntriples` | Source RDF format: `ntriples` (one triple per line in `.nt` files) or `turtle_parquet` (self-contained Turtle blobs in a Parquet column). Applies to modes `full` and `enrichment_only` only — `pyg_only` always reads enriched Parquet written by this pipeline |
+| `--turtle_column` | No | `triples` | Column name containing Turtle strings when `--source_format=turtle_parquet`. Ignored for `ntriples` format. Configurable so that different source Parquet schemas can be handled without code changes |
 
 Metadata files are always written when mode is `full` or `pyg_only`. Mode `enrichment_only` does not produce metadata files (no PyG graph is built in that mode).
 
@@ -1179,6 +1191,49 @@ s3://my-data-lake/pyg/2024-12/hetero_data_512d_metadata/feature_spec.json
     "--pyg_output_key": "pyg/2024-12/hetero_data_no_edge_features.pt",
     "--time_period": "2024-12",
     "--pyg_config": "{\"edge_feature_config\": {\"enabled\": false}}"
+}
+```
+
+**Turtle Parquet source (SEC filings):**
+
+```json
+{
+    "--mode": "enrichment_only",
+    "--source_bucket": "my-data-lake",
+    "--source_prefix": "raw/sec/filings/2024-12/",
+    "--output_bucket": "my-data-lake",
+    "--enriched_parquet_prefix": "enriched/2024-12/triples/",
+    "--source_format": "turtle_parquet",
+    "--turtle_column": "triples",
+    "--time_period": "2024-12",
+    "--parquet_partitions": "200"
+}
+```
+
+If your Parquet column is named something other than `triples`:
+
+```json
+{
+    "--source_format": "turtle_parquet",
+    "--turtle_column": "rdf_turtle"
+}
+```
+
+**Full pipeline from Turtle Parquet source:**
+
+```json
+{
+    "--mode": "full",
+    "--source_bucket": "my-data-lake",
+    "--source_prefix": "raw/sec/filings/2024-12/",
+    "--output_bucket": "my-data-lake",
+    "--enriched_parquet_prefix": "enriched/2024-12/triples/",
+    "--pyg_output_key": "pyg/2024-12/hetero_data.pt",
+    "--source_format": "turtle_parquet",
+    "--turtle_column": "triples",
+    "--time_period": "2024-12",
+    "--parquet_partitions": "200",
+    "--pyg_config": "{\"feature_config\": {\"normalize\": true, \"vector_dim\": 1024}}"
 }
 ```
 
@@ -1594,7 +1649,7 @@ pyg-knowledge-graph-builder/
 | `bls_linker.py`, `sec_linker.py`, `market_linker.py`, `noaa_linker.py` | Produce intra-source enrichment triples | Yes |
 | `cross_source_linker.py` | Produces cross-source enrichment triples | Yes |
 | `ontology_mapper.py` | Produces equivalence mapping triples | Yes |
-| `build_graph.py` | Parses N-Triples, orchestrates pipeline modes, saves Parquet, `.pt`, and metadata JSON files to S3 | Yes (orchestration) |
+| `build_graph.py` | Parses source RDF into triples DataFrame (`load_ntriples_to_dataframe()` for `.nt` files, `load_turtle_parquet_to_dataframe()` for Turtle Parquet blobs); dispatches via `load_source_triples()`; orchestrates pipeline modes; saves Parquet, `.pt`, and metadata JSON files to S3. `--source_format` and `--turtle_column` parameters control which loader is used | Yes (orchestration) |
 | `constructor.py` | Orchestrates PyG HeteroData construction from triples DataFrame (5 steps: node IDs, edge indices, node features, edge features, assembly); initializes `MetadataCollector`; calls `register_*` methods after each step; returns `(HeteroData, MetadataCollector)` | Yes (orchestration) |
 | `node_mapper.py` | Discovers node types, assigns per-type integer IDs via Window functions. `get_type_uri_mapping()` provides a small collect for metadata. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
 | `edge_mapper.py` | Double-joins triples with node IDs, collects edge index tensors. Returns cached resolved edges DataFrame for reuse by `edge_feature_extractor.py`. `get_predicate_uri_mapping()` provides a small collect for metadata. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
