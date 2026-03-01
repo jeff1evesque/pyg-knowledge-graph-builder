@@ -61,7 +61,7 @@ import logging
 import time
 import io
 from datetime import datetime
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, List
 
 # ============================================
 # AWS Glue imports (graceful fallback for local)
@@ -138,7 +138,17 @@ class JobConfig:
 
         # Source parameters (required for full and enrichment_only)
         self.source_bucket = args.get("source_bucket", "")
-        self.source_prefix = args.get("source_prefix", "")
+
+        # source_prefix accepts a single prefix or a comma-separated list
+        # of prefixes within the same source_bucket.
+        # Examples:
+        #   single:   "rdf/monthly/2024-12/"
+        #   multiple: "raw/sec/filings/2024-12/,raw/sec/proceedings/2024-12/,raw/sec/suspensions/2024-12/,raw/sec/litigations/2024-12/"
+        # Leading/trailing whitespace around each prefix is stripped.
+        raw_prefix = args.get("source_prefix", "")
+        self.source_prefixes: List[str] = [
+            p.strip() for p in raw_prefix.split(",") if p.strip()
+        ]
 
         # Source format:
         #   "ntriples":       one triple per line in .nt files
@@ -211,7 +221,7 @@ class JobConfig:
                 raise ValueError(
                     f"source_bucket is required for mode '{self.mode}'"
                 )
-            if not self.source_prefix:
+            if not self.source_prefixes:
                 raise ValueError(
                     f"source_prefix is required for mode '{self.mode}'"
                 )
@@ -232,7 +242,8 @@ class JobConfig:
     def __repr__(self):
         return (
             f"JobConfig(mode={self.mode}, "
-            f"source={self.source_bucket}/{self.source_prefix}, "
+            f"source_bucket={self.source_bucket}, "
+            f"source_prefixes={self.source_prefixes}, "
             f"source_format={self.source_format}, "
             f"turtle_column={self.turtle_column}, "
             f"output={self.output_bucket}, "
@@ -589,6 +600,13 @@ def load_source_triples(
       - "ntriples":       load_ntriples_to_dataframe()
       - "turtle_parquet": load_turtle_parquet_to_dataframe()
 
+    Supports multiple source prefixes within the same source_bucket.
+    When more than one prefix is provided, each is loaded independently
+    and the results are unioned into a single triples DataFrame before
+    caching. Duplicates across prefixes are not deduplicated here —
+    the enrichment pipeline's left_anti join pattern handles any
+    duplicate triples naturally.
+
     Caches the resulting DataFrame and forces materialization so that
     downstream steps do not re-trigger the parse UDF.
 
@@ -600,45 +618,67 @@ def load_source_triples(
         Tuple of (triples_df cached on executors, triple_count)
 
     Raises:
-        FileNotFoundError: If no triples are parsed from the source.
+        FileNotFoundError: If no triples are parsed from any source prefix.
         ValueError: If turtle_column is not found (turtle_parquet only).
     """
-    source_path = (
-        f"s3://{config.source_bucket}/{config.source_prefix}"
+    source_paths = [
+        f"s3://{config.source_bucket}/{prefix}"
+        for prefix in config.source_prefixes
+    ]
+
+    logger.info(
+        f"Source format: {config.source_format}, "
+        f"{len(source_paths)} prefix(es)"
     )
+    for path in source_paths:
+        logger.info(f"  {path}")
 
-    if config.source_format == "ntriples":
-        logger.info(
-            f"Source format: N-Triples (.nt files) from {source_path}"
-        )
-        triples_df = load_ntriples_to_dataframe(spark, source_path)
+    loaded: List[DataFrame] = []
+
+    for source_path in source_paths:
+        if config.source_format == "ntriples":
+            df = load_ntriples_to_dataframe(spark, source_path)
+        else:
+            df = load_turtle_parquet_to_dataframe(
+                spark,
+                source_path,
+                turtle_column=config.turtle_column,
+            )
+        loaded.append(df)
+        logger.info(f"  Parsed: {source_path}")
+
+    # Union all prefix DataFrames into one.
+    # unionAll is a lazy transformation — no data moves until cache().
+    if len(loaded) == 1:
+        triples_df = loaded[0]
     else:
-        logger.info(
-            f"Source format: Turtle Parquet from {source_path}, "
-            f"column='{config.turtle_column}'"
-        )
-        triples_df = load_turtle_parquet_to_dataframe(
-            spark,
-            source_path,
-            turtle_column=config.turtle_column,
-        )
+        triples_df = loaded[0]
+        for df in loaded[1:]:
+            triples_df = triples_df.unionAll(df)
 
+    # Cache and materialize once — all downstream steps read from cache.
+    # For turtle_parquet, this also ensures the rdflib UDF runs exactly
+    # once across all prefixes rather than being re-triggered by each
+    # downstream action.
     triples_df = triples_df.cache()
     count = triples_df.count()
 
     if count == 0:
         raise FileNotFoundError(
-            f"No triples parsed from {config.source_format} source "
-            f"at {source_path}."
+            f"No triples parsed from {config.source_format} source(s): "
+            f"{source_paths}."
             + (
                 f" Check that column '{config.turtle_column}' contains "
                 f"valid Turtle strings."
                 if config.source_format == "turtle_parquet"
-                else " Check that .nt files exist at the source prefix."
+                else " Check that .nt files exist at the source prefixes."
             )
         )
 
-    logger.info(f"Loaded {count:,} triples")
+    logger.info(
+        f"Loaded {count:,} triples total across "
+        f"{len(source_paths)} prefix(es)"
+    )
     return triples_df, count
 
 
