@@ -36,7 +36,7 @@ SEC_SUSP = Namespace("https://www.sec.gov/ontology/trading-suspensions#")
 SEC_FILINGS = Namespace("http://www.sec.gov/filings#")
 
 # ============================================
-# Market data namespace (TODO: Update with actual namespace)
+# Market data namespace
 # ============================================
 
 MARKET = Namespace("https://financial-data.org/")
@@ -53,10 +53,13 @@ NOAA = Namespace("https://www.noaa.gov/")
 CAP = Namespace("http://www.oasis-open.org/committees/emergency/cap/1.2/")
 
 # NWS (National Weather Service) extensions
-NWS = Namespace("http://api.weather.gov/ontology/")
+NWS = Namespace("https://api.weather.gov/ontology#")
 
 # Alert instances
-ALERT = Namespace("http://api.weather.gov/alerts/")
+ALERT = Namespace("https://api.weather.gov/alerts/")
+
+# GeoSPARQL namespace (used by CAP Area alignment)
+GEOSPARQL = Namespace("http://www.opengis.net/ont/geosparql#")
 
 # Atom feed namespace
 ATOM = Namespace("http://www.w3.org/2005/Atom/")
@@ -111,6 +114,7 @@ NAMESPACE_PREFIXES: List[Tuple[str, str]] = [
     (str(ALERT), "alert"),
     (str(NOAA_ENRICHMENT), "noaa_enrichment"),
     (str(NOAA), "noaa"),
+    (str(GEOSPARQL), "geosparql"),
     (str(UNIFIED), "unified"),
     (str(OWL), "owl"),
     (str(RDFS), "rdfs"),
