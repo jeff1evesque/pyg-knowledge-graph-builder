@@ -1,14 +1,34 @@
 """
 NOAA Intra-Source Enrichment Orchestrator (PySpark)
 
-Coordinates enrichment for NOAA weather alerts (CAP 1.2 format).
+Coordinates enrichment for NOAA weather alerts (CAP 1.2 / NWS format).
 All enrichment runs as distributed PySpark DataFrame operations.
+
+Aligned with CAP 1.2 ontology v3.0 and the NWS RML mapper which produces:
+  - Alert subjects:  alert:{alert_id}         typed as nws:WeatherAlert
+  - Info subjects:   alert:{alert_id}#info     typed as cap:Info
+  - Area subjects:   alert:{alert_id}#area     typed as cap:Area
+  - Geocode subjects: alert:{alert_id}#geocode-{fips_code} typed as cap:Geocode
+
+Key structural notes from the RML mapper:
+  - cap:hasSentTime is on the Info subject (not the Alert subject)
+  - cap:hasInfo links Alert → Info
+  - cap:hasArea links Info → Area
+  - cap:hasGeocode links Area → Geocode
+  - Severity, urgency, certainty, category, responseType, status,
+    messageType, scope are all URI-valued (named individuals like
+    cap:Severe, cap:Immediate, cap:Met)
+  - cap:hasEvent is a literal string on Info (e.g., "Tornado Warning")
+  - Geocodes use nws:hasFIPSCode, nws:hasStateFIPS, nws:hasCountyFIPS,
+    nws:hasUGCCode, and nws:hasSAMECode
 
 Enrichment strategies:
 1. Link temporal sequences of alerts per geographic area (precedes)
-2. Link alerts affecting same geographic regions (via SAME codes)
+2. Link alerts affecting same geographic regions (via FIPS/SAME codes)
 3. Link alerts of the same event type (sameEventType)
 4. Link severity escalations within same area over time (escalatesTo)
+5. Classify alerts by event category (severeWeatherEvent, floodEvent, etc.)
+6. Link alerts sharing the same CAP category (sameCategory)
 
 Note: Temporal unification is handled separately by TemporalUnifier
 in pipeline.py Phase 2 — not called from here.
@@ -20,7 +40,12 @@ from functools import reduce
 from typing import List, Optional
 
 from glue_jobs.utils.rdf_utils import (
-    CAP, NWS, NOAA_ENRICHMENT
+    CAP, NWS, NOAA_ENRICHMENT, ALERT
+)
+from glue_jobs.enrichment.intra_source.noaa.patterns import (
+    NOAA_EVENT_PATTERNS,
+    SEVERITY_HIERARCHY,
+    URGENCY_HIERARCHY,
 )
 
 import logging
@@ -34,38 +59,59 @@ logger = logging.getLogger(__name__)
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
 
-# CAP class URIs
+# Class URIs — aligned with RML mapper output
+# The mapper types alerts as nws:WeatherAlert (subClassOf cap:Alert)
+WEATHER_ALERT_TYPE = str(NWS.WeatherAlert)
 ALERT_TYPE = str(CAP.Alert)
 INFO_TYPE = str(CAP.Info)
 AREA_TYPE = str(CAP.Area)
 GEOCODE_TYPE = str(CAP.Geocode)
 
-# CAP property URIs
-HAS_SENT_TIME = str(CAP.hasSentTime)
+# Alert-level property URIs
 HAS_INFO = str(CAP.hasInfo)
+HAS_STATUS = str(CAP.hasStatus)
+HAS_MESSAGE_TYPE = str(CAP.hasMessageType)
+
+# Info-level property URIs
+# NOTE: In the RML mapper, hasSentTime is mapped on the Info subject,
+# not the Alert subject. The enricher must join through Info to get
+# the sent time for an alert.
+HAS_SENT_TIME = str(CAP.hasSentTime)
 HAS_AREA = str(CAP.hasArea)
 HAS_AREA_DESC = str(CAP.hasAreaDescription)
 HAS_EVENT = str(CAP.hasEvent)
 HAS_SEVERITY = str(CAP.hasSeverity)
+HAS_URGENCY = str(CAP.hasUrgency)
+HAS_CERTAINTY = str(CAP.hasCertainty)
+HAS_CATEGORY = str(CAP.hasCategory)
+HAS_RESPONSE_TYPE = str(CAP.hasResponseType)
+HAS_HEADLINE = str(CAP.hasHeadline)
+HAS_EFFECTIVE_TIME = str(CAP.hasEffectiveTime)
+HAS_ONSET_TIME = str(CAP.hasOnsetTime)
+HAS_EXPIRATION_TIME = str(CAP.hasExpirationTime)
+HAS_ENDS_TIME = str(CAP.hasEndsTime)
+
+# Area-level property URIs
 HAS_GEOCODE = str(CAP.hasGeocode)
 
-# NWS geocode property URIs
+# Geocode property URIs — aligned with RML mapper
 HAS_SAME_CODE = str(NWS.hasSAMECode)
+HAS_FIPS_CODE = str(NWS.hasFIPSCode)
+HAS_STATE_FIPS = str(NWS.hasStateFIPS)
+HAS_COUNTY_FIPS = str(NWS.hasCountyFIPS)
+HAS_UGC_CODE = str(NWS.hasUGCCode)
+
+# Status/MessageType named individuals for filtering
+STATUS_ACTUAL = str(CAP.Actual)
+MSG_TYPE_CANCEL = str(CAP.Cancel)
 
 # Enrichment property URIs
 PRECEDES_PRED = str(NOAA_ENRICHMENT.precedes)
 AFFECTS_SAME_REGION_PRED = str(NOAA_ENRICHMENT.affectsSameRegion)
 SAME_EVENT_TYPE_PRED = str(NOAA_ENRICHMENT.sameEventType)
 ESCALATES_TO_PRED = str(NOAA_ENRICHMENT.escalatesTo)
-
-# Severity hierarchy — higher number = more severe
-# The severity objects in the triples are URIs like cap:Minor, cap:Moderate, etc.
-SEVERITY_URIS = {
-    str(CAP.Minor): 1,
-    str(CAP.Moderate): 2,
-    str(CAP.Severe): 3,
-    str(CAP.Extreme): 4,
-}
+SAME_CATEGORY_PRED = str(NOAA_ENRICHMENT.sameCategory)
+HAS_EVENT_CLASSIFICATION = str(NOAA_ENRICHMENT.hasEventClassification)
 
 
 class NOAAIntraSourceLinker:
@@ -75,6 +121,14 @@ class NOAAIntraSourceLinker:
     Each method reads from triples_df, produces a DataFrame of new triples
     (subject, predicate, object), and returns it. The enrich() method unions
     all new triples together.
+
+    The RML mapper produces a 3-level structure:
+        Alert (nws:WeatherAlert) → Info (cap:Info) → Area (cap:Area) → Geocode (cap:Geocode)
+
+    Most enrichment operates at the Alert level (linking alerts to each other),
+    but properties like hasSentTime, hasEvent, hasSeverity are on the Info
+    subject. The _build_alert_info() method denormalizes this structure into
+    a flat table for efficient enrichment joins.
     """
 
     def __init__(self, spark: SparkSession):
@@ -95,9 +149,14 @@ class NOAAIntraSourceLinker:
         )
 
         # Quick check: is there any NOAA data?
+        # The RML mapper types alerts as nws:WeatherAlert.
+        # Also check for cap:Alert in case of mixed data or future changes.
         has_noaa = triples_df.filter(
             (F.col("predicate") == RDF_TYPE)
-            & (F.col("object") == ALERT_TYPE)
+            & (
+                (F.col("object") == WEATHER_ALERT_TYPE)
+                | (F.col("object") == ALERT_TYPE)
+            )
         ).limit(1).count() > 0
 
         if not has_noaa:
@@ -110,8 +169,10 @@ class NOAAIntraSourceLinker:
 
         triples_df.cache()
 
-        # Build the alert info table once — used by multiple steps.
-        # Structure: (alert, info, area, area_desc, sent_time, event, severity_uri)
+        # Build the denormalized alert info table once — used by multiple steps.
+        # Structure: (alert, info, sent_time, event, severity_uri,
+        #             urgency_uri, certainty_uri, category_uri,
+        #             area, area_desc)
         alert_info_df = self._build_alert_info(triples_df)
 
         if alert_info_df is None:
@@ -122,23 +183,33 @@ class NOAAIntraSourceLinker:
 
         new_dfs: List[DataFrame] = []
 
-        logger.info("[Step 1/4] Linking temporal sequences...")
+        logger.info("[Step 1/6] Linking temporal sequences...")
         df = self._link_temporal_sequences(alert_info_df)
         if df is not None:
             new_dfs.append(df)
 
-        logger.info("[Step 2/4] Linking geographic relationships...")
+        logger.info("[Step 2/6] Linking geographic relationships...")
         df = self._link_geographic_relationships(triples_df)
         if df is not None:
             new_dfs.append(df)
 
-        logger.info("[Step 3/4] Linking event type relationships...")
+        logger.info("[Step 3/6] Linking event type relationships...")
         df = self._link_event_relationships(alert_info_df)
         if df is not None:
             new_dfs.append(df)
 
-        logger.info("[Step 4/4] Linking severity escalations...")
+        logger.info("[Step 4/6] Linking severity escalations...")
         df = self._link_severity_escalations(alert_info_df)
+        if df is not None:
+            new_dfs.append(df)
+
+        logger.info("[Step 5/6] Classifying alerts by event category...")
+        df = self._classify_event_categories(alert_info_df)
+        if df is not None:
+            new_dfs.append(df)
+
+        logger.info("[Step 6/6] Linking alerts by CAP category...")
+        df = self._link_by_cap_category(alert_info_df)
         if df is not None:
             new_dfs.append(df)
 
@@ -158,32 +229,43 @@ class NOAAIntraSourceLinker:
         return result
 
     # ================================================================
-    # Shared: Build alert info table
+    # Shared: Build denormalized alert info table
     # ================================================================
 
     def _build_alert_info(self, triples_df: DataFrame) -> Optional[DataFrame]:
         """
         Build a denormalized table of alert metadata by joining through
-        the CAP structure: Alert → Info → Area, Event, Severity.
+        the CAP/NWS structure produced by the RML mapper:
+
+            Alert (nws:WeatherAlert)
+              → cap:hasInfo → Info (cap:Info)
+                  → cap:hasSentTime (dateTime literal)
+                  → cap:hasEvent (string literal)
+                  → cap:hasSeverity (URI: cap:Minor/Moderate/Severe/Extreme)
+                  → cap:hasUrgency (URI: cap:Immediate/Expected/Future/Past)
+                  → cap:hasCertainty (URI: cap:Observed/Likely/Possible/Unlikely)
+                  → cap:hasCategory (URI: cap:Met/Geo/Fire/etc.)
+                  → cap:hasArea → Area (cap:Area)
+                      → cap:hasAreaDescription (string literal)
+
+        IMPORTANT: In the RML mapper, cap:hasSentTime is on the Info
+        subject, not the Alert subject. We join Alert → Info first,
+        then read sent_time from the Info subject.
 
         Returns DataFrame with columns:
-            alert, info, area, area_desc, sent_time, event, severity_uri
+            alert, info, sent_time, event, severity_uri, urgency_uri,
+            certainty_uri, category_uri, area, area_desc
         """
-        # Alerts
+        # Alerts — detect both nws:WeatherAlert and cap:Alert
         alerts = triples_df.filter(
             (F.col("predicate") == RDF_TYPE)
-            & (F.col("object") == ALERT_TYPE)
+            & (
+                (F.col("object") == WEATHER_ALERT_TYPE)
+                | (F.col("object") == ALERT_TYPE)
+            )
         ).select(F.col("subject").alias("alert"))
 
-        # Alert → sent time
-        sent_times = triples_df.filter(
-            F.col("predicate") == HAS_SENT_TIME
-        ).select(
-            F.col("subject").alias("alert"),
-            F.col("object").alias("sent_time"),
-        )
-
-        # Alert → Info
+        # Alert → Info (cap:hasInfo)
         alert_infos = triples_df.filter(
             F.col("predicate") == HAS_INFO
         ).select(
@@ -191,7 +273,15 @@ class NOAAIntraSourceLinker:
             F.col("object").alias("info"),
         )
 
-        # Info → Area
+        # Info → sent time (cap:hasSentTime is on Info subject per RML mapper)
+        sent_times = triples_df.filter(
+            F.col("predicate") == HAS_SENT_TIME
+        ).select(
+            F.col("subject").alias("info"),
+            F.col("object").alias("sent_time"),
+        )
+
+        # Info → Area (cap:hasArea)
         info_areas = triples_df.filter(
             F.col("predicate") == HAS_AREA
         ).select(
@@ -215,7 +305,7 @@ class NOAAIntraSourceLinker:
             F.col("object").alias("event"),
         )
 
-        # Info → severity (URI like cap:Minor)
+        # Info → severity (URI like cap:Severe)
         severities = triples_df.filter(
             F.col("predicate") == HAS_SEVERITY
         ).select(
@@ -223,15 +313,45 @@ class NOAAIntraSourceLinker:
             F.col("object").alias("severity_uri"),
         )
 
-        # Join everything together
+        # Info → urgency (URI like cap:Immediate)
+        urgencies = triples_df.filter(
+            F.col("predicate") == HAS_URGENCY
+        ).select(
+            F.col("subject").alias("info"),
+            F.col("object").alias("urgency_uri"),
+        )
+
+        # Info → certainty (URI like cap:Observed)
+        certainties = triples_df.filter(
+            F.col("predicate") == HAS_CERTAINTY
+        ).select(
+            F.col("subject").alias("info"),
+            F.col("object").alias("certainty_uri"),
+        )
+
+        # Info → category (URI like cap:Met)
+        categories = triples_df.filter(
+            F.col("predicate") == HAS_CATEGORY
+        ).select(
+            F.col("subject").alias("info"),
+            F.col("object").alias("category_uri"),
+        )
+
+        # Join everything together:
+        # Alert → Info (inner: every alert must have an info)
+        # Info → sent_time, event, severity, urgency, certainty, category (left)
+        # Info → Area → area_desc (left)
         result = (
             alerts
-            .join(sent_times, "alert", "inner")
             .join(alert_infos, "alert", "inner")
-            .join(info_areas, "info", "left")
-            .join(area_descs, "area", "left")
+            .join(sent_times, "info", "left")
             .join(events, "info", "left")
             .join(severities, "info", "left")
+            .join(urgencies, "info", "left")
+            .join(certainties, "info", "left")
+            .join(categories, "info", "left")
+            .join(info_areas, "info", "left")
+            .join(area_descs, "area", "left")
         )
 
         if result.head(1) == []:
@@ -251,6 +371,9 @@ class NOAAIntraSourceLinker:
 
         For each area_desc, orders alerts by sent_time and produces:
             alert_N  noaa_enrichment:precedes  alert_N+1
+
+        Uses the denormalized alert_info_df where sent_time comes from
+        the Info subject (joined through cap:hasInfo).
         """
         # Only alerts with area_desc and sent_time
         sequenceable = alert_info_df.filter(
@@ -278,19 +401,25 @@ class NOAAIntraSourceLinker:
         return result
 
     # ================================================================
-    # Step 2: Geographic Relationships (via SAME codes)
+    # Step 2: Geographic Relationships (via FIPS/SAME codes)
     # ================================================================
 
     def _link_geographic_relationships(
         self, triples_df: DataFrame
     ) -> Optional[DataFrame]:
         """
-        Link alerts that share SAME geocodes (same geographic region).
+        Link alerts that share FIPS or SAME geocodes (same geographic region).
 
-        Traverses: Alert → Info → Area → Geocode → hasSAMECode
-        Then self-joins on SAME code to find alert pairs.
+        Traverses the RML mapper structure:
+            Alert → cap:hasInfo → Info → cap:hasArea → Area
+                → cap:hasGeocode → Geocode → nws:hasFIPSCode / nws:hasSAMECode
 
+        Then self-joins on FIPS/SAME code to find alert pairs.
         Uses alert1 < alert2 to produce each pair exactly once.
+
+        The RML mapper produces geocode URIs like:
+            alert:{alert_id}#geocode-{fips_code}
+        with nws:hasFIPSCode and nws:hasSAMECode both set to the FIPS code.
         """
         # Alert → Info
         alert_infos = triples_df.filter(
@@ -316,41 +445,43 @@ class NOAAIntraSourceLinker:
             F.col("object").alias("geocode"),
         )
 
-        # Geocode → SAME code
-        same_codes = triples_df.filter(
-            F.col("predicate") == HAS_SAME_CODE
+        # Geocode → FIPS code (primary geographic identifier in new mapper)
+        # Also check SAME code for backward compatibility
+        fips_codes = triples_df.filter(
+            (F.col("predicate") == HAS_FIPS_CODE)
+            | (F.col("predicate") == HAS_SAME_CODE)
         ).select(
             F.col("subject").alias("geocode"),
-            F.col("object").alias("same_code"),
-        )
+            F.col("object").alias("geo_code"),
+        ).dropDuplicates()
 
-        # Join: alert → same_code
-        alert_same = (
+        # Join: alert → geo_code
+        alert_geo = (
             alert_infos
             .join(info_areas, "info", "inner")
             .join(area_geocodes, "area", "inner")
-            .join(same_codes, "geocode", "inner")
-            .select("alert", "same_code")
+            .join(fips_codes, "geocode", "inner")
+            .select("alert", "geo_code")
             .dropDuplicates()
         )
 
-        if alert_same.head(1) == []:
-            logger.info("  No SAME codes found")
+        if alert_geo.head(1) == []:
+            logger.info("  No FIPS/SAME codes found")
             return None
 
-        # Self-join on same_code, alert1 < alert2
-        left = alert_same.select(
+        # Self-join on geo_code, alert1 < alert2
+        left = alert_geo.select(
             F.col("alert").alias("alert1"),
-            F.col("same_code").alias("sc1"),
+            F.col("geo_code").alias("gc1"),
         )
-        right = alert_same.select(
+        right = alert_geo.select(
             F.col("alert").alias("alert2"),
-            F.col("same_code").alias("sc2"),
+            F.col("geo_code").alias("gc2"),
         )
 
         pairs = left.join(
             right,
-            (left.sc1 == right.sc2) & (left.alert1 < right.alert2),
+            (left.gc1 == right.gc2) & (left.alert1 < right.alert2),
             "inner",
         ).select("alert1", "alert2").dropDuplicates()
 
@@ -375,6 +506,10 @@ class NOAAIntraSourceLinker:
     ) -> Optional[DataFrame]:
         """
         Link alerts with the same event type (e.g., all "Flood Advisory" alerts).
+
+        cap:hasEvent is a literal string on the Info subject.
+        The denormalized alert_info_df already has the event column
+        joined from Info.
 
         Uses alert1 < alert2 to produce each pair exactly once.
         """
@@ -428,6 +563,14 @@ class NOAAIntraSourceLinker:
             (only when severity_level(N+1) > severity_level(N))
 
         Severity hierarchy: Minor(1) < Moderate(2) < Severe(3) < Extreme(4)
+
+        Severity URIs are named individuals (e.g., cap:Severe) produced
+        by the RML mapper's enum mapping. The SEVERITY_HIERARCHY dict
+        maps these URIs to numeric levels.
+
+        Also considers urgency as a secondary escalation signal:
+        if severity is the same but urgency increases, that is also
+        treated as an escalation.
         """
         # Only alerts with area_desc, sent_time, and severity
         escalatable = alert_info_df.filter(
@@ -435,14 +578,14 @@ class NOAAIntraSourceLinker:
             & F.col("sent_time").isNotNull()
             & F.col("severity_uri").isNotNull()
         ).select(
-            "alert", "area_desc", "sent_time", "severity_uri"
+            "alert", "area_desc", "sent_time", "severity_uri", "urgency_uri"
         ).dropDuplicates()
 
         if escalatable.head(1) == []:
             return None
 
         # Map severity URIs to numeric levels via broadcast join
-        severity_rows = list(SEVERITY_URIS.items())
+        severity_rows = list(SEVERITY_HIERARCHY.items())
         severity_df = self.spark.createDataFrame(
             severity_rows, ["severity_uri", "severity_level"]
         )
@@ -450,6 +593,16 @@ class NOAAIntraSourceLinker:
         escalatable = escalatable.join(
             F.broadcast(severity_df), "severity_uri", "inner"
         )
+
+        # Map urgency URIs to numeric levels via broadcast join (optional)
+        urgency_rows = list(URGENCY_HIERARCHY.items())
+        urgency_df = self.spark.createDataFrame(
+            urgency_rows, ["urgency_uri", "urgency_level"]
+        )
+
+        escalatable = escalatable.join(
+            F.broadcast(urgency_df), "urgency_uri", "left"
+        ).fillna({"urgency_level": 0})
 
         if escalatable.head(1) == []:
             return None
@@ -461,14 +614,21 @@ class NOAAIntraSourceLinker:
             "next_alert", F.lead("alert").over(w)
         ).withColumn(
             "next_severity", F.lead("severity_level").over(w)
+        ).withColumn(
+            "next_urgency", F.lead("urgency_level").over(w)
         ).filter(
             F.col("next_alert").isNotNull()
             & F.col("next_severity").isNotNull()
         )
 
-        # Only keep pairs where severity increases
+        # Keep pairs where severity increases, OR severity is same but
+        # urgency increases (secondary escalation signal)
         escalations = with_next.filter(
-            F.col("next_severity") > F.col("severity_level")
+            (F.col("next_severity") > F.col("severity_level"))
+            | (
+                (F.col("next_severity") == F.col("severity_level"))
+                & (F.col("next_urgency") > F.col("urgency_level"))
+            )
         )
 
         if escalations.head(1) == []:
@@ -481,4 +641,124 @@ class NOAAIntraSourceLinker:
         )
 
         logger.info("  Severity escalation linking complete")
+        return result
+
+    # ================================================================
+    # Step 5: Event Category Classification
+    # ================================================================
+
+    def _classify_event_categories(
+        self, alert_info_df: DataFrame
+    ) -> Optional[DataFrame]:
+        """
+        Classify alerts by event type using NOAA_EVENT_PATTERNS.
+
+        For each alert whose cap:hasEvent literal matches a known event
+        type pattern, produces:
+            alert  noaa_enrichment:hasEventClassification  noaa_enrichment:{category}
+
+        Also produces the specific relationship triple:
+            alert  noaa_enrichment:{relationship}  noaa_enrichment:{category}
+
+        Event types are matched as exact string equality against the
+        literal values produced by the RML mapper's cap:hasEvent property.
+        """
+        alert_events = alert_info_df.filter(
+            F.col("event").isNotNull()
+        ).select("alert", "event").dropDuplicates()
+
+        if alert_events.head(1) == []:
+            return None
+
+        # Build event type → (category_uri, relationship) lookup
+        event_rows = []
+        for category_name, pattern in NOAA_EVENT_PATTERNS.items():
+            category_uri = str(NOAA_ENRICHMENT[category_name])
+            relationship = pattern['relationship']
+            for event_type in pattern['event_types']:
+                event_rows.append((event_type, category_uri, relationship))
+
+        if not event_rows:
+            return None
+
+        event_lookup_df = self.spark.createDataFrame(
+            event_rows, ["event_type", "category_uri", "relationship"]
+        )
+
+        # Join alerts to event patterns
+        matched = alert_events.join(
+            F.broadcast(event_lookup_df),
+            alert_events.event == event_lookup_df.event_type,
+            "inner",
+        )
+
+        if matched.head(1) == []:
+            return None
+
+        # Classification triples
+        classification_triples = matched.select(
+            F.col("alert").alias("subject"),
+            F.lit(HAS_EVENT_CLASSIFICATION).alias("predicate"),
+            F.col("category_uri").alias("object"),
+        )
+
+        # Specific relationship triples
+        relationship_triples = matched.select(
+            F.col("alert").alias("subject"),
+            F.col("relationship").alias("predicate"),
+            F.col("category_uri").alias("object"),
+        )
+
+        result = classification_triples.unionByName(relationship_triples)
+
+        logger.info("  Event category classification complete")
+        return result
+
+    # ================================================================
+    # Step 6: CAP Category Linking
+    # ================================================================
+
+    def _link_by_cap_category(
+        self, alert_info_df: DataFrame
+    ) -> Optional[DataFrame]:
+        """
+        Link alerts that share the same CAP category (cap:hasCategory).
+
+        CAP categories are URI-valued named individuals (e.g., cap:Met,
+        cap:Geo, cap:Fire) produced by the RML mapper's enum mapping.
+
+        Uses alert1 < alert2 to produce each pair exactly once.
+        """
+        alert_categories = alert_info_df.filter(
+            F.col("category_uri").isNotNull()
+        ).select("alert", "category_uri").dropDuplicates()
+
+        if alert_categories.head(1) == []:
+            return None
+
+        left = alert_categories.select(
+            F.col("alert").alias("alert1"),
+            F.col("category_uri").alias("cat1"),
+        )
+        right = alert_categories.select(
+            F.col("alert").alias("alert2"),
+            F.col("category_uri").alias("cat2"),
+        )
+
+        pairs = left.join(
+            right,
+            (left.cat1 == right.cat2) & (left.alert1 < right.alert2),
+            "inner",
+        ).select("alert1", "alert2").dropDuplicates()
+
+        if pairs.head(1) == []:
+            return None
+
+        result = pairs.select(
+            F.col("alert1").alias("subject"),
+            F.lit(SAME_CATEGORY_PRED).alias("predicate"),
+            F.col("alert2").alias("object"),
+        )
+
+        logger.info("  CAP category linking complete")
         return result
