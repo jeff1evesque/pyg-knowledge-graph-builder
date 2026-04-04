@@ -35,7 +35,7 @@ from glue_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, UNIFIED,
     CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER, WKYENG,
     SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP,
-    MARKET, MARKET_OPTIONS, CAP,
+    MARKET, MARKET_OPTIONS, CAP, NWS,
 )
 
 import logging
@@ -91,9 +91,26 @@ SEC_DATE_PREDS = [
     str(SEC_SUSP.startDate) if hasattr(SEC_SUSP, 'startDate') else "https://www.sec.gov/ontology/trading-suspensions#startDate",
 ]
 
-# NOAA
+# NOAA — aligned with updated RML mapper
+# In the new mapper, cap:hasSentTime is on the Info subject
+# (alert:{alert_id}#info), not on the Alert subject.
+# We collect all NOAA date predicates that appear on Info subjects.
+# The temporal unifier's _collect_date_based_temporals() extracts
+# month/year from the literal values regardless of which subject
+# they appear on — it only needs the predicate and object columns.
+NOAA_WEATHER_ALERT_TYPE = str(NWS.WeatherAlert)
 CAP_ALERT_TYPE = str(CAP.Alert)
-CAP_HAS_SENT_TIME = str(CAP.hasSentTime)
+
+# All NOAA date predicates that carry temporal information.
+# hasSentTime, hasEffectiveTime, hasOnsetTime, hasExpirationTime, hasEndsTime
+# are all on the Info subject in the new mapper.
+NOAA_DATE_PREDS = [
+    str(CAP.hasSentTime),
+    str(CAP.hasEffectiveTime),
+    str(CAP.hasOnsetTime),
+    str(CAP.hasExpirationTime),
+    str(CAP.hasEndsTime),
+]
 
 # Valid month names for regex matching
 MONTH_NAMES = [
@@ -180,7 +197,7 @@ class TemporalUnifier:
 
         logger.info("  Collecting NOAA temporal entities...")
         df = self._collect_date_based_temporals(
-            triples_df, [CAP_HAS_SENT_TIME], "https://www.noaa.gov/temporal/"
+            triples_df, NOAA_DATE_PREDS, "https://www.noaa.gov/temporal/"
         )
         if df is not None:
             temporal_dfs.append(df)
@@ -349,6 +366,12 @@ class TemporalUnifier:
 
         Works for any source that stores dates as literal values
         (SEC filing dates, NOAA alert timestamps, etc.)
+
+        For NOAA: In the updated RML mapper, cap:hasSentTime and other
+        date properties are on the Info subject (alert:{id}#info), not
+        the Alert subject. This method only uses the predicate and object
+        columns, so it works correctly regardless of which subject the
+        date property appears on.
 
         Args:
             triples_df: The triples DataFrame

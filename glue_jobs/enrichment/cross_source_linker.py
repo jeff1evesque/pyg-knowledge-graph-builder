@@ -16,7 +16,8 @@ from rdflib.namespace import RDF, RDFS, OWL, XSD
 from glue_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, SEC_ENRICHMENT, MARKET_ENRICHMENT, NOAA_ENRICHMENT,
     UNIFIED, CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER,
-    WKYENG, SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP, MARKET, CAP,
+    WKYENG, SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP, MARKET, CAP, NWS,
+    ALERT,
 )
 from glue_jobs.enrichment.intra_source.bls.patterns import BLS_SECTOR_PATTERNS
 from glue_jobs.utils.spark_rdf_utils import (
@@ -32,6 +33,22 @@ logger = logging.getLogger(__name__)
 _RDF_TYPE = str(RDF.type)
 _OWL_SAME_AS = str(OWL.sameAs)
 _RDFS_LABEL = str(RDFS.label)
+
+# NOAA type URIs — aligned with updated RML mapper
+_NWS_WEATHER_ALERT_TYPE = str(NWS.WeatherAlert)
+_CAP_ALERT_TYPE = str(CAP.Alert)
+
+# NOAA area description — on Area subject (alert:{id}#area)
+_CAP_HAS_AREA_DESC = str(CAP.hasAreaDescription)
+
+# NOAA geocode properties for geographic linking
+_NWS_HAS_STATE_FIPS = str(NWS.hasStateFIPS)
+_NWS_HAS_FIPS_CODE = str(NWS.hasFIPSCode)
+
+# NOAA structural properties for traversal
+_CAP_HAS_INFO = str(CAP.hasInfo)
+_CAP_HAS_AREA = str(CAP.hasArea)
+_CAP_HAS_GEOCODE = str(CAP.hasGeocode)
 
 
 class CrossSourceLinker:
@@ -60,7 +77,9 @@ class CrossSourceLinker:
         bls_prefixes = [str(ns) for ns in [CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER, WKYENG]]
         sec_prefixes = [str(ns) for ns in [SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP]]
         market_prefix = str(MARKET)
-        noaa_prefix = str(CAP)
+        # NOAA alert instances use the ALERT namespace (https://api.weather.gov/alerts/)
+        # Also check CAP namespace for type triples
+        noaa_prefixes = [str(ALERT), str(CAP), str(NWS)]
 
         # Sample subjects to detect sources — bounded, fast
         sample = (
@@ -79,7 +98,7 @@ class CrossSourceLinker:
                 sources.add('sec')
             elif s.startswith(market_prefix):
                 sources.add('market')
-            elif s.startswith(noaa_prefix):
+            elif any(s.startswith(p) for p in noaa_prefixes):
                 sources.add('noaa')
 
             if len(sources) == 4:
@@ -418,8 +437,20 @@ class CrossSourceLinker:
 
     def _link_by_geography(self) -> Optional[DataFrame]:
         """
-        Link entities by US state. Matches state names in subject URIs
-        and NOAA alert area descriptions.
+        Link entities by US state. Matches state names in subject URIs,
+        NOAA alert area descriptions, and NOAA state FIPS codes.
+
+        For NOAA: The updated RML mapper produces:
+          - Area descriptions on cap:Area subjects (alert:{id}#area)
+            via cap:hasAreaDescription
+          - State FIPS codes on cap:Geocode subjects (alert:{id}#geocode-{fips})
+            via nws:hasStateFIPS
+
+        To link NOAA alerts to geographic regions, we:
+          1. Match area descriptions containing state names
+          2. Match state FIPS codes to state names
+        Both approaches trace back to the Alert subject via the
+        Alert → Info → Area → Geocode chain.
         """
         us_states = [
             'Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado',
@@ -433,6 +464,26 @@ class CrossSourceLinker:
             'Tennessee', 'Texas', 'Utah', 'Vermont', 'Virginia', 'Washington',
             'West Virginia', 'Wisconsin', 'Wyoming'
         ]
+
+        # State FIPS code → state name mapping (2-digit codes)
+        state_fips_to_name = {
+            '01': 'Alabama', '02': 'Alaska', '04': 'Arizona', '05': 'Arkansas',
+            '06': 'California', '08': 'Colorado', '09': 'Connecticut',
+            '10': 'Delaware', '12': 'Florida', '13': 'Georgia', '15': 'Hawaii',
+            '16': 'Idaho', '17': 'Illinois', '18': 'Indiana', '19': 'Iowa',
+            '20': 'Kansas', '21': 'Kentucky', '22': 'Louisiana', '23': 'Maine',
+            '24': 'Maryland', '25': 'Massachusetts', '26': 'Michigan',
+            '27': 'Minnesota', '28': 'Mississippi', '29': 'Missouri',
+            '30': 'Montana', '31': 'Nebraska', '32': 'Nevada',
+            '33': 'New Hampshire', '34': 'New Jersey', '35': 'New Mexico',
+            '36': 'New York', '37': 'North Carolina', '38': 'North Dakota',
+            '39': 'Ohio', '40': 'Oklahoma', '41': 'Oregon',
+            '42': 'Pennsylvania', '44': 'Rhode Island', '45': 'South Carolina',
+            '46': 'South Dakota', '47': 'Tennessee', '48': 'Texas',
+            '49': 'Utah', '50': 'Vermont', '51': 'Virginia',
+            '53': 'Washington', '54': 'West Virginia', '55': 'Wisconsin',
+            '56': 'Wyoming',
+        }
 
         state_rows = [(s, s.replace(' ', '')) for s in us_states]
         states_df = self.spark.createDataFrame(state_rows, schema=["state_name", "state_key"])
@@ -453,6 +504,7 @@ class CrossSourceLinker:
         )
 
         # Match LAUS entities containing state names
+        laus_links = None
         if 'bls' in self.available_sources:
             laus_prefix = str(LAUS)
             laus_entities = (
@@ -471,28 +523,111 @@ class CrossSourceLinker:
                 F.lit(str(BLS_ENRICHMENT.hasRegion)).alias("predicate"),
                 F.concat(F.lit(str(UNIFIED)), F.col("state_key"), F.lit("Region")).alias("object")
             )
-        else:
-            laus_links = None
 
         # Match NOAA alerts by area description containing state name
+        # AND by state FIPS code
+        noaa_links = None
         if 'noaa' in self.available_sources:
+            noaa_link_dfs: List[DataFrame] = []
+
+            # Strategy 1: Area description contains state name
+            # Area descriptions are on cap:Area subjects.
+            # Trace back: Area → Info (via hasArea inverse) → Alert (via hasInfo inverse)
+            # But it's easier to join through the forward chain:
+            #   Alert → hasInfo → Info → hasArea → Area → hasAreaDescription
             area_descs = extract_property(
-                self.triples_df, str(CAP.hasAreaDescription), "area_desc"
+                self.triples_df, _CAP_HAS_AREA_DESC, "area_desc"
             )
 
-            noaa_matched = area_descs.crossJoin(F.broadcast(states_df)).filter(
-                F.col("area_desc").contains(F.col("state_name"))
+            if area_descs.head(1):
+                # area_descs has (subject=area_uri, area_desc)
+                # Join Area → Info via hasArea (Info → Area, so we need reverse)
+                info_areas = self.triples_df.filter(
+                    F.col("predicate") == _CAP_HAS_AREA
+                ).select(
+                    F.col("subject").alias("info"),
+                    F.col("object").alias("area"),
+                )
+
+                alert_infos = self.triples_df.filter(
+                    F.col("predicate") == _CAP_HAS_INFO
+                ).select(
+                    F.col("subject").alias("alert"),
+                    F.col("object").alias("info"),
+                )
+
+                # Join: area_desc → area → info → alert
+                area_to_alert = (
+                    area_descs
+                    .join(info_areas, area_descs.subject == info_areas.area, "inner")
+                    .join(alert_infos, "info", "inner")
+                    .select("alert", "area_desc")
+                )
+
+                noaa_area_matched = area_to_alert.crossJoin(F.broadcast(states_df)).filter(
+                    F.col("area_desc").contains(F.col("state_name"))
+                )
+
+                noaa_area_links = noaa_area_matched.select(
+                    F.col("alert").alias("subject"),
+                    F.lit(str(BLS_ENRICHMENT.affectsRegion)).alias("predicate"),
+                    F.concat(F.lit(str(UNIFIED)), F.col("state_key"), F.lit("Region")).alias("object")
+                )
+                noaa_link_dfs.append(noaa_area_links)
+
+            # Strategy 2: State FIPS code matching
+            # Geocode subjects have nws:hasStateFIPS with 2-digit state codes
+            state_fips_rows = [
+                (fips, name, name.replace(' ', ''))
+                for fips, name in state_fips_to_name.items()
+            ]
+            state_fips_df = self.spark.createDataFrame(
+                state_fips_rows, ["fips_code", "state_name", "state_key"]
             )
 
-            # Need to trace back: area → info → alert
-            # For simplicity, link the subject of hasAreaDescription
-            noaa_links = noaa_matched.select(
-                F.col("subject"),
-                F.lit(str(BLS_ENRICHMENT.affectsRegion)).alias("predicate"),
-                F.concat(F.lit(str(UNIFIED)), F.col("state_key"), F.lit("Region")).alias("object")
+            state_fips_triples = self.triples_df.filter(
+                F.col("predicate") == _NWS_HAS_STATE_FIPS
+            ).select(
+                F.col("subject").alias("geocode"),
+                F.col("object").alias("state_fips"),
             )
-        else:
-            noaa_links = None
+
+            if state_fips_triples.head(1):
+                # Trace geocode → area → info → alert
+                area_geocodes = self.triples_df.filter(
+                    F.col("predicate") == _CAP_HAS_GEOCODE
+                ).select(
+                    F.col("subject").alias("area"),
+                    F.col("object").alias("geocode"),
+                )
+
+                geocode_to_alert = (
+                    state_fips_triples
+                    .join(area_geocodes, "geocode", "inner")
+                    .join(info_areas, "area", "inner")
+                    .join(alert_infos, "info", "inner")
+                    .select("alert", "state_fips")
+                    .dropDuplicates()
+                )
+
+                fips_matched = geocode_to_alert.join(
+                    F.broadcast(state_fips_df),
+                    geocode_to_alert.state_fips == state_fips_df.fips_code,
+                    "inner",
+                )
+
+                noaa_fips_links = fips_matched.select(
+                    F.col("alert").alias("subject"),
+                    F.lit(str(BLS_ENRICHMENT.affectsRegion)).alias("predicate"),
+                    F.concat(F.lit(str(UNIFIED)), F.col("state_key"), F.lit("Region")).alias("object")
+                )
+                noaa_link_dfs.append(noaa_fips_links)
+
+            if noaa_link_dfs:
+                noaa_links = noaa_link_dfs[0]
+                for df in noaa_link_dfs[1:]:
+                    noaa_links = noaa_links.unionByName(df)
+                noaa_links = noaa_links.dropDuplicates()
 
         result = type_triples.unionByName(label_triples)
         if laus_links is not None:
