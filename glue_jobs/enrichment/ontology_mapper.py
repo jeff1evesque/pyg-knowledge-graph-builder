@@ -9,6 +9,7 @@ Use cases:
 2. Create owl:equivalentProperty and owl:equivalentClass mappings
 3. Add SKOS prefLabel for entities that only have rdfs:label
 4. Align classification systems (NAICS, SIC, GICS, etc.) — future
+5. Map NOAA CAP properties to unified equivalents
 
 All operations run as PySpark DataFrame transformations.
 """
@@ -20,7 +21,7 @@ from typing import List, Optional
 from glue_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, SEC_ENRICHMENT, MARKET_ENRICHMENT, NOAA_ENRICHMENT,
     UNIFIED, CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER,
-    SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP, MARKET, CAP
+    SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP, MARKET, CAP, NWS
 )
 
 import logging
@@ -93,6 +94,25 @@ PROPERTY_MAPPINGS = {
     # Geographic
     str(LAUS.hasState): str(UNIFIED.hasRegion),
     str(METRO.hasMetropolitanArea): str(UNIFIED.hasRegion),
+
+    # NOAA temporal properties → unified equivalents
+    # cap:hasSentTime is the primary temporal property for NOAA alerts
+    # (on Info subjects in the new mapper, but the equivalence is
+    # at the property level regardless of subject)
+    str(CAP.hasSentTime): str(UNIFIED.hasTimestamp),
+    str(CAP.hasEffectiveTime): str(UNIFIED.hasTimestamp),
+    str(CAP.hasOnsetTime): str(UNIFIED.hasTimestamp),
+    str(CAP.hasExpirationTime): str(UNIFIED.hasTimestamp),
+
+    # NOAA event → unified category
+    str(CAP.hasEvent): str(UNIFIED.hasEventName),
+
+    # NOAA severity/urgency/certainty → unified severity
+    str(CAP.hasSeverity): str(UNIFIED.hasSeverity),
+    str(CAP.hasUrgency): str(UNIFIED.hasUrgency),
+
+    # NOAA area description → unified region description
+    str(CAP.hasAreaDescription): str(UNIFIED.hasRegionDescription),
 }
 
 # ============================================
@@ -135,6 +155,16 @@ CLASS_MAPPINGS = {
     # Occupational classifications
     str(ECI.OccupationalGroup): str(BLS_ENRICHMENT.OccupationalClassification),
     str(EMPSIT.Occupation): str(BLS_ENRICHMENT.OccupationalClassification),
+
+    # NOAA alert classes → unified emergency alert type
+    # nws:WeatherAlert is the primary type from the RML mapper
+    # (subClassOf cap:Alert in the ontology)
+    str(NWS.WeatherAlert): str(NOAA_ENRICHMENT.EmergencyAlert),
+    str(CAP.Alert): str(NOAA_ENRICHMENT.EmergencyAlert),
+
+    # NOAA sub-structures
+    str(CAP.Info): str(NOAA_ENRICHMENT.AlertInfo),
+    str(CAP.Area): str(NOAA_ENRICHMENT.AlertArea),
 }
 
 
@@ -219,8 +249,9 @@ class OntologyMapper:
         Create owl:equivalentProperty triples from the static mapping table.
 
         Produces:
-            cpi:hasMonth  owl:equivalentProperty  unified:hasMonth
-            ppi:hasStartMonth  owl:equivalentProperty  unified:hasMonth
+            cpi:Index  owl:equivalentClass  bls:PriceIndex
+            ppi:IndexValue  owl:equivalentClass  bls:PriceIndex
+            nws:WeatherAlert  owl:equivalentClass  noaa_enrichment:EmergencyAlert
             ...
         """
         if not PROPERTY_MAPPINGS:
@@ -248,7 +279,7 @@ class OntologyMapper:
 
         Produces:
             cpi:Index  owl:equivalentClass  bls:PriceIndex
-            ppi:IndexValue  owl:equivalentClass  bls:PriceIndex
+            nws:WeatherAlert  owl:equivalentClass  noaa_enrichment:EmergencyAlert
             ...
         """
         if not CLASS_MAPPINGS:
@@ -334,6 +365,10 @@ class OntologyMapper:
             (str(BLS_ENRICHMENT.OccupationConceptScheme),
              "BLS Occupational Classifications",
              "Occupational group classifications in ECI and EMPSIT"),
+            (str(NOAA_ENRICHMENT.EventTypeConceptScheme),
+             "NOAA Weather Event Types",
+             "Weather event type classifications from NWS alerts, "
+             "aligned with the NWS SKOS EventTypeScheme vocabulary"),
         ]
 
         rows = []
