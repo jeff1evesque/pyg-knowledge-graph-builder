@@ -27,7 +27,8 @@ from typing import List, Optional
 
 from glue_jobs.utils.rdf_utils import MARKET, MARKET_ENRICHMENT
 from glue_jobs.enrichment.intra_source.market.patterns import (
-    MARKET_SECTOR_PATTERNS,
+    get_sector_patterns,
+    MARKET_OPTION_STRATEGY_PATTERNS,
 )
 
 import logging
@@ -86,8 +87,15 @@ class MarketIntraSourceLinker:
     triples (subject, predicate, object), and returns it.
     """
 
-    def __init__(self, spark: SparkSession):
+    def __init__(
+        self,
+        spark: SparkSession,
+        sector_definitions_bucket: str = "",
+        sector_definitions_key: str = "",
+    ):
         self.spark = spark
+        self._sector_definitions_bucket = sector_definitions_bucket
+        self._sector_definitions_key = sector_definitions_key
 
     def enrich(self, triples_df: DataFrame) -> DataFrame:
         """
@@ -581,13 +589,20 @@ class MarketIntraSourceLinker:
 
     def _classify_sectors(self, triples_df: DataFrame) -> Optional[DataFrame]:
         """
-        Classify equity snapshots by sector using MARKET_SECTOR_PATTERNS.
+        Classify equity snapshots by sector.
 
-        Also classifies option snapshots via their underlyingSymbol.
+        Loads sector patterns from the S&P 500 tickers CSV in S3
+        (grouped by GICS Sector). Falls back to hardcoded defaults
+        if S3 is unavailable.
         """
+        sector_patterns = get_sector_patterns(
+            bucket=self._sector_definitions_bucket,
+            key=self._sector_definitions_key,
+        )
+
         # Build ticker → sector lookup
         sector_rows = []
-        for sector_name, pattern in MARKET_SECTOR_PATTERNS.items():
+        for sector_name, pattern in sector_patterns.items():
             sector_uri = str(pattern["sector_uri"])
             relationship = str(pattern["relationship"])
             for ticker in pattern["tickers"]:

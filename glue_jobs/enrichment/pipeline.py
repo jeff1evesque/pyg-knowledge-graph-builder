@@ -29,10 +29,14 @@ class EnrichmentPipeline:
     def __init__(
         self,
         spark: SparkSession,
-        triples_df: DataFrame
+        triples_df: DataFrame,
+        sector_definitions_bucket: str = "",
+        sector_definitions_key: str = "",
     ):
         self.spark = spark
         self.triples_df = triples_df
+        self._sector_definitions_bucket = sector_definitions_bucket
+        self._sector_definitions_key = sector_definitions_key
         self.stats: Dict[str, any] = {
             'initial_triples': 0,
             'intra_source': {},
@@ -65,7 +69,9 @@ class EnrichmentPipeline:
         # Run all intra-source enrichers
         intra_result = enrich_intra_source(
             self.spark,
-            self.triples_df
+            self.triples_df,
+            sector_definitions_bucket=self._sector_definitions_bucket,
+            sector_definitions_key=self._sector_definitions_key,
         )
 
         self.stats['intra_source'] = intra_result.get('stats', {})

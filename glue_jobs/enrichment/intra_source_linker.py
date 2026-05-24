@@ -19,7 +19,9 @@ logger = logging.getLogger(__name__)
 
 def enrich_intra_source(
     spark: SparkSession,
-    triples_df: DataFrame
+    triples_df: DataFrame,
+    sector_definitions_bucket: str = "",
+    sector_definitions_key: str = "",
 ) -> Dict:
     """
     Run intra-source enrichment for all detected data sources.
@@ -72,7 +74,11 @@ def enrich_intra_source(
     # ----------------------------------------
     logger.info("Checking for Market data...")
     try:
-        market_linker = MarketIntraSourceLinker(spark)
+        market_linker = MarketIntraSourceLinker(
+            spark,
+            sector_definitions_bucket=sector_definitions_bucket,
+            sector_definitions_key=sector_definitions_key,
+        )
         market_new_df = market_linker.enrich(triples_df)
         spark_new_dfs.append(market_new_df)
         market_count = market_new_df.count()
