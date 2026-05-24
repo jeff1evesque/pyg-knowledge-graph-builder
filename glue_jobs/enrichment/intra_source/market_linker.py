@@ -1,19 +1,23 @@
 """
 Market Intra-Source Enrichment Orchestrator (PySpark)
 
-Coordinates enrichment for stock market data (prices and options).
+Coordinates enrichment for stock market data using the flat snapshot model:
+  - EquitySnapshot: one node per equity quote capture
+  - OptionSnapshot: one node per option quote capture
+
 All enrichment runs as distributed PySpark DataFrame operations.
 
 Enrichment strategies:
-1. Link temporal sequences of price observations (precedes)
-2. Link options to underlying stock price observations
-3. Identify option strategies (spreads, straddles, strangles)
-4. Classify tickers by sector
-5. Link multi-source observations of same ticker/contract
+1. Link temporal sequences of snapshots per symbol (precedes)
+2. Link option snapshots to their underlying equity snapshots
+3. Identify option strategies (straddles, spreads, strangles)
+4. Classify snapshots by sector (via ticker symbol)
+5. Compute moneyness for option snapshots
 
-Note: Ticker unification is NOT needed — all mappers produce the same
-canonical ticker URI (e.g., finance:TSLA) regardless of source.
-Option contract URIs are also canonical (e.g., finance:TSLA_20250606_C50000).
+The flat model means each snapshot node has ALL its properties as
+direct datatype properties (lastPrice, strikePrice, delta, etc.).
+No intermediate entity resolution is needed — the enricher works
+directly with the snapshot subjects.
 """
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -21,9 +25,7 @@ from pyspark.sql.window import Window
 from functools import reduce
 from typing import List, Optional
 
-from glue_jobs.utils.rdf_utils import (
-    MARKET, MARKET_OPTIONS, MARKET_ENRICHMENT, UNIFIED
-)
+from glue_jobs.utils.rdf_utils import MARKET, MARKET_ENRICHMENT
 from glue_jobs.enrichment.intra_source.market.patterns import (
     MARKET_SECTOR_PATTERNS,
 )
@@ -36,33 +38,28 @@ logger = logging.getLogger(__name__)
 # URI string constants
 # ============================================
 
-# Standard predicates
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
-OWL_SAME_AS = "http://www.w3.org/2002/07/owl#sameAs"
 
-# Market class URIs (canonical — all mappers use these)
-STOCK_TICKER_TYPE = str(MARKET.StockTicker)
-PRICE_OBS_TYPE = str(MARKET.PriceObservation)
-OPTION_CONTRACT_TYPE = str(MARKET.OptionContract)
-OPTION_QUOTE_TYPE = str(MARKET.OptionQuote)
+# Class URIs (flat snapshot model)
+EQUITY_SNAPSHOT_TYPE = str(MARKET.EquitySnapshot)
+OPTION_SNAPSHOT_TYPE = str(MARKET.OptionSnapshot)
+QUOTE_SNAPSHOT_TYPE = str(MARKET.QuoteSnapshot)
 
-# Market property URIs (canonical — all mappers use finance: namespace)
+# Property URIs
 SYMBOL_PRED = str(MARKET.symbol)
-OBSERVED_TICKER_PRED = str(MARKET.observedTicker)
-OBSERVED_AT_PRED = str(MARKET.observedAt)
-OBSERVED_PRICE_PRED = str(MARKET.observedPrice)
-DATA_SOURCE_PRED = str(MARKET.dataSource)
-UNDERLYING_TICKER_PRED = str(MARKET.underlyingTicker)
-QUOTED_CONTRACT_PRED = str(MARKET.quotedContract)
-
-# Option property URIs (canonical — all mappers use options: namespace)
-STRIKE_PRICE_PRED = str(MARKET_OPTIONS.strikePrice)
-EXPIRATION_DATE_PRED = str(MARKET_OPTIONS.expirationDate)
-OPTION_TYPE_PRED = str(MARKET_OPTIONS.optionType)
+CAPTURE_TIME_PRED = str(MARKET.captureTime)
+LAST_PRICE_PRED = str(MARKET.lastPrice)
+UNDERLYING_SYMBOL_PRED = str(MARKET.underlyingSymbol)
+UNDERLYING_PRICE_PRED = str(MARKET.underlyingPrice)
+STRIKE_PRICE_PRED = str(MARKET.strikePrice)
+EXPIRATION_DATE_PRED = str(MARKET.expirationDate)
+CONTRACT_TYPE_PRED = str(MARKET.contractType)
+DELTA_PRED = str(MARKET.delta)
+IN_THE_MONEY_PRED = str(MARKET.inTheMoney)
 
 # Enrichment property URIs
 PRECEDES_PRED = str(MARKET_ENRICHMENT.precedes)
-HAS_UNDERLYING_OBS_PRED = str(MARKET_ENRICHMENT.hasUnderlyingPriceObservation)
+HAS_UNDERLYING_EQUITY_PRED = str(MARKET_ENRICHMENT.hasUnderlyingEquity)
 HAS_MONEYNESS_PRED = str(MARKET_ENRICHMENT.hasMoneyness)
 ATM_URI = str(MARKET_ENRICHMENT.AtTheMoney)
 ITM_URI = str(MARKET_ENRICHMENT.InTheMoney)
@@ -72,10 +69,8 @@ CALL_SPREAD_WITH_PRED = str(MARKET_ENRICHMENT.callSpreadWith)
 PUT_SPREAD_WITH_PRED = str(MARKET_ENRICHMENT.putSpreadWith)
 STRANGLE_WITH_PRED = str(MARKET_ENRICHMENT.strangleWith)
 BELONGS_TO_SECTOR_PRED = str(MARKET_ENRICHMENT.belongsToSector)
-SAME_TICKER_OBS_PRED = str(MARKET_ENRICHMENT.sameTickerObservation)
-SAME_CONTRACT_QUOTE_PRED = str(MARKET_ENRICHMENT.sameContractQuote)
 
-# Maximum strangle pairs per ticker/expiration chain
+# Maximum strangle pairs per underlying/expiration chain
 MAX_STRANGLE_PAIRS_PER_CHAIN = 10
 
 
@@ -83,18 +78,12 @@ class MarketIntraSourceLinker:
     """
     Market intra-source enrichment using PySpark DataFrames.
 
-    Each method reads from triples_df, produces a DataFrame of new triples
-    (subject, predicate, object), and returns it. The enrich() method unions
-    all new triples together.
+    Works with the flat snapshot model where each subject is a
+    self-contained EquitySnapshot or OptionSnapshot with all
+    properties as direct datatype properties.
 
-    Design notes:
-    - Ticker URIs are already canonical across sources (finance:TSLA).
-      No ticker unification step is needed.
-    - OptionContract URIs are already canonical (finance:TSLA_20250606_C50000).
-      No contract unification step is needed.
-    - PriceObservation and OptionQuote URIs are source-specific
-      (yahoo:price_obs_X, marketwatch:price_obs_X). Multi-source linking
-      connects these.
+    Each method reads from triples_df, produces a DataFrame of new
+    triples (subject, predicate, object), and returns it.
     """
 
     def __init__(self, spark: SparkSession):
@@ -118,9 +107,9 @@ class MarketIntraSourceLinker:
         has_market = triples_df.filter(
             (F.col("predicate") == RDF_TYPE)
             & (
-                (F.col("object") == PRICE_OBS_TYPE)
-                | (F.col("object") == OPTION_CONTRACT_TYPE)
-                | (F.col("object") == STOCK_TICKER_TYPE)
+                (F.col("object") == EQUITY_SNAPSHOT_TYPE)
+                | (F.col("object") == OPTION_SNAPSHOT_TYPE)
+                | (F.col("object") == QUOTE_SNAPSHOT_TYPE)
             )
         ).limit(1).count() > 0
 
@@ -136,13 +125,13 @@ class MarketIntraSourceLinker:
 
         new_dfs: List[DataFrame] = []
 
-        logger.info("[Step 1/5] Linking price observation sequences...")
-        df = self._link_price_sequences(triples_df)
+        logger.info("[Step 1/5] Linking snapshot temporal sequences...")
+        df = self._link_snapshot_sequences(triples_df)
         if df is not None:
             new_dfs.append(df)
 
-        logger.info("[Step 2/5] Linking options to underlying stocks...")
-        df = self._link_options_to_stocks(triples_df)
+        logger.info("[Step 2/5] Linking options to underlying equities...")
+        df = self._link_options_to_underlying(triples_df)
         if df is not None:
             new_dfs.append(df)
 
@@ -156,8 +145,8 @@ class MarketIntraSourceLinker:
         if df is not None:
             new_dfs.append(df)
 
-        logger.info("[Step 5/5] Linking multi-source observations...")
-        df = self._link_multi_source_observations(triples_df)
+        logger.info("[Step 5/5] Computing option moneyness...")
+        df = self._compute_moneyness(triples_df)
         if df is not None:
             new_dfs.append(df)
 
@@ -175,196 +164,175 @@ class MarketIntraSourceLinker:
         return result
 
     # ================================================================
-    # Step 1: Price Observation Sequences
+    # Step 1: Snapshot Temporal Sequences
     # ================================================================
 
-    def _link_price_sequences(self, triples_df: DataFrame) -> Optional[DataFrame]:
+    def _link_snapshot_sequences(self, triples_df: DataFrame) -> Optional[DataFrame]:
         """
-        Link price observations in chronological order per ticker.
+        Link snapshots in chronological order per symbol.
 
-        Produces:  obs_N  enrichment:precedes  obs_N+1
+        For each symbol, orders snapshots by captureTime and produces:
+            snapshot_N  enrichment:precedes  snapshot_N+1
+
+        Works for both equity and option snapshots — any subject with
+        a symbol and captureTime property gets sequenced.
         """
-        price_obs = triples_df.filter(
-            (F.col("predicate") == RDF_TYPE)
-            & (F.col("object") == PRICE_OBS_TYPE)
-        ).select(F.col("subject").alias("obs"))
-
-        obs_tickers = triples_df.filter(
-            F.col("predicate") == OBSERVED_TICKER_PRED
+        # Get all snapshot subjects with their symbol and timestamp
+        snapshot_symbols = triples_df.filter(
+            F.col("predicate") == SYMBOL_PRED
         ).select(
-            F.col("subject").alias("obs"),
-            F.col("object").alias("ticker"),
+            F.col("subject").alias("snapshot"),
+            F.col("object").alias("symbol"),
         )
 
-        obs_timestamps = triples_df.filter(
-            F.col("predicate") == OBSERVED_AT_PRED
+        snapshot_times = triples_df.filter(
+            F.col("predicate") == CAPTURE_TIME_PRED
         ).select(
-            F.col("subject").alias("obs"),
-            F.col("object").alias("observed_at"),
+            F.col("subject").alias("snapshot"),
+            F.col("object").alias("capture_time"),
         )
 
-        obs_df = (
-            price_obs
-            .join(obs_tickers, "obs", "inner")
-            .join(obs_timestamps, "obs", "inner")
-        )
+        snapshots_df = snapshot_symbols.join(snapshot_times, "snapshot", "inner")
 
-        if obs_df.head(1) == []:
-            logger.info("  No price observations found")
+        if snapshots_df.head(1) == []:
+            logger.info("  No snapshots with symbol + captureTime found")
             return None
 
-        w = Window.partitionBy("ticker").orderBy("observed_at")
-        sequenced = obs_df.withColumn("next_obs", F.lead("obs").over(w))
-        pairs = sequenced.filter(F.col("next_obs").isNotNull())
+        # Window: partition by symbol, order by capture_time
+        w = Window.partitionBy("symbol").orderBy("capture_time")
+        sequenced = snapshots_df.withColumn(
+            "next_snapshot", F.lead("snapshot").over(w)
+        )
+        pairs = sequenced.filter(F.col("next_snapshot").isNotNull())
 
         if pairs.head(1) == []:
             return None
 
         result = pairs.select(
-            F.col("obs").alias("subject"),
+            F.col("snapshot").alias("subject"),
             F.lit(PRECEDES_PRED).alias("predicate"),
-            F.col("next_obs").alias("object"),
+            F.col("next_snapshot").alias("object"),
         )
 
-        logger.info("  Price sequence linking complete")
+        logger.info("  Snapshot sequence linking complete")
         return result
 
     # ================================================================
-    # Step 2: Link Options to Underlying Stocks
+    # Step 2: Link Options to Underlying Equities
     # ================================================================
 
-    def _link_options_to_stocks(self, triples_df: DataFrame) -> Optional[DataFrame]:
+    def _link_options_to_underlying(self, triples_df: DataFrame) -> Optional[DataFrame]:
         """
-        Link option contracts to their underlying stock price observations.
+        Link option snapshots to their underlying equity snapshots.
+
+        Uses the underlyingSymbol property on OptionSnapshots to find
+        the corresponding EquitySnapshot with the same symbol and
+        closest captureTime.
 
         Produces:
-          contract  hasUnderlyingPriceObservation  price_obs
-          contract  hasMoneyness                   ATM/ITM/OTM
+            option_snapshot  hasUnderlyingEquity  equity_snapshot
         """
-        contracts = triples_df.filter(
+        # Option snapshots with their underlying symbol
+        option_snapshots = triples_df.filter(
             (F.col("predicate") == RDF_TYPE)
-            & (F.col("object") == OPTION_CONTRACT_TYPE)
-        ).select(F.col("subject").alias("contract"))
+            & (F.col("object") == OPTION_SNAPSHOT_TYPE)
+        ).select(F.col("subject").alias("option"))
 
-        contract_tickers = triples_df.filter(
-            F.col("predicate") == UNDERLYING_TICKER_PRED
+        option_underlying = triples_df.filter(
+            F.col("predicate") == UNDERLYING_SYMBOL_PRED
         ).select(
-            F.col("subject").alias("contract"),
-            F.col("object").alias("ticker"),
+            F.col("subject").alias("option"),
+            F.col("object").alias("underlying_symbol"),
         )
 
-        contract_strikes = triples_df.filter(
-            F.col("predicate") == STRIKE_PRICE_PRED
+        option_times = triples_df.filter(
+            F.col("predicate") == CAPTURE_TIME_PRED
         ).select(
-            F.col("subject").alias("contract"),
-            F.col("object").cast("double").alias("strike"),
+            F.col("subject").alias("option"),
+            F.col("object").alias("option_time"),
         )
 
-        contract_types = triples_df.filter(
-            F.col("predicate") == OPTION_TYPE_PRED
-        ).select(
-            F.col("subject").alias("contract"),
-            F.col("object").alias("option_type"),
+        options_df = (
+            option_snapshots
+            .join(option_underlying, "option", "inner")
+            .join(option_times, "option", "inner")
         )
 
-        contracts_df = (
-            contracts
-            .join(contract_tickers, "contract", "inner")
-            .join(contract_strikes, "contract", "left")
-            .join(contract_types, "contract", "left")
-        )
-
-        if contracts_df.head(1) == []:
-            logger.info("  No option contracts found")
+        if options_df.head(1) == []:
+            logger.info("  No option snapshots with underlyingSymbol found")
             return None
 
-        # Price observations: (obs, ticker, price)
-        price_obs = triples_df.filter(
+        # Equity snapshots with their symbol and time
+        equity_snapshots = triples_df.filter(
             (F.col("predicate") == RDF_TYPE)
-            & (F.col("object") == PRICE_OBS_TYPE)
-        ).select(F.col("subject").alias("obs"))
+            & (F.col("object") == EQUITY_SNAPSHOT_TYPE)
+        ).select(F.col("subject").alias("equity"))
 
-        obs_tickers = triples_df.filter(
-            F.col("predicate") == OBSERVED_TICKER_PRED
+        equity_symbols = triples_df.filter(
+            F.col("predicate") == SYMBOL_PRED
         ).select(
-            F.col("subject").alias("obs"),
-            F.col("object").alias("ticker"),
+            F.col("subject").alias("equity"),
+            F.col("object").alias("equity_symbol"),
         )
 
-        obs_prices = triples_df.filter(
-            F.col("predicate") == OBSERVED_PRICE_PRED
+        equity_times = triples_df.filter(
+            F.col("predicate") == CAPTURE_TIME_PRED
         ).select(
-            F.col("subject").alias("obs"),
-            F.col("object").cast("double").alias("stock_price"),
+            F.col("subject").alias("equity"),
+            F.col("object").alias("equity_time"),
         )
 
-        prices_df = (
-            price_obs
-            .join(obs_tickers, "obs", "inner")
-            .join(obs_prices, "obs", "inner")
+        equities_df = (
+            equity_snapshots
+            .join(equity_symbols, "equity", "inner")
+            .join(equity_times, "equity", "inner")
         )
 
-        # One representative price observation per ticker
-        w = Window.partitionBy("ticker").orderBy("obs")
-        prices_df = (
-            prices_df
-            .withColumn("rn", F.row_number().over(w))
-            .filter(F.col("rn") == 1)
-            .drop("rn")
-        )
+        if equities_df.head(1) == []:
+            logger.info("  No equity snapshots found for linking")
+            return None
 
-        joined = contracts_df.join(prices_df, "ticker", "inner")
+        # Join: option's underlyingSymbol = equity's symbol
+        # AND same captureTime (snapshots from same capture event)
+        joined = options_df.join(
+            equities_df,
+            (options_df.underlying_symbol == equities_df.equity_symbol)
+            & (options_df.option_time == equities_df.equity_time),
+            "inner",
+        )
 
         if joined.head(1) == []:
-            logger.info("  No option-stock matches found")
-            return None
-
-        # hasUnderlyingPriceObservation triples
-        link_triples = joined.select(
-            F.col("contract").alias("subject"),
-            F.lit(HAS_UNDERLYING_OBS_PRED).alias("predicate"),
-            F.col("obs").alias("object"),
-        )
-
-        # hasMoneyness triples
-        moneyness_df = joined.filter(
-            F.col("strike").isNotNull() & F.col("option_type").isNotNull()
-        ).withColumn(
-            "moneyness",
-            F.when(
-                F.abs(F.col("strike") - F.col("stock_price"))
-                <= F.col("stock_price") * 0.02,
-                F.lit(ATM_URI),
+            # Fallback: match by symbol only, take most recent equity
+            # per underlying symbol (for cases where timestamps don't
+            # align exactly)
+            w = Window.partitionBy("equity_symbol").orderBy(
+                F.col("equity_time").desc()
             )
-            .when(
-                (F.col("option_type") == "call")
-                & (F.col("strike") < F.col("stock_price")),
-                F.lit(ITM_URI),
+            latest_equities = (
+                equities_df
+                .withColumn("rn", F.row_number().over(w))
+                .filter(F.col("rn") == 1)
+                .drop("rn")
             )
-            .when(
-                (F.col("option_type") == "call")
-                & (F.col("strike") > F.col("stock_price")),
-                F.lit(OTM_URI),
-            )
-            .when(
-                (F.col("option_type") == "put")
-                & (F.col("strike") > F.col("stock_price")),
-                F.lit(ITM_URI),
-            )
-            .when(
-                (F.col("option_type") == "put")
-                & (F.col("strike") < F.col("stock_price")),
-                F.lit(OTM_URI),
-            ),
-        ).filter(F.col("moneyness").isNotNull())
 
-        moneyness_triples = moneyness_df.select(
-            F.col("contract").alias("subject"),
-            F.lit(HAS_MONEYNESS_PRED).alias("predicate"),
-            F.col("moneyness").alias("object"),
-        )
+            joined = options_df.join(
+                latest_equities,
+                options_df.underlying_symbol == latest_equities.equity_symbol,
+                "inner",
+            )
 
-        return link_triples.unionAll(moneyness_triples)
+            if joined.head(1) == []:
+                logger.info("  No option-equity matches found")
+                return None
+
+        result = joined.select(
+            F.col("option").alias("subject"),
+            F.lit(HAS_UNDERLYING_EQUITY_PRED).alias("predicate"),
+            F.col("equity").alias("object"),
+        ).dropDuplicates()
+
+        logger.info("  Option-to-underlying linking complete")
+        return result
 
     # ================================================================
     # Step 3: Option Strategy Identification
@@ -375,50 +343,61 @@ class MarketIntraSourceLinker:
     ) -> Optional[DataFrame]:
         """
         Identify option strategies: straddles, vertical spreads, strangles.
-        """
-        contracts = triples_df.filter(
-            (F.col("predicate") == RDF_TYPE)
-            & (F.col("object") == OPTION_CONTRACT_TYPE)
-        ).select(F.col("subject").alias("contract"))
 
-        tickers = triples_df.filter(
-            F.col("predicate") == UNDERLYING_TICKER_PRED
+        Works directly with OptionSnapshot subjects and their properties.
+        """
+        # Build options table from triples
+        option_snapshots = triples_df.filter(
+            (F.col("predicate") == RDF_TYPE)
+            & (F.col("object") == OPTION_SNAPSHOT_TYPE)
+        ).select(F.col("subject").alias("option"))
+
+        underlying = triples_df.filter(
+            F.col("predicate") == UNDERLYING_SYMBOL_PRED
         ).select(
-            F.col("subject").alias("contract"),
-            F.col("object").alias("ticker"),
+            F.col("subject").alias("option"),
+            F.col("object").alias("underlying"),
         )
 
         strikes = triples_df.filter(
             F.col("predicate") == STRIKE_PRICE_PRED
         ).select(
-            F.col("subject").alias("contract"),
+            F.col("subject").alias("option"),
             F.col("object").cast("double").alias("strike"),
         )
 
         expirations = triples_df.filter(
             F.col("predicate") == EXPIRATION_DATE_PRED
         ).select(
-            F.col("subject").alias("contract"),
+            F.col("subject").alias("option"),
             F.col("object").alias("expiration"),
         )
 
-        types = triples_df.filter(
-            F.col("predicate") == OPTION_TYPE_PRED
+        contract_types = triples_df.filter(
+            F.col("predicate") == CONTRACT_TYPE_PRED
         ).select(
-            F.col("subject").alias("contract"),
-            F.col("object").alias("option_type"),
+            F.col("subject").alias("option"),
+            F.col("object").alias("contract_type"),
+        )
+
+        capture_times = triples_df.filter(
+            F.col("predicate") == CAPTURE_TIME_PRED
+        ).select(
+            F.col("subject").alias("option"),
+            F.col("object").alias("capture_time"),
         )
 
         options_df = (
-            contracts
-            .join(tickers, "contract", "inner")
-            .join(strikes, "contract", "inner")
-            .join(expirations, "contract", "inner")
-            .join(types, "contract", "inner")
+            option_snapshots
+            .join(underlying, "option", "inner")
+            .join(strikes, "option", "inner")
+            .join(expirations, "option", "inner")
+            .join(contract_types, "option", "inner")
+            .join(capture_times, "option", "inner")
         )
 
         if options_df.head(1) == []:
-            logger.info("  No fully-specified option contracts found")
+            logger.info("  No fully-specified option snapshots found")
             return None
 
         options_df.cache()
@@ -447,26 +426,33 @@ class MarketIntraSourceLinker:
     def _identify_straddles(
         self, options_df: DataFrame
     ) -> Optional[DataFrame]:
-        """Same ticker, expiration, strike — call + put."""
-        calls = options_df.filter(F.col("option_type") == "call").select(
-            F.col("contract").alias("call_contract"),
-            F.col("ticker"),
+        """Same underlying, expiration, strike, capture_time — call + put."""
+        calls = options_df.filter(
+            F.upper(F.col("contract_type")) == "CALL"
+        ).select(
+            F.col("option").alias("call_option"),
+            F.col("underlying"),
             F.col("expiration"),
             F.col("strike"),
+            F.col("capture_time"),
         )
 
-        puts = options_df.filter(F.col("option_type") == "put").select(
-            F.col("contract").alias("put_contract"),
-            F.col("ticker").alias("p_ticker"),
+        puts = options_df.filter(
+            F.upper(F.col("contract_type")) == "PUT"
+        ).select(
+            F.col("option").alias("put_option"),
+            F.col("underlying").alias("p_underlying"),
             F.col("expiration").alias("p_expiration"),
             F.col("strike").alias("p_strike"),
+            F.col("capture_time").alias("p_capture_time"),
         )
 
         straddles = calls.join(
             puts,
-            (calls.ticker == puts.p_ticker)
+            (calls.underlying == puts.p_underlying)
             & (calls.expiration == puts.p_expiration)
-            & (calls.strike == puts.p_strike),
+            & (calls.strike == puts.p_strike)
+            & (calls.capture_time == puts.p_capture_time),
             "inner",
         )
 
@@ -474,40 +460,40 @@ class MarketIntraSourceLinker:
             return None
 
         return straddles.select(
-            F.col("call_contract").alias("subject"),
+            F.col("call_option").alias("subject"),
             F.lit(STRADDLE_WITH_PRED).alias("predicate"),
-            F.col("put_contract").alias("object"),
+            F.col("put_option").alias("object"),
         )
 
     def _identify_vertical_spreads(
         self, options_df: DataFrame
     ) -> Optional[DataFrame]:
-        """Same ticker, expiration, type — adjacent strikes."""
+        """Same underlying, expiration, type, capture_time — adjacent strikes."""
         w = Window.partitionBy(
-            "ticker", "expiration", "option_type"
+            "underlying", "expiration", "contract_type", "capture_time"
         ).orderBy("strike")
 
         with_next = options_df.withColumn(
-            "next_contract", F.lead("contract").over(w)
-        ).filter(F.col("next_contract").isNotNull())
+            "next_option", F.lead("option").over(w)
+        ).filter(F.col("next_option").isNotNull())
 
         if with_next.head(1) == []:
             return None
 
         call_spreads = with_next.filter(
-            F.col("option_type") == "call"
+            F.upper(F.col("contract_type")) == "CALL"
         ).select(
-            F.col("contract").alias("subject"),
+            F.col("option").alias("subject"),
             F.lit(CALL_SPREAD_WITH_PRED).alias("predicate"),
-            F.col("next_contract").alias("object"),
+            F.col("next_option").alias("object"),
         )
 
         put_spreads = with_next.filter(
-            F.col("option_type") == "put"
+            F.upper(F.col("contract_type")) == "PUT"
         ).select(
-            F.col("contract").alias("subject"),
+            F.col("option").alias("subject"),
             F.lit(PUT_SPREAD_WITH_PRED).alias("predicate"),
-            F.col("next_contract").alias("object"),
+            F.col("next_option").alias("object"),
         )
 
         result = call_spreads.unionAll(put_spreads)
@@ -519,57 +505,63 @@ class MarketIntraSourceLinker:
     def _identify_strangles(
         self, options_df: DataFrame
     ) -> Optional[DataFrame]:
-        """Nearest OTM call + put pairs per (ticker, expiration)."""
-        chain_stats = options_df.groupBy("ticker", "expiration").agg(
+        """Nearest OTM call + put pairs per (underlying, expiration, capture_time)."""
+        # Compute midpoint of strike range per chain
+        chain_stats = options_df.groupBy(
+            "underlying", "expiration", "capture_time"
+        ).agg(
             ((F.min("strike") + F.max("strike")) / 2.0).alias("midpoint")
         )
 
         options_with_mid = options_df.join(
-            chain_stats, ["ticker", "expiration"], "inner"
+            chain_stats, ["underlying", "expiration", "capture_time"], "inner"
         )
 
         # OTM calls: strike > midpoint, ranked ascending
         otm_calls = options_with_mid.filter(
-            (F.col("option_type") == "call")
+            (F.upper(F.col("contract_type")) == "CALL")
             & (F.col("strike") > F.col("midpoint"))
         )
-        w_call = Window.partitionBy("ticker", "expiration").orderBy(
-            F.col("strike").asc()
-        )
+        w_call = Window.partitionBy(
+            "underlying", "expiration", "capture_time"
+        ).orderBy(F.col("strike").asc())
         otm_calls = (
             otm_calls.withColumn("rank", F.row_number().over(w_call))
             .filter(F.col("rank") <= MAX_STRANGLE_PAIRS_PER_CHAIN)
             .select(
-                F.col("contract").alias("call_contract"),
-                F.col("ticker"),
+                F.col("option").alias("call_option"),
+                F.col("underlying"),
                 F.col("expiration"),
+                F.col("capture_time"),
                 F.col("rank"),
             )
         )
 
         # OTM puts: strike < midpoint, ranked descending
         otm_puts = options_with_mid.filter(
-            (F.col("option_type") == "put")
+            (F.upper(F.col("contract_type")) == "PUT")
             & (F.col("strike") < F.col("midpoint"))
         )
-        w_put = Window.partitionBy("ticker", "expiration").orderBy(
-            F.col("strike").desc()
-        )
+        w_put = Window.partitionBy(
+            "underlying", "expiration", "capture_time"
+        ).orderBy(F.col("strike").desc())
         otm_puts = (
             otm_puts.withColumn("rank", F.row_number().over(w_put))
             .filter(F.col("rank") <= MAX_STRANGLE_PAIRS_PER_CHAIN)
             .select(
-                F.col("contract").alias("put_contract"),
-                F.col("ticker").alias("p_ticker"),
+                F.col("option").alias("put_option"),
+                F.col("underlying").alias("p_underlying"),
                 F.col("expiration").alias("p_expiration"),
+                F.col("capture_time").alias("p_capture_time"),
                 F.col("rank").alias("p_rank"),
             )
         )
 
         strangles = otm_calls.join(
             otm_puts,
-            (otm_calls.ticker == otm_puts.p_ticker)
+            (otm_calls.underlying == otm_puts.p_underlying)
             & (otm_calls.expiration == otm_puts.p_expiration)
+            & (otm_calls.capture_time == otm_puts.p_capture_time)
             & (otm_calls.rank == otm_puts.p_rank),
             "inner",
         )
@@ -578,9 +570,9 @@ class MarketIntraSourceLinker:
             return None
 
         return strangles.select(
-            F.col("call_contract").alias("subject"),
+            F.col("call_option").alias("subject"),
             F.lit(STRANGLE_WITH_PRED).alias("predicate"),
-            F.col("put_contract").alias("object"),
+            F.col("put_option").alias("object"),
         )
 
     # ================================================================
@@ -589,34 +581,45 @@ class MarketIntraSourceLinker:
 
     def _classify_sectors(self, triples_df: DataFrame) -> Optional[DataFrame]:
         """
-        Classify tickers by sector using MARKET_SECTOR_PATTERNS.
+        Classify equity snapshots by sector using MARKET_SECTOR_PATTERNS.
 
-        Broadcast-joins a small lookup table of (symbol -> sector) against
-        the ticker symbols in the graph.
+        Also classifies option snapshots via their underlyingSymbol.
         """
+        # Build ticker → sector lookup
         sector_rows = []
         for sector_name, pattern in MARKET_SECTOR_PATTERNS.items():
             sector_uri = str(pattern["sector_uri"])
             relationship = str(pattern["relationship"])
-            for symbol in pattern["keywords"].get("stock_prices", []):
-                sector_rows.append((symbol, sector_uri, relationship))
+            for ticker in pattern["tickers"]:
+                sector_rows.append((ticker, sector_uri, relationship))
 
         if not sector_rows:
             return None
 
         sector_df = self.spark.createDataFrame(
-            sector_rows, ["symbol", "sector_uri", "relationship_uri"]
+            sector_rows, ["ticker", "sector_uri", "relationship_uri"]
         )
 
-        ticker_symbols = triples_df.filter(
+        # Equity snapshots: match by symbol
+        equity_symbols = triples_df.filter(
             F.col("predicate") == SYMBOL_PRED
         ).select(
-            F.col("subject").alias("ticker_uri"),
-            F.col("object").alias("symbol"),
+            F.col("subject").alias("snapshot"),
+            F.col("object").alias("ticker"),
         )
 
-        joined = ticker_symbols.join(
-            F.broadcast(sector_df), "symbol", "inner"
+        # Also match option snapshots by underlyingSymbol
+        option_underlying = triples_df.filter(
+            F.col("predicate") == UNDERLYING_SYMBOL_PRED
+        ).select(
+            F.col("subject").alias("snapshot"),
+            F.col("object").alias("ticker"),
+        )
+
+        all_symbols = equity_symbols.unionAll(option_underlying)
+
+        joined = all_symbols.join(
+            F.broadcast(sector_df), "ticker", "inner"
         )
 
         if joined.head(1) == []:
@@ -624,13 +627,13 @@ class MarketIntraSourceLinker:
             return None
 
         belongs_triples = joined.select(
-            F.col("ticker_uri").alias("subject"),
+            F.col("snapshot").alias("subject"),
             F.lit(BELONGS_TO_SECTOR_PRED).alias("predicate"),
             F.col("sector_uri").alias("object"),
         )
 
         correlation_triples = joined.select(
-            F.col("ticker_uri").alias("subject"),
+            F.col("snapshot").alias("subject"),
             F.col("relationship_uri").alias("predicate"),
             F.col("sector_uri").alias("object"),
         )
@@ -638,101 +641,98 @@ class MarketIntraSourceLinker:
         return belongs_triples.unionAll(correlation_triples)
 
     # ================================================================
-    # Step 5: Multi-Source Observation Linking
+    # Step 5: Compute Moneyness
     # ================================================================
 
-    def _link_multi_source_observations(
-        self, triples_df: DataFrame
-    ) -> Optional[DataFrame]:
+    def _compute_moneyness(self, triples_df: DataFrame) -> Optional[DataFrame]:
         """
-        Link observations of the same ticker/contract from multiple sources.
+        Compute moneyness classification for option snapshots.
 
-        Two sub-steps:
-        a) PriceObservations for the same ticker: sameTickerObservation
-        b) OptionQuotes for the same contract: sameContractQuote
+        Uses strikePrice and underlyingPrice (both direct properties
+        on the OptionSnapshot) to classify as ATM/ITM/OTM.
 
-        Uses self-join with obs1 < obs2 to produce each pair exactly once.
+        ATM: strike within 2% of underlying price
+        ITM: call with strike < underlying, or put with strike > underlying
+        OTM: call with strike > underlying, or put with strike < underlying
+
+        Produces:
+            option_snapshot  hasMoneyness  ATM/ITM/OTM
         """
-        new_dfs: List[DataFrame] = []
-
-        # (a) Price observations — same ticker, different source URIs
-        price_obs = triples_df.filter(
+        option_snapshots = triples_df.filter(
             (F.col("predicate") == RDF_TYPE)
-            & (F.col("object") == PRICE_OBS_TYPE)
-        ).select(F.col("subject").alias("obs"))
+            & (F.col("object") == OPTION_SNAPSHOT_TYPE)
+        ).select(F.col("subject").alias("option"))
 
-        obs_tickers = triples_df.filter(
-            F.col("predicate") == OBSERVED_TICKER_PRED
+        strikes = triples_df.filter(
+            F.col("predicate") == STRIKE_PRICE_PRED
         ).select(
-            F.col("subject").alias("obs"),
-            F.col("object").alias("ticker"),
+            F.col("subject").alias("option"),
+            F.col("object").cast("double").alias("strike"),
         )
 
-        obs_df = price_obs.join(obs_tickers, "obs", "inner")
-
-        left = obs_df.select(
-            F.col("obs").alias("obs1"), F.col("ticker").alias("t1")
-        )
-        right = obs_df.select(
-            F.col("obs").alias("obs2"), F.col("ticker").alias("t2")
-        )
-
-        price_pairs = left.join(
-            right,
-            (left.t1 == right.t2) & (left.obs1 < right.obs2),
-            "inner",
-        )
-
-        if price_pairs.head(1) != []:
-            new_dfs.append(
-                price_pairs.select(
-                    F.col("obs1").alias("subject"),
-                    F.lit(SAME_TICKER_OBS_PRED).alias("predicate"),
-                    F.col("obs2").alias("object"),
-                )
-            )
-
-        # (b) Option quotes — same contract, different source URIs
-        quotes = triples_df.filter(
-            (F.col("predicate") == RDF_TYPE)
-            & (F.col("object") == OPTION_QUOTE_TYPE)
-        ).select(F.col("subject").alias("quote"))
-
-        quote_contracts = triples_df.filter(
-            F.col("predicate") == QUOTED_CONTRACT_PRED
+        underlying_prices = triples_df.filter(
+            F.col("predicate") == UNDERLYING_PRICE_PRED
         ).select(
-            F.col("subject").alias("quote"),
-            F.col("object").alias("contract"),
+            F.col("subject").alias("option"),
+            F.col("object").cast("double").alias("underlying_price"),
         )
 
-        quote_df = quotes.join(quote_contracts, "quote", "inner")
-
-        ql = quote_df.select(
-            F.col("quote").alias("q1"), F.col("contract").alias("c1")
-        )
-        qr = quote_df.select(
-            F.col("quote").alias("q2"), F.col("contract").alias("c2")
+        contract_types = triples_df.filter(
+            F.col("predicate") == CONTRACT_TYPE_PRED
+        ).select(
+            F.col("subject").alias("option"),
+            F.col("object").alias("contract_type"),
         )
 
-        quote_pairs = ql.join(
-            qr,
-            (ql.c1 == qr.c2) & (ql.q1 < qr.q2),
-            "inner",
+        options_df = (
+            option_snapshots
+            .join(strikes, "option", "inner")
+            .join(underlying_prices, "option", "inner")
+            .join(contract_types, "option", "inner")
         )
 
-        if quote_pairs.head(1) != []:
-            new_dfs.append(
-                quote_pairs.select(
-                    F.col("q1").alias("subject"),
-                    F.lit(SAME_CONTRACT_QUOTE_PRED).alias("predicate"),
-                    F.col("q2").alias("object"),
-                )
-            )
-
-        if not new_dfs:
-            logger.info("  No multi-source observations to link")
+        if options_df.head(1) == []:
+            logger.info("  No options with strike + underlyingPrice found")
             return None
 
-        result = reduce(DataFrame.unionAll, new_dfs).cache()
-        logger.info("  Multi-source observation linking complete")
+        # Classify moneyness
+        moneyness_df = options_df.withColumn(
+            "moneyness",
+            F.when(
+                F.abs(F.col("strike") - F.col("underlying_price"))
+                <= F.col("underlying_price") * 0.02,
+                F.lit(ATM_URI),
+            )
+            .when(
+                (F.upper(F.col("contract_type")) == "CALL")
+                & (F.col("strike") < F.col("underlying_price")),
+                F.lit(ITM_URI),
+            )
+            .when(
+                (F.upper(F.col("contract_type")) == "CALL")
+                & (F.col("strike") > F.col("underlying_price")),
+                F.lit(OTM_URI),
+            )
+            .when(
+                (F.upper(F.col("contract_type")) == "PUT")
+                & (F.col("strike") > F.col("underlying_price")),
+                F.lit(ITM_URI),
+            )
+            .when(
+                (F.upper(F.col("contract_type")) == "PUT")
+                & (F.col("strike") < F.col("underlying_price")),
+                F.lit(OTM_URI),
+            ),
+        ).filter(F.col("moneyness").isNotNull())
+
+        if moneyness_df.head(1) == []:
+            return None
+
+        result = moneyness_df.select(
+            F.col("option").alias("subject"),
+            F.lit(HAS_MONEYNESS_PRED).alias("predicate"),
+            F.col("moneyness").alias("object"),
+        )
+
+        logger.info("  Moneyness computation complete")
         return result
