@@ -105,6 +105,14 @@ class GlueStack(Stack):
             or "spark-ui-logs/"
         )
 
+        # stock market definitions
+        self._market_sector_definitions_bucket = (
+                self.node.try_get_context("market_sector_definitions_bucket") or ""
+        )
+        self._market_sector_definitions_key = (
+                self.node.try_get_context("market_sector_definitions_key") or ""
+        )
+
         # Stable job name (no version suffix for blue/green)
         self._job_name = (
             f"{self._project_name}-{self._environment}-build-graph"
@@ -287,6 +295,12 @@ class GlueStack(Stack):
 
             # Deployment version tracking
             "--deployment_version": "initial",
+
+            # Market sector definitions — S&P 500 tickers CSV
+            # produced by the market-morning pipeline.
+            # If empty or unavailable, falls back to hardcoded defaults.
+            "--market_sector_definitions_bucket": self._market_sector_definitions_bucket,
+            "--market_sector_definitions_key": self._market_sector_definitions_key,
         }
 
         # Spark UI

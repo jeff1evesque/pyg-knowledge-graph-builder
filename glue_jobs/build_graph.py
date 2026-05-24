@@ -136,6 +136,13 @@ class JobConfig:
         self.mode = args.get("mode", "full").lower().strip()
         self.output_bucket = args.get("output_bucket", "")
 
+        self.market_sector_definitions_bucket = args.get(
+            "market_sector_definitions_bucket", ""
+        )
+        self.market_sector_definitions_key = args.get(
+            "market_sector_definitions_key", ""
+        )
+
         # Source parameters (required for full and enrichment_only)
         self.source_bucket = args.get("source_bucket", "")
 
@@ -273,6 +280,8 @@ def parse_args() -> JobConfig:
                 "parquet_partitions",
                 "source_format",
                 "turtle_column",
+                "market_sector_definitions_bucket",
+                "market_sector_definitions_key",
             ],
         )
     else:
@@ -302,6 +311,8 @@ def parse_args() -> JobConfig:
             default="ntriples",
         )
         parser.add_argument("--turtle_column", default="triples")
+        parser.add_argument("--market_sector_definitions_bucket", default="")
+        parser.add_argument("--market_sector_definitions_key", default="")
 
         parsed = parser.parse_args()
         args = vars(parsed)
@@ -783,6 +794,8 @@ def run_enrichment(
     spark: SparkSession,
     triples_df: DataFrame,
     enable_ontology_mapping: bool = False,
+    market_sector_definitions_bucket: str = "",
+    market_sector_definitions_key: str = "",
 ) -> tuple:
     """
     Run the enrichment pipeline on a triples DataFrame.
@@ -809,7 +822,12 @@ def run_enrichment(
 
     start_time = time.time()
 
-    pipeline = EnrichmentPipeline(spark, triples_df)
+    pipeline = EnrichmentPipeline(
+        spark,
+        triples_df,
+        sector_definitions_bucket=market_sector_definitions_bucket,
+        sector_definitions_key=market_sector_definitions_key,
+    )
     stats = pipeline.run(enable_ontology_mapping=enable_ontology_mapping)
     enriched_df = pipeline.get_enriched_triples_df()
 
@@ -951,7 +969,11 @@ def execute_full_pipeline(
 
     # Step 2: Enrich (all on executors)
     enriched_df, enrichment_stats = run_enrichment(
-        spark, triples_df, config.enable_ontology_mapping
+        spark,
+        triples_df,
+        config.enable_ontology_mapping,
+        market_sector_definitions_bucket=config.market_sector_definitions_bucket,
+        market_sector_definitions_key=config.market_sector_definitions_key,
     )
 
     # Unpersist raw triples — enriched_df is independently cached
