@@ -1118,6 +1118,8 @@ When config is empty, sensible defaults are inferred from the data.
 | `--parquet_partitions` | No | `200` | Number of Parquet output partitions |
 | `--source_format` | No | `ntriples` | Source RDF format: `ntriples` (one triple per line in `.nt` files) or `turtle_parquet` (self-contained Turtle blobs in a Parquet column). Applies to modes `full` and `enrichment_only` only — `pyg_only` always reads enriched Parquet written by this pipeline |
 | `--turtle_column` | No | `triples` | Column name containing Turtle strings when `--source_format=turtle_parquet`. Ignored for `ntriples` format. Configurable so that different source Parquet schemas can be handled without code changes |
+| `--market_sector_definitions_bucket` | No | `""` | S3 bucket containing the S&P 500 tickers CSV for dynamic sector classification. If empty, falls back to hardcoded sector patterns |
+| `--market_sector_definitions_key` | No | `""` | S3 key for the tickers CSV (e.g., `market/sp500/tickers/latest.csv`). Tickers are grouped by `GICS Sector` column to build sector patterns at runtime |
 
 Metadata files are always written when mode is `full` or `pyg_only`. Mode `enrichment_only` does not produce metadata files (no PyG graph is built in that mode).
 
@@ -1265,7 +1267,8 @@ triples_df (raw)
     │   ├── Snapshot temporal sequences (precedes by captureTime)
     │   ├── Option-to-underlying equity linking (hasUnderlyingEquity)
     │   ├── Option strategy detection (straddleWith, spreadWith, strangleWith)
-    │   ├── Sector classification (belongsToSector via symbol)
+    │   ├── Sector classification (belongsToSector via symbol; loads
+    │   │   GICS sectors from S3 tickers CSV with hardcoded fallback)
     │   └── Moneyness computation (hasMoneyness: ATM/ITM/OTM)
     │
     ├── NOAA Intra-Source Enricher
