@@ -15,7 +15,7 @@ logging.basicConfig(
 @pytest.fixture
 def sample_cpi_graph():
     """Fixture providing CPI test graph"""
-    from glue_jobs.utils.rdf_utils import RDFGraphLoader
+    from spark_jobs.utils.rdf_utils import RDFGraphLoader
     from tests.test_bls_enrichment import create_sample_cpi_data
 
     loader = RDFGraphLoader()
@@ -27,7 +27,7 @@ def sample_cpi_graph():
 @pytest.fixture
 def sample_ppi_graph():
     """Fixture providing PPI test graph"""
-    from glue_jobs.utils.rdf_utils import RDFGraphLoader
+    from spark_jobs.utils.rdf_utils import RDFGraphLoader
     from tests.test_bls_enrichment import create_sample_ppi_data
 
     loader = RDFGraphLoader()
@@ -39,7 +39,7 @@ def sample_ppi_graph():
 @pytest.fixture
 def sample_eci_graph():
     """Fixture providing ECI test graph"""
-    from glue_jobs.utils.rdf_utils import RDFGraphLoader
+    from spark_jobs.utils.rdf_utils import RDFGraphLoader
     from tests.test_bls_enrichment import create_sample_eci_data
 
     loader = RDFGraphLoader()
@@ -51,7 +51,7 @@ def sample_eci_graph():
 @pytest.fixture
 def sample_jolts_graph():
     """Fixture providing JOLTS test graph"""
-    from glue_jobs.utils.rdf_utils import RDFGraphLoader
+    from spark_jobs.utils.rdf_utils import RDFGraphLoader
     from tests.test_bls_enrichment import create_sample_jolts_data
 
     loader = RDFGraphLoader()
@@ -63,7 +63,7 @@ def sample_jolts_graph():
 @pytest.fixture
 def sample_empsit_graph():
     """Fixture providing EMPSIT test graph"""
-    from glue_jobs.utils.rdf_utils import RDFGraphLoader
+    from spark_jobs.utils.rdf_utils import RDFGraphLoader
     from tests.test_bls_enrichment import create_sample_empsit_data
 
     loader = RDFGraphLoader()
@@ -75,7 +75,7 @@ def sample_empsit_graph():
 @pytest.fixture
 def multi_dataset_graph():
     """Fixture providing multi-dataset test graph"""
-    from glue_jobs.utils.rdf_utils import RDFGraphLoader
+    from spark_jobs.utils.rdf_utils import RDFGraphLoader
     from tests.test_bls_enrichment import (
         create_sample_cpi_data,
         create_sample_ppi_data,

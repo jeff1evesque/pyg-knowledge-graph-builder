@@ -13,9 +13,9 @@ from typing import Dict, List
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rdflib import Graph
-from glue_jobs.utils.rdf_utils import RDFGraphLoader
-from glue_jobs.enrichment.intra_source.bls_linker import BLSIntraSourceLinker
-from glue_jobs.enrichment.intra_source.bls.enrichers import (
+from spark_jobs.utils.rdf_utils import RDFGraphLoader
+from spark_jobs.enrichment.intra_source.bls_linker import BLSIntraSourceLinker
+from spark_jobs.enrichment.intra_source.bls.enrichers import (
     CPIEnricher, PPIEnricher, ECIEnricher, JOLTSEnricher, EMPSITEnricher
 )
 import logging
