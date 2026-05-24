@@ -12,6 +12,8 @@
     "max_concurrent_runs": 3,
     "enable_spark_ui": true,
     "spark_ui_log_prefix": "spark-ui-logs/",
+    "market_sector_definitions_bucket": "",
+    "market_sector_definitions_key": "",
     "tags": {
       "Project": "pyg-knowledge-graph-builder",
       "ManagedBy": "cdk"
