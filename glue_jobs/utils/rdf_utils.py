@@ -38,9 +38,12 @@ SEC_FILINGS = Namespace("http://www.sec.gov/filings#")
 # ============================================
 # Market data namespace
 # ============================================
+# Source-agnostic namespace for equity/option quote snapshots.
+# The upstream scraper writes flat snapshot rows;
+# this namespace models them generically so switching data sources
+# only requires changing the scraper, not the enrichment pipeline.
 
 MARKET = Namespace("https://financial-data.org/")
-MARKET_OPTIONS = Namespace("https://financial-data.org/options/")
 
 # ============================================
 # NOAA WEATHER DATA NAMESPACES
@@ -83,7 +86,7 @@ UNIFIED = Namespace("https://example.org/unified/")
 #
 # Order matters for node_mapper and edge_mapper: longer/more-specific
 # namespaces must appear before shorter ones so that startsWith matching
-# picks the most specific prefix (e.g., "https://financial-data.org/options/"
+# picks the most specific prefix (e.g., "https://financial-data.org/enrichment/"
 # before "https://financial-data.org/").
 #
 # The index position in this list is used by feature_extractor for
@@ -106,7 +109,6 @@ NAMESPACE_PREFIXES: List[Tuple[str, str]] = [
     (str(SEC_LIT), "sec_lit"),
     (str(SEC_SUSP), "sec_susp"),
     (str(SEC_ENRICHMENT), "sec_enrichment"),
-    (str(MARKET_OPTIONS), "market_options"),
     (str(MARKET_ENRICHMENT), "market_enrichment"),
     (str(MARKET), "market"),
     (str(CAP), "cap"),
