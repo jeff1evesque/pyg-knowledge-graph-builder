@@ -122,8 +122,10 @@ Schema: (subject: string, predicate: string, object: string)
 │ cpi:Food_Nov2024_Index          │ cpi:indexValue       │ 295.8              │
 │ cpi:Food_Nov2024_Index          │ cpi:hasMonth         │ cpi:November       │
 │ cpi:Food_Nov2024_Index          │ cpi:hasCategory      │ cpi:Food_Entity    │
-│ market:AAPL_Obs_20241115        │ rdf:type             │ market:PriceObs    │
-│ market:AAPL_Obs_20241115        │ market:observedPrice │ 191.45             │
+│ market:AAPL_20241115T143000Z    │ rdf:type             │ market:EquitySnap  │
+│ market:AAPL_20241115T143000Z    │ market:lastPrice     │ 191.45             │
+│ market:AAPL_20241115T143000Z    │ market:symbol        │ AAPL               │
+│ market:AAPL_20241115T143000Z    │ market:captureTime   │ 2024-11-15T14:30Z  │
 └─────────────────────────────────┴──────────────────────┴────────────────────┘
 ```
 
@@ -1021,8 +1023,8 @@ Post-construction: Save outputs
 | Node type example | Typical nodes | Memory @ 1024-d | Memory @ 512-d | Key signals |
 |-------------------|--------------|-----------------|----------------|-------------|
 | cpi_Index | ~50K | ~200 MB | ~100 MB | CPI class hierarchy, index/change properties, BLS source |
-| market_PriceObservation | ~500K-1M | ~2-4 GB | ~1-2 GB | Market class, price/volume properties, ticker source |
-| market_options_OptionQuote | ~1-2M | ~4-8 GB | ~2-4 GB | Options subclass, strike/expiry/greeks properties |
+| market_EquitySnapshot | ~500K-1M | ~2-4 GB | ~1-2 GB | Equity class, price/volume/52wk properties, market source |
+| market_OptionSnapshot | ~1-2M | ~4-8 GB | ~2-4 GB | Option subclass, strike/expiry/greeks/underlying properties |
 | jolts_JobOpeningsLevel | ~10K | ~40 MB | ~20 MB | JOLTS hierarchy, level/rate properties, BLS source |
 | filings_Form4 | ~50K | ~200 MB | ~100 MB | SEC filing class, transaction properties, SEC source |
 | unified_UnifiedMonth | ~12 | ~48 KB | ~24 KB | Temporal class, cross-source membership |
@@ -1030,8 +1032,8 @@ Post-construction: Save outputs
 | Edge type example | Typical edges | Memory @ 32-d | Key signals |
 |-------------------|--------------|---------------|-------------|
 | (cpi_Index, precedes, cpi_Index) | ~50K | ~6 MB | Month delta, same-year, direction |
-| (market_PriceObservation, precedes, market_PriceObservation) | ~500K-1M | ~64-128 MB | Intraday time delta, consecutive flag |
-| (market_options_OptionQuote, hasUnderlyingPriceObservation, market_PriceObservation) | ~500K-1M | ~64-128 MB | Moneyness, log-moneyness, strike-stock diff |
+| (market_EquitySnapshot, precedes, market_EquitySnapshot) | ~500K-1M | ~64-128 MB | Intraday time delta, consecutive flag |
+| (market_OptionSnapshot, hasUnderlyingEquity, market_EquitySnapshot) | ~500K-1M | ~64-128 MB | Moneyness, log-moneyness, strike-stock diff |
 | (noaa_Alert, escalatesTo, noaa_Alert) | ~1K | ~128 KB | Severity delta |
 | (cpi_Index, belongsToSector, unified_EconomicSector) | ~5K | — (no features) | Relation name sufficient |
 | (cpi_Index, correlatesWith, ppi_Index) | ~10K | — (OFF by default) | Label similarity, cross-source flag |
@@ -1260,11 +1262,11 @@ triples_df (raw)
     │   └── Violation type linking (hasViolationType)
     │
     ├── Market Intra-Source Enricher
-    │   ├── Ticker unification (owl:sameAs across sources)
-    │   ├── Price sequences (precedes by timestamp)
-    │   ├── Option-stock linking (hasUnderlyingPriceObservation)
-    │   ├── Option strategy detection (straddleWith, spreadWith)
-    │   └── Sector classification (belongsToSector)
+    │   ├── Snapshot temporal sequences (precedes by captureTime)
+    │   ├── Option-to-underlying equity linking (hasUnderlyingEquity)
+    │   ├── Option strategy detection (straddleWith, spreadWith, strangleWith)
+    │   ├── Sector classification (belongsToSector via symbol)
+    │   └── Moneyness computation (hasMoneyness: ATM/ITM/OTM)
     │
     ├── NOAA Intra-Source Enricher
     │   ├── Alert temporal sequences (precedes by sent time)
@@ -1307,11 +1309,11 @@ Discovers and creates relationships within each data source family:
 - Classifies entities by sector and violation type
 
 **Within Market Data** (1 mapper, intraday snapshots every 10-30 minutes)
-- Links price observations in chronological sequences per ticker
-- Links option contracts to underlying stock price observations
+- Links equity and option snapshots in chronological sequences per symbol
+- Links option snapshots to their underlying equity snapshots
 - Identifies option strategies (straddles, vertical spreads, strangles)
-- Classifies tickers by sector
-- Links multi-source observations of same ticker/contract
+- Classifies snapshots by sector (via symbol and underlyingSymbol)
+- Computes moneyness classification (ATM/ITM/OTM) for option snapshots
 
 **Within NOAA Weather Data** (1 mapper)
 - Links alerts in chronological sequences per geographic area
@@ -1324,40 +1326,50 @@ Discovers and creates relationships within each data source family:
 Each enrichment step follows the same pattern — filter the triples DataFrame to extract relevant entities, join to discover relationships, and produce new triples:
 
 ```python
-def link_options_to_stocks(self, triples_df):
-    """Example: Link option contracts to underlying stock prices"""
+def link_options_to_underlying(self, triples_df):
+    """Example: Link option snapshots to underlying equity snapshots"""
     from pyspark.sql import functions as F
     from pyspark.sql.window import Window
 
-    # Extract option contracts (filter + self-join to pivot properties)
-    contracts_df = (
+    # Extract option snapshots with their underlying symbol and capture time
+    options_df = (
         triples_df.filter(F.col("predicate") == RDF_TYPE)
-                  .filter(F.col("object") == OPTION_CONTRACT_TYPE)
-                  .select(F.col("subject").alias("contract"))
+                  .filter(F.col("object") == OPTION_SNAPSHOT_TYPE)
+                  .select(F.col("subject").alias("option"))
         .join(
-            triples_df.filter(F.col("predicate") == UNDERLYING_TICKER)
-                      .select(F.col("subject").alias("contract"),
-                              F.col("object").alias("ticker")),
-            "contract"
+            triples_df.filter(F.col("predicate") == UNDERLYING_SYMBOL_PRED)
+                      .select(F.col("subject").alias("option"),
+                              F.col("object").alias("underlying_symbol")),
+            "option"
+        )
+        .join(
+            triples_df.filter(F.col("predicate") == CAPTURE_TIME_PRED)
+                      .select(F.col("subject").alias("option"),
+                              F.col("object").alias("option_time")),
+            "option"
         )
     )
 
-    # Extract price observations — one representative per ticker
-    w = Window.partitionBy("ticker").orderBy("obs")
-    prices_df = (
-        triples_df.filter(...)  # similar filter+join pattern
-        .withColumn("rn", F.row_number().over(w))
-        .filter(F.col("rn") == 1)
+    # Extract equity snapshots with their symbol and capture time
+    equities_df = (
+        triples_df.filter(F.col("predicate") == RDF_TYPE)
+                  .filter(F.col("object") == EQUITY_SNAPSHOT_TYPE)
+                  .select(F.col("subject").alias("equity"))
+        .join(...)  # similar pattern for symbol + capture_time
     )
 
-    # Distributed join — Spark handles partitioning and optimization
-    joined = contracts_df.join(prices_df, on="ticker", how="inner")
+    # Join: option's underlyingSymbol = equity's symbol AND same captureTime
+    joined = options_df.join(equities_df,
+        (options_df.underlying_symbol == equities_df.equity_symbol)
+        & (options_df.option_time == equities_df.equity_time),
+        "inner"
+    )
 
     # Produce new triples
     return joined.select(
-        F.col("contract").alias("subject"),
-        F.lit(HAS_UNDERLYING_OBS).alias("predicate"),
-        F.col("price_obs").alias("object")
+        F.col("option").alias("subject"),
+        F.lit(HAS_UNDERLYING_EQUITY_PRED).alias("predicate"),
+        F.col("equity").alias("object")
     )
 ```
 
@@ -1406,7 +1418,7 @@ unified:Company_AAPL a bls:UnifiedCompany ;
     bls:ticker "AAPL" .
 
 sec:AAPL_10K_Filing bls:refersToCompany unified:Company_AAPL .
-market:AAPL_Ticker bls:refersToCompany unified:Company_AAPL .
+market:AAPL_20241115T143000Z bls:refersToCompany unified:Company_AAPL .
 ```
 
 4. **Geographic/Regional Linking** — Links entities by geographic region
@@ -1529,9 +1541,10 @@ The pipeline ingests RDF data from multiple heterogeneous sources, all in **N-Tr
 - Litigation releases
 - Trading suspensions
 
-**Market Data** (1 mapper, intraday snapshots every 10-30 minutes)
-- Stock prices with options chains (select tickers)
-- ~39 snapshots/day at 10-min intervals during trading hours
+**Market Data** (1 mapper, intraday equity + option snapshots every 20 minutes)
+- Flat snapshot model: EquitySnapshot and OptionSnapshot with all fields as direct properties
+- ~500+ tickers with full options chains (~500K+ symbols per snapshot)
+- ~39 snapshots/day at 20-min intervals during market hours
 - ~1-1.5M triples/day, ~30-35M triples/month
 
 **NOAA Weather Data** (1 mapper)
@@ -1573,9 +1586,9 @@ pyg-knowledge-graph-builder/
 │   │       │   ├── __init__.py
 │   │       │   ├── patterns.py             # SEC_SECTOR_PATTERNS, SEC_VIOLATION_PATTERNS
 │   │       │   └── correlations.py         # SEC KNOWN_CORRELATIONS
-│   │       ├── market/                     # Market-specific components
+│   │       ├── market/                     # Market-specific components (flat snapshot model)
 │   │       │   ├── __init__.py
-│   │       │   ├── patterns.py             # MARKET_SECTOR_PATTERNS, MARKET_OPTION_PATTERNS
+│   │       │   ├── patterns.py             # MARKET_SECTOR_PATTERNS, MARKET_OPTION_STRATEGY_PATTERNS
 │   │       │   ├── correlations.py         # Market KNOWN_CORRELATIONS
 │   │       │   └── measurements.py         # Market MEASUREMENT_TYPES
 │   │       └── noaa/                       # NOAA-specific components
