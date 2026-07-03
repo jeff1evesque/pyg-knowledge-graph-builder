@@ -1130,7 +1130,7 @@ When config is empty, sensible defaults are inferred from the data.
 | `--pyg_config` | No | `{}` | JSON string with PyG construction config |
 | `--parquet_partitions` | No | `200` | Number of Parquet output partitions |
 | `--source_format` | No | `ntriples` | Source RDF format: `ntriples` (one triple per line in `.nt` files) or `turtle_parquet` (self-contained Turtle blobs in a Parquet column). Applies to modes `full` and `enrichment_only` only — `pyg_only` always reads enriched Parquet written by this pipeline |
-| `--turtle_column` | No | `triples` | Column name containing Turtle strings when `--source_format=turtle_parquet`. Ignored for `ntriples` format |
+| `--turtle_column` | No | `triples` | Column name containing Turtle strings when `--source_format=turtle_parquet`. Ignored for `ntriples` format. Configurable so that different source Parquet schemas can be handled without code changes |
 | `--market_sector_definitions_bucket` | No | `""` | S3 bucket containing the S&P 500 tickers CSV for dynamic sector classification. If empty, falls back to hardcoded sector patterns |
 | `--market_sector_definitions_key` | No | `""` | S3 key for the tickers CSV (e.g., `market/sp500/tickers/latest.csv`). Tickers are grouped by `GICS Sector` column to build sector patterns at runtime |
 
