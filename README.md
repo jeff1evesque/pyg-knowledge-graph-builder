@@ -3,7 +3,6 @@
 > GPU-accelerated Apache Spark pipeline for constructing PyTorch Geometric heterogeneous graphs from enriched RDF knowledge graphs
 
 [![tests](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/actions/workflows/tests.yml/badge.svg)](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/actions/workflows/tests.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch Geometric](https://img.shields.io/badge/PyG-2.0+-red.svg)](https://pytorch-geometric.readthedocs.io/)
 [![Apache Spark](https://img.shields.io/badge/Apache-Spark-orange.svg)](https://spark.apache.org/)
@@ -1681,3 +1680,29 @@ The pipeline is designed to handle:
 - **Efficient literal isolation** — anti-join against node_id_df filters out edge triples before numeric parsing, avoiding wasted computation on URI-valued objects
 - **Canonical namespace registry** — `NAMESPACE_PREFIXES` and `ONTOLOGY_NAMESPACE_INDICES` in `rdf_utils.py` are the single source of truth, imported by `node_mapper.py`, `edge_mapper.py`, `feature_extractor.py`, and `edge_feature_extractor.py` to eliminate duplication
 - **Negligible metadata overhead** — all metadata collect calls target small aggregated DataFrames (<5000 rows each); total metadata memory is under 1 MB; six JSON files are written after the `.pt` file with no impact on tensor collection or HeteroData assembly
+
+## Testing
+
+Live pass/fail status is the **tests** badge at the top of this README, which reflects the latest [GitHub Actions](.github/workflows/tests.yml) run on the default branch.
+
+The suite runs entirely against a **local `SparkSession`** — no Spark cluster and no RAPIDS Accelerator are required. The same application code runs unchanged on the GPU cluster (RAPIDS is a drop-in SQL plugin), so plain local Spark is a valid way to unit-test the enrichment and PyG logic. CI runs it on a stock `ubuntu-latest` runner (Java 17 + Python 3.12) on every push and pull request.
+
+```bash
+python -m venv .venv
+.venv/bin/pip install -r requirements-test.txt          # runtime deps + pyspark + pytest
+SPARK_LOCAL_IP=127.0.0.1 .venv/bin/python -m pytest tests/
+```
+
+`pyspark` is cluster-provided in production and is therefore not in `requirements.txt`; `requirements-test.txt` layers it (and `pytest`) on top for local and CI runs.
+
+### Test tiers
+
+Test depth is calibrated to risk rather than applied uniformly — deeper coverage only where the logic is genuinely subtle, to keep maintenance debt proportional to value:
+
+| Tier | Scope | Examples |
+|------|-------|----------|
+| **1 — pure / no-Spark** | Import-time integrity, vector geometry, and hand-maintained pattern tables. Sub-second. | `test_imports.py` (imports every `spark_jobs` module), `test_vector_layout.py` / `test_edge_vector_layout.py` (`VectorLayout` / `EdgeVectorLayout` boundaries), `test_source_patterns.py` (NOAA/market/SEC pattern-dict integrity) |
+| **2 — linker smokes** | Each intra-source linker's `enrich()` driven end-to-end over tiny in-memory triples: one happy path + one foreign-input short-circuit. | `test_{bls,noaa,market,sec}_linker.py` |
+| **Targeted deep** | One focused test on each source's trickiest computation (including the negative case), where a silent regression would be costly. | severity escalation (NOAA), option moneyness (market), CIK unification (SEC), temporal sequencing (BLS) |
+
+Exhaustive per-relationship assertions are intentionally **not** written — the targeted deep tests capture the high-risk logic without the brittleness of pinning every output.
