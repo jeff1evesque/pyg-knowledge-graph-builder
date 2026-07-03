@@ -1,17 +1,18 @@
 # PyTorch Geometric Knowledge Graph Builder
 
-> Serverless pipeline for constructing PyTorch Geometric heterogeneous graphs from enriched RDF knowledge graphs
+> GPU-accelerated Apache Spark pipeline for constructing PyTorch Geometric heterogeneous graphs from enriched RDF knowledge graphs
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch Geometric](https://img.shields.io/badge/PyG-2.0+-red.svg)](https://pytorch-geometric.readthedocs.io/)
-[![AWS Glue](https://img.shields.io/badge/AWS-Glue-orange.svg)](https://aws.amazon.com/glue/)
+[![Apache Spark](https://img.shields.io/badge/Apache-Spark-orange.svg)](https://spark.apache.org/)
+[![RAPIDS](https://img.shields.io/badge/RAPIDS-Accelerator-green.svg)](https://nvidia.github.io/spark-rapids/)
 
 ## Overview
 
-PyTorch Geometric Knowledge Graph Builder is a serverless pipeline that transforms raw RDF data from multiple heterogeneous sources into enriched knowledge graphs and constructs PyTorch Geometric `HeteroData` objects ready for Graph Neural Network (GNN) training.
+PyTorch Geometric Knowledge Graph Builder is an Apache Spark pipeline that transforms raw RDF data from multiple heterogeneous sources into enriched knowledge graphs and constructs PyTorch Geometric `HeteroData` objects ready for Graph Neural Network (GNN) training.
 
-The pipeline processes data from **100+ domain-specific ontologies** spanning economic indicators, financial filings, market data, and environmental alerts. All enrichment logic runs as **distributed PySpark DataFrame operations** on AWS Glue, enabling horizontal scaling across the cluster rather than bottlenecking on a single-threaded in-memory graph.
+The pipeline processes data from **100+ domain-specific ontologies** spanning economic indicators, financial filings, market data, and environmental alerts. All enrichment logic runs as **distributed PySpark DataFrame operations** on a Spark standalone cluster accelerated by the **RAPIDS Accelerator for Apache Spark** (GPU), enabling horizontal scaling across the cluster rather than bottlenecking on a single-threaded in-memory graph. Because the pipeline is UDF-free except for one small parsing step, the compute-heavy DataFrame operators (regex parsing, joins, hashing, window functions, aggregations) execute on GPU.
 
 PyG construction also leverages Spark executors for all heavy computation (node ID assignment, edge resolution, feature extraction). Only compact integer and float tensors cross the Spark → driver boundary for final `HeteroData` assembly. All URI-to-name conversions use **pure Spark Column expressions** (JVM-native `WHEN` chains), not Python UDFs, eliminating serialization overhead.
 
@@ -40,22 +41,23 @@ The pipeline supports three execution modes:
 - **Proportionally Scalable Dimensions**: Overriding `vector_dim` or `edge_vector_dim` automatically rescales all segment and sub-segment boundaries via `VectorLayout` / `EdgeVectorLayout` — no hardcoded dim indices
 - **No Double-Join for Edge Features**: Edge features reuse the cached resolved edges DataFrame from EdgeMapper — the expensive double-join runs exactly once
 - **Driver Memory Safety**: Large node types use chunked collection with explicit memory management to prevent OOM
-- **Six Metadata Files Per Build**: `graph_schema.json`, `feature_spec.json`, `normalization.json`, `encoding_config.json`, `ontology_schema.json`, and `slot_mapping.json` written to S3 alongside every `.pt` file — enabling consistent training, inference, and experiment tracking
+- **Six Metadata Files Per Build**: `graph_schema.json`, `feature_spec.json`, `normalization.json`, `encoding_config.json`, `ontology_schema.json`, and `slot_mapping.json` written alongside every `.pt` file (locally, and mirrored to S3 when an archive is configured) — enabling consistent training, inference, and experiment tracking
 - **Temporal Unification**: Unified temporal entities across all data sources
 - **Intra-Source Linking**: Automatic relationship discovery within data source families
 - **Cross-Source Linking**: Automatic relationship discovery across heterogeneous datasets
 - **PyTorch Geometric Output**: Native `HeteroData` objects with configurable node/edge types and optional edge features
 - **Reusable Parquet Artifacts**: Enriched triples saved as Parquet for multiple PyG experiments without re-enrichment
 - **Flexible Graph Construction**: Experiment with different graph structures from existing Parquet (5-10 min per experiment)
-- **Serverless Architecture**: Fully managed AWS Glue, no infrastructure to maintain
-- **Controlled Parquet Output**: Configurable partition count for optimal S3 file sizes
+- **GPU-Accelerated Spark**: Runs on an Apache Spark standalone cluster with the RAPIDS Accelerator; DataFrame operators execute on GPU
+- **Local-First Storage**: Interim enriched Parquet stays on a shared local filesystem; final artifacts are written locally and optionally mirrored to S3 as a durable catalog
+- **Controlled Parquet Output**: Configurable partition count for optimal file sizes
 - **Canonical Namespace Registry**: Single source of truth for all namespace-to-prefix mappings in `rdf_utils.py`
 
 ## Architecture
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│ Raw Data Sources (S3)                                      │
+│ Raw Data Sources (local filesystem or S3 via s3a://)       │
 │                                                            │
 │ N-Triples format (.nt files):                              │
 │ ├── BLS Economic Data (10 categories, ~100 mappers)        │
@@ -71,15 +73,16 @@ The pipeline supports three execution modes:
 └────────────────────────────────────────────────────────────┘
                             ↓
 ┌────────────────────────────────────────────────────────────┐
-│ AWS Glue Job: pyg-knowledge-graph-builder                  │
+│ Spark job (spark-submit): pyg-knowledge-graph-builder      │
+│ Spark standalone cluster + RAPIDS Accelerator (GPU)        │
 │                                                            │
 │  ┌──────────────┐   ┌───────────────┐   ┌──────────────┐   │
 │  │ Parse        │──▶│ Enrichment    │──▶│ Build PyG    │   │
 │  │ Source RDF   │   │ (PySpark      │   │ (PySpark     │   │
 │  │ (N-Triples:  │   │  DataFrames   │   │  executors   │   │
-│  │  Spark regex │   │  on executors)│   │  → driver    │   │
-│  │  on executors│   │               │   │  tensors)    │   │
-│  │ Turtle Parq: │   │               │   │              │   │
+│  │  Spark regex │   │  on executors,│   │  on GPU      │   │
+│  │  on executors│   │  GPU via      │   │  → driver    │   │
+│  │ Turtle Parq: │   │  RAPIDS)      │   │  tensors)    │   │
 │  │  rdflib UDF  │   │               │   │              │   │
 │  │  on executors│   │               │   │              │   │
 │  │  → triples   │   │               │   │              │   │
@@ -87,23 +90,24 @@ The pipeline supports three execution modes:
 │  └──────────────┘   └───────────────┘   └──────────────┘   │
 │                                                            │
 │ Mode 1: Full Pipeline                                      │
-│   Source RDF → triples_df → Enrich → Save Parquet          │
-│   → Build PyG HeteroData → Save .pt → Save metadata JSON   │
+│   Source RDF → triples_df → Enrich → Save Parquet (local)  │
+│   → Build PyG HeteroData → Save .pt + metadata JSON        │
 │                                                            │
 │ Mode 2: Enrichment Only                                    │
-│   Source RDF → triples_df → Enrich → Save Parquet to S3    │
+│   Source RDF → triples_df → Enrich → Save Parquet (local)  │
 │                                                            │
 │ Mode 3: PyG Only                                           │
-│   Enriched Parquet (S3) → triples_df → Build PyG HeteroData│
-│   → Save .pt → Save metadata JSON                          │
+│   Enriched Parquet (local) → triples_df → Build PyG        │
+│   HeteroData → Save .pt + metadata JSON                    │
 └────────────────────────────────────────────────────────────┘
                             ↓
 ┌────────────────────────────────────────────────────────────┐
-│ Outputs (S3)                                               │
-│ ├── Enriched Triples (Parquet) - Reusable artifact         │
-│ ├── PyTorch Geometric HeteroData (.pt files) - GNN ready   │
-│ └── Metadata JSON files (6 files per build) - Training /   │
-│     inference support                                      │
+│ Outputs                                                    │
+│ ├── Enriched Triples (Parquet) - local, reusable artifact  │
+│ ├── PyTorch Geometric HeteroData (.pt) - local + optional  │
+│ │     S3 archive - GNN ready                               │
+│ └── Metadata JSON files (6 files per build) - local +      │
+│     optional S3 archive - training / inference support     │
 └────────────────────────────────────────────────────────────┘
 
 ```
@@ -137,11 +141,11 @@ Enrichment steps read from this DataFrame, produce new triples DataFrames, and u
 
 | Aspect | rdflib + SPARQL | PySpark DataFrames |
 |--------|----------------|-------------------|
-| Execution | Single Python process on Glue driver | Distributed across all Spark executors |
+| Execution | Single Python process on the driver | Distributed across all Spark executors (GPU via RAPIDS) |
 | Memory | Entire graph must fit in driver RAM | Partitioned across cluster |
 | Query optimization | None (sequential iteration) | Catalyst optimizer, predicate pushdown, broadcast joins |
 | Parallelism | None | Automatic partitioning |
-| Glue DPU utilization | Pays for cluster, uses 1 core | Uses all allocated DPUs |
+| Hardware utilization | Uses 1 core | Uses all executor cores and GPUs |
 | Join pattern | Python dict lookups or nested SPARQL | Distributed hash/sort-merge joins |
 
 rdflib Namespace objects are used as **URI string constants** in the enrichment modules for readability — they produce plain strings and don't hold or query graph data. The PyG builder modules use **pure Spark Column expressions** for all URI-to-name conversions (no Python UDFs).
@@ -297,13 +301,13 @@ VectorLayout(2048) — double resolution, maximum fidelity:
 |-----------|-------------------|--------------------------|----------|
 | 2048 | Very low | ~8 GB | Maximum fidelity, large cluster |
 | 1024 | Low (~10 properties/type vs 256 numeric slots) | ~4 GB | Production default |
-| 512 | Moderate (128 numeric slots) | ~2 GB | Fast experiments on G.2X |
+| 512 | Moderate (128 numeric slots) | ~2 GB | Fast experiments |
 | 256 | Higher (64 numeric slots) | ~1 GB | Rapid prototyping, small datasets |
 
-**Notebook invocation example:**
+**Invocation example:**
 
 ```python
-# Quick experiment with half-resolution vectors on G.2X
+# Quick experiment with half-resolution vectors
 config = {
     "feature_config": {
         "vector_dim": 512,
@@ -311,7 +315,8 @@ config = {
     }
 }
 
-# The Glue job parameter:
+# Passed to the job as:
+#   --pyg_config "$(python -c 'import json,sys; ...')"
 "--pyg_config": json.dumps(config)
 ```
 
@@ -603,7 +608,7 @@ WITH selective edge features:
 
 ## PyG Construction Pipeline
 
-The PyG builder converts the enriched triples DataFrame into a PyTorch Geometric `HeteroData` object through five steps, with all heavy computation on Spark executors. After the `.pt` file is saved, six metadata JSON files are written to S3:
+The PyG builder converts the enriched triples DataFrame into a PyTorch Geometric `HeteroData` object through five steps, with all heavy computation on Spark executors. After the `.pt` file is saved, six metadata JSON files are written alongside it (locally, and mirrored to S3 when an archive is configured):
 
 ```
 triples_df (enriched, on executors)
@@ -706,17 +711,20 @@ triples_df (enriched, on executors)
     └── Post-construction: Save outputs (build_graph.py)
         ├── torch.save() → BytesIO → upload_fileobj → S3 (.pt file)
         ├── MetadataCollector.to_metadata_files() → six JSON dicts
-        └── write_metadata_to_s3() → six JSON files → S3 (metadata/ dir)
+        └── write_metadata_to_local() → six JSON files → local (metadata/ dir)
+            (and write_metadata_to_s3() when an S3 archive is configured)
 ```
 
 ## Metadata Files
 
-Every PyG build produces six JSON metadata files written to S3 alongside the `.pt` file. These files enable downstream training and inference code to consistently use the `HeteroData` object without re-running the pipeline.
+Every PyG build produces six JSON metadata files written alongside the `.pt` file (locally, and mirrored to S3 when an archive is configured). These files enable downstream training and inference code to consistently use the `HeteroData` object without re-running the pipeline.
 
 ### Output Location
 
+Written under `--local_work_dir` (and mirrored under the S3 archive bucket/key when `--s3_archive_bucket` is set):
+
 ```
-s3://my-data-lake/pyg/2024-12/
+<local_work_dir>/pyg/2024-12/
 ├── hetero_data.pt
 └── metadata/
     ├── graph_schema.json
@@ -727,17 +735,17 @@ s3://my-data-lake/pyg/2024-12/
     └── slot_mapping.json
 ```
 
-For experiment variants (non-default output keys), the metadata directory is named after the output file stem:
+For experiment variants (non-default `--pyg_filename`), the metadata directory is named after the output file stem:
 
 ```
-s3://my-data-lake/pyg/2024-12/
+<local_work_dir>/pyg/2024-12/
 ├── hetero_data_512d.pt
 └── hetero_data_512d_metadata/
     ├── graph_schema.json
     └── ...
 ```
 
-The metadata prefix is derived automatically from the `--pyg_output_key` parameter by `derive_metadata_prefix()` in `metadata_writer.py`. No additional configuration is required.
+The metadata directory is derived automatically from the `.pt` filename (`--pyg_filename`, and the S3 `--s3_pyg_key` when archiving) by `derive_metadata_prefix()` in `metadata_writer.py`. No additional configuration is required.
 
 ### File Descriptions
 
@@ -966,12 +974,14 @@ Step 5: Assemble HeteroData
   gc.collect() to reclaim dict overhead
 
 Post-construction: Save outputs
-  torch.save() to BytesIO buffer → upload_fileobj streams to S3
+  torch.save() → local .pt (and, when archiving, a BytesIO buffer
+    streamed to S3 via upload_fileobj)
   Peak: HeteroData + serialized buffer (same size)
   Buffer freed after upload
 
   MetadataCollector.to_metadata_files() → six JSON dicts (<1 MB total)
-  write_metadata_to_s3() → six put_object calls → S3
+  write_metadata_to_local() → six files locally
+    (and write_metadata_to_s3() → six put_object calls when archiving)
   MetadataCollector holds only small Python dicts throughout
 ```
 
@@ -1012,9 +1022,9 @@ Post-construction: Save outputs
 | Edge feature collection | Driver | Per-type sparse entries → dense [N, edge_vector_dim] float32, chunked for large types |
 | HeteroData assembly | Driver | Only compact tensors, no strings |
 | Metadata collection | Driver | Small aggregated DataFrames only (<5000 rows per collect), <1 MB total |
-| Metadata serialization | Driver | `json.dumps()` on small Python dicts, six `put_object` calls to S3 |
-| Enriched Parquet write | Spark executors | `repartition` + `write.parquet` — executors write directly to S3 |
-| PyG .pt upload | Driver | `upload_fileobj` streams buffer to S3 (no extra copy) |
+| Metadata serialization | Driver | `json.dumps()` on small Python dicts; six local writes (+ `put_object` calls when archiving) |
+| Enriched Parquet write | Spark executors | `repartition` + `write.parquet` — executors write directly to the shared local dir |
+| PyG .pt write | Driver | `torch.save` to local file (+ `upload_fileobj` streaming to S3 when archiving) |
 
 **Universal node feature width**: HeteroData stores node feature tensors of the same `vector_dim` for every node type. The ontology-aware encoding keeps vectors informative even for types with few literal properties — the ontology structure and property schema segments still carry meaningful signal.
 
@@ -1038,10 +1048,13 @@ Post-construction: Save outputs
 | (cpi_Index, belongsToSector, unified_EconomicSector) | ~5K | — (no features) | Relation name sufficient |
 | (cpi_Index, correlatesWith, ppi_Index) | ~10K | — (OFF by default) | Label similarity, cross-source flag |
 
-### Memory Budget by Glue Worker Type
+### Memory Budget by Driver Size
+
+The final `HeteroData` assembly happens on the driver, so driver memory
+bounds the graph size. Approximate budgets:
 
 ```
-Glue G.2X (32 GB driver):
+~32 GB driver:
   JVM + Spark overhead:     ~8-10 GB
   Python interpreter:       ~1-2 GB
   Available for tensors:    ~20-22 GB
@@ -1050,7 +1063,7 @@ Glue G.2X (32 GB driver):
   → Or <2M total nodes at 512-d with edge features
   → Metadata: <1 MB, negligible
 
-Glue G.4X (64 GB driver):
+~64 GB driver:
   JVM + Spark overhead:     ~10-12 GB
   Python interpreter:       ~1-2 GB
   Available for tensors:    ~50-52 GB
@@ -1060,7 +1073,7 @@ Glue G.4X (64 GB driver):
   → Metadata: <1 MB, negligible
 ```
 
-Reducing `vector_dim` from 1024 to 512 **halves driver memory** for node feature tensors while preserving the same three-segment structure. Edge feature tensors at 32-d are already compact — reducing `edge_vector_dim` to 16 halves their memory but is rarely necessary since they are ~32× smaller per element than node features. This enables running on G.2X workers for rapid experimentation before committing to full-resolution production runs on G.4X.
+Reducing `vector_dim` from 1024 to 512 **halves driver memory** for node feature tensors while preserving the same three-segment structure. Edge feature tensors at 32-d are already compact — reducing `edge_vector_dim` to 16 halves their memory but is rarely necessary since they are ~32× smaller per element than node features. This enables rapid experimentation at reduced resolution before committing to full-resolution production runs.
 
 ### PyG Configuration
 
@@ -1102,16 +1115,16 @@ The PyG builder accepts an optional configuration dict:
 
 When config is empty, sensible defaults are inferred from the data.
 
-### Glue Job Parameters
+### Job Parameters
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
 | `--mode` | Yes | `full` | `full`, `enrichment_only`, or `pyg_only` |
-| `--source_bucket` | Modes 1,2 | — | S3 bucket containing raw RDF files |
-| `--source_prefix` | Modes 1,2 | — | S3 prefix for raw RDF files within `source_bucket`. Accepts a single prefix or a comma-separated list of prefixes: `"raw/sec/filings/2024-12/,raw/sec/proceedings/2024-12/"`. Each prefix is loaded independently and the results are unioned into a single triples DataFrame before enrichment |
-| `--output_bucket` | Yes | — | S3 bucket for all outputs |
-| `--enriched_parquet_prefix` | Modes 1,2,3 | `enriched/{time_period}/triples/` | S3 prefix for enriched Parquet. Modes 1 and 2 write to this prefix; mode 3 reads from it |
-| `--pyg_output_key` | Modes 1,3 | `pyg/{time_period}/hetero_data.pt` | S3 key for PyG output. Also determines metadata directory: `metadata/` for the default key, `{stem}_metadata/` for experiment variants |
+| `--source_paths` | Modes 1,2 | — | Comma-separated source path(s)/URI(s): local directories or `s3a://...`. Each is loaded independently and the results are unioned into a single triples DataFrame before enrichment |
+| `--local_work_dir` | Yes | — | Shared working directory (visible to every worker, e.g. an NFS mount) for the interim enriched Parquet and the local copy of the final artifacts |
+| `--s3_archive_bucket` | No | `""` | Optional S3 bucket to mirror the final artifacts (`.pt` + metadata + manifest). When empty, outputs are local-only |
+| `--s3_pyg_key` | No | `pyg/{time_period}/{pyg_filename}` | Optional S3 key for the archived `.pt`; the metadata prefix is derived from it |
+| `--pyg_filename` | No | `hetero_data.pt` | Local `.pt` filename (override for experiment variants, e.g. `hetero_data_512d.pt`); determines the metadata directory name |
 | `--enable_ontology_mapping` | No | `false` | Enable ontology equivalence mapping |
 | `--time_period` | No | Current `YYYY-MM` | Time period label for output paths |
 | `--pyg_config` | No | `{}` | JSON string with PyG construction config |
@@ -1123,122 +1136,114 @@ When config is empty, sensible defaults are inferred from the data.
 
 Metadata files are always written when mode is `full` or `pyg_only`. Mode `enrichment_only` does not produce metadata files (no PyG graph is built in that mode).
 
-**Example Glue job parameters:**
+Jobs are launched with `bin/submit_spark_job.sh`, which packages the code
+and submits to the Spark standalone master with the RAPIDS Accelerator
+enabled. Set `SPARK_MASTER_URL` (and optionally `RAPIDS_JAR`); see the
+launcher header for all environment variables.
 
-```json
-{
-    "--mode": "full",
-    "--source_bucket": "my-data-lake",
-    "--source_prefix": "rdf/monthly/2024-12/",
-    "--output_bucket": "my-data-lake",
-    "--enriched_parquet_prefix": "enriched/2024-12/triples/",
-    "--pyg_output_key": "pyg/2024-12/hetero_data.pt",
-    "--enable_ontology_mapping": "true",
-    "--time_period": "2024-12",
-    "--parquet_partitions": "200",
-    "--pyg_config": "{\"feature_config\": {\"normalize\": true, \"vector_dim\": 1024}, \"edge_feature_config\": {\"enabled\": true, \"edge_vector_dim\": 32}}"
-}
+**Example — full pipeline (local source, local + S3 archive):**
+
+```bash
+SPARK_MASTER_URL=spark://<host>:7077 \
+  bin/submit_spark_job.sh \
+    --mode full \
+    --source_paths /data/rdf/monthly/2024-12/ \
+    --local_work_dir /data/pyg \
+    --s3_archive_bucket my-archive \
+    --s3_pyg_key pyg/2024-12/hetero_data.pt \
+    --enable_ontology_mapping true \
+    --time_period 2024-12 \
+    --parquet_partitions 200 \
+    --pyg_config '{"feature_config": {"normalize": true, "vector_dim": 1024}, "edge_feature_config": {"enabled": true, "edge_vector_dim": 32}}'
+```
+
+Outputs (local; and mirrored to `s3://my-archive/...` because an archive
+bucket was given):
+```
+/data/pyg/enriched/2024-12/triples/            # interim, local only
+/data/pyg/pyg/2024-12/hetero_data.pt
+/data/pyg/pyg/2024-12/metadata/graph_schema.json
+/data/pyg/pyg/2024-12/metadata/feature_spec.json
+/data/pyg/pyg/2024-12/metadata/normalization.json
+/data/pyg/pyg/2024-12/metadata/encoding_config.json
+/data/pyg/pyg/2024-12/metadata/ontology_schema.json
+/data/pyg/pyg/2024-12/metadata/slot_mapping.json
+```
+
+**Example — reduced-dimension experiment from existing enriched Parquet:**
+
+```bash
+SPARK_MASTER_URL=spark://<host>:7077 \
+  bin/submit_spark_job.sh \
+    --mode pyg_only \
+    --local_work_dir /data/pyg \
+    --pyg_filename hetero_data_512d.pt \
+    --time_period 2024-12 \
+    --pyg_config '{"feature_config": {"vector_dim": 512, "normalize": true}, "edge_feature_config": {"edge_vector_dim": 16}}'
 ```
 
 Outputs:
 ```
-s3://my-data-lake/pyg/2024-12/hetero_data.pt
-s3://my-data-lake/pyg/2024-12/metadata/graph_schema.json
-s3://my-data-lake/pyg/2024-12/metadata/feature_spec.json
-s3://my-data-lake/pyg/2024-12/metadata/normalization.json
-s3://my-data-lake/pyg/2024-12/metadata/encoding_config.json
-s3://my-data-lake/pyg/2024-12/metadata/ontology_schema.json
-s3://my-data-lake/pyg/2024-12/metadata/slot_mapping.json
-```
-
-**Notebook experiment with reduced dimensions:**
-
-```json
-{
-    "--mode": "pyg_only",
-    "--output_bucket": "my-data-lake",
-    "--enriched_parquet_prefix": "enriched/2024-12/triples/",
-    "--pyg_output_key": "pyg/2024-12/hetero_data_512d.pt",
-    "--time_period": "2024-12",
-    "--pyg_config": "{\"feature_config\": {\"vector_dim\": 512, \"normalize\": true}, \"edge_feature_config\": {\"edge_vector_dim\": 16}}"
-}
-```
-
-Outputs:
-```
-s3://my-data-lake/pyg/2024-12/hetero_data_512d.pt
-s3://my-data-lake/pyg/2024-12/hetero_data_512d_metadata/graph_schema.json
-s3://my-data-lake/pyg/2024-12/hetero_data_512d_metadata/feature_spec.json
+/data/pyg/pyg/2024-12/hetero_data_512d.pt
+/data/pyg/pyg/2024-12/hetero_data_512d_metadata/graph_schema.json
+/data/pyg/pyg/2024-12/hetero_data_512d_metadata/feature_spec.json
 ... (remaining four files)
 ```
 
-**Notebook experiment with additional edge feature categories:**
+**Example — additional edge feature categories:**
 
-```json
-{
-    "--mode": "pyg_only",
-    "--output_bucket": "my-data-lake",
-    "--enriched_parquet_prefix": "enriched/2024-12/triples/",
-    "--pyg_output_key": "pyg/2024-12/hetero_data_full_edge_features.pt",
-    "--time_period": "2024-12",
-    "--pyg_config": "{\"edge_feature_config\": {\"enabled_categories\": [\"temporal\", \"option_stock\", \"escalation\", \"correlation\", \"causal\"]}}"
-}
+```bash
+SPARK_MASTER_URL=spark://<host>:7077 \
+  bin/submit_spark_job.sh \
+    --mode pyg_only \
+    --local_work_dir /data/pyg \
+    --pyg_filename hetero_data_full_edge_features.pt \
+    --time_period 2024-12 \
+    --pyg_config '{"edge_feature_config": {"enabled_categories": ["temporal", "option_stock", "escalation", "correlation", "causal"]}}'
 ```
 
-**Notebook experiment with edge features disabled:**
+**Example — edge features disabled:**
 
-```json
-{
-    "--mode": "pyg_only",
-    "--output_bucket": "my-data-lake",
-    "--enriched_parquet_prefix": "enriched/2024-12/triples/",
-    "--pyg_output_key": "pyg/2024-12/hetero_data_no_edge_features.pt",
-    "--time_period": "2024-12",
-    "--pyg_config": "{\"edge_feature_config\": {\"enabled\": false}}"
-}
+```bash
+SPARK_MASTER_URL=spark://<host>:7077 \
+  bin/submit_spark_job.sh \
+    --mode pyg_only \
+    --local_work_dir /data/pyg \
+    --pyg_filename hetero_data_no_edge_features.pt \
+    --time_period 2024-12 \
+    --pyg_config '{"edge_feature_config": {"enabled": false}}'
 ```
 
-**Turtle Parquet source (SEC filings):**
+**Turtle Parquet source (SEC filings), reading from S3 via s3a://:**
 
-```json
-{
-    "--mode": "enrichment_only",
-    "--source_bucket": "my-data-lake",
-    "--source_prefix": "raw/sec/filings/2024-12/",
-    "--output_bucket": "my-data-lake",
-    "--enriched_parquet_prefix": "enriched/2024-12/triples/",
-    "--source_format": "turtle_parquet",
-    "--turtle_column": "triples",
-    "--time_period": "2024-12",
-    "--parquet_partitions": "200"
-}
+```bash
+SPARK_MASTER_URL=spark://<host>:7077 \
+  bin/submit_spark_job.sh \
+    --mode enrichment_only \
+    --source_paths s3a://my-data-lake/raw/sec/filings/2024-12/ \
+    --local_work_dir /data/pyg \
+    --source_format turtle_parquet \
+    --turtle_column triples \
+    --time_period 2024-12 \
+    --parquet_partitions 200
 ```
 
-If your Parquet column is named something other than `triples`:
+If your Parquet column is named something other than `triples`, set
+`--source_format turtle_parquet --turtle_column rdf_turtle`.
 
-```json
-{
-    "--source_format": "turtle_parquet",
-    "--turtle_column": "rdf_turtle"
-}
-```
+**Full pipeline from a Turtle Parquet source:**
 
-**Full pipeline from Turtle Parquet source:**
-
-```json
-{
-    "--mode": "full",
-    "--source_bucket": "my-data-lake",
-    "--source_prefix": "raw/sec/filings/2024-12/",
-    "--output_bucket": "my-data-lake",
-    "--enriched_parquet_prefix": "enriched/2024-12/triples/",
-    "--pyg_output_key": "pyg/2024-12/hetero_data.pt",
-    "--source_format": "turtle_parquet",
-    "--turtle_column": "triples",
-    "--time_period": "2024-12",
-    "--parquet_partitions": "200",
-    "--pyg_config": "{\"feature_config\": {\"normalize\": true, \"vector_dim\": 1024}}"
-}
+```bash
+SPARK_MASTER_URL=spark://<host>:7077 \
+  bin/submit_spark_job.sh \
+    --mode full \
+    --source_paths s3a://my-data-lake/raw/sec/filings/2024-12/ \
+    --local_work_dir /data/pyg \
+    --source_format turtle_parquet \
+    --turtle_column triples \
+    --time_period 2024-12 \
+    --parquet_partitions 200 \
+    --pyg_config '{"feature_config": {"normalize": true, "vector_dim": 1024}}'
 ```
 
 ## Knowledge Graph Enrichment
@@ -1292,7 +1297,7 @@ triples_df (raw)
         └── owl:equivalentClass mappings
     │
     ▼
-triples_df (enriched) → Parquet (S3) + PyG HeteroData (.pt) + Metadata JSON (S3)
+triples_df (enriched) → Parquet (local) + PyG HeteroData (.pt) + Metadata JSON (local + optional S3)
 ```
 
 ### Intra-Source Linking
@@ -1563,8 +1568,12 @@ The pipeline ingests RDF data from multiple heterogeneous sources, all in **N-Tr
 
 ```
 pyg-knowledge-graph-builder/
-├── glue_jobs/
-│   ├── build_graph.py                      # Main Glue job entry point
+├── bin/
+│   └── submit_spark_job.sh                 # spark-submit launcher (RAPIDS/GPU)
+├── conf/
+│   └── spark-rapids.conf.template          # reference RAPIDS spark-defaults
+├── spark_jobs/
+│   ├── build_graph.py                      # Main Spark job entry point
 │   ├── enrichment/                         # RDF enrichment modules (PySpark)
 │   │   ├── __init__.py
 │   │   ├── pipeline.py                     # Main enrichment orchestrator
@@ -1619,39 +1628,18 @@ pyg-knowledge-graph-builder/
 │   │   │                                   # config and edge classification for metadata
 │   │   └── metadata_writer.py              # MetadataCollector (accumulates artifacts
 │   │                                       # during construction steps);
-│   │                                       # write_metadata_to_s3() (serializes six
-│   │                                       # JSON files to S3);
+│   │                                       # write_metadata_to_local() / _to_s3()
+│   │                                       # (serialize the six JSON files);
 │   │                                       # derive_metadata_prefix() (naming convention)
 │   └── utils/
 │       ├── __init__.py
 │       └── rdf_utils.py                    # Namespace constants, URI helpers, canonical
 │                                           # namespace registry (NAMESPACE_PREFIXES,
 │                                           # ONTOLOGY_NAMESPACE_INDICES)
-├── notebooks/
-│   ├── utils/
-│   │   └── invoke_helpers.py               # Helper functions
-│   ├── quick_experiment.ipynb              # Quick start
-│   ├── multi_experiment.ipynb              # Multi-graph workflow
-│   └── experiments/
-│       ├── node_types.ipynb                # Experiment with node types
-│       ├── edge_types.ipynb                # Experiment with edge types
-│       └── features.ipynb                  # Experiment with features
 ├── tests/                                  # Unit and integration tests
-├── deployment/                             # Deployment scripts
-│   └── cdk/
-│       ├── app.py
-│       ├── cdk.json
-│       ├── requirements.txt
-│       ├── README.md
-│       └── stacks/
-│           ├── __init__.py
-│           ├── glue_stack.py
-│           ├── s3_stack.py
-│           └── iam_stack.py
 ├── .gitignore
 ├── README.md
-├── requirements.txt
-└── setup.py
+└── requirements.txt
 ```
 
 ### Module Roles
@@ -1665,13 +1653,13 @@ pyg-knowledge-graph-builder/
 | `bls_linker.py`, `sec_linker.py`, `market_linker.py`, `noaa_linker.py` | Produce intra-source enrichment triples | Yes |
 | `cross_source_linker.py` | Produces cross-source enrichment triples | Yes |
 | `ontology_mapper.py` | Produces equivalence mapping triples | Yes |
-| `build_graph.py` | Parses source RDF into triples DataFrame (`load_ntriples_to_dataframe()` for `.nt` files, `load_turtle_parquet_to_dataframe()` for Turtle Parquet blobs); dispatches via `load_source_triples()`; orchestrates pipeline modes; saves Parquet, `.pt`, and metadata JSON files to S3. `--source_format` and `--turtle_column` parameters control which loader is used | Yes (orchestration) |
+| `build_graph.py` | Parses source RDF into triples DataFrame (`load_ntriples_to_dataframe()` for `.nt` files, `load_turtle_parquet_to_dataframe()` for Turtle Parquet blobs); dispatches via `load_source_triples()`; orchestrates pipeline modes; writes enriched Parquet locally and the `.pt` + metadata JSON files locally (mirroring the final artifacts to S3 when an archive is configured). `--source_format` and `--turtle_column` parameters control which loader is used | Yes (orchestration) |
 | `constructor.py` | Orchestrates PyG HeteroData construction from triples DataFrame (5 steps: node IDs, edge indices, node features, edge features, assembly); initializes `MetadataCollector`; calls `register_*` methods after each step; returns `(HeteroData, MetadataCollector)` | Yes (orchestration) |
 | `node_mapper.py` | Discovers node types, assigns per-type integer IDs via Window functions. `get_type_uri_mapping()` provides a small collect for metadata. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
 | `edge_mapper.py` | Double-joins triples with node IDs, collects edge index tensors. Returns cached resolved edges DataFrame for reuse by `edge_feature_extractor.py`. `get_predicate_uri_mapping()` provides a small collect for metadata. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
 | `feature_extractor.py` | Builds ontology-aware node feature vectors via `VectorLayout` (proportionally scaled segments): extracts class hierarchy, property schema, and literal values on executors; collects sparse entries (chunked for large types); scatters into dense tensors on driver. During `build_features()`, collects normalization stats, ontology schema snapshot, and slot mapping into small Python objects via `_collect_*` methods. `get_metadata_artifacts()` returns these for `MetadataCollector`. Imports `ONTOLOGY_NAMESPACE_INDICES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
 | `edge_feature_extractor.py` | Builds derived edge feature vectors via `EdgeVectorLayout` (proportionally scaled segments): classifies edge types by category, extracts endpoint properties, encodes temporal signals / numeric contrast / relational context on executors; collects sparse entries per edge type; scatters into dense tensors on driver. Reuses cached resolved edges from `edge_mapper.py` — no double-join replay. `get_encoding_config()` and `get_edge_classification()` provide metadata for `MetadataCollector`. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
-| `metadata_writer.py` | `MetadataCollector` accumulates metadata artifacts deposited by `constructor.py` during each step; `to_metadata_files()` produces six JSON-serializable dicts; `write_metadata_to_s3()` serializes and uploads them; `derive_metadata_prefix()` computes the S3 metadata directory from the PyG output key | No (pure Python) |
+| `metadata_writer.py` | `MetadataCollector` accumulates metadata artifacts deposited by `constructor.py` during each step; `to_metadata_files()` produces six JSON-serializable dicts; `write_metadata_to_local()` writes them to the local metadata directory and `write_metadata_to_s3()` mirrors them to S3; `derive_metadata_prefix()` computes the metadata directory from the `.pt` filename/key | No (pure Python) |
 
 ### Scalability
 
@@ -1681,14 +1669,14 @@ The pipeline is designed to handle:
 - **Heterogeneous data types** (prices, rates, levels, changes, categorical)
 - **Multiple temporal granularities** (intraday, daily, weekly, monthly, quarterly)
 - **Dynamic schema evolution** as new data sources are added
-- **Horizontal scaling** by adding Glue DPUs — enrichment and PyG construction work distributes automatically
+- **Horizontal scaling** by adding Spark workers (and GPUs) — enrichment and PyG construction work distributes automatically
 - **Bounded driver memory** — PyG construction collects only compact integer/float tensors, not URI strings. Chunked collection for large node types bounds peak Pandas memory. Chunked collection for large edge types follows the same pattern. `gc.collect()` between types reclaims fragmented memory (safe because it runs on the driver process only, after all Spark executor work is complete).
 - **Configurable node vector dimension** — reducing `vector_dim` from 1024 to 512 halves driver memory for node feature tensors while preserving the same three-segment structure via proportional `VectorLayout` scaling
 - **Configurable edge vector dimension** — reducing `edge_vector_dim` from 32 to 16 halves driver memory for edge feature tensors while preserving the same three-segment structure via proportional `EdgeVectorLayout` scaling
 - **Selective edge featurization** — only high-value edge types receive feature vectors, avoiding wasted memory on constant vectors for structural edges
 - **No double-join for edge features** — the expensive double-join (triples × node_id_df) runs exactly once in EdgeMapper; EdgeFeatureExtractor reuses the cached result
 - **No Python UDFs in the hot path** — URI-to-name conversions, hash-based encoding, and numeric parsing use pure Spark expressions (JVM-native), avoiding Python serialization overhead on 30-50M rows
-- **Controlled Parquet output** — configurable partition count prevents thousands of tiny files or few huge files on S3
+- **Controlled Parquet output** — configurable partition count prevents thousands of tiny files or few huge files
 - **Efficient literal isolation** — anti-join against node_id_df filters out edge triples before numeric parsing, avoiding wasted computation on URI-valued objects
 - **Canonical namespace registry** — `NAMESPACE_PREFIXES` and `ONTOLOGY_NAMESPACE_INDICES` in `rdf_utils.py` are the single source of truth, imported by `node_mapper.py`, `edge_mapper.py`, `feature_extractor.py`, and `edge_feature_extractor.py` to eliminate duplication
-- **Negligible metadata overhead** — all metadata collect calls target small aggregated DataFrames (<5000 rows each); total metadata memory is under 1 MB; six JSON files are written to S3 after the `.pt` file with no impact on tensor collection or HeteroData assembly
+- **Negligible metadata overhead** — all metadata collect calls target small aggregated DataFrames (<5000 rows each); total metadata memory is under 1 MB; six JSON files are written after the `.pt` file with no impact on tensor collection or HeteroData assembly

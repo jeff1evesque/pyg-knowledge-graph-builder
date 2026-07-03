@@ -1,3 +1,19 @@
+# Runtime dependencies for the knowledge-graph-builder Spark job.
+#
+# Install into the Spark Python environment on every worker. rdflib is used
+# on executors (Turtle parsing UDF) and the driver; torch / torch-geometric
+# are used on the driver for HeteroData assembly and torch.save; boto3 is
+# used on the driver to read optional definitions from S3 and to mirror final
+# artifacts to an S3 archive.
+#
+# NOTE: install torch / torch-geometric from the wheel index matching your
+# cluster's GPUs and CUDA version (see the PyTorch and PyG install guides).
+# The ceilings below are intentionally open so a CUDA-matched build can be used.
 rdflib>=6.0.0,<8.0.0
-torch>=2.0.0,<2.5.0
-torch-geometric>=2.4.0,<2.6.0
+torch>=2.5.0
+torch-geometric>=2.6.0
+boto3>=1.28.0
+
+# pyspark is provided by the Spark cluster at runtime. Uncomment for local
+# development / running the unit tests without a cluster:
+# pyspark>=3.5.0,<3.6.0

@@ -1,0 +1,33 @@
+# RAPIDS Accelerator for Apache Spark — reference configuration
+#
+# These settings enable GPU acceleration for the knowledge-graph-builder
+# job. The launcher (bin/submit_spark_job.sh) passes equivalent --conf
+# flags; this template documents the same settings for a cluster-wide
+# spark-defaults.conf if you prefer to set them there instead.
+#
+# Copy to your cluster's $SPARK_HOME/conf/spark-defaults.conf (or merge),
+# adjusting values for your GPUs.
+
+# Enable the RAPIDS SQL plugin (requires the RAPIDS Accelerator jar on the
+# classpath).
+spark.plugins                                   com.nvidia.spark.SQLPlugin
+spark.rapids.sql.enabled                        true
+
+# GPU resource scheduling. One GPU per executor; task fraction controls how
+# many concurrent tasks may share a GPU (0.125 -> up to 8).
+spark.executor.resource.gpu.amount              1
+spark.task.resource.gpu.amount                  0.125
+spark.rapids.sql.concurrentGpuTasks             2
+# Ships with Spark; adjust the path to your installation.
+spark.executor.resource.gpu.discoveryScript     ${SPARK_HOME}/examples/src/main/scripts/getGpusResources.sh
+
+# Pinned host memory pool improves host<->device transfer throughput.
+spark.rapids.memory.pinnedPool.size             2G
+
+# Multithreaded Parquet reader hides request latency when reading from
+# object storage (s3a://).
+spark.rapids.sql.format.parquet.reader.type     MULTITHREADED
+
+# Set to ALL to log, per query, which operators run on the GPU and which
+# fall back to the CPU (useful for tuning/verification).
+spark.rapids.sql.explain                        NONE
