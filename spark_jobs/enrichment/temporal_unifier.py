@@ -35,7 +35,7 @@ from spark_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, UNIFIED,
     CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER, WKYENG,
     SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP,
-    MARKET, MARKET_OPTIONS, CAP, NWS,
+    MARKET, CAP, NWS,
 )
 
 import logging
@@ -72,7 +72,7 @@ WKYENG_HAS_YEAR = str(WKYENG.hasYear)
 MARKET_OBSERVED_AT = str(MARKET.observedAt)
 MARKET_PRICE_OBS_TYPE = str(MARKET.PriceObservation)
 MARKET_OPTION_CONTRACT_TYPE = str(MARKET.OptionContract)
-MARKET_EXPIRATION_DATE = str(MARKET_OPTIONS.expirationDate)
+MARKET_EXPIRATION_DATE = str(MARKET.expirationDate)
 
 # SEC types for detection
 SEC_TYPES = [
