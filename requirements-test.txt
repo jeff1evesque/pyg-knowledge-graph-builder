@@ -1,0 +1,28 @@
+# Test-environment dependencies.
+#
+# Layers the application's runtime deps (requirements.txt) on top of the two
+# things a *local* test run needs that production does not pip-install:
+#
+#   - pyspark : provided by the Spark cluster at runtime (see requirements.txt),
+#               but must be installed locally to run the enrichment / PyG code
+#               against a local SparkSession without a cluster.
+#   - pytest  : the test runner itself.
+#
+# Everything else the tests import (rdflib, torch, torch-geometric, boto3, and
+# numpy via torch) comes from requirements.txt. Note: torch-geometric is only
+# needed once PyG-construction tests exist — constructor.py imports it lazily,
+# so the current enrichment / layout / import tests pass without it.
+#
+# Usage:
+#   python -m venv .venv
+#   .venv/bin/pip install -r requirements-test.txt
+#   SPARK_LOCAL_IP=127.0.0.1 .venv/bin/python -m pytest tests/
+#
+# Tests run entirely on a local SparkSession — no Spark cluster and no RAPIDS
+# Accelerator are required.
+
+-r requirements.txt
+
+# pyspark is cluster-provided in production; pin to the cluster's 3.5.x line.
+pyspark>=3.5.0,<3.6.0
+pytest>=8.0.0
