@@ -10,3 +10,7 @@
 ##
 output.md
 extract_*.py
+##
+## python venv
+##
+.venv/
