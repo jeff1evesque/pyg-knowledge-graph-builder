@@ -307,125 +307,6 @@ class EdgeVectorLayout:
 
         self._validate()
 
-    # Add these methods to the existing EdgeFeatureExtractor class,
-    # after __init__ and before build_edge_features
-
-    def get_layout(self) -> EdgeVectorLayout:
-        """Return the EdgeVectorLayout for metadata registration."""
-        return self._layout
-
-    def get_encoding_config(self) -> Dict[str, Any]:
-        """
-        Return edge feature encoding configuration.
-
-        All values here are the same constants used in the encoding
-        methods below. Called by constructor.py after
-        build_edge_features() to merge into the combined
-        encoding_config.json.
-        """
-        layout = self._layout
-        return {
-            "edge_features": {
-                "total_dim": layout.edge_vector_dim,
-                "enabled_categories": sorted(
-                    list(self._enabled_categories)
-                ),
-                "segment_proportions": {
-                    "temporal_signals": _EDGE_SEG1_FRAC,
-                    "numeric_contrast": _EDGE_SEG2_FRAC,
-                    "relational_context": _EDGE_SEG3_FRAC,
-                },
-                "temporal_signals": {
-                    "time_delta_seed": 0,
-                    "abs_time_delta_seed": 7,
-                    "normalization_divisor": 12.0,
-                },
-                "numeric_contrast": {
-                    "difference_seed": 500,
-                    "ratio_seed": 501,
-                    "magnitude_seed": 502,
-                    "ratio_clamp": 10.0,
-                },
-                "cross_property": {
-                    "moneyness_seed": 510,
-                    "log_moneyness_seed": 511,
-                    "strike_stock_diff_seed": 512,
-                    "severity_delta_seed": 520,
-                },
-                "relational_context": {
-                    "namespace_seed_offset": 700,
-                    "dst_namespace_seed_offset": 710,
-                    "label_hash_seed": 800,
-                    "category_label_seed": 810,
-                    "relation_seed_offset": 900,
-                    "category_hash_seed": 950,
-                    "relation_weight": 1.0,
-                    "category_weight": 0.5,
-                },
-                "classification_fragments": {
-                    "temporal": list(
-                        _TEMPORAL_RELATION_FRAGMENTS
-                    ),
-                    "option_stock": list(
-                        _OPTION_STOCK_RELATION_FRAGMENTS
-                    ),
-                    "escalation": list(
-                        _ESCALATION_RELATION_FRAGMENTS
-                    ),
-                    "correlation": list(
-                        _CORRELATION_RELATION_FRAGMENTS
-                    ),
-                    "causal": list(_CAUSAL_RELATION_FRAGMENTS),
-                    "strategy": list(
-                        _STRATEGY_RELATION_FRAGMENTS
-                    ),
-                    "skip": list(_SKIP_RELATION_FRAGMENTS),
-                },
-            },
-            "checksum": {
-                "total_edge_feature_dim": layout.edge_vector_dim,
-            },
-        }
-
-    def get_edge_classification(
-        self,
-        edge_indices: Dict[Tuple[str, str, str], "torch.Tensor"],
-    ) -> Tuple[
-        Dict[str, str],
-        List[str],
-        List[str],
-    ]:
-        """
-        Classify all edge types and return classification metadata.
-
-        This is a lightweight driver-side operation — just substring
-        matching on relation names, ~1 μs per type.
-
-        Args:
-            edge_indices: Dict from EdgeMapper
-
-        Returns:
-            Tuple of:
-            - categories: Dict[relation_name -> category]
-            - types_with_features: List of edge type key strings
-            - types_without_features: List of edge type key strings
-        """
-        categories: Dict[str, str] = {}
-        types_with: List[str] = []
-        types_without: List[str] = []
-
-        for (src, rel, dst) in edge_indices:
-            cat = _classify_relation(rel)
-            categories[rel] = cat
-            key_str = f"({src}, {rel}, {dst})"
-
-            if cat == "skip" or cat not in self._enabled_categories:
-                types_without.append(key_str)
-            else:
-                types_with.append(key_str)
-
-        return categories, types_with, types_without
-
     def _validate(self):
         """Verify all sub-segments tile the full vector with no gaps."""
         total = (
@@ -691,6 +572,122 @@ class EdgeFeatureExtractor:
         # Compute layout from edge_vector_dim — all segment boundaries
         # scale proportionally
         self._layout = EdgeVectorLayout(self._edge_vector_dim)
+
+    def get_layout(self) -> EdgeVectorLayout:
+        """Return the EdgeVectorLayout for metadata registration."""
+        return self._layout
+
+    def get_encoding_config(self) -> Dict[str, Any]:
+        """
+        Return edge feature encoding configuration.
+
+        All values here are the same constants used in the encoding
+        methods below. Called by constructor.py after
+        build_edge_features() to merge into the combined
+        encoding_config.json.
+        """
+        layout = self._layout
+        return {
+            "edge_features": {
+                "total_dim": layout.edge_vector_dim,
+                "enabled_categories": sorted(
+                    list(self._enabled_categories)
+                ),
+                "segment_proportions": {
+                    "temporal_signals": _EDGE_SEG1_FRAC,
+                    "numeric_contrast": _EDGE_SEG2_FRAC,
+                    "relational_context": _EDGE_SEG3_FRAC,
+                },
+                "temporal_signals": {
+                    "time_delta_seed": 0,
+                    "abs_time_delta_seed": 7,
+                    "normalization_divisor": 12.0,
+                },
+                "numeric_contrast": {
+                    "difference_seed": 500,
+                    "ratio_seed": 501,
+                    "magnitude_seed": 502,
+                    "ratio_clamp": 10.0,
+                },
+                "cross_property": {
+                    "moneyness_seed": 510,
+                    "log_moneyness_seed": 511,
+                    "strike_stock_diff_seed": 512,
+                    "severity_delta_seed": 520,
+                },
+                "relational_context": {
+                    "namespace_seed_offset": 700,
+                    "dst_namespace_seed_offset": 710,
+                    "label_hash_seed": 800,
+                    "category_label_seed": 810,
+                    "relation_seed_offset": 900,
+                    "category_hash_seed": 950,
+                    "relation_weight": 1.0,
+                    "category_weight": 0.5,
+                },
+                "classification_fragments": {
+                    "temporal": list(
+                        _TEMPORAL_RELATION_FRAGMENTS
+                    ),
+                    "option_stock": list(
+                        _OPTION_STOCK_RELATION_FRAGMENTS
+                    ),
+                    "escalation": list(
+                        _ESCALATION_RELATION_FRAGMENTS
+                    ),
+                    "correlation": list(
+                        _CORRELATION_RELATION_FRAGMENTS
+                    ),
+                    "causal": list(_CAUSAL_RELATION_FRAGMENTS),
+                    "strategy": list(
+                        _STRATEGY_RELATION_FRAGMENTS
+                    ),
+                    "skip": list(_SKIP_RELATION_FRAGMENTS),
+                },
+            },
+            "checksum": {
+                "total_edge_feature_dim": layout.edge_vector_dim,
+            },
+        }
+
+    def get_edge_classification(
+        self,
+        edge_indices: Dict[Tuple[str, str, str], "torch.Tensor"],
+    ) -> Tuple[
+        Dict[str, str],
+        List[str],
+        List[str],
+    ]:
+        """
+        Classify all edge types and return classification metadata.
+
+        This is a lightweight driver-side operation — just substring
+        matching on relation names, ~1 μs per type.
+
+        Args:
+            edge_indices: Dict from EdgeMapper
+
+        Returns:
+            Tuple of:
+            - categories: Dict[relation_name -> category]
+            - types_with_features: List of edge type key strings
+            - types_without_features: List of edge type key strings
+        """
+        categories: Dict[str, str] = {}
+        types_with: List[str] = []
+        types_without: List[str] = []
+
+        for (src, rel, dst) in edge_indices:
+            cat = _classify_relation(rel)
+            categories[rel] = cat
+            key_str = f"({src}, {rel}, {dst})"
+
+            if cat == "skip" or cat not in self._enabled_categories:
+                types_without.append(key_str)
+            else:
+                types_with.append(key_str)
+
+        return categories, types_with, types_without
 
     def build_edge_features(
         self,

@@ -1,101 +1,64 @@
 """
-Pytest configuration for BLS enrichment tests
-"""
-import pytest
-import logging
-from rdflib import Graph
+Pytest configuration for the PySpark enrichment tests.
 
-# Configure logging for tests
+These tests exercise the current PySpark DataFrame API (BLSIntraSourceLinker,
+BLSDatasetEnricher) against a *local* SparkSession — no standalone cluster and
+no RAPIDS Accelerator are required. The same application code runs unchanged on
+a GPU cluster; RAPIDS is a drop-in SQL plugin, so plain local Spark is a valid
+way to unit-test the enrichment logic.
+"""
+import logging
+
+import pytest
+
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.WARNING,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 
-
-@pytest.fixture
-def sample_cpi_graph():
-    """Fixture providing CPI test graph"""
-    from spark_jobs.utils.rdf_utils import RDFGraphLoader
-    from tests.test_bls_enrichment import create_sample_cpi_data
-
-    loader = RDFGraphLoader()
-    cpi_ttl = create_sample_cpi_data()
-    loader.load_from_string(cpi_ttl, format='turtle')
-    return loader.graph
+# Spark's own logging is very chatty at INFO; keep test output readable.
+logging.getLogger("py4j").setLevel(logging.ERROR)
 
 
-@pytest.fixture
-def sample_ppi_graph():
-    """Fixture providing PPI test graph"""
-    from spark_jobs.utils.rdf_utils import RDFGraphLoader
-    from tests.test_bls_enrichment import create_sample_ppi_data
+@pytest.fixture(scope="session")
+def spark(tmp_path_factory):
+    """
+    Session-scoped local SparkSession.
 
-    loader = RDFGraphLoader()
-    ppi_ttl = create_sample_ppi_data()
-    loader.load_from_string(ppi_ttl, format='turtle')
-    return loader.graph
+    Uses local[2] so window functions and joins exercise real partitioning
+    while staying fast. Shuffle partitions are capped to keep small-data tests
+    from spawning 200 empty tasks per shuffle.
+    """
+    from pyspark.sql import SparkSession
 
+    warehouse = tmp_path_factory.mktemp("spark_warehouse")
 
-@pytest.fixture
-def sample_eci_graph():
-    """Fixture providing ECI test graph"""
-    from spark_jobs.utils.rdf_utils import RDFGraphLoader
-    from tests.test_bls_enrichment import create_sample_eci_data
-
-    loader = RDFGraphLoader()
-    eci_ttl = create_sample_eci_data()
-    loader.load_from_string(eci_ttl, format='turtle')
-    return loader.graph
-
-
-@pytest.fixture
-def sample_jolts_graph():
-    """Fixture providing JOLTS test graph"""
-    from spark_jobs.utils.rdf_utils import RDFGraphLoader
-    from tests.test_bls_enrichment import create_sample_jolts_data
-
-    loader = RDFGraphLoader()
-    jolts_ttl = create_sample_jolts_data()
-    loader.load_from_string(jolts_ttl, format='turtle')
-    return loader.graph
-
-
-@pytest.fixture
-def sample_empsit_graph():
-    """Fixture providing EMPSIT test graph"""
-    from spark_jobs.utils.rdf_utils import RDFGraphLoader
-    from tests.test_bls_enrichment import create_sample_empsit_data
-
-    loader = RDFGraphLoader()
-    empsit_ttl = create_sample_empsit_data()
-    loader.load_from_string(empsit_ttl, format='turtle')
-    return loader.graph
-
-
-@pytest.fixture
-def multi_dataset_graph():
-    """Fixture providing multi-dataset test graph"""
-    from spark_jobs.utils.rdf_utils import RDFGraphLoader
-    from tests.test_bls_enrichment import (
-        create_sample_cpi_data,
-        create_sample_ppi_data,
-        create_sample_eci_data,
-        create_sample_jolts_data,
-        create_sample_empsit_data
+    session = (
+        SparkSession.builder
+        .master("local[2]")
+        .appName("pyg-kg-builder-tests")
+        .config("spark.ui.enabled", "false")
+        .config("spark.sql.shuffle.partitions", "2")
+        .config("spark.sql.warehouse.dir", str(warehouse))
+        .config("spark.driver.host", "127.0.0.1")
+        .getOrCreate()
     )
+    session.sparkContext.setLogLevel("ERROR")
 
-    loader = RDFGraphLoader()
+    yield session
 
-    loader.load_from_string(create_sample_cpi_data(), format='turtle')
-    loader.load_from_string(create_sample_ppi_data(), format='turtle')
-    loader.load_from_string(create_sample_eci_data(), format='turtle')
-    loader.load_from_string(create_sample_jolts_data(), format='turtle')
-    loader.load_from_string(create_sample_empsit_data(), format='turtle')
-
-    return loader.graph
+    session.stop()
 
 
 @pytest.fixture
-def empty_graph():
-    """Fixture providing empty graph"""
-    return Graph()
+def make_triples(spark):
+    """
+    Factory fixture: build a (subject, predicate, object) triples DataFrame
+    from a list of 3-tuples of URI/literal strings.
+    """
+    def _make(rows):
+        return spark.createDataFrame(
+            rows, schema="subject STRING, predicate STRING, object STRING"
+        )
+
+    return _make
