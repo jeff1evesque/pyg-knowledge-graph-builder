@@ -71,4 +71,9 @@ jobs:
       - name: Run e2e smoke test
         env:
           SPARK_LOCAL_IP: 127.0.0.1
+          # spark.driver.memory is only honored at JVM launch, so raise the
+          # driver heap here (the full pipeline needs more than the default 1 GB
+          # even on tiny fixtures). Leaves headroom for Python/torch on a 7 GB
+          # runner. Must end with `pyspark-shell`.
+          PYSPARK_SUBMIT_ARGS: "--driver-memory 4g pyspark-shell"
         run: python -m pytest tests/ -q -m e2e
