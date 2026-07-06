@@ -1,0 +1,76 @@
+"""Spark session tuned for the end-to-end pipeline smoke test.
+
+Overrides the shared session-scoped ``spark`` fixture (tests/conftest.py), which
+is sized for the tiny unit tests. The full ``build_graph`` pipeline fans out into
+~1,300 Spark jobs/stages even on small fixtures, and the driver's status
+listeners retain per-job/stage/task metadata by default — that accumulation OOMs
+the driver heap (OutOfMemoryError in SQLAppStatusListener.onJobStart). This
+fixture caps that retention. Driver *heap* is raised out-of-band via
+PYSPARK_SUBMIT_ARGS (``spark.driver.memory`` is only honored at JVM launch).
+
+GPU acceleration is opt-in: set ``SPARK_RAPIDS=1`` to run the same tests through
+the RAPIDS Accelerator (drop-in SQL plugin). CPU vs GPU produces the same logical
+results, so the assertions are identical either way.
+"""
+
+import os
+
+import pytest
+
+
+def _truthy(val) -> bool:
+    return str(val or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+@pytest.fixture(scope="session")
+def spark(tmp_path_factory):
+    from pyspark.sql import SparkSession
+
+    warehouse = tmp_path_factory.mktemp("spark_warehouse_e2e")
+
+    builder = (
+        SparkSession.builder
+        .master("local[2]")
+        .appName("pyg-kg-builder-e2e")
+        .config("spark.ui.enabled", "false")
+        .config("spark.sql.shuffle.partitions", "2")
+        .config("spark.sql.warehouse.dir", str(warehouse))
+        .config("spark.driver.host", "127.0.0.1")
+        # Bound the driver status store — the pipeline emits hundreds of
+        # jobs/stages on tiny data; default retention OOMs the heap.
+        .config("spark.ui.retainedJobs", "40")
+        .config("spark.ui.retainedStages", "80")
+        .config("spark.ui.retainedTasks", "1000")
+        .config("spark.sql.ui.retainedExecutions", "40")
+    )
+
+    # Opt-in GPU acceleration (SPARK_RAPIDS=1). Mirrors
+    # conf/spark-rapids.conf.template, but only the settings that apply in
+    # local[*] mode — GPU *resource scheduling* (executor.resource.gpu.*,
+    # discoveryScript) is a standalone/YARN concern and is omitted here.
+    # The RAPIDS Accelerator jar must be on the classpath: set RAPIDS_JAR, or if
+    # the plugin fails to load pass it at launch via
+    #   PYSPARK_SUBMIT_ARGS="--jars <rapids.jar> ... pyspark-shell"
+    if _truthy(os.environ.get("SPARK_RAPIDS")):
+        builder = (
+            builder
+            .config("spark.plugins", "com.nvidia.spark.SQLPlugin")
+            .config("spark.rapids.sql.enabled", "true")
+            .config("spark.rapids.sql.concurrentGpuTasks",
+                    os.environ.get("RAPIDS_CONCURRENT_GPU_TASKS", "2"))
+            .config("spark.rapids.memory.pinnedPool.size",
+                    os.environ.get("RAPIDS_PINNED_POOL", "2G"))
+            .config("spark.rapids.sql.format.parquet.reader.type", "MULTITHREADED")
+            .config("spark.rapids.sql.explain",
+                    os.environ.get("RAPIDS_EXPLAIN", "NONE"))
+        )
+        rapids_jar = os.environ.get("RAPIDS_JAR")
+        if rapids_jar:
+            builder = builder.config("spark.jars", rapids_jar)
+
+    session = builder.getOrCreate()
+    session.sparkContext.setLogLevel("ERROR")
+
+    yield session
+
+    session.stop()

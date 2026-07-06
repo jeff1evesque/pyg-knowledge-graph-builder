@@ -1,8 +1,11 @@
 name: tests
 
-# Runs the unit-test suite on GitHub-hosted runners. The suite is built to run
-# against a local SparkSession (no Spark cluster and no RAPIDS Accelerator are
-# required), so a plain Ubuntu runner reproduces a local test run exactly.
+# Fast unit suite — runs on every push and PR, and drives the README badge.
+# The heavier end-to-end pipeline smoke test is a separate, manual-only workflow
+# (.github/workflows/e2e.yml); see the README "Testing" section for why.
+#
+# Runs against a local SparkSession (no cluster, no RAPIDS), so a stock
+# ubuntu-latest runner (Java 17 + Python 3.12) reproduces a local run exactly.
 on:
   push:
   pull_request:
@@ -13,7 +16,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  pytest:
+  unit:
+    name: unit tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,9 +37,9 @@ jobs:
       - name: Install test dependencies
         run: pip install -r requirements-test.txt
 
-      - name: Run tests
+      - name: Run unit tests
         env:
           # Pin Spark's bind address so the local[*] driver comes up on runners
           # that don't resolve their own hostname.
           SPARK_LOCAL_IP: 127.0.0.1
-        run: python -m pytest tests/ -q
+        run: python -m pytest tests/ -q -m "not e2e"

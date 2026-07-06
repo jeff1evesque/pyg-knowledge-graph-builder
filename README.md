@@ -1685,13 +1685,33 @@ The pipeline is designed to handle:
 
 Live pass/fail status is the **tests** badge at the top of this README, which reflects the latest [GitHub Actions](.github/workflows/tests.yml) run on the default branch.
 
-The suite runs entirely against a **local `SparkSession`** — no Spark cluster and no RAPIDS Accelerator are required. The same application code runs unchanged on the GPU cluster (RAPIDS is a drop-in SQL plugin), so plain local Spark is a valid way to unit-test the enrichment and PyG logic. CI runs it on a stock `ubuntu-latest` runner (Java 17 + Python 3.12) on every push and pull request.
+The suite runs entirely against a **local `SparkSession`** — no Spark cluster and no RAPIDS Accelerator are required. The same application code runs unchanged on the GPU cluster (RAPIDS is a drop-in SQL plugin), so plain local Spark is a valid way to test the enrichment and PyG logic.
+
+Tests are split into two groups by the `e2e` marker:
+
+- **Fast suite** (everything except `e2e`) — runs on a stock `ubuntu-latest` runner (Java 17 + Python 3.12) on **every push and pull request** ([`tests.yml`](.github/workflows/tests.yml)); this is what the **tests** badge reflects.
+- **End-to-end smoke** (`e2e`) — runs the real `build_graph` over small fixtures for all sources. It's heavy (~1,300 Spark stages regardless of data size) and does **not** reliably finish on a 7 GB GitHub runner, so it is **manual-only** ([`e2e.yml`](.github/workflows/e2e.yml), `workflow_dispatch`) and best run locally / on a capable machine.
 
 ```bash
 python -m venv .venv
 .venv/bin/pip install -r requirements-test.txt          # runtime deps + pyspark + pytest
-SPARK_LOCAL_IP=127.0.0.1 .venv/bin/python -m pytest tests/
+
+# Fast suite (what CI runs on every push/PR):
+SPARK_LOCAL_IP=127.0.0.1 .venv/bin/python -m pytest tests/ -m "not e2e"
+
+# End-to-end pipeline smoke test on CPU (heavy; run locally / on a capable
+# machine). Raise the driver heap since the full pipeline needs more than default:
+SPARK_LOCAL_IP=127.0.0.1 PYSPARK_SUBMIT_ARGS="--driver-memory 4g pyspark-shell" \
+  .venv/bin/python -m pytest tests/ -m e2e -s
+
+# ...the same e2e test on GPU via the RAPIDS Accelerator (requires a GPU + the
+# RAPIDS jar). SPARK_RAPIDS=1 enables the plugin; point RAPIDS_JAR at the jar:
+SPARK_RAPIDS=1 RAPIDS_JAR=/path/to/rapids-4-spark_2.12-<version>.jar \
+SPARK_LOCAL_IP=127.0.0.1 PYSPARK_SUBMIT_ARGS="--driver-memory 4g pyspark-shell" \
+  .venv/bin/python -m pytest tests/ -m e2e -s
 ```
+
+The e2e test runs on **CPU by default**; set `SPARK_RAPIDS=1` to run it through the **RAPIDS Accelerator** on GPU. RAPIDS is a drop-in SQL plugin, so the application logic — and therefore every assertion — is identical on CPU and GPU; the toggle only changes where the DataFrame operators execute. (The one Python parsing UDF always runs on CPU under both.) The GPU settings mirror [`conf/spark-rapids.conf.template`](conf/spark-rapids.conf.template) / [`bin/submit_spark_job.sh`](bin/submit_spark_job.sh), minus the cluster-only GPU resource-scheduling confs that don't apply in `local[*]` mode.
 
 `pyspark` is cluster-provided in production and is therefore not in `requirements.txt`; `requirements-test.txt` layers it (and `pytest`) on top for local and CI runs.
 
@@ -1704,5 +1724,6 @@ Test depth is calibrated to risk rather than applied uniformly — deeper covera
 | **1 — pure / no-Spark** | Import-time integrity, vector geometry, and hand-maintained pattern tables. Sub-second. | `test_imports.py` (imports every `spark_jobs` module), `test_vector_layout.py` / `test_edge_vector_layout.py` (`VectorLayout` / `EdgeVectorLayout` boundaries), `test_source_patterns.py` (NOAA/market/SEC pattern-dict integrity) |
 | **2 — linker smokes** | Each intra-source linker's `enrich()` driven end-to-end over tiny in-memory triples: one happy path + one foreign-input short-circuit. | `test_{bls,noaa,market,sec}_linker.py` |
 | **Targeted deep** | One focused test on each source's trickiest computation (including the negative case), where a silent regression would be costly. | severity escalation (NOAA), option moneyness (market), CIK unification (SEC), temporal sequencing (BLS) |
+| **e2e — pipeline smoke** (`e2e` marker, manual-only) | The real `build_graph` end-to-end over tiny committed RDF fixtures: both source loaders (`.nt` and turtle-parquet) × all three modes (`full`, and the `enrichment_only` → `pyg_only` split), asserting a valid `.pt` + all six metadata JSONs and layout-consistent tensor shapes. Catches wiring / API-mismatch bugs the unit tiers can't. | `tests/e2e/test_pipeline_smoke.py` |
 
 Exhaustive per-relationship assertions are intentionally **not** written — the targeted deep tests capture the high-risk logic without the brittleness of pinning every output.
