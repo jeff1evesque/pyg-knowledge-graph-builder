@@ -11,9 +11,14 @@ Coverage matrix:
   * modes:   full, and the split enrichment_only -> pyg_only round-trip
   * loaders: turtle_parquet (production UDF path) and ntriples (default loader)
 
+Sources: noaa / market / sec. BLS is intentionally excluded from the e2e run —
+its enrichment (correlations/patterns/measurements) fans out into ~1,300 Spark
+stages regardless of data size, which OOMs / times out a CI runner; BLS logic is
+covered by tests/test_bls_linker.py instead.
+
 Marked ``e2e`` so the fast unit job (``-m "not e2e"``) stays fast; a separate CI
-job runs ``-m e2e``. Fixtures are tiny (~200 KB) and trimmed from real source
-data. No cluster, no GPU/RAPIDS — identical logic runs on CPU.
+job runs ``-m e2e``. Fixtures are tiny and trimmed from real source data. No
+cluster, no GPU/RAPIDS — identical logic runs on CPU.
 """
 
 import json
