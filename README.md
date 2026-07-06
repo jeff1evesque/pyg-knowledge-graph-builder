@@ -1699,14 +1699,19 @@ python -m venv .venv
 # Fast suite (what CI runs on every push/PR):
 SPARK_LOCAL_IP=127.0.0.1 .venv/bin/python -m pytest tests/ -m "not e2e"
 
-# End-to-end pipeline smoke test (heavy; run locally / on a capable machine).
-# Raise the driver heap since the full pipeline needs more than the default:
+# End-to-end pipeline smoke test on CPU (heavy; run locally / on a capable
+# machine). Raise the driver heap since the full pipeline needs more than default:
 SPARK_LOCAL_IP=127.0.0.1 PYSPARK_SUBMIT_ARGS="--driver-memory 4g pyspark-shell" \
   .venv/bin/python -m pytest tests/ -m e2e -s
 
-# Everything at once:
-SPARK_LOCAL_IP=127.0.0.1 .venv/bin/python -m pytest tests/
+# ...the same e2e test on GPU via the RAPIDS Accelerator (requires a GPU + the
+# RAPIDS jar). SPARK_RAPIDS=1 enables the plugin; point RAPIDS_JAR at the jar:
+SPARK_RAPIDS=1 RAPIDS_JAR=/path/to/rapids-4-spark_2.12-<version>.jar \
+SPARK_LOCAL_IP=127.0.0.1 PYSPARK_SUBMIT_ARGS="--driver-memory 4g pyspark-shell" \
+  .venv/bin/python -m pytest tests/ -m e2e -s
 ```
+
+The e2e test runs on **CPU by default**; set `SPARK_RAPIDS=1` to run it through the **RAPIDS Accelerator** on GPU. RAPIDS is a drop-in SQL plugin, so the application logic — and therefore every assertion — is identical on CPU and GPU; the toggle only changes where the DataFrame operators execute. (The one Python parsing UDF always runs on CPU under both.) The GPU settings mirror [`conf/spark-rapids.conf.template`](conf/spark-rapids.conf.template) / [`bin/submit_spark_job.sh`](bin/submit_spark_job.sh), minus the cluster-only GPU resource-scheduling confs that don't apply in `local[*]` mode.
 
 `pyspark` is cluster-provided in production and is therefore not in `requirements.txt`; `requirements-test.txt` layers it (and `pytest`) on top for local and CI runs.
 
