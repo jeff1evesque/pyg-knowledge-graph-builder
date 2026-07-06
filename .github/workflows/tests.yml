@@ -51,6 +51,8 @@ jobs:
   e2e:
     name: e2e pipeline smoke test
     runs-on: ubuntu-latest
+    # Guard against a runaway/hung pipeline (default job timeout is 6h).
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -76,4 +78,6 @@ jobs:
           # even on tiny fixtures). Leaves headroom for Python/torch on a 7 GB
           # runner. Must end with `pyspark-shell`.
           PYSPARK_SUBMIT_ARGS: "--driver-memory 4g pyspark-shell"
-        run: python -m pytest tests/ -q -m e2e
+        # -s streams Spark's live [Stage N] output (pytest captures by default,
+        # which hid all progress); -rA shows a summary of every test outcome.
+        run: python -m pytest tests/ -m e2e -s -rA

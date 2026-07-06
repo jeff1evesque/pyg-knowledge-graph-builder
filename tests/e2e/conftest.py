@@ -7,9 +7,10 @@ and the driver's status listeners retain per-job/stage/task metadata by default
 (1000 jobs / 1000 stages / 100000 tasks) — that unbounded accumulation OOMs the
 driver heap (observed: OutOfMemoryError in SQLAppStatusListener.onJobStart).
 
-This fixture caps that retention so the status store stays small, and is
-function-scoped so each e2e test gets a fresh SparkContext (no cross-test
-accumulation).
+This override caps that retention so the status store stays small. It is
+session-scoped (one JVM shared by the e2e tests): with the OOM fixed there is no
+per-test crash to isolate, and a single long-lived context avoids SparkContext
+stop/restart overhead and hangs.
 
 The driver *heap* itself is raised in the CI e2e job via PYSPARK_SUBMIT_ARGS
 (``spark.driver.memory`` is only honored at JVM launch, before pyspark starts).
@@ -18,7 +19,7 @@ The driver *heap* itself is raised in the CI e2e job via PYSPARK_SUBMIT_ARGS
 import pytest
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="session")
 def spark(tmp_path_factory):
     from pyspark.sql import SparkSession
 
