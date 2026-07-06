@@ -1685,11 +1685,26 @@ The pipeline is designed to handle:
 
 Live pass/fail status is the **tests** badge at the top of this README, which reflects the latest [GitHub Actions](.github/workflows/tests.yml) run on the default branch.
 
-The suite runs entirely against a **local `SparkSession`** — no Spark cluster and no RAPIDS Accelerator are required. The same application code runs unchanged on the GPU cluster (RAPIDS is a drop-in SQL plugin), so plain local Spark is a valid way to unit-test the enrichment and PyG logic. CI runs it on a stock `ubuntu-latest` runner (Java 17 + Python 3.12) on every push and pull request.
+The suite runs entirely against a **local `SparkSession`** — no Spark cluster and no RAPIDS Accelerator are required. The same application code runs unchanged on the GPU cluster (RAPIDS is a drop-in SQL plugin), so plain local Spark is a valid way to test the enrichment and PyG logic.
+
+Tests are split into two groups by the `e2e` marker:
+
+- **Fast suite** (everything except `e2e`) — runs on a stock `ubuntu-latest` runner (Java 17 + Python 3.12) on **every push and pull request** ([`tests.yml`](.github/workflows/tests.yml)); this is what the **tests** badge reflects.
+- **End-to-end smoke** (`e2e`) — runs the real `build_graph` over small fixtures for all sources. It's heavy (~1,300 Spark stages regardless of data size) and does **not** reliably finish on a 7 GB GitHub runner, so it is **manual-only** ([`e2e.yml`](.github/workflows/e2e.yml), `workflow_dispatch`) and best run locally / on a capable machine.
 
 ```bash
 python -m venv .venv
 .venv/bin/pip install -r requirements-test.txt          # runtime deps + pyspark + pytest
+
+# Fast suite (what CI runs on every push/PR):
+SPARK_LOCAL_IP=127.0.0.1 .venv/bin/python -m pytest tests/ -m "not e2e"
+
+# End-to-end pipeline smoke test (heavy; run locally / on a capable machine).
+# Raise the driver heap since the full pipeline needs more than the default:
+SPARK_LOCAL_IP=127.0.0.1 PYSPARK_SUBMIT_ARGS="--driver-memory 4g pyspark-shell" \
+  .venv/bin/python -m pytest tests/ -m e2e -s
+
+# Everything at once:
 SPARK_LOCAL_IP=127.0.0.1 .venv/bin/python -m pytest tests/
 ```
 
@@ -1704,5 +1719,6 @@ Test depth is calibrated to risk rather than applied uniformly — deeper covera
 | **1 — pure / no-Spark** | Import-time integrity, vector geometry, and hand-maintained pattern tables. Sub-second. | `test_imports.py` (imports every `spark_jobs` module), `test_vector_layout.py` / `test_edge_vector_layout.py` (`VectorLayout` / `EdgeVectorLayout` boundaries), `test_source_patterns.py` (NOAA/market/SEC pattern-dict integrity) |
 | **2 — linker smokes** | Each intra-source linker's `enrich()` driven end-to-end over tiny in-memory triples: one happy path + one foreign-input short-circuit. | `test_{bls,noaa,market,sec}_linker.py` |
 | **Targeted deep** | One focused test on each source's trickiest computation (including the negative case), where a silent regression would be costly. | severity escalation (NOAA), option moneyness (market), CIK unification (SEC), temporal sequencing (BLS) |
+| **e2e — pipeline smoke** (`e2e` marker, manual-only) | The real `build_graph` end-to-end over tiny committed RDF fixtures: both source loaders (`.nt` and turtle-parquet) × all three modes (`full`, and the `enrichment_only` → `pyg_only` split), asserting a valid `.pt` + all six metadata JSONs and layout-consistent tensor shapes. Catches wiring / API-mismatch bugs the unit tiers can't. | `tests/e2e/test_pipeline_smoke.py` |
 
 Exhaustive per-relationship assertions are intentionally **not** written — the targeted deep tests capture the high-risk logic without the brittleness of pinning every output.
