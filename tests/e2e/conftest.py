@@ -23,6 +23,7 @@ results, so the assertions are identical either way.
 """
 
 import os
+import sys
 
 import pytest
 
@@ -37,10 +38,20 @@ def spark(tmp_path_factory):
 
     warehouse = tmp_path_factory.mktemp("spark_warehouse_e2e")
 
+    # Pin the executor/worker Python to the *same* interpreter running the
+    # driver (this venv). Otherwise PySpark launches workers with whatever
+    # `python3` is first on PATH — e.g. the system interpreter, which lacks
+    # rdflib — and the turtle_parquet parse UDF silently returns [] for every
+    # row (0 triples). Running `.venv/bin/python -m pytest` without activating
+    # the venv is exactly that situation, so set this explicitly rather than
+    # relying on PATH/PYSPARK_PYTHON being configured by the caller.
+    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+
     builder = (
         SparkSession.builder
         .master("local[2]")
         .appName("pyg-kg-builder-e2e")
+        .config("spark.pyspark.python", sys.executable)
         .config("spark.ui.enabled", "false")
         .config("spark.sql.shuffle.partitions", "2")
         .config("spark.sql.warehouse.dir", str(warehouse))
