@@ -47,6 +47,26 @@ class EnrichmentPipeline:
             'total_enrichment': 0
         }
 
+    def _settle(self, df: DataFrame) -> DataFrame:
+        """Materialize *and truncate* the logical plan.
+
+        The pipeline grows ``triples_df`` by unioning each phase's output, so
+        its logical plan deepens on every phase. ``.cache()`` materializes the
+        rows but does NOT truncate the logical plan — Catalyst keeps
+        re-analyzing the ever-deeper union/dropDuplicates/regexp tree, and
+        constraint inference makes the plan blow up super-linearly (measured
+        6 -> 436 -> 5,854 plan nodes over three phases on a 184-triple fixture,
+        then OutOfMemoryError with ~1.5M constraint BitSets on the driver
+        heap). ``localCheckpoint(eager=True)`` writes the rows to the block
+        manager and replaces the plan with a single-node scan, so each phase
+        starts planning fresh and the node count stays flat.
+
+        localCheckpoint is executor-local (not fault-tolerant); that is fine
+        for a batch job, which simply recomputes from source on failure, and
+        avoids the reliable-checkpoint requirement of an HDFS/S3 checkpoint dir.
+        """
+        return df.localCheckpoint(eager=True)
+
     def run(
         self,
         enable_ontology_mapping: bool = False,
@@ -58,6 +78,11 @@ class EnrichmentPipeline:
 
         self.stats['initial_triples'] = self.triples_df.count()
         logger.info(f"Initial triples_df size: {self.stats['initial_triples']} triples")
+
+        # Truncate the source lineage before any phase builds on it. For the
+        # turtle_parquet path this also detaches the per-row rdflib parse UDF
+        # so it is not re-planned into every downstream phase.
+        self.triples_df = self._settle(self.triples_df)
 
         # ============================================
         # PHASE 1: INTRA-SOURCE ENRICHMENT
@@ -81,13 +106,11 @@ class EnrichmentPipeline:
         spark_new = intra_result.get('spark_new_triples')
         if spark_new is not None:
             old_df = self.triples_df
-            self.triples_df = (
+            self.triples_df = self._settle(
                 self.triples_df
                 .unionByName(spark_new)
                 .dropDuplicates(["subject", "predicate", "object"])
-                .cache()
             )
-            self.triples_df.count()
             old_df.unpersist()
 
             logger.info("Merged intra-source enrichment into triples_df on executors")
@@ -107,13 +130,11 @@ class EnrichmentPipeline:
 
         if temporal_count > 0:
             old_df = self.triples_df
-            self.triples_df = (
+            self.triples_df = self._settle(
                 self.triples_df
                 .unionByName(temporal_new)
                 .dropDuplicates(["subject", "predicate", "object"])
-                .cache()
             )
-            self.triples_df.count()
             old_df.unpersist()
             temporal_new.unpersist()
 
@@ -133,13 +154,11 @@ class EnrichmentPipeline:
 
         if cross_count > 0:
             old_df = self.triples_df
-            self.triples_df = (
+            self.triples_df = self._settle(
                 self.triples_df
                 .unionByName(cross_new)
                 .dropDuplicates(["subject", "predicate", "object"])
-                .cache()
             )
-            self.triples_df.count()
             old_df.unpersist()
             cross_new.unpersist()
 
@@ -163,13 +182,11 @@ class EnrichmentPipeline:
 
             if ontology_count > 0:
                 old_df = self.triples_df
-                self.triples_df = (
+                self.triples_df = self._settle(
                     self.triples_df
                     .unionByName(ontology_new)
                     .dropDuplicates(["subject", "predicate", "object"])
-                    .cache()
                 )
-                self.triples_df.count()
                 old_df.unpersist()
                 ontology_new.unpersist()
 
