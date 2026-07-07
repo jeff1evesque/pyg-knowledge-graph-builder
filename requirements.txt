@@ -2,9 +2,10 @@
 #
 # Install into the Spark Python environment on every worker. rdflib is used
 # on executors (Turtle parsing UDF) and the driver; torch / torch-geometric
-# are used on the driver for HeteroData assembly and torch.save; boto3 is
-# used on the driver to read optional definitions from S3 and to mirror final
-# artifacts to an S3 archive.
+# are used on the driver for HeteroData assembly and torch.save; pandas /
+# pyarrow back the driver's Arrow-optimized toPandas() collection in the PyG
+# feature build; boto3 is used on the driver to read optional definitions from
+# S3 and to mirror final artifacts to an S3 archive.
 #
 # NOTE: install torch / torch-geometric from the wheel index matching your
 # cluster's GPUs and CUDA version (see the PyTorch and PyG install guides).
@@ -12,6 +13,8 @@
 rdflib>=6.0.0,<8.0.0
 torch>=2.5.0
 torch-geometric>=2.6.0
+pandas>=1.0.5
+pyarrow>=4.0.0
 boto3>=1.28.0
 
 # pyspark is provided by the Spark cluster at runtime. Uncomment for local
