@@ -1699,8 +1699,14 @@ python -m venv .venv
 # Fast suite (what CI runs on every push/PR):
 SPARK_LOCAL_IP=127.0.0.1 .venv/bin/python -m pytest tests/ -m "not e2e"
 
-# End-to-end pipeline smoke test on CPU (heavy; run locally / on a capable
-# machine). Raise the driver heap since the full pipeline needs more than default:
+# End-to-end pipeline smoke test (heavy; run locally / on a capable machine).
+# bin/run_e2e_tests.sh wraps the env boilerplate below — SPARK_LOCAL_IP, the
+# raised driver heap (the full pipeline fans out into ~1,300 stages and OOMs the
+# default heap), and the RAPIDS toggle:
+bin/run_e2e_tests.sh          # CPU (default)
+bin/run_e2e_tests.sh gpu      # GPU via the RAPIDS Accelerator (auto-finds the jar)
+
+# ...or invoke pytest directly. CPU:
 SPARK_LOCAL_IP=127.0.0.1 PYSPARK_SUBMIT_ARGS="--driver-memory 4g pyspark-shell" \
   .venv/bin/python -m pytest tests/ -m e2e -s
 
@@ -1710,6 +1716,8 @@ SPARK_RAPIDS=1 RAPIDS_JAR=/path/to/rapids-4-spark_2.12-<version>.jar \
 SPARK_LOCAL_IP=127.0.0.1 PYSPARK_SUBMIT_ARGS="--driver-memory 4g pyspark-shell" \
   .venv/bin/python -m pytest tests/ -m e2e -s
 ```
+
+The `gpu` mode of [`bin/run_e2e_tests.sh`](bin/run_e2e_tests.sh) resolves the RAPIDS jar via a glob (`/opt/spark/jars/rapids-4-spark_*.jar`, overridable with `RAPIDS_JAR` / `RAPIDS_JAR_DIR`), so a version bump on the host needs no edit.
 
 The e2e test runs on **CPU by default**; set `SPARK_RAPIDS=1` to run it through the **RAPIDS Accelerator** on GPU. RAPIDS is a drop-in SQL plugin, so the application logic — and therefore every assertion — is identical on CPU and GPU; the toggle only changes where the DataFrame operators execute. (The one Python parsing UDF always runs on CPU under both.) The GPU settings mirror [`conf/spark-rapids.conf.template`](conf/spark-rapids.conf.template) / [`bin/submit_spark_job.sh`](bin/submit_spark_job.sh), minus the cluster-only GPU resource-scheduling confs that don't apply in `local[*]` mode.
 

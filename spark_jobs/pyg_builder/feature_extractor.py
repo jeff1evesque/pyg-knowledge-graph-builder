@@ -53,7 +53,10 @@ import torch
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 
-from spark_jobs.utils.rdf_utils import ONTOLOGY_NAMESPACE_INDICES
+from spark_jobs.utils.rdf_utils import (
+    NAMESPACE_PREFIXES,
+    ONTOLOGY_NAMESPACE_INDICES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1305,8 +1308,6 @@ class FeatureExtractor:
         - class_hierarchy: ~5000 rows (classes × depth, transitive)
         - property_schema: ~500 rows (properties with domain/range)
         """
-        from spark_jobs.utils.rdf_utils import NAMESPACE_PREFIXES
-
         # Collect type URI → PyG name mapping.
         # One row per distinct type URI — typically <500.
         type_mapping_rows = (
