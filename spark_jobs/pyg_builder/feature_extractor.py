@@ -417,6 +417,13 @@ class FeatureExtractor:
         # scale proportionally
         self._layout = VectorLayout(self._vector_dim)
 
+        # Ontology-wide existence flags, populated once per build_features()
+        # run and reused across all node types (see the hoist in that method).
+        # Conservative defaults so a direct encoder call can't AttributeError.
+        self._has_class_hierarchy = True
+        self._has_property_schema = True
+        self._has_property_hierarchy = True
+
     def get_layout(self) -> "VectorLayout":
         """Return the VectorLayout instance for metadata registration."""
         return self._layout
@@ -616,56 +623,88 @@ class FeatureExtractor:
         )
 
         # ============================================
-        # Build vectors per node type (on executors, collect per type)
-        # Process largest types first so OOM fails fast if it will fail
+        # Build ALL node-type vectors in ONE distributed pass.
+        #
+        # The encoders carry ``node_type`` through every projection, so every
+        # type's sparse (node_type, node_id, dim, value) entries are produced
+        # and aggregated together — a single Spark job-chain instead of one
+        # per type (which was the dominant cost). node_id is 0-indexed within
+        # a type, so the driver splits the collected frame back out by
+        # node_type when scattering into per-type dense tensors.
         # ============================================
-        logger.info("  Assembling feature vectors per node type...")
+        logger.info("  Assembling feature vectors (single pass, all types)...")
+
+        # Ontology-wide existence checks, evaluated ONCE (not once per type).
+        self._has_class_hierarchy = bool(class_hierarchy_df.head(1))
+        self._has_property_schema = bool(property_schema_df.head(1))
+        self._has_property_hierarchy = bool(property_hierarchy_df.head(1))
+
+        segment_names = [
+            f"ontology_structure[{layout.seg1_start}:{layout.seg2_start}]",
+            f"property_schema[{layout.seg2_start}:{layout.seg3_start}]",
+            f"literal_values[{layout.seg3_start}:{layout.vector_dim}]",
+        ]
+
+        all_nodes = node_id_df.select("uri", "node_id", "node_type")
+
+        seg1 = self._encode_ontology_structure(
+            all_type_uris=type_uri_df,
+            all_nodes=all_nodes,
+            class_hierarchy_df=class_hierarchy_df,
+        )
+        seg2 = self._encode_property_schema(
+            all_node_props=node_properties_df,
+            property_schema_df=property_schema_df,
+            property_hierarchy_df=property_hierarchy_df,
+        )
+        seg3 = self._encode_literal_values(
+            numeric_df=numeric_df,
+            categorical_df=categorical_df,
+            norm_stats=norm_stats,
+        )
+
+        all_parts = [p for p in [seg1, seg2, seg3] if p is not None]
 
         feature_tensors: Dict[str, torch.Tensor] = {}
         feature_names: Dict[str, List[str]] = {}
+        active_types = [
+            (t, n) for t, n in node_counts.items() if n > 0
+        ]
 
-        sorted_types = sorted(
-            node_counts.items(), key=lambda x: -x[1]
-        )
+        if not all_parts:
+            # No sparse entries at all — every type is a zero tensor.
+            for node_type, num_nodes in active_types:
+                feature_tensors[node_type] = torch.zeros(
+                    num_nodes, vector_dim, dtype=torch.float32
+                )
+                feature_names[node_type] = segment_names
+        else:
+            combined = all_parts[0]
+            for p in all_parts[1:]:
+                combined = combined.unionAll(p)
 
-        for node_type, num_nodes in sorted_types:
-            if num_nodes == 0:
-                continue
-
-            dense_mb = num_nodes * vector_dim * 4 / (1024 * 1024)
-            needs_chunking = num_nodes > self._chunk_threshold
-            logger.info(
-                f"    [{node_type}] {num_nodes:,} nodes, "
-                f"dense tensor: {dense_mb:,.1f} MB"
-                f"{' (chunked collection)' if needs_chunking else ''}"
+            # Aggregate on executors: sum values at same (node_type, node_id,
+            # dim). Cache the single result so the bounded per-batch collects
+            # below read from cache instead of recomputing the encode plan.
+            combined = (
+                combined
+                .groupBy("node_type", "node_id", "dim")
+                .agg(F.sum("value").alias("value"))
+                .select(
+                    F.col("node_type"),
+                    F.col("node_id").cast("long"),
+                    F.col("dim").cast("int"),
+                    F.col("value").cast("float"),
+                )
+                .cache()
             )
 
-            tensor = self._build_type_vectors(
-                node_type=node_type,
-                num_nodes=num_nodes,
-                node_id_df=node_id_df,
-                type_uri_df=type_uri_df,
-                class_hierarchy_df=class_hierarchy_df,
-                property_schema_df=property_schema_df,
-                property_hierarchy_df=property_hierarchy_df,
-                node_properties_df=node_properties_df,
-                numeric_df=numeric_df,
-                categorical_df=categorical_df,
-                norm_stats=norm_stats,
+            self._scatter_all_types(
+                combined, active_types, vector_dim,
+                feature_tensors, feature_names, segment_names,
             )
 
-            feature_tensors[node_type] = tensor
-            feature_names[node_type] = [
-                f"ontology_structure"
-                f"[{layout.seg1_start}:{layout.seg2_start}]",
-                f"property_schema"
-                f"[{layout.seg2_start}:{layout.seg3_start}]",
-                f"literal_values"
-                f"[{layout.seg3_start}:{layout.vector_dim}]",
-            ]
-
-            # Force GC between types to reclaim Pandas/numpy intermediaries
-            gc.collect()
+            combined.unpersist()
 
         # Cleanup cached intermediates
         for df in [numeric_df, categorical_df, class_hierarchy_df,
@@ -677,6 +716,103 @@ class FeatureExtractor:
                     pass
 
         return feature_tensors, feature_names
+
+    def _scatter_all_types(
+        self,
+        combined: DataFrame,
+        active_types: List[Tuple[str, int]],
+        vector_dim: int,
+        feature_tensors: Dict[str, "torch.Tensor"],
+        feature_names: Dict[str, List[str]],
+        segment_names: List[str],
+    ) -> None:
+        """
+        Collect the single aggregated (node_type, node_id, dim, value) frame
+        and scatter it into per-type dense tensors.
+
+        Driver-memory discipline (preserves the #186 guarantee at cluster
+        scale; a single batch on small data):
+          - Large types (> chunk_threshold nodes) are collected one at a time
+            via the chunked node_id-range path, so one big type can't blow the
+            driver heap.
+          - Small types are collected in node-count-bounded batches — one
+            toPandas per batch instead of one per type.
+        """
+        import torch
+
+        large = [
+            (t, n) for t, n in active_types if n > self._chunk_threshold
+        ]
+        small = [
+            (t, n) for t, n in active_types if n <= self._chunk_threshold
+        ]
+
+        for node_type, num_nodes in large:
+            logger.info(
+                f"    [{node_type}] {num_nodes:,} nodes (chunked collection)"
+            )
+            tensor = np.zeros((num_nodes, vector_dim), dtype=np.float32)
+            type_combined = (
+                combined
+                .filter(F.col("node_type") == node_type)
+                .select("node_id", "dim", "value")
+            )
+            self._collect_and_scatter_chunked(
+                type_combined, tensor, num_nodes, vector_dim
+            )
+            feature_tensors[node_type] = torch.from_numpy(tensor).contiguous()
+            feature_names[node_type] = segment_names
+            gc.collect()
+
+        budget = max(1, self._chunk_threshold)
+
+        def flush(batch: List[Tuple[str, int]]) -> None:
+            if not batch:
+                return
+            names = [t for t, _ in batch]
+            pdf = (
+                combined
+                .filter(F.col("node_type").isin(names))
+                .toPandas()
+            )
+            groups = (
+                {nt: g for nt, g in pdf.groupby("node_type")}
+                if not pdf.empty else {}
+            )
+            for node_type, num_nodes in batch:
+                tensor = np.zeros(
+                    (num_nodes, vector_dim), dtype=np.float32
+                )
+                g = groups.get(node_type)
+                if g is not None and not g.empty:
+                    node_ids = g["node_id"].values
+                    dims = g["dim"].values
+                    values = g["value"].values
+                    valid_mask = (dims >= 0) & (dims < vector_dim)
+                    tensor[
+                        node_ids[valid_mask], dims[valid_mask]
+                    ] = values[valid_mask]
+                feature_tensors[node_type] = (
+                    torch.from_numpy(tensor).contiguous()
+                )
+                feature_names[node_type] = segment_names
+            del pdf
+            gc.collect()
+
+        batch: List[Tuple[str, int]] = []
+        batch_nodes = 0
+        for node_type, num_nodes in small:
+            if batch and batch_nodes + num_nodes > budget:
+                flush(batch)
+                batch = []
+                batch_nodes = 0
+            batch.append((node_type, num_nodes))
+            batch_nodes += num_nodes
+        flush(batch)
+        logger.info(
+            f"    Collected {len(small)} small + {len(large)} large "
+            f"node types"
+        )
 
     # ================================================================
     # Ontology structure extraction (all on executors)
@@ -1042,116 +1178,6 @@ class FeatureExtractor:
     # ================================================================
     # Per-type vector assembly (on executors, collect to driver)
     # ================================================================
-
-    def _build_type_vectors(
-        self,
-        node_type: str,
-        num_nodes: int,
-        node_id_df: DataFrame,
-        type_uri_df: DataFrame,
-        class_hierarchy_df: DataFrame,
-        property_schema_df: DataFrame,
-        property_hierarchy_df: DataFrame,
-        node_properties_df: DataFrame,
-        numeric_df: Optional[DataFrame],
-        categorical_df: Optional[DataFrame],
-        norm_stats: Optional[DataFrame],
-    ) -> torch.Tensor:
-        """
-        Build the full vector for all nodes of one type.
-
-        Each segment is computed on executors as a DataFrame of
-        (node_id, dim, value) sparse entries. These are aggregated on
-        executors (sum at same node_id+dim), then collected to the
-        driver and scattered into a pre-allocated dense numpy array.
-
-        For large types (>chunk_threshold nodes), collection is split
-        into node_id ranges to bound peak Pandas memory on the driver.
-        """
-        layout = self._layout
-        vector_dim = layout.vector_dim
-
-        # Filter all inputs to this node type
-        type_nodes = node_id_df.filter(
-            F.col("node_type") == node_type
-        ).select("uri", "node_id")
-
-        type_type_uris = type_uri_df.filter(
-            F.col("node_type") == node_type
-        )
-
-        type_node_props = node_properties_df.filter(
-            F.col("node_type") == node_type
-        )
-
-        # ============================================
-        # Compute all three segments (lazy on executors)
-        # ============================================
-        seg1_entries = self._encode_ontology_structure(
-            node_type=node_type,
-            type_nodes=type_nodes,
-            type_type_uris=type_type_uris,
-            class_hierarchy_df=class_hierarchy_df,
-        )
-
-        seg2_entries = self._encode_property_schema(
-            node_type=node_type,
-            type_nodes=type_nodes,
-            type_type_uris=type_type_uris,
-            type_node_props=type_node_props,
-            property_schema_df=property_schema_df,
-            property_hierarchy_df=property_hierarchy_df,
-        )
-
-        seg3_entries = self._encode_literal_values(
-            node_type=node_type,
-            numeric_df=numeric_df,
-            categorical_df=categorical_df,
-            norm_stats=norm_stats,
-        )
-
-        # ============================================
-        # Union all segments
-        # ============================================
-        all_parts = [
-            df for df in [seg1_entries, seg2_entries, seg3_entries]
-            if df is not None
-        ]
-
-        if not all_parts:
-            return torch.zeros(
-                num_nodes, vector_dim, dtype=torch.float32
-            )
-
-        combined = all_parts[0]
-        for df in all_parts[1:]:
-            combined = combined.unionAll(df)
-
-        # Aggregate on executors: sum values at same (node_id, dim)
-        combined = (
-            combined
-            .groupBy("node_id", "dim")
-            .agg(F.sum("value").alias("value"))
-            .select(
-                F.col("node_id").cast("long"),
-                F.col("dim").cast("int"),
-                F.col("value").cast("float"),
-            )
-        )
-
-        # ============================================
-        # Collect to driver and scatter into dense array
-        # ============================================
-        tensor = np.zeros((num_nodes, vector_dim), dtype=np.float32)
-
-        if num_nodes <= self._chunk_threshold:
-            self._collect_and_scatter(combined, tensor, vector_dim)
-        else:
-            self._collect_and_scatter_chunked(
-                combined, tensor, num_nodes, vector_dim
-            )
-
-        return torch.from_numpy(tensor).contiguous()
 
     def _collect_and_scatter(
         self,
@@ -1633,26 +1659,31 @@ class FeatureExtractor:
 
     def _encode_ontology_structure(
         self,
-        node_type: str,
-        type_nodes: DataFrame,
-        type_type_uris: DataFrame,
+        all_type_uris: DataFrame,
+        all_nodes: DataFrame,
         class_hierarchy_df: DataFrame,
     ) -> Optional[DataFrame]:
         """
         Encode Segment 1: class identity, class hierarchy, and
-        ontology/source membership.
+        ontology/source membership — for ALL node types in one pass.
 
-        All dim indices are derived from self._layout.
+        Every projection carries ``node_type`` so the disjoint per-type
+        vectors can be split apart on the driver (node_id is 0-indexed
+        within a type). All dim indices are derived from self._layout.
 
-        Returns DataFrame(node_id: long, dim: int, value: float) or None.
+        Inputs:
+          all_type_uris: DataFrame(node_type, node_id, type_uri) — every type
+          all_nodes:     DataFrame(uri, node_id, node_type) — every type
+
+        Returns DataFrame(node_type, node_id, dim, value) or None.
         """
         layout = self._layout
         parts: List[DataFrame] = []
 
         # --- Sub-segment 1a: Class Identity ---
         class_identity = (
-            type_type_uris
-            .select("node_id", "type_uri")
+            all_type_uris
+            .select("node_type", "node_id", "type_uri")
             .distinct()
         )
 
@@ -1661,6 +1692,7 @@ class FeatureExtractor:
 
         for seed_offset in _HASH_SEEDS:
             ci_encoded = class_identity.select(
+                F.col("node_type"),
                 F.col("node_id"),
                 (
                     F.abs(F.hash(F.col("type_uri"), F.lit(seed_offset)))
@@ -1675,15 +1707,16 @@ class FeatureExtractor:
         ch_start = layout.seg1_class_hierarchy_start
         ch_dim = layout.seg1_class_hierarchy_dim
 
-        if class_hierarchy_df.head(1):
+        if self._has_class_hierarchy:
             node_supers = (
-                type_type_uris
+                all_type_uris
                 .select(
+                    F.col("node_type"),
                     F.col("node_id"),
                     F.col("type_uri").alias("class_uri"),
                 )
                 .join(class_hierarchy_df, "class_uri", "inner")
-                .select("node_id", "superclass_uri", "depth")
+                .select("node_type", "node_id", "superclass_uri", "depth")
             )
 
             if node_supers.head(1):
@@ -1694,6 +1727,7 @@ class FeatureExtractor:
 
                 for seed_offset in _HASH_SEEDS[:2]:
                     hier_encoded = node_supers.select(
+                        F.col("node_type"),
                         F.col("node_id"),
                         (
                             F.abs(
@@ -1715,9 +1749,9 @@ class FeatureExtractor:
 
         for namespace, onto_idx in ONTOLOGY_NAMESPACE_INDICES:
             ns_match = (
-                type_type_uris
+                all_type_uris
                 .filter(F.col("type_uri").startswith(namespace))
-                .select("node_id")
+                .select("node_type", "node_id")
                 .distinct()
                 .withColumn(
                     "dim",
@@ -1729,7 +1763,7 @@ class FeatureExtractor:
 
         # Also encode from node URI namespace
         node_ns_parts = self._encode_node_uri_namespace(
-            type_nodes, os_start, os_dim
+            all_nodes, os_start, os_dim
         )
         if node_ns_parts is not None:
             parts.append(node_ns_parts)
@@ -1742,6 +1776,7 @@ class FeatureExtractor:
             result = result.unionAll(df)
 
         return result.select(
+            F.col("node_type"),
             F.col("node_id").cast("long"),
             F.col("dim").cast("int"),
             F.col("value").cast("float"),
@@ -1749,19 +1784,23 @@ class FeatureExtractor:
 
     def _encode_node_uri_namespace(
         self,
-        type_nodes: DataFrame,
+        all_nodes: DataFrame,
         os_start: int,
         os_dim: int,
     ) -> Optional[DataFrame]:
         """
-        Encode ontology membership from the node's own URI namespace.
+        Encode ontology membership from the node's own URI namespace, for
+        all node types at once. Carries node_type through every projection.
+
+        Input:  all_nodes: DataFrame(uri, node_id, node_type)
+        Returns DataFrame(node_type, node_id, dim, value) or None.
         """
         parts = []
         for namespace, onto_idx in ONTOLOGY_NAMESPACE_INDICES:
             ns_match = (
-                type_nodes
+                all_nodes
                 .filter(F.col("uri").startswith(namespace))
-                .select("node_id")
+                .select("node_type", "node_id")
                 .distinct()
                 .withColumn(
                     "dim",
@@ -1789,31 +1828,32 @@ class FeatureExtractor:
 
     def _encode_property_schema(
         self,
-        node_type: str,
-        type_nodes: DataFrame,
-        type_type_uris: DataFrame,
-        type_node_props: DataFrame,
+        all_node_props: DataFrame,
         property_schema_df: DataFrame,
         property_hierarchy_df: DataFrame,
     ) -> Optional[DataFrame]:
         """
-        Encode Segment 2: property presence, domain/range signals,
-        and property hierarchy.
+        Encode Segment 2: property presence, domain/range signals, and
+        property hierarchy — for ALL node types in one pass. Every
+        projection carries ``node_type``.
 
-        All dim indices are derived from self._layout.
-
-        Returns DataFrame(node_id: long, dim: int, value: float) or None.
+        Input:  all_node_props: DataFrame(node_type, node_id, predicate)
+        Returns DataFrame(node_type, node_id, dim, value) or None.
         """
         layout = self._layout
         parts: List[DataFrame] = []
+
+        # Existence check once across all types (not once per type).
+        has_any_props = bool(all_node_props.head(1))
 
         # --- Sub-segment 2a: Property Presence ---
         pp_start = layout.seg2_property_presence_start
         pp_dim = layout.seg2_property_presence_dim
 
-        if type_node_props.head(1):
+        if has_any_props:
             for seed_offset in _HASH_SEEDS[:3]:
-                pp_encoded = type_node_props.select(
+                pp_encoded = all_node_props.select(
+                    F.col("node_type"),
                     F.col("node_id"),
                     (
                         F.abs(
@@ -1834,13 +1874,13 @@ class FeatureExtractor:
         dr_dim = layout.seg2_domain_range_dim
         dr_half = max(1, dr_dim // 2)
 
-        if type_node_props.head(1) and property_schema_df.head(1):
+        if has_any_props and self._has_property_schema:
             prop_with_schema = (
-                type_node_props
-                .select("node_id", "predicate")
+                all_node_props
+                .select("node_type", "node_id", "predicate")
                 .join(
                     property_schema_df,
-                    type_node_props["predicate"]
+                    all_node_props["predicate"]
                     == property_schema_df["property_uri"],
                     "inner",
                 )
@@ -1852,6 +1892,7 @@ class FeatureExtractor:
                     prop_with_schema
                     .filter(F.col("domain_uri").isNotNull())
                     .select(
+                        F.col("node_type"),
                         F.col("node_id"),
                         (
                             F.abs(
@@ -1869,6 +1910,7 @@ class FeatureExtractor:
                     prop_with_schema
                     .filter(F.col("range_uri").isNotNull())
                     .select(
+                        F.col("node_type"),
                         F.col("node_id"),
                         (
                             F.abs(
@@ -1886,14 +1928,13 @@ class FeatureExtractor:
         ph_start = layout.seg2_property_hierarchy_start
         ph_dim = layout.seg2_property_hierarchy_dim
 
-        if (type_node_props.head(1)
-                and property_hierarchy_df.head(1)):
+        if has_any_props and self._has_property_hierarchy:
             prop_with_super = (
-                type_node_props
-                .select("node_id", "predicate")
+                all_node_props
+                .select("node_type", "node_id", "predicate")
                 .join(
                     property_hierarchy_df,
-                    type_node_props["predicate"]
+                    all_node_props["predicate"]
                     == property_hierarchy_df["property_uri"],
                     "inner",
                 )
@@ -1903,6 +1944,7 @@ class FeatureExtractor:
             if prop_with_super.head(1):
                 for seed_offset in _HASH_SEEDS[:2]:
                     ph_encoded = prop_with_super.select(
+                        F.col("node_type"),
                         F.col("node_id"),
                         (
                             F.abs(
@@ -1926,6 +1968,7 @@ class FeatureExtractor:
             result = result.unionAll(df)
 
         return result.select(
+            F.col("node_type"),
             F.col("node_id").cast("long"),
             F.col("dim").cast("int"),
             F.col("value").cast("float"),
@@ -1937,18 +1980,20 @@ class FeatureExtractor:
 
     def _encode_literal_values(
         self,
-        node_type: str,
         numeric_df: Optional[DataFrame],
         categorical_df: Optional[DataFrame],
         norm_stats: Optional[DataFrame],
     ) -> Optional[DataFrame]:
         """
         Encode Segment 3: numeric values in hashed slots and categorical
-        values as multi-hot hash encoding.
+        values as multi-hot hash encoding — for ALL node types in one pass.
+        numeric_df / categorical_df already carry node_type, so no per-type
+        filtering is needed; node_type is projected through.
 
-        All dim indices are derived from self._layout.
-
-        Returns DataFrame(node_id: long, dim: int, value: float) or None.
+        Inputs:
+          numeric_df:     DataFrame(node_type, node_id, predicate, numeric_value)
+          categorical_df: DataFrame(node_type, node_id, predicate, cat_value)
+        Returns DataFrame(node_type, node_id, dim, value) or None.
         """
         layout = self._layout
         parts: List[DataFrame] = []
@@ -1957,78 +2002,71 @@ class FeatureExtractor:
         num_start = layout.seg3_numeric_start
         num_dim = layout.seg3_numeric_dim
 
-        if numeric_df is not None:
-            type_numeric = numeric_df.filter(
-                F.col("node_type") == node_type
-            )
-
-            if type_numeric.head(1):
-                if norm_stats is not None and self._normalize:
-                    type_numeric = (
-                        type_numeric
-                        .join(
-                            F.broadcast(norm_stats),
-                            "predicate",
-                            "left",
-                        )
-                        .withColumn(
-                            "normalized_value",
-                            (
-                                F.col("numeric_value")
-                                - F.coalesce(F.col("mu"), F.lit(0.0))
-                            )
-                            / F.coalesce(F.col("sigma"), F.lit(1.0)),
-                        )
-                        .drop("mu", "sigma")
+        if numeric_df is not None and numeric_df.head(1):
+            all_numeric = numeric_df
+            if norm_stats is not None and self._normalize:
+                all_numeric = (
+                    all_numeric
+                    .join(
+                        F.broadcast(norm_stats),
+                        "predicate",
+                        "left",
                     )
-                    value_col = "normalized_value"
-                else:
-                    type_numeric = type_numeric.withColumn(
-                        "normalized_value", F.col("numeric_value")
+                    .withColumn(
+                        "normalized_value",
+                        (
+                            F.col("numeric_value")
+                            - F.coalesce(F.col("mu"), F.lit(0.0))
+                        )
+                        / F.coalesce(F.col("sigma"), F.lit(1.0)),
                     )
-                    value_col = "normalized_value"
-
-                num_encoded = type_numeric.select(
-                    F.col("node_id"),
-                    (
-                        F.abs(F.hash(F.col("predicate"), F.lit(500)))
-                        % F.lit(num_dim)
-                        + F.lit(num_start)
-                    ).alias("dim"),
-                    F.col(value_col).alias("value"),
+                    .drop("mu", "sigma")
                 )
-                parts.append(num_encoded)
+                value_col = "normalized_value"
+            else:
+                all_numeric = all_numeric.withColumn(
+                    "normalized_value", F.col("numeric_value")
+                )
+                value_col = "normalized_value"
+
+            num_encoded = all_numeric.select(
+                F.col("node_type"),
+                F.col("node_id"),
+                (
+                    F.abs(F.hash(F.col("predicate"), F.lit(500)))
+                    % F.lit(num_dim)
+                    + F.lit(num_start)
+                ).alias("dim"),
+                F.col(value_col).alias("value"),
+            )
+            parts.append(num_encoded)
 
         # --- Sub-segment 3b: Categorical Values ---
         cat_start = layout.seg3_categorical_start
         cat_dim = layout.seg3_categorical_dim
 
-        if categorical_df is not None:
-            type_cat = categorical_df.filter(
-                F.col("node_type") == node_type
-            )
-
-            if type_cat.head(1):
-                for seed_offset in _HASH_SEEDS:
-                    cat_encoded = type_cat.select(
-                        F.col("node_id"),
-                        (
-                            F.abs(
-                                F.hash(
-                                    F.concat(
-                                        F.col("predicate"),
-                                        F.lit("::"),
-                                        F.col("cat_value"),
-                                    ),
-                                    F.lit(seed_offset + 600),
-                                )
+        if categorical_df is not None and categorical_df.head(1):
+            for seed_offset in _HASH_SEEDS:
+                cat_encoded = categorical_df.select(
+                    F.col("node_type"),
+                    F.col("node_id"),
+                    (
+                        F.abs(
+                            F.hash(
+                                F.concat(
+                                    F.col("predicate"),
+                                    F.lit("::"),
+                                    F.col("cat_value"),
+                                ),
+                                F.lit(seed_offset + 600),
                             )
-                            % F.lit(cat_dim)
-                            + F.lit(cat_start)
-                        ).alias("dim"),
-                        F.lit(1.0).alias("value"),
-                    )
-                    parts.append(cat_encoded)
+                        )
+                        % F.lit(cat_dim)
+                        + F.lit(cat_start)
+                    ).alias("dim"),
+                    F.lit(1.0).alias("value"),
+                )
+                parts.append(cat_encoded)
 
         if not parts:
             return None
@@ -2038,6 +2076,7 @@ class FeatureExtractor:
             result = result.unionAll(df)
 
         return result.select(
+            F.col("node_type"),
             F.col("node_id").cast("long"),
             F.col("dim").cast("int"),
             F.col("value").cast("float"),
