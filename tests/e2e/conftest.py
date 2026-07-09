@@ -18,10 +18,15 @@ bound the listener bus regardless of scope. The tests are mutually isolated —
 each writes into its own function-scoped ``tmp_path`` — so sharing the session is
 safe.
 
-Parallelism is set to ``local[8]`` with 8 shuffle partitions to use more of the
-available cores; the suite is stage-count bound (thousands of tiny per-type/
-per-chunk stages), so more parallelism cuts wall-clock materially. Do not raise
-the driver heap here — this is not memory bound.
+Parallelism is set to ``local[8]`` with 8 shuffle partitions. NOTE: on these
+tiny fixtures this did **not** materially change wall-clock. The suite is
+stage-count bound, but the stages run near-instantly and the true bottleneck
+was per-type *driver* work (one Spark job per node/edge type), not core
+saturation — so more cores bought little. The real speedup came from the
+single-pass encoder refactor (#188), which collapsed the per-node-type job
+loop into one distributed pass. These settings are harmless and kept for
+headroom on larger inputs. Do not raise the driver heap here — this is not
+memory bound.
 
 GPU acceleration is opt-in: set ``SPARK_RAPIDS=1`` to run the same tests through
 the RAPIDS Accelerator (drop-in SQL plugin). CPU vs GPU produces the same logical
