@@ -8,14 +8,25 @@ the driver heap (OutOfMemoryError in SQLAppStatusListener.onJobStart). This
 fixture caps that retention. Driver *heap* is raised out-of-band via
 PYSPARK_SUBMIT_ARGS (``spark.driver.memory`` is only honored at JVM launch).
 
-This fixture is **function-scoped** (not session): each e2e test gets a fresh
-SparkContext, and ``session.stop()`` tears down the previous context's listener
-bus and status store between tests. Sharing one session across all three tests
-accumulates their *combined* fan-out on the driver heap and OOMs partway through
-even at a large heap; per-test sessions bound live accumulation to a single
-test's stages, so it finishes at a modest heap. The JVM is reused across tests
-(pyspark launches it once per process), so ``spark.driver.memory`` still applies
-process-wide — but the retained objects reset on each stop().
+This fixture is **session-scoped**: the SparkContext is built once and reused
+across all e2e tests, so SparkContext startup is paid once rather than per test.
+It was previously function-scoped to bound a driver OOM from accumulating the
+tests' *combined* fan-out on the heap; that OOM is now fixed by localCheckpoint
+at the enrichment phase boundaries (#186), which truncates the logical plan so
+retention no longer grows unbounded. The status-store retention caps below still
+bound the listener bus regardless of scope. The tests are mutually isolated —
+each writes into its own function-scoped ``tmp_path`` — so sharing the session is
+safe.
+
+Parallelism is set to ``local[8]`` with 8 shuffle partitions. NOTE: on these
+tiny fixtures this did **not** materially change wall-clock. The suite is
+stage-count bound, but the stages run near-instantly and the true bottleneck
+was per-type *driver* work (one Spark job per node/edge type), not core
+saturation — so more cores bought little. The real speedup came from the
+single-pass encoder refactor (#188), which collapsed the per-node-type job
+loop into one distributed pass. These settings are harmless and kept for
+headroom on larger inputs. Do not raise the driver heap here — this is not
+memory bound.
 
 GPU acceleration is opt-in: set ``SPARK_RAPIDS=1`` to run the same tests through
 the RAPIDS Accelerator (drop-in SQL plugin). CPU vs GPU produces the same logical
@@ -32,7 +43,7 @@ def _truthy(val) -> bool:
     return str(val or "").strip().lower() in ("1", "true", "yes", "on")
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="session")
 def spark(tmp_path_factory):
     from pyspark.sql import SparkSession
 
@@ -49,11 +60,11 @@ def spark(tmp_path_factory):
 
     builder = (
         SparkSession.builder
-        .master("local[2]")
+        .master("local[8]")
         .appName("pyg-kg-builder-e2e")
         .config("spark.pyspark.python", sys.executable)
         .config("spark.ui.enabled", "false")
-        .config("spark.sql.shuffle.partitions", "2")
+        .config("spark.sql.shuffle.partitions", "8")
         .config("spark.sql.warehouse.dir", str(warehouse))
         .config("spark.driver.host", "127.0.0.1")
         # Bound the driver status store — the pipeline emits hundreds of
