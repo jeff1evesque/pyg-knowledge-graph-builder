@@ -106,7 +106,7 @@ class EdgeMapper:
 
     All heavy work (joining URIs to integer IDs, grouping by edge type)
     runs on Spark executors. Only compact [2, num_edges] integer arrays
-    are collected to the driver, one edge type at a time.
+    are collected to the driver, in a single pass over all edge types.
 
     The resolved edges DataFrame is returned alongside the tensors so
     that EdgeFeatureExtractor can reuse it without replaying the
@@ -137,8 +137,9 @@ class EdgeMapper:
         Build edge_index tensors for all edge types.
 
         Joins triples with node_id_df on executors to resolve URIs to
-        integer IDs, then collects per-edge-type [2, num_edges] tensors
-        to the driver one type at a time.
+        integer IDs, then collects all edges in a single globally-sorted
+        pass and splits them into per-edge-type [2, num_edges] tensors on
+        the driver.
 
         The resolved edges DataFrame (edges_final) is returned cached
         on executors for reuse by EdgeFeatureExtractor. The caller
@@ -234,71 +235,66 @@ class EdgeMapper:
         edges_final = edges_final.cache()
 
         # ============================================
-        # Step 5: Discover distinct edge types (small collect)
+        # Step 5: Collect ALL edge types in ONE pass, split on the driver
+        #
+        # A single global sort by (src_type, relation, dst_type, src_id,
+        # dst_id) makes every edge type's rows both contiguous AND internally
+        # ordered, so one toPandas replaces the former per-type
+        # filter+orderBy+toPandas loop — which ran one Spark job per edge type
+        # and was the dominant cost at hundreds of edge types. The driver then
+        # slices the single frame by edge-type key. Mirrors the single-pass
+        # encoder refactor in feature_extractor.py (#188).
+        #
+        # No chunking is needed here (unlike the wide node-feature tensors):
+        # edges are just two int64 columns (~16 bytes/edge), so the whole set
+        # is compact on the driver even at cluster scale — and every edge
+        # type's tensor is retained on the driver anyway, so peak memory is
+        # unchanged.
         # ============================================
-        edge_type_rows = (
+        import numpy as np
+
+        ordered = (
             edges_final
-            .select("src_type", "relation", "dst_type")
-            .distinct()
-            .collect()
+            .select("src_type", "relation", "dst_type", "src_id", "dst_id")
+            .orderBy("src_type", "relation", "dst_type", "src_id", "dst_id")
         )
 
-        logger.info(
-            f"  Discovered {len(edge_type_rows)} distinct edge types"
-        )
+        # Collect via Arrow-optimized toPandas — only int64 pairs + keys
+        pdf = ordered.toPandas()
 
-        # ============================================
-        # Step 6: Collect each edge type's indices to driver
-        #         in deterministic order (src_id, dst_id)
-        # ============================================
         edge_indices: Dict[Tuple[str, str, str], torch.Tensor] = {}
 
-        for row in edge_type_rows:
-            src_type = row.src_type
-            relation = row.relation
-            dst_type = row.dst_type
-            edge_type_key = (src_type, relation, dst_type)
-
-            # Filter to this edge type, select only integer IDs,
-            # sort deterministically for alignment with edge features
-            type_edges = (
-                edges_final
-                .filter(
-                    (F.col("src_type") == src_type)
-                    & (F.col("relation") == relation)
-                    & (F.col("dst_type") == dst_type)
+        if not pdf.empty:
+            # groupby preserves within-group row order (rows are already
+            # globally sorted), so per-type (src_id ASC, dst_id ASC) ordering —
+            # the contract EdgeFeatureExtractor aligns against — is retained.
+            # sort=False: the group-key ordering is irrelevant (keys index a
+            # dict), and skipping it avoids a redundant re-sort.
+            for edge_type_key, group in pdf.groupby(
+                ["src_type", "relation", "dst_type"], sort=False
+            ):
+                # from_numpy shares memory with numpy; .contiguous() ensures a
+                # clean tensor for PyG
+                src_ids = torch.from_numpy(
+                    group["src_id"].values.astype(np.int64)
                 )
-                .select("src_id", "dst_id")
-                .orderBy("src_id", "dst_id")
-            )
+                dst_ids = torch.from_numpy(
+                    group["dst_id"].values.astype(np.int64)
+                )
+                edge_indices[edge_type_key] = torch.stack(
+                    [src_ids, dst_ids], dim=0
+                ).contiguous()
 
-            # Collect via Arrow-optimized toPandas — only int64 pairs
-            pdf = type_edges.toPandas()
+                logger.info(
+                    f"    {edge_type_key}: "
+                    f"{edge_indices[edge_type_key].shape[1]:,} edges"
+                )
 
-            if pdf.empty:
-                continue
+        logger.info(
+            f"  Discovered {len(edge_indices)} distinct edge types"
+        )
 
-            # Convert to tensor — from_numpy shares memory with numpy,
-            # .contiguous() ensures a clean tensor for PyG
-            import numpy as np
-
-            src_ids = torch.from_numpy(
-                pdf["src_id"].values.astype(np.int64)
-            )
-            dst_ids = torch.from_numpy(
-                pdf["dst_id"].values.astype(np.int64)
-            )
-            edge_index = torch.stack(
-                [src_ids, dst_ids], dim=0
-            ).contiguous()
-
-            edge_indices[edge_type_key] = edge_index
-
-            logger.info(
-                f"    {edge_type_key}: {edge_index.shape[1]:,} edges"
-            )
-
-            del pdf  # release Pandas memory immediately
+        del pdf  # release Pandas memory immediately
 
         # NOTE: edges_final is NOT unpersisted here — it is returned
         # for reuse by EdgeFeatureExtractor. The caller (constructor.py)
