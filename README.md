@@ -1721,6 +1721,8 @@ The `gpu` mode of [`bin/run_e2e_tests.sh`](bin/run_e2e_tests.sh) resolves the RA
 
 The e2e test runs on **CPU by default**; set `SPARK_RAPIDS=1` to run it through the **RAPIDS Accelerator** on GPU. RAPIDS is a drop-in SQL plugin, so the application logic — and therefore every assertion — is identical on CPU and GPU; the toggle only changes where the DataFrame operators execute. (The one Python parsing UDF always runs on CPU under both.) The GPU settings mirror [`conf/spark-rapids.conf.template`](conf/spark-rapids.conf.template) / [`bin/submit_spark_job.sh`](bin/submit_spark_job.sh), minus the cluster-only GPU resource-scheduling confs that don't apply in `local[*]` mode.
 
+> **Note — the GPU run is *slower* on these fixtures, and that is expected.** The `gpu` mode is a **correctness / plumbing sanity check** (does the pipeline produce the same graph through RAPIDS?), not a benchmark. On the tiny e2e fixtures GPU wall-clock is higher than CPU for two reasons: (1) a **one-time JIT compile** of GPU kernels when the RAPIDS jar ships no precompiled binaries for the local GPU architecture, and (2) the fixtures are so small that **per-operator GPU launch and host↔device transfer overhead dominates** any compute savings. GPU acceleration only pays off at cluster data scale, where those fixed costs amortize. Do not read the local e2e timing as a CPU-vs-GPU verdict. (You may also see recoverable `RMM ... maximum pool size exceeded` messages — that is the deliberately conservative `spark.rapids.memory.gpu.allocFraction` cap being hit; raise it for real workloads.)
+
 `pyspark` is cluster-provided in production and is therefore not in `requirements.txt`; `requirements-test.txt` layers it (and `pytest`) on top for local and CI runs.
 
 ### Test tiers
