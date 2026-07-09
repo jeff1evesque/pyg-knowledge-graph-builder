@@ -4,12 +4,14 @@
 **/.DS_Store
 **/__pycache__
 **/.ipynb_checkpoints
+/reports/tests/
 
 ##
 ## ignore files
 ##
 output.md
 extract_*.py
+
 ##
 ## python venv
 ##
