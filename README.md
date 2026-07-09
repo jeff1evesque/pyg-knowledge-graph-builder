@@ -1737,3 +1737,14 @@ Test depth is calibrated to risk rather than applied uniformly — deeper covera
 | **e2e — pipeline smoke** (`e2e` marker, manual-only) | The real `build_graph` end-to-end over tiny committed RDF fixtures: both source loaders (`.nt` and turtle-parquet) × all three modes (`full`, and the `enrichment_only` → `pyg_only` split), asserting a valid `.pt` + all six metadata JSONs and layout-consistent tensor shapes. Catches wiring / API-mismatch bugs the unit tiers can't. | `tests/e2e/test_pipeline_smoke.py` |
 
 Exhaustive per-relationship assertions are intentionally **not** written — the targeted deep tests capture the high-risk logic without the brittleness of pinning every output.
+
+### Local test report
+
+[`bin/generate_report.sh`](bin/generate_report.sh) runs the suites and writes a combined report to [`reports/tests/report.html`](reports/tests/report.html) + [`reports/tests/report.json`](reports/tests/report.json) (same data, two formats), overwriting the previous pair each run. (Reports are namespaced by kind under `reports/` — e.g. `reports/tests/` — to leave room for other report types.)
+
+```bash
+bin/generate_report.sh            # fast + e2e (CPU) [+ e2e (GPU) if a GPU + RAPIDS jar are present]
+bin/generate_report.sh --no-gpu   # never attempt the GPU run
+```
+
+This is **local-only and not committed** — `reports/tests/` is gitignored. The e2e suite is too heavy for the GitHub Actions runners, so the report can't be produced in CI; instead each developer runs `bin/generate_report.sh` on their own branch to verify locally (the **tests** badge covers the fast suite in CI). The report always includes the fast unit suite and the CPU e2e run, and adds the GPU (RAPIDS) e2e run when the hardware is available. [`bin/generate_test_report.py`](bin/generate_test_report.py) is the underlying renderer (reads pytest JUnit XML).
