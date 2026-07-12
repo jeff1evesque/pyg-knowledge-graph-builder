@@ -54,7 +54,13 @@ spark-submit \
   --conf spark.task.resource.gpu.amount="${GPU_PER_TASK:-0.125}" \
   --conf spark.executor.resource.gpu.discoveryScript="$GPU_DISCOVERY_SCRIPT" \
   --conf spark.rapids.memory.pinnedPool.size="${RAPIDS_PINNED_POOL:-2G}" \
+  --conf spark.rapids.memory.gpu.allocFraction="${RAPIDS_GPU_ALLOC_FRACTION:-0.25}" \
   --conf spark.rapids.sql.format.parquet.reader.type=MULTITHREADED \
   --conf spark.rapids.sql.explain="${RAPIDS_EXPLAIN:-NONE}" \
+  --conf spark.hadoop.fs.s3a.path.style.access="${S3A_PATH_STYLE_ACCESS:-true}" \
+  --conf spark.hadoop.fs.s3a.connection.establish.timeout=5000 \
+  --conf spark.hadoop.fs.s3a.connection.timeout=10000 \
+  --conf spark.hadoop.fs.s3a.attempts.maximum=3 \
+  --conf spark.hadoop.fs.s3a.retry.limit=3 \
   ${SPARK_EXTRA_CONF:-} \
   spark_jobs/build_graph.py "$@"
