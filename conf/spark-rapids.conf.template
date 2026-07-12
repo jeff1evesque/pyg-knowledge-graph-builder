@@ -24,6 +24,25 @@ spark.executor.resource.gpu.discoveryScript     ${SPARK_HOME}/examples/src/main/
 # Pinned host memory pool improves host<->device transfer throughput.
 spark.rapids.memory.pinnedPool.size             2G
 
+# Share of GPU memory RAPIDS may pool. The default (1.0) assumes a discrete card
+# with dedicated VRAM. On an integrated / unified-memory GPU the "GPU memory" is
+# the host's RAM, and the default will reserve nearly all of it, starving the OS
+# and the JVM until the machine thrashes. Cap it there; raise it on a discrete GPU.
+spark.rapids.memory.gpu.allocFraction           0.25
+
+# Required if any bucket name contains dots: S3A's default virtual-host addressing
+# builds <bucket>.s3.<region>.amazonaws.com, which the *.s3.<region>.amazonaws.com
+# wildcard certificate cannot match, so TLS fails before any S3 call is made. The
+# AWS CLI/boto3 switch to path-style automatically and will NOT reproduce this.
+spark.hadoop.fs.s3a.path.style.access           true
+
+# Fail fast. S3A's defaults (20 attempts, 200s socket timeout) turn a
+# misconfiguration into a multi-minute hang with no output instead of an error.
+spark.hadoop.fs.s3a.connection.establish.timeout  5000
+spark.hadoop.fs.s3a.connection.timeout            10000
+spark.hadoop.fs.s3a.attempts.maximum              3
+spark.hadoop.fs.s3a.retry.limit                   3
+
 # Multithreaded Parquet reader hides request latency when reading from
 # object storage (s3a://).
 spark.rapids.sql.format.parquet.reader.type     MULTITHREADED
