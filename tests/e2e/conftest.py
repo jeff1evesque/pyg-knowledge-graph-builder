@@ -98,6 +98,15 @@ def spark(tmp_path_factory):
             # discrete-GPU hosts.
             .config("spark.rapids.memory.gpu.allocFraction",
                     os.environ.get("RAPIDS_GPU_ALLOC_FRACTION", "0.3"))
+            # RAPIDS sizes the pool from *free* memory but validates it against
+            # minAllocFraction of *total* memory (default 0.25). On a unified-memory
+            # host "GPU free" is the host's free RAM, so page cache from an earlier
+            # run can push the computed pool under that floor -- and RAPIDS then
+            # refuses to start at all ("pool allocation ... was less than allocation
+            # of ..."). Lower the floor so the session survives a busy host instead of
+            # depending on how much page cache happens to be in use.
+            .config("spark.rapids.memory.gpu.minAllocFraction",
+                    os.environ.get("RAPIDS_GPU_MIN_ALLOC_FRACTION", "0.05"))
             .config("spark.rapids.memory.gpu.pool", "ASYNC")
             .config("spark.rapids.sql.format.parquet.reader.type", "MULTITHREADED")
             .config("spark.rapids.sql.explain",

@@ -30,6 +30,12 @@ spark.rapids.memory.pinnedPool.size             2G
 # and the JVM until the machine thrashes. Cap it there; raise it on a discrete GPU.
 spark.rapids.memory.gpu.allocFraction           0.25
 
+# RAPIDS sizes the pool from *free* memory but validates it against minAllocFraction
+# of *total* memory (default 0.25). On a unified-memory GPU, "free" is the host's free
+# RAM, so a busy host can push the computed pool under that floor and RAPIDS refuses to
+# start. Lower the floor rather than depend on how idle the machine happens to be.
+spark.rapids.memory.gpu.minAllocFraction        0.05
+
 # Required if any bucket name contains dots: S3A's default virtual-host addressing
 # builds <bucket>.s3.<region>.amazonaws.com, which the *.s3.<region>.amazonaws.com
 # wildcard certificate cannot match, so TLS fails before any S3 call is made. The
