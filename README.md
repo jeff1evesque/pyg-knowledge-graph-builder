@@ -1246,6 +1246,54 @@ SPARK_MASTER_URL=spark://<host>:7077 \
     --pyg_config '{"feature_config": {"normalize": true, "vector_dim": 1024}}'
 ```
 
+### Cluster prerequisites for GPU runs
+
+Three cluster-side settings decide whether this job runs at all. They share an
+unpleasant property: when any of them is wrong, the job **hangs indefinitely
+with no error message** rather than failing, so they are worth checking before
+you conclude the job itself is slow.
+
+**1. Workers must advertise their GPUs.** The RAPIDS configuration makes every
+executor request a GPU (`spark.executor.resource.gpu.amount`). On a standalone
+cluster the worker must independently declare that it *has* one, or the master
+can never satisfy the request and the application waits forever without ever
+scheduling a task:
+
+```bash
+# in $SPARK_HOME/conf/spark-env.sh on each worker
+export SPARK_WORKER_OPTS="-Dspark.worker.resource.gpu.amount=1 \
+  -Dspark.worker.resource.gpu.discoveryScript=$SPARK_HOME/examples/src/main/scripts/getGpusResources.sh"
+```
+
+**2. Buckets whose names contain dots need path-style S3A access.** With S3A's
+default virtual-host addressing the request is sent to
+`<bucket>.s3.<region>.amazonaws.com`. If the bucket name contains dots (for
+example a bucket named after a domain), that hostname has more labels than the
+`*.s3.<region>.amazonaws.com` wildcard certificate covers, and TLS fails with
+`SSLPeerUnverifiedException` before any S3 call is made:
+
+```
+spark.hadoop.fs.s3a.path.style.access    true
+```
+
+Note that a working `aws s3 ls` proves nothing here: `boto3` and the AWS CLI
+switch to path-style automatically for dotted buckets, while S3A does not.
+
+**3. Cap the RAPIDS pool on GPUs whose memory is shared with the host.** RAPIDS
+defaults to pooling essentially all available GPU memory, which is correct for a
+discrete card with dedicated VRAM. On integrated or unified-memory GPUs, that
+memory is the host's RAM — the default can reserve nearly all of it, starve the
+OS and the JVM, and drive the machine into swap:
+
+```
+spark.rapids.memory.gpu.allocFraction    0.25
+```
+
+**Verify GPU execution; don't assume it.** A `count()` on Parquet can be answered
+from file metadata without touching the GPU. Set `spark.rapids.sql.explain=ALL`,
+or confirm that `Gpu*` operators (e.g. `GpuFileSourceScanExec`) appear in the
+physical plan.
+
 ## Knowledge Graph Enrichment
 
 The enrichment pipeline creates a unified knowledge graph by establishing relationships at two levels across **100+ data sources and ontologies**. Each enrichment step is a PySpark transformation that reads the triples DataFrame, computes new relationship triples, and unions them back.
