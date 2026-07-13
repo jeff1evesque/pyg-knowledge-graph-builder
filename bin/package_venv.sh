@@ -28,39 +28,39 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-VENV="${VENV:-.venv}"
+REQUIREMENTS="${EXECUTOR_REQUIREMENTS:-requirements-executor.txt}"
+BUILD_VENV="${BUILD_VENV:-dist/executor_venv}"
 VENV_ARCHIVE="${VENV_ARCHIVE:-dist/pyspark_venv.tar.gz}"
 FORCE=0
 [[ "${1:-}" == "--force" ]] && FORCE=1
 
-[[ -x "${VENV}/bin/python" ]] || {
-  echo "no virtualenv at ${VENV} -- create it first (python -m venv ${VENV})" >&2
-  exit 1
-}
+[[ -f "$REQUIREMENTS" ]] || { echo "missing ${REQUIREMENTS}" >&2; exit 1; }
 
 mkdir -p "$(dirname "$VENV_ARCHIVE")"
 
-# Rebuild only if the archive is older than any requirements file.
-if [[ "$FORCE" -eq 0 && -f "$VENV_ARCHIVE" ]]; then
-  stale=0
-  for req in requirements.txt requirements-test.txt; do
-    [[ -f "$req" && "$req" -nt "$VENV_ARCHIVE" ]] && stale=1
-  done
-  if [[ "$stale" -eq 0 ]]; then
-    echo "==> ${VENV_ARCHIVE} is up to date (use --force to rebuild)"
-    exit 0
-  fi
+if [[ "$FORCE" -eq 0 && -f "$VENV_ARCHIVE" && ! "$REQUIREMENTS" -nt "$VENV_ARCHIVE" ]]; then
+  echo "==> ${VENV_ARCHIVE} is up to date (use --force to rebuild)"
+  exit 0
 fi
 
-if ! "${VENV}/bin/python" -c "import venv_pack" 2>/dev/null; then
-  echo "==> installing venv-pack into ${VENV}"
-  "${VENV}/bin/pip" install --quiet venv-pack
-fi
+# Build a dedicated EXECUTOR environment rather than packing the developer venv.
+#
+# The dev venv is ~3.2 GB, almost all of it driver-only (nvidia 2.9 G, torch 0.9 G,
+# triton 0.65 G). Shipping that to every executor is not merely wasteful: on a
+# unified-memory GPU, unpacking it floods the page cache, host free memory collapses,
+# and RAPIDS then computes a GPU pool below its own floor and kills the executor --
+# which Spark relaunches, which unpacks it again. The job spirals instead of running.
+echo "==> building executor environment from ${REQUIREMENTS}"
+rm -rf "$BUILD_VENV"
+python3 -m venv "$BUILD_VENV"
+"${BUILD_VENV}/bin/pip" install --quiet --upgrade pip
+"${BUILD_VENV}/bin/pip" install --quiet -r "$REQUIREMENTS"
+"${BUILD_VENV}/bin/pip" install --quiet venv-pack
 
-echo "==> packing ${VENV} -> ${VENV_ARCHIVE} (this is large; torch dominates)"
+echo "==> packing ${BUILD_VENV} -> ${VENV_ARCHIVE}"
 rm -f "$VENV_ARCHIVE"
 # --prefix is required: without it venv-pack tries to pack the *running* interpreter's
 # environment, which fails ("Current environment is not a virtual environment").
-"${VENV}/bin/python" -m venv_pack --prefix "$VENV" --output "$VENV_ARCHIVE" --force
+"${BUILD_VENV}/bin/python" -m venv_pack --prefix "$BUILD_VENV" --output "$VENV_ARCHIVE" --force
 
 echo "==> done: $(du -h "$VENV_ARCHIVE" | cut -f1) at ${VENV_ARCHIVE}"

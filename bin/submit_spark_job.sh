@@ -26,6 +26,8 @@
 #   RAPIDS_PINNED_POOL          (optional, default 2G)
 #   RAPIDS_EXPLAIN              (optional, default NONE; set ALL to log which
 #                               operators run on GPU vs fall back to CPU)
+#   DRIVER_MEMORY               (optional, default 4g) driver heap. The pipeline fans
+#                               out into ~1,300 stages and OOMs Spark's 1g default.
 #   SPARK_EXTRA_CONF            (optional) extra "--conf k=v" flags, space-separated
 #
 set -euo pipefail
@@ -88,6 +90,7 @@ fi
 "$SPARK_SUBMIT" \
   "${venv_args[@]}" \
   --master "$SPARK_MASTER_URL" \
+  --driver-memory "${DRIVER_MEMORY:-4g}" \
   ${RAPIDS_JAR:+--jars "$RAPIDS_JAR"} \
   --py-files "$PKG_ZIP" \
   --conf spark.plugins=com.nvidia.spark.SQLPlugin \
@@ -98,7 +101,7 @@ fi
   --conf spark.executor.resource.gpu.discoveryScript="$GPU_DISCOVERY_SCRIPT" \
   --conf spark.rapids.memory.pinnedPool.size="${RAPIDS_PINNED_POOL:-2G}" \
   --conf spark.rapids.memory.gpu.allocFraction="${RAPIDS_GPU_ALLOC_FRACTION:-0.25}" \
-  --conf spark.rapids.memory.gpu.minAllocFraction="${RAPIDS_GPU_MIN_ALLOC_FRACTION:-0.05}" \
+  --conf spark.rapids.memory.gpu.minAllocFraction="${RAPIDS_GPU_MIN_ALLOC_FRACTION:-0}" \
   --conf spark.rapids.sql.format.parquet.reader.type=MULTITHREADED \
   --conf spark.rapids.sql.explain="${RAPIDS_EXPLAIN:-NONE}" \
   --conf spark.hadoop.fs.s3a.path.style.access="${S3A_PATH_STYLE_ACCESS:-true}" \

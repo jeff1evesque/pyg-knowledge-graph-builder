@@ -1,0 +1,20 @@
+# Dependencies the Spark EXECUTORS need — deliberately not the full runtime set.
+#
+# Executors run the Turtle-parsing UDF (rdflib) and Arrow-backed serialization; the
+# heavy machinery — torch, torch-geometric and their bundled CUDA libraries — is used
+# only on the DRIVER (HeteroData assembly, torch.save), as requirements.txt states.
+#
+# This matters more than it looks. bin/package_venv.sh ships this environment to every
+# executor, and a full venv is ~3.2 GB (nvidia 2.9 G + torch 0.9 G + triton 0.65 G).
+# On a unified-memory GPU (where "GPU memory" IS host RAM), unpacking that on each
+# executor floods the page cache, host free memory collapses, and RAPIDS then computes
+# a GPU pool too small to satisfy its own floor and kills the executor -- which Spark
+# relaunches, which unpacks 3.2 GB again. The job never progresses.
+#
+# Keep this list to what executors actually import.
+rdflib>=6.0.0,<8.0.0
+pandas>=1.0.5
+pyarrow>=4.0.0
+
+# pyspark itself is NOT needed here: Spark puts its own pyspark on the executor's
+# PYTHONPATH from SPARK_HOME.

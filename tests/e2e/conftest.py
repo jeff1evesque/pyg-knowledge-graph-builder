@@ -106,7 +106,7 @@ def spark(tmp_path_factory):
             # of ..."). Lower the floor so the session survives a busy host instead of
             # depending on how much page cache happens to be in use.
             .config("spark.rapids.memory.gpu.minAllocFraction",
-                    os.environ.get("RAPIDS_GPU_MIN_ALLOC_FRACTION", "0.05"))
+                    os.environ.get("RAPIDS_GPU_MIN_ALLOC_FRACTION", "0"))
             .config("spark.rapids.memory.gpu.pool", "ASYNC")
             .config("spark.rapids.sql.format.parquet.reader.type", "MULTITHREADED")
             .config("spark.rapids.sql.explain",

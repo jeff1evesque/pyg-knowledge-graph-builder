@@ -28,9 +28,11 @@ in practice).
 """
 
 import os
+import signal
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -40,7 +42,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER = REPO_ROOT / "bin" / "submit_spark_job.sh"
 
 MASTER_URL = os.environ.get("SPARK_MASTER_URL", "")
+# Source data. Optional: if unset, the repo's own e2e fixtures are staged to object
+# storage (see _staged_source_paths). They cannot simply be read from the checkout --
+# executors run on every node, and a file:// path is resolved on the *executor*, so a
+# fixture that exists only on the driver's disk is invisible to the rest of the
+# cluster. Staging them keeps the test self-contained instead of depending on files
+# someone copied onto each node by hand.
 SOURCE_PATH = os.environ.get("CLUSTER_SMOKE_SOURCE_PATH", "")
+FIXTURES = REPO_ROOT / "tests" / "fixtures" / "e2e" / "turtle_parquet"
 # Where the job writes. On a cluster this MUST be storage every node can reach: the
 # executors are spread across machines, so a file:// path resolves to a different
 # local disk on each one and the commit protocol cannot assemble the output ("Mkdirs
@@ -49,12 +58,54 @@ OUTPUT_BASE = os.environ.get("CLUSTER_SMOKE_OUTPUT_PATH", "")
 TIMEOUT_S = int(os.environ.get("CLUSTER_SMOKE_TIMEOUT", "900"))
 
 requires_cluster = pytest.mark.skipif(
-    not (MASTER_URL and SOURCE_PATH and OUTPUT_BASE),
+    not (MASTER_URL and OUTPUT_BASE),
     reason=(
-        "set SPARK_MASTER_URL, CLUSTER_SMOKE_SOURCE_PATH and CLUSTER_SMOKE_OUTPUT_PATH "
-        "to run against a real standalone cluster (skipped by default: CI has none)"
+        "set SPARK_MASTER_URL and CLUSTER_SMOKE_OUTPUT_PATH to run against a real "
+        "standalone cluster (skipped by default: CI has none)"
     ),
 )
+
+
+def _staged_source_paths() -> str:
+    """Upload the repo's e2e fixtures to object storage and return their s3a:// paths.
+
+    Uses CLUSTER_SMOKE_SOURCE_PATH verbatim when given (e.g. to point the smoke test at
+    real data). Otherwise the committed fixtures are staged under the output base, so a
+    fresh clone can run this against any cluster with nothing copied onto the nodes.
+    """
+    if SOURCE_PATH:
+        return SOURCE_PATH
+
+    if not OUTPUT_BASE.startswith("s3a://"):
+        pytest.skip(
+            "fixtures can only be auto-staged to s3a://; set CLUSTER_SMOKE_SOURCE_PATH "
+            "to a path readable by every node instead"
+        )
+
+    import boto3
+
+    bucket, _, base_prefix = OUTPUT_BASE[len("s3a://"):].partition("/")
+    prefix = f"{base_prefix.rstrip('/')}/_fixtures/turtle_parquet"
+    s3 = boto3.client("s3")
+
+    parquet = sorted(FIXTURES.rglob("*.parquet"))
+    assert parquet, f"no fixtures found under {FIXTURES}"
+
+    leaf_dirs = set()
+    for path in parquet:
+        key = f"{prefix}/{path.relative_to(FIXTURES).as_posix()}"
+        s3.upload_file(str(path), bucket, key)
+        leaf_dirs.add(key.rsplit("/", 1)[0])
+
+    # All fixture sources are submitted: the pipeline runs an enrichment pass per
+    # source, and the point of this test is the real job, not a trimmed one.
+    # CLUSTER_SMOKE_MAX_SOURCES can cap it if you want a faster signal locally.
+    limit = int(os.environ.get("CLUSTER_SMOKE_MAX_SOURCES", "0"))
+    selected = sorted(leaf_dirs)
+    if limit > 0:
+        selected = selected[:limit]
+
+    return ",".join(f"s3a://{bucket}/{d}" for d in selected)
 
 
 def _run_output_path() -> str:
@@ -93,7 +144,7 @@ def submission():
     cmd = [
         str(LAUNCHER),
         "--mode", "enrichment_only",
-        "--source_paths", SOURCE_PATH,
+        "--source_paths", _staged_source_paths(),
         "--source_format", "turtle_parquet",
         "--turtle_column", "triples",
         "--local_work_dir", work_dir,
@@ -101,25 +152,37 @@ def submission():
         "--parquet_partitions", "2",
     ]
 
+    # start_new_session so the launcher and the spark-submit JVM it spawns share a
+    # process group we can kill as a unit. Without this, a timeout kills only the shell
+    # and leaves an ORPHANED driver holding the cluster's cores -- standalone Spark
+    # hands an application every core by default, so one orphan starves every later
+    # submission ("Initial job has not accepted any resources") and the next run looks
+    # like a hang. A test that poisons the cluster when it fails is worse than no test.
+    proc = subprocess.Popen(
+        cmd,
+        cwd=REPO_ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+
     try:
-        proc = subprocess.run(
-            cmd,
-            cwd=REPO_ROOT,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=TIMEOUT_S,
-        )
-    except subprocess.TimeoutExpired as exc:
+        stdout, stderr = proc.communicate(timeout=TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        stdout, stderr = proc.communicate()
         pytest.fail(
-            f"the job HUNG for {TIMEOUT_S}s and was killed.\n\n"
-            "The usual cause is that the cluster's workers advertise no GPU while "
-            "spark-defaults.conf makes every task request one: the request can never "
-            "be satisfied, so the job is never scheduled and Spark waits in silence.\n\n"
-            f"stdout tail:\n{(exc.stdout or b'')[-2000:]!r}"
+            f"the job HUNG for {TIMEOUT_S}s and was killed (with its driver).\n\n"
+            "Usual causes: the cluster's workers advertise no GPU while every task "
+            "requests one (the request can never be satisfied, so nothing is ever "
+            "scheduled), or an earlier orphaned driver still holds the cluster's "
+            "cores.\n\n"
+            f"stdout tail:\n{stdout[-2000:]}"
         )
 
-    return proc, work_dir
+    return SimpleNamespace(returncode=proc.returncode, stdout=stdout, stderr=stderr), work_dir
 
 
 @requires_cluster
