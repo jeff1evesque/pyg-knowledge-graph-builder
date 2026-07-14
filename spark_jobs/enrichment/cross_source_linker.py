@@ -144,6 +144,14 @@ class CrossSourceLinker:
         for df in new_dfs[1:]:
             all_new = all_new.unionByName(df)
 
+        # Truncate the plan before the dedup pass (see EnrichmentPipeline._settle).
+        # Each step above is a join over triples_df, so this union carries six of
+        # those subtrees; feeding it straight into dropDuplicates + the anti-join
+        # against triples_df makes Catalyst's constraint inference blow the driver
+        # heap while *planning* (OutOfMemoryError inside .cache(), before any task
+        # runs). Materializing here replaces the six subtrees with one scan.
+        all_new = all_new.localCheckpoint(eager=True)
+
         all_new = all_new.dropDuplicates(["subject", "predicate", "object"])
         all_new = deduplicate_against_existing(all_new, self.triples_df)
 

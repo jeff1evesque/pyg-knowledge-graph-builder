@@ -16,6 +16,7 @@
 #
 # Environment variables:
 #   SPARK_MASTER_URL            (required) e.g. spark://<host>:7077
+#   SPARK_DRIVER_HOST           (optional) address the EXECUTORS dial back on; see note
 #   RAPIDS_JAR                  (optional) path to the RAPIDS Accelerator jar,
 #                               if it is not already on the cluster classpath
 #   GPU_DISCOVERY_SCRIPT        (optional) GPU resource discovery script;
@@ -28,7 +29,27 @@
 #                               operators run on GPU vs fall back to CPU)
 #   DRIVER_MEMORY               (optional, default 4g) driver heap. The pipeline fans
 #                               out into ~1,300 stages and OOMs Spark's 1g default.
+#   MAX_PLAN_STRING_LENGTH      (optional, default 16k) see note below
 #   SPARK_EXTRA_CONF            (optional) extra "--conf k=v" flags, space-separated
+#
+# SPARK_DRIVER_HOST: in client mode the driver picks its own advertised address from
+# the host's first non-loopback interface, and every executor dials back on it. On a
+# node with more than one network -- e.g. a management LAN plus a dedicated cluster
+# fabric -- that guess can land on the wrong one. The failure is quiet and expensive:
+# executors on OTHER hosts cannot reach the driver, time out after 120s, exit 1, and
+# are relaunched forever, while the executor that happens to be co-located with the
+# driver connects over loopback and runs the whole job. The cluster looks healthy, the
+# job succeeds, and every task lands on one node. Set this to the driver's address on
+# the same network as SPARK_MASTER_URL.
+#
+# maxPlanStringLength: Spark renders the physical plan to a STRING for the SQL UI on
+# every execution (SQLExecution.withNewExecutionId -> explainString), and that string
+# defaults to spark.sql.maxPlanStringLength = 2147483632b (~2GB) -- effectively
+# unbounded. The enrichment plan over several unioned sources is big enough that the
+# driver OOMs inside StringBuilder.<init> while *describing* the query, before running
+# it, and no amount of --driver-memory helps. A 7-source run OOMs without this cap and
+# passes with it (at the stock 4g heap). Cost: plans shown in the SQL UI and by
+# explain() are truncated past this length.
 #
 set -euo pipefail
 
@@ -91,6 +112,7 @@ fi
   "${venv_args[@]}" \
   --master "$SPARK_MASTER_URL" \
   --driver-memory "${DRIVER_MEMORY:-4g}" \
+  ${SPARK_DRIVER_HOST:+--conf spark.driver.host="$SPARK_DRIVER_HOST"} \
   ${RAPIDS_JAR:+--jars "$RAPIDS_JAR"} \
   --py-files "$PKG_ZIP" \
   --conf spark.plugins=com.nvidia.spark.SQLPlugin \
@@ -104,6 +126,7 @@ fi
   --conf spark.rapids.memory.gpu.minAllocFraction="${RAPIDS_GPU_MIN_ALLOC_FRACTION:-0}" \
   --conf spark.rapids.sql.format.parquet.reader.type=MULTITHREADED \
   --conf spark.rapids.sql.explain="${RAPIDS_EXPLAIN:-NONE}" \
+  --conf spark.sql.maxPlanStringLength="${MAX_PLAN_STRING_LENGTH:-16k}" \
   --conf spark.hadoop.fs.s3a.path.style.access="${S3A_PATH_STYLE_ACCESS:-true}" \
   --conf spark.hadoop.fs.s3a.connection.establish.timeout=5000 \
   --conf spark.hadoop.fs.s3a.connection.timeout=10000 \

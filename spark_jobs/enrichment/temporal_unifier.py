@@ -207,9 +207,17 @@ class TemporalUnifier:
             return empty
 
         # Union all temporal entities: (temporal_uri, normalized_name, kind)
+        #
+        # Truncate the plan here (see EnrichmentPipeline._settle). all_temporals is a
+        # union of every collector above -- each one a scan of triples_df -- and the
+        # three _create_unified_* branches below each build on it, so without this its
+        # whole subtree is re-planned into all three and Catalyst's constraint
+        # inference blows the driver heap while *planning* (OutOfMemoryError inside
+        # .cache(), before a single task runs). It survives a 1-source run and OOMs a
+        # 7-source one. Eager, so it is materialized once and shared by the branches.
         all_temporals = reduce(DataFrame.unionAll, temporal_dfs).dropDuplicates(
             ["temporal_uri", "normalized_name", "kind"]
-        )
+        ).localCheckpoint(eager=True)
 
         # Produce unified triples
         new_dfs: List[DataFrame] = []
