@@ -1248,10 +1248,11 @@ SPARK_MASTER_URL=spark://<host>:7077 \
 
 ### Cluster prerequisites for GPU runs
 
-Three cluster-side settings decide whether this job runs at all. They share an
-unpleasant property: when any of them is wrong, the job **hangs indefinitely
-with no error message** rather than failing, so they are worth checking before
-you conclude the job itself is slow.
+Four cluster-side settings decide whether this job runs at all — or whether it
+merely *appears* to. They share an unpleasant property: when any of them is wrong,
+the job **hangs indefinitely with no error message** (or, for the fourth, silently
+runs on one node) rather than failing, so they are worth checking before you
+conclude the job itself is slow.
 
 **1. Workers must advertise their GPUs.** The RAPIDS configuration makes every
 executor request a GPU (`spark.executor.resource.gpu.amount`). On a standalone
@@ -1288,6 +1289,29 @@ OS and the JVM, and drive the machine into swap:
 ```
 spark.rapids.memory.gpu.allocFraction    0.25
 ```
+
+**4. On a multi-homed node, bind Spark to the interface the cluster actually uses.**
+If the nodes have more than one network — say a management LAN plus a dedicated
+fabric — every Spark process advertises whichever non-loopback interface it finds
+first unless told otherwise. Pointing the master at the fabric is not enough:
+`SPARK_MASTER_HOST` only decides where the master *listens*, while the addresses
+the driver, the executors and their block managers hand out to *each other* come
+from `SPARK_LOCAL_IP`:
+
+```bash
+# in $SPARK_HOME/conf/spark-env.sh, per node — the node's OWN address on the fabric
+export SPARK_LOCAL_IP=10.0.0.7
+```
+
+This one does not hang so much as **lie**. Executors on every node *except* the
+driver's cannot reach the driver's advertised address, time out after 120s, exit 1,
+and are relaunched forever; the executor that happens to be co-located with the
+driver reaches it over loopback and quietly runs the entire job. The master reports
+every worker healthy, the job succeeds, the tests pass — and the cluster is running
+at the capacity of a single node. If those executors do survive long enough to
+shuffle, peer block fetches hang instead, and the job stops making progress with no
+error at all. Confirm the fix by checking that the master's worker list shows fabric
+addresses, not LAN ones.
 
 **Verify GPU execution; don't assume it.** A `count()` on Parquet can be answered
 from file metadata without touching the GPU. Set `spark.rapids.sql.explain=ALL`,
@@ -1775,6 +1799,30 @@ Under `SPARK_RAPIDS=1` the suite additionally asserts that the query **really ra
 
 `pyspark` is cluster-provided in production and is therefore not in `requirements.txt`; `requirements-test.txt` layers it (and `pytest`) on top for local and CI runs.
 
+### Cluster smoke test (a real cluster, not `local[*]`)
+
+Everything above runs against a local `SparkSession`. That leaves one path untested: **the job as actually submitted to a cluster**. Local mode reads none of the cluster's `spark-defaults.conf`, has no master or workers (so executor/GPU resource negotiation — the thing that decides whether a GPU job is ever *scheduled* — never happens), and imports the job in-process instead of zipping it and shipping it to executors. A cluster whose workers advertise no GPU will accept the job and simply never schedule it, hanging forever while the entire local suite stays green.
+
+[`tests/e2e/test_cluster_submit.py`](tests/e2e/test_cluster_submit.py) (marker: `cluster`) submits the real job through [`bin/submit_spark_job.sh`](bin/submit_spark_job.sh) and asserts it completes, writes its artifacts to shared storage, and **actually placed operators on the GPU**. The submission is bounded by a timeout, because an unschedulable GPU request hangs rather than failing. It is **skipped unless `SPARK_MASTER_URL` and `CLUSTER_SMOKE_OUTPUT_PATH` are set**, so CI and contributors without a cluster are unaffected.
+
+```bash
+export SPARK_HOME=/opt/spark
+export SPARK_MASTER_URL=spark://<master>:7077
+export CLUSTER_SMOKE_OUTPUT_PATH=s3a://<bucket>/<prefix>   # must be reachable by EVERY node
+.venv/bin/python -m pytest tests/e2e/test_cluster_submit.py -m cluster -q
+```
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `SPARK_MASTER_URL` | — | Required; the test skips without it. |
+| `CLUSTER_SMOKE_OUTPUT_PATH` | — | Required. Where the job writes. On a cluster this must be shared storage (`s3a://`): executors are spread across machines, so a `file://` path resolves to a different local disk on each one and the commit protocol cannot assemble the output. |
+| `CLUSTER_SMOKE_SOURCE_PATH` | staged fixtures | Source data. If unset, the repo's own e2e fixtures are uploaded under the output path, so a fresh clone can run this against any cluster with nothing copied onto the nodes by hand. |
+| `CLUSTER_SMOKE_TIMEOUT` | `900` | Seconds before a hung submission is killed (with its driver). |
+| `CLUSTER_SMOKE_MAX_SOURCES` | all | Cap the number of sources, for a faster signal. The pipeline's cost scales with **source count**, not data size — one source ≈ 30s, all seven ≈ 6min. |
+| `CLUSTER_SMOKE_EXPECT_GPU` | `1` | Set `0` to skip the GPU-placement assertion (e.g. a CPU-only cluster). |
+
+Two failure modes this test exists to catch, both of which otherwise produce a **green** suite: RAPIDS silently falling back to CPU (the job still succeeds and still produces a correct graph), and the driver OOMing while *planning* the multi-source query — see [`bin/submit_spark_job.sh`](bin/submit_spark_job.sh) on `spark.sql.maxPlanStringLength`, and `_settle()` in [`spark_jobs/enrichment/pipeline.py`](spark_jobs/enrichment/pipeline.py) on why the enrichment phases truncate their logical plans.
+
 ### Test tiers
 
 Test depth is calibrated to risk rather than applied uniformly — deeper coverage only where the logic is genuinely subtle, to keep maintenance debt proportional to value:
@@ -1785,6 +1833,7 @@ Test depth is calibrated to risk rather than applied uniformly — deeper covera
 | **2 — linker smokes** | Each intra-source linker's `enrich()` driven end-to-end over tiny in-memory triples: one happy path + one foreign-input short-circuit. | `test_{bls,noaa,market,sec}_linker.py` |
 | **Targeted deep** | One focused test on each source's trickiest computation (including the negative case), where a silent regression would be costly. | severity escalation (NOAA), option moneyness (market), CIK unification (SEC), temporal sequencing (BLS) |
 | **e2e — pipeline smoke** (`e2e` marker, manual-only) | The real `build_graph` end-to-end over tiny committed RDF fixtures: both source loaders (`.nt` and turtle-parquet) × all three modes (`full`, and the `enrichment_only` → `pyg_only` split), asserting a valid `.pt` + all six metadata JSONs and layout-consistent tensor shapes. Catches wiring / API-mismatch bugs the unit tiers can't. | `tests/e2e/test_pipeline_smoke.py` |
+| **cluster — submit smoke** (`cluster` marker, opt-in) | The real job submitted to a real standalone cluster through `bin/submit_spark_job.sh`: asserts it completes, writes artifacts to shared storage, and ran on the GPU. The only tier that exercises `--py-files`/venv packaging, executor↔GPU resource negotiation, and the cluster's own `spark-defaults.conf`. Skipped unless `SPARK_MASTER_URL` is set. | `tests/e2e/test_cluster_submit.py` |
 
 Exhaustive per-relationship assertions are intentionally **not** written — the targeted deep tests capture the high-risk logic without the brittleness of pinning every output.
 
