@@ -25,6 +25,7 @@ from spark_jobs.pyg_builder.node_mapper import (
 CPI_INDEX = "https://www.bls.gov/cpi/Index"        # -> cpi_Index
 CPI_SERIES = "https://www.bls.gov/cpi/Series"      # -> cpi_Series
 UNIFIED_MONTH = "https://example.org/unified/UnifiedMonth"  # -> unified_UnifiedMonth
+UNIFIED_SECTOR = "https://example.org/unified/EconomicSector"  # -> unified_EconomicSector
 OWL_THING = "http://www.w3.org/2002/07/owl#Thing"  # excluded (meta-ontology)
 
 
@@ -152,6 +153,19 @@ def test_include_temporal_false_drops_temporal_types(spark, make_triples):
 
     assert "cpi_Index" in counts
     assert not any("Month" in t for t in counts)
+
+
+def test_include_sector_false_drops_sector_types(spark, make_triples):
+    triples = make_triples([
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/s", RDF_TYPE, UNIFIED_SECTOR),  # matches sector fragment
+    ])
+    node_id_df, counts = NodeMapper(
+        spark, {"include_sector_nodes": False}
+    ).build_node_id_table(triples)
+
+    assert "cpi_Index" in counts
+    assert not any("Sector" in t for t in counts)
 
 
 # ======================================================================

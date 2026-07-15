@@ -19,7 +19,11 @@ fully known and this test isolates EdgeMapper.
 """
 import torch
 
-from spark_jobs.pyg_builder.edge_mapper import EdgeMapper, RDF_TYPE
+from spark_jobs.pyg_builder.edge_mapper import (
+    EdgeMapper,
+    RDF_TYPE,
+    _build_predicate_to_relation_expr,
+)
 
 PRECEDES = "https://www.bls.gov/enrichment/precedes"  # -> bls_enrichment_precedes
 RELATION = "bls_enrichment_precedes"
@@ -47,6 +51,26 @@ def _build(spark, triple_rows, config=None):
     return EdgeMapper(spark, config or {}).build_edge_indices(
         triples, _node_id_df(spark), NODE_COUNTS
     )
+
+
+# ======================================================================
+# Relation naming (pure Column expression)
+# ======================================================================
+
+def test_predicate_to_relation_maps_known_namespace(spark):
+    df = spark.createDataFrame([(PRECEDES,)], ["predicate"])
+    rel = df.withColumn(
+        "r", _build_predicate_to_relation_expr("predicate")
+    ).collect()[0]["r"]
+    assert rel == RELATION
+
+
+def test_predicate_to_relation_falls_back_to_last_segment(spark):
+    df = spark.createDataFrame([("http://nonexistent.invalid/links",)], ["predicate"])
+    rel = df.withColumn(
+        "r", _build_predicate_to_relation_expr("predicate")
+    ).collect()[0]["r"]
+    assert rel == "unknown_links"
 
 
 # ======================================================================
