@@ -17,9 +17,16 @@
 #   2. E2E pipeline smoke    (marker: e2e)              — CPU
 #   3. E2E pipeline smoke    (marker: e2e, RAPIDS)      — GPU, only if a GPU and
 #                                                         RAPIDS jar are present
+#   4. Cluster submit        (marker: cluster)          — submits the REAL job to a
+#                                                         standalone cluster; only if
+#                                                         SPARK_MASTER_URL et al. are set
+#
+# Suites 1-3 all run in local[*], so none of them can see the cluster: not GPU
+# resource scheduling, not the packaged venv the executors need, not object storage.
+# Suite 4 is the only one that exercises the job the way production runs it.
 #
 # Usage:
-#   bin/generate_report.sh              # fast + e2e(CPU) [+ e2e(GPU) if available]
+#   bin/generate_report.sh              # fast + e2e(CPU) [+ e2e(GPU), + cluster if configured]
 #   bin/generate_report.sh --no-gpu     # never attempt the GPU run
 #
 # Environment variables:
@@ -27,6 +34,12 @@
 #   DRIVER_MEMORY  driver heap for the e2e runs; default 4g
 #   RAPIDS_JAR     explicit RAPIDS jar (else newest under RAPIDS_JAR_DIR)
 #   RAPIDS_JAR_DIR dir to search for the jar; default /opt/spark/jars
+#
+#   SPARK_MASTER_URL           standalone master, e.g. spark://<host>:7077
+#   CLUSTER_SMOKE_SOURCE_PATH  source data readable by EVERY node (executors are
+#                              spread across machines, so a driver-local path fails)
+#   CLUSTER_SMOKE_OUTPUT_PATH  shared output base, e.g. s3a://<bucket>/<prefix>
+#                              (the run is written to a date-partitioned subpath)
 #
 # Exit status is non-zero if any suite failed (the report is still written).
 set -uo pipefail
@@ -46,6 +59,17 @@ trap 'rm -rf "$JUNIT_DIR"' EXIT
 export SPARK_LOCAL_IP="${SPARK_LOCAL_IP:-127.0.0.1}"
 export PYSPARK_SUBMIT_ARGS="--driver-memory ${DRIVER_MEMORY} pyspark-shell"
 
+# Isolate the local[*] suites from any cluster configuration.
+#
+# If SPARK_HOME points at a cluster's Spark install, the local suites read its
+# spark-defaults.conf and inherit spark.master (pointing at the cluster) AND its GPU
+# task requirement. Local mode has no worker to advertise a GPU, so the request can
+# never be satisfied and the suite HANGS FOREVER with no error -- it does not fail,
+# it just sits there. The cluster suite re-supplies SPARK_HOME for itself below,
+# since spark-submit genuinely needs it.
+CLUSTER_SPARK_HOME="${SPARK_HOME:-/opt/spark}"
+unset SPARK_HOME
+
 status=0
 declare -a SPECS
 
@@ -55,7 +79,9 @@ echo "==> Fast unit suite (CPU)"
 SPECS+=("Fast (unit) suite=CPU=$JUNIT_DIR/fast.xml")
 
 echo "==> End-to-end pipeline smoke (CPU)"
-"$VENV_PYTHON" -m pytest tests/ -m e2e \
+# "not cluster": the cluster suite is also marked e2e, but it submits to a real
+# cluster and must not run inside the local[*] suites.
+"$VENV_PYTHON" -m pytest tests/ -m "e2e and not cluster" \
   --junitxml="$JUNIT_DIR/e2e_cpu.xml" -q || status=1
 SPECS+=("End-to-end pipeline smoke=CPU=$JUNIT_DIR/e2e_cpu.xml")
 
@@ -69,12 +95,40 @@ if [[ "$WANT_GPU" == "1" ]]; then
      && [[ -n "${RAPIDS_JAR:-}" && -f "${RAPIDS_JAR:-}" ]]; then
     echo "==> End-to-end pipeline smoke (GPU via RAPIDS: $RAPIDS_JAR)"
     SPARK_RAPIDS=1 RAPIDS_JAR="$RAPIDS_JAR" \
-      "$VENV_PYTHON" -m pytest tests/ -m e2e \
+      "$VENV_PYTHON" -m pytest tests/ -m "e2e and not cluster" \
       --junitxml="$JUNIT_DIR/e2e_gpu.xml" -q || status=1
     SPECS+=("End-to-end pipeline smoke=GPU (RAPIDS Accelerator)=$JUNIT_DIR/e2e_gpu.xml")
   else
     echo "==> Skipping GPU run (no GPU and/or RAPIDS jar found)"
   fi
+fi
+
+# Optional cluster run — only if a standalone cluster and an output location are
+# configured. This is the only suite that submits the job the way production does
+# (spark-submit to a master, code + venv shipped to executors, GPU scheduling
+# negotiated with the workers); everything above runs in local[*] and cannot see
+# any of that.
+# Gate matches the cluster test's own requirements (tests/e2e/test_cluster_submit.py):
+# it needs a master and a shared-storage output location; the source is OPTIONAL --
+# when CLUSTER_SMOKE_SOURCE_PATH is unset the test auto-stages the repo's fixtures to
+# an s3a:// output base. Requiring it here would wrongly skip the suite for the exact
+# self-contained run the test supports.
+if [[ -n "${SPARK_MASTER_URL:-}" && -n "${CLUSTER_SMOKE_OUTPUT_PATH:-}" ]]; then
+  echo "==> Cluster submit (real job -> ${SPARK_MASTER_URL})"
+  # This is a smoke test, not a benchmark. The pipeline fans out into ~1,300 stages
+  # regardless of data size, and Spark's default of 200 shuffle partitions means each
+  # of those stages schedules 200 tasks over a few KB of fixtures -- pure scheduling
+  # overhead. Shrinking the partition count is what makes this finish in minutes;
+  # shrinking the *data* would not, because the stage count does not depend on it.
+  SPARK_HOME="$CLUSTER_SPARK_HOME" \
+  SPARK_EXTRA_CONF="${SPARK_EXTRA_CONF:-} --conf spark.sql.shuffle.partitions=${CLUSTER_SMOKE_SHUFFLE_PARTITIONS:-8}" \
+    "$VENV_PYTHON" -m pytest tests/ -m cluster \
+    --junitxml="$JUNIT_DIR/cluster.xml" -q || status=1
+  SPECS+=("Cluster submit=Standalone cluster (GPU)=$JUNIT_DIR/cluster.xml")
+else
+  echo "==> Skipping cluster run (set SPARK_MASTER_URL and CLUSTER_SMOKE_OUTPUT_PATH"
+  echo "    to submit the real job to a standalone cluster; CLUSTER_SMOKE_SOURCE_PATH"
+  echo "    is optional -- fixtures auto-stage to the output base when it is unset)"
 fi
 
 echo "==> Rendering report -> $REPORT_DIR/report.{html,json}"

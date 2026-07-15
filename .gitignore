@@ -16,3 +16,6 @@ extract_*.py
 ## python venv
 ##
 .venv/
+
+# Packed virtualenv shipped to Spark executors (bin/package_venv.sh); ~GB, never commit.
+/dist/
