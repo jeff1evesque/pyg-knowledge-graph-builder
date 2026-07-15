@@ -1121,8 +1121,8 @@ When config is empty, sensible defaults are inferred from the data.
 |-----------|----------|---------|-------------|
 | `--mode` | Yes | `full` | `full`, `enrichment_only`, or `pyg_only` |
 | `--source_paths` | Modes 1,2 | — | Comma-separated source path(s)/URI(s): local directories or `s3a://...`. Each is loaded independently and the results are unioned into a single triples DataFrame before enrichment |
-| `--local_work_dir` | Yes | — | Shared working directory (visible to every worker, e.g. an NFS mount) for the interim enriched Parquet and the local copy of the final artifacts |
-| `--s3_archive_bucket` | No | `""` | Optional S3 bucket to mirror the final artifacts (`.pt` + metadata + manifest). When empty, outputs are local-only |
+| `--local_work_dir` | Yes | — | Working directory for the interim enriched Parquet and the final artifacts. Must be reachable by every worker — a shared mount (e.g. NFS) or a URI on shared storage (`s3a://...`); on a multi-node cluster a driver-local path won't do |
+| `--s3_archive_bucket` | No | `""` | Optional S3 bucket to *additionally* mirror the final artifacts (`.pt` + metadata + manifest). When empty, artifacts are written only to `--local_work_dir` (which may itself be an `s3a://` path) |
 | `--s3_pyg_key` | No | `pyg/{time_period}/{pyg_filename}` | Optional S3 key for the archived `.pt`; the metadata prefix is derived from it |
 | `--pyg_filename` | No | `hetero_data.pt` | Local `.pt` filename (override for experiment variants, e.g. `hetero_data_512d.pt`); determines the metadata directory name |
 | `--enable_ontology_mapping` | No | `false` | Enable ontology equivalence mapping |
