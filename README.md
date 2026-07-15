@@ -1844,6 +1844,11 @@ Exhaustive per-relationship assertions are intentionally **not** written — the
 ```bash
 bin/generate_report.sh            # fast + e2e (CPU) [+ e2e (GPU) if a GPU + RAPIDS jar are present]
 bin/generate_report.sh --no-gpu   # never attempt the GPU run
+
+# Full picture: also submit the real job to a standalone cluster (adds the cluster suite).
+SPARK_MASTER_URL=spark://<master>:7077 \
+CLUSTER_SMOKE_OUTPUT_PATH=s3a://<bucket>/<prefix> \
+  bin/generate_report.sh
 ```
 
-This is **local-only and not committed** — `reports/tests/` is gitignored. The e2e suite is too heavy for the GitHub Actions runners, so the report can't be produced in CI; instead each developer runs `bin/generate_report.sh` on their own branch to verify locally (the **tests** badge covers the fast suite in CI). The report always includes the fast unit suite and the CPU e2e run, and adds the GPU (RAPIDS) e2e run when the hardware is available. [`bin/generate_test_report.py`](bin/generate_test_report.py) is the underlying renderer (reads pytest JUnit XML).
+This is **local-only and not committed** — `reports/tests/` is gitignored. The e2e suite is too heavy for the GitHub Actions runners, so the report can't be produced in CI; instead each developer runs `bin/generate_report.sh` on their own branch to verify locally (the **tests** badge covers the fast suite in CI). The report always includes the fast unit suite and the CPU e2e run; it adds the GPU (RAPIDS) e2e run when the hardware is available, and the [cluster smoke test](#cluster-smoke-test-a-real-cluster-not-local) when `SPARK_MASTER_URL` and `CLUSTER_SMOKE_OUTPUT_PATH` are set (source data auto-stages, so `CLUSTER_SMOKE_SOURCE_PATH` is optional). [`bin/generate_test_report.py`](bin/generate_test_report.py) is the underlying renderer (reads pytest JUnit XML).
