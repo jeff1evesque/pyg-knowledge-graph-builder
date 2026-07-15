@@ -424,6 +424,15 @@ class FeatureExtractor:
         self._has_property_schema = True
         self._has_property_hierarchy = True
 
+        # Metadata artifacts — populated by the _collect_* methods during
+        # build_features(). Initialized here (not just inside the conditional
+        # collect paths) so get_metadata_artifacts() is safe even when a build
+        # has no numeric literals (normalization collection is then skipped).
+        self._collected_norm_stats: Optional[List[Dict[str, Any]]] = None
+        self._collected_zero_variance: List[str] = []
+        self._collected_ontology_schema: Optional[Dict[str, Any]] = None
+        self._collected_slot_mapping: Optional[Dict[str, Any]] = None
+
     def get_layout(self) -> "VectorLayout":
         """Return the VectorLayout instance for metadata registration."""
         return self._layout
