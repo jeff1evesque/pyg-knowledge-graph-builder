@@ -217,6 +217,16 @@ def test_job_writes_its_artifacts(submission):
     leftovers = [k for k in keys if "_temporary" in k]
     assert not leftovers, f"commit did not complete; _temporary files remain: {leftovers[:3]}"
 
+    # The job manifest must reach shared storage too. It is written with plain Python
+    # I/O (not Spark's committer), so when local_work_dir is an s3a:// URI a naive
+    # open() would silently drop it onto the driver's local disk as a junk ./s3a:/...
+    # tree instead. Assert it actually landed in the object store.
+    manifests = [k for k in keys if "/manifests/" in k and k.endswith(".json")]
+    assert manifests, (
+        f"no job manifest under s3a://{bucket}/{prefix}/manifests/ -- it was likely "
+        "written to the driver's local disk instead of shared storage"
+    )
+
 
 @requires_cluster
 def test_job_actually_ran_on_the_gpu(submission):

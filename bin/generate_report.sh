@@ -108,8 +108,12 @@ fi
 # (spark-submit to a master, code + venv shipped to executors, GPU scheduling
 # negotiated with the workers); everything above runs in local[*] and cannot see
 # any of that.
-if [[ -n "${SPARK_MASTER_URL:-}" && -n "${CLUSTER_SMOKE_SOURCE_PATH:-}" \
-      && -n "${CLUSTER_SMOKE_OUTPUT_PATH:-}" ]]; then
+# Gate matches the cluster test's own requirements (tests/e2e/test_cluster_submit.py):
+# it needs a master and a shared-storage output location; the source is OPTIONAL --
+# when CLUSTER_SMOKE_SOURCE_PATH is unset the test auto-stages the repo's fixtures to
+# an s3a:// output base. Requiring it here would wrongly skip the suite for the exact
+# self-contained run the test supports.
+if [[ -n "${SPARK_MASTER_URL:-}" && -n "${CLUSTER_SMOKE_OUTPUT_PATH:-}" ]]; then
   echo "==> Cluster submit (real job -> ${SPARK_MASTER_URL})"
   # This is a smoke test, not a benchmark. The pipeline fans out into ~1,300 stages
   # regardless of data size, and Spark's default of 200 shuffle partitions means each
@@ -122,8 +126,9 @@ if [[ -n "${SPARK_MASTER_URL:-}" && -n "${CLUSTER_SMOKE_SOURCE_PATH:-}" \
     --junitxml="$JUNIT_DIR/cluster.xml" -q || status=1
   SPECS+=("Cluster submit=Standalone cluster (GPU)=$JUNIT_DIR/cluster.xml")
 else
-  echo "==> Skipping cluster run (set SPARK_MASTER_URL, CLUSTER_SMOKE_SOURCE_PATH and"
-  echo "    CLUSTER_SMOKE_OUTPUT_PATH to submit the real job to a standalone cluster)"
+  echo "==> Skipping cluster run (set SPARK_MASTER_URL and CLUSTER_SMOKE_OUTPUT_PATH"
+  echo "    to submit the real job to a standalone cluster; CLUSTER_SMOKE_SOURCE_PATH"
+  echo "    is optional -- fixtures auto-stage to the output base when it is unset)"
 fi
 
 echo "==> Rendering report -> $REPORT_DIR/report.{html,json}"

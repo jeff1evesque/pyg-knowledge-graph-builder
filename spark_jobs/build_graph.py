@@ -1202,15 +1202,48 @@ def execute_pyg_only(
 # ============================================
 # Job manifest and summary
 # ============================================
-def save_job_manifest(
-    s3_client, config: JobConfig, result: Dict, elapsed: float
-):
+def _write_manifest_bytes(spark: SparkSession, path: str, body: bytes):
+    """Write ``body`` to ``path``, honoring the path's URI scheme.
+
+    ``local_work_dir`` may be a bare POSIX path (``/data/pyg``) or a URI on shared
+    storage (``s3a://bucket/prefix``). A plain ``open()`` treats the latter
+    literally and creates a junk ``./s3a:/...`` tree on the driver's local disk
+    instead of writing to the object store. Route any non-local URI through the
+    Hadoop FileSystem API so it lands on the same filesystem (with the same S3A/IAM
+    config) that Spark writes every other artifact to; keep the plain-local path on
+    the direct filesystem call.
     """
-    Save a JSON manifest with job metadata locally, and mirror it to S3
-    when an archive is configured.
-    """
+    from urllib.parse import urlparse
+
+    scheme = urlparse(path).scheme
+    if scheme and scheme != "file":
+        jvm = spark._jvm
+        hconf = spark._jsc.hadoopConfiguration()
+        juri = jvm.java.net.URI(path)
+        fs = jvm.org.apache.hadoop.fs.FileSystem.get(juri, hconf)
+        jpath = jvm.org.apache.hadoop.fs.Path(path)
+        stream = fs.create(jpath, True)  # overwrite
+        try:
+            stream.write(bytearray(body))
+        finally:
+            stream.close()
+        return
+
     import os
 
+    local_path = urlparse(path).path if scheme == "file" else path
+    os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
+    with open(local_path, "wb") as f:
+        f.write(body)
+
+
+def save_job_manifest(
+    spark: SparkSession, s3_client, config: JobConfig, result: Dict, elapsed: float
+):
+    """
+    Save a JSON manifest with job metadata to the job's work dir (local path or
+    shared-storage URI), and mirror it to a dedicated S3 archive when configured.
+    """
     manifest = {
         "job_timestamp": datetime.utcnow().isoformat() + "Z",
         "time_period": config.time_period,
@@ -1238,15 +1271,13 @@ def save_job_manifest(
     )
     rel_key = f"manifests/{config.time_period}/{filename}"
 
-    # Local (always)
+    # Work dir (always) — local path or shared-storage URI (s3a://, hdfs://, ...).
     try:
-        local_path = os.path.join(config.local_work_dir, rel_key)
-        os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        with open(local_path, "wb") as f:
-            f.write(body)
-        logger.info(f"Saved job manifest to {local_path}")
+        work_path = f"{config.local_work_dir.rstrip('/')}/{rel_key}"
+        _write_manifest_bytes(spark, work_path, body)
+        logger.info(f"Saved job manifest to {work_path}")
     except Exception as e:
-        logger.warning(f"Failed to save local job manifest: {e}")
+        logger.warning(f"Failed to save job manifest to work dir: {e}")
 
     # S3 mirror (optional)
     if config.archive_to_s3:
@@ -1392,7 +1423,7 @@ def main():
 
     # Save manifest and print summary
     elapsed = time.time() - job_start_time
-    save_job_manifest(s3_client, config, result, elapsed)
+    save_job_manifest(spark, s3_client, config, result, elapsed)
     print_final_banner(config, result, elapsed)
 
     logger.info("Done.")
