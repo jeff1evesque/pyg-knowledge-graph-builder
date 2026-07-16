@@ -173,3 +173,150 @@ def test_split_enrichment_then_pyg(spark, tmp_path):
     pyg = _make_config(local_work_dir=work, mode="pyg_only")
     execute_pyg_only(pyg, spark, s3_client=None)
     _assert_valid_graph_and_metadata(pyg, tmp_path)
+
+
+# --------------------------------------------------------------------------- #
+# reproducibility — the same input must yield an identical graph
+#
+# Determinism is an integration property no unit test can cover: it only emerges
+# when every construction module composes over the real pipeline. We run the full
+# pipeline twice on the same fixture and assert the two outputs are identical.
+# --------------------------------------------------------------------------- #
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _run_pipeline_subprocess(work_dir):
+    """Run the real build_graph CLI once, in its own JVM process.
+
+    Determinism requires two runs, but the enrichment fans out into ~1,300
+    cumulative Spark stages *per run* regardless of source count (every source's
+    linker executes structurally). Two runs in one shared SparkSession exhaust
+    the driver/executor heap of the single local JVM (OutOfMemoryError mid-second
+    run). Each single run fits — the other e2e tests prove it — so we isolate the
+    two runs in separate processes. Independent JVMs, independent shuffle
+    scheduling: this is also the strongest form of a reproducibility check.
+
+    PYSPARK_PYTHON is pinned to this interpreter so the turtle_parquet parse UDF
+    finds rdflib (see the e2e conftest note); heap/retention are passed through
+    PYSPARK_SUBMIT_ARGS, which the driver JVM honors at launch.
+    """
+    import os
+    import subprocess
+    import sys
+
+    env = os.environ.copy()
+    env["PYSPARK_PYTHON"] = sys.executable
+    env["SPARK_LOCAL_IP"] = "127.0.0.1"
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(REPO_ROOT), env.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
+    env["PYSPARK_SUBMIT_ARGS"] = (
+        "--master local[4] --driver-memory 2g "
+        "--conf spark.ui.enabled=false "
+        "--conf spark.sql.shuffle.partitions=8 "
+        "--conf spark.ui.retainedJobs=40 "
+        "--conf spark.ui.retainedStages=80 "
+        "--conf spark.sql.ui.retainedExecutions=40 "
+        "pyspark-shell"
+    )
+
+    cmd = [
+        sys.executable, "-m", "spark_jobs.build_graph",
+        "--mode", "full",
+        "--source_format", "turtle_parquet",
+        "--turtle_column", "triples",
+        "--time_period", "2099-01",
+        "--parquet_partitions", "2",
+        "--local_work_dir", str(work_dir),
+        "--source_paths", ",".join(_turtle_parquet_source_paths()),
+    ]
+    proc = subprocess.run(
+        cmd, cwd=str(REPO_ROOT), env=env,
+        capture_output=True, text=True, timeout=1200,
+    )
+    assert proc.returncode == 0, (
+        "build_graph subprocess failed\n"
+        f"STDOUT tail:\n{proc.stdout[-3000:]}\n"
+        f"STDERR tail:\n{proc.stderr[-3000:]}"
+    )
+
+
+def _metadata_by_name(work_dir):
+    return {
+        p.name: p
+        for p in Path(work_dir).rglob("*.json")
+        if p.name in METADATA_FILES
+    }
+
+
+def _store_get(store, key):
+    return store[key] if key in store and store[key] is not None else None
+
+
+@pytest.mark.xfail(
+    reason=(
+        "Known jolts_* categorical non-determinism: the multi-hot flags + "
+        "group-by-sum combine in feature_extractor drift run-to-run "
+        "(observed on jolts_MonthlyHiresData node features). Tracked as its "
+        "own bug. Non-strict so an occasionally-deterministic run does not "
+        "flip this red; remove the marker once reproducibility is fixed."
+    ),
+    strict=False,
+)
+def test_output_is_reproducible(tmp_path):
+    """Two runs over the same fixture → identical graph, tensors, and metadata.
+
+    Guards the class of defect the jolts_* categorical non-determinism belongs
+    to: individually-plausible modules that, composed, drift run-to-run. The
+    metadata build_timestamp is the one field allowed to differ. Runs each
+    pipeline in its own process (see _run_pipeline_subprocess).
+
+    Currently xfails on the jolts_* categorical non-determinism (see the marker).
+    The full assertion set is kept intact so the guard flips green the moment
+    the bug is fixed.
+    """
+    import torch
+
+    run1, run2 = tmp_path / "run1", tmp_path / "run2"
+    _run_pipeline_subprocess(run1)
+    _run_pipeline_subprocess(run2)
+
+    pt1 = next(run1.rglob("hetero_data.pt"))
+    pt2 = next(run2.rglob("hetero_data.pt"))
+    d1 = _load_hetero(pt1)
+    d2 = _load_hetero(pt2)
+
+    # --- same node/edge type inventory ---
+    assert sorted(d1.node_types) == sorted(d2.node_types)
+    assert sorted(map(tuple, d1.edge_types)) == sorted(map(tuple, d2.edge_types))
+
+    # --- per-type counts + feature tensors bit-identical ---
+    for nt in d1.node_types:
+        assert d1[nt].num_nodes == d2[nt].num_nodes, f"{nt} count drift"
+        x1, x2 = _store_get(d1[nt], "x"), _store_get(d2[nt], "x")
+        assert (x1 is None) == (x2 is None), f"{nt} feature presence drift"
+        if x1 is not None:
+            assert torch.equal(x1, x2), f"node features differ for {nt}"
+
+    for et in d1.edge_types:
+        assert torch.equal(d1[et].edge_index, d2[et].edge_index), (
+            f"edge_index differs for {et}"
+        )
+        a1, a2 = _store_get(d1[et], "edge_attr"), _store_get(d2[et], "edge_attr")
+        assert (a1 is None) == (a2 is None), f"{et} edge_attr presence drift"
+        if a1 is not None:
+            assert torch.equal(a1, a2), f"edge features differ for {et}"
+
+    # --- metadata byte-identical, except the allow-listed build timestamp ---
+    m1, m2 = _metadata_by_name(run1), _metadata_by_name(run2)
+    assert set(m1) == METADATA_FILES and set(m2) == METADATA_FILES
+    for name in METADATA_FILES:
+        b1, b2 = m1[name].read_bytes(), m2[name].read_bytes()
+        if name == "graph_schema.json":
+            j1, j2 = json.loads(b1), json.loads(b2)
+            j1["build_metadata"].pop("build_timestamp", None)
+            j2["build_metadata"].pop("build_timestamp", None)
+            assert j1 == j2, "graph_schema.json differs beyond the timestamp"
+        else:
+            assert b1 == b2, f"{name} differs between runs"
