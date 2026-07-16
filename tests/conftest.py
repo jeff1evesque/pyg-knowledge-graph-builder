@@ -28,7 +28,22 @@ def spark(tmp_path_factory):
     Uses local[2] so window functions and joins exercise real partitioning
     while staying fast. Shuffle partitions are capped to keep small-data tests
     from spawning 200 empty tasks per shuffle.
+
+    Driver heap and retention: this session is reused across the whole suite,
+    including the feature-encoding tests, each of which runs a large query
+    (long unionAll chains of hash expressions). Spark's SQLAppStatusListener
+    retains one plan per execution, so without bounding it the driver heap
+    grows with every query and eventually GC-thrashes. We cap retained
+    executions low and raise the driver heap. spark.driver.memory must be set
+    before the JVM launches (the builder config is too late in local mode),
+    so it goes through PYSPARK_SUBMIT_ARGS.
     """
+    import os
+
+    os.environ.setdefault(
+        "PYSPARK_SUBMIT_ARGS", "--driver-memory 2g pyspark-shell"
+    )
+
     from pyspark.sql import SparkSession
 
     warehouse = tmp_path_factory.mktemp("spark_warehouse")
@@ -41,6 +56,11 @@ def spark(tmp_path_factory):
         .config("spark.sql.shuffle.partitions", "2")
         .config("spark.sql.warehouse.dir", str(warehouse))
         .config("spark.driver.host", "127.0.0.1")
+        # Bound driver-side retention so a long session doesn't leak plan
+        # metadata for every executed query.
+        .config("spark.sql.ui.retainedExecutions", "5")
+        .config("spark.ui.retainedJobs", "20")
+        .config("spark.ui.retainedStages", "40")
         .getOrCreate()
     )
     session.sparkContext.setLogLevel("ERROR")
