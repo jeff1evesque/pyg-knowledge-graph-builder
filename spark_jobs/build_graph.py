@@ -65,7 +65,7 @@ import json
 import logging
 import time
 import io
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Tuple, List
 
 from pyspark.sql import SparkSession, DataFrame
@@ -102,6 +102,17 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("build_graph")
+
+
+def _utcnow() -> datetime:
+    """Naive UTC now — drop-in for the deprecated datetime.utcnow().
+
+    Returns a *naive* datetime (no tzinfo) so isoformat()/strftime()
+    output stays byte-identical to the historical utcnow() call sites
+    (a tz-aware isoformat() would insert "+00:00" before the manual "Z").
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
 
 # ============================================
 # Constants
@@ -1245,7 +1256,7 @@ def save_job_manifest(
     shared-storage URI), and mirror it to a dedicated S3 archive when configured.
     """
     manifest = {
-        "job_timestamp": datetime.utcnow().isoformat() + "Z",
+        "job_timestamp": _utcnow().isoformat() + "Z",
         "time_period": config.time_period,
         "mode": config.mode,
         "config": {
@@ -1267,7 +1278,7 @@ def save_job_manifest(
     body = json.dumps(manifest, indent=2, default=str).encode("utf-8")
 
     filename = (
-        f"{config.mode}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
+        f"{config.mode}_{_utcnow().strftime('%Y%m%d_%H%M%S')}.json"
     )
     rel_key = f"manifests/{config.time_period}/{filename}"
 
@@ -1370,7 +1381,7 @@ def main():
     logger.info("=" * 80)
     logger.info("PyTorch Geometric Knowledge Graph Builder")
     logger.info("=" * 80)
-    logger.info(f"Start time: {datetime.utcnow().isoformat()}Z")
+    logger.info(f"Start time: {_utcnow().isoformat()}Z")
     logger.info("")
 
     # Parse and validate arguments
