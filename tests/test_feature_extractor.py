@@ -33,9 +33,17 @@ from spark_jobs.pyg_builder.feature_extractor import (
 CPI_INDEX = "https://www.bls.gov/cpi/Index"        # -> cpi_Index
 CPI_SERIES = "https://www.bls.gov/cpi/Series"      # -> cpi_Series
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+RDFS_SUBCLASS_OF = "http://www.w3.org/2000/01/rdf-schema#subClassOf"
+RDFS_DOMAIN = "http://www.w3.org/2000/01/rdf-schema#domain"
+RDFS_RANGE = "http://www.w3.org/2000/01/rdf-schema#range"
+RDFS_SUBPROPERTY_OF = "http://www.w3.org/2000/01/rdf-schema#subPropertyOf"
+XSD_STRING = "http://www.w3.org/2001/XMLSchema#string"
 METRIC = "https://example.org/metric"              # numeric literal predicate
 SECTOR = "https://example.org/sector"              # categorical predicate
 REGION = "https://example.org/region"              # categorical predicate
+SUPER_PROP = "https://example.org/attribute"       # super-property of SECTOR
+BASE_CLASS = "https://example.org/EconomicIndicator"   # direct superclass
+ROOT_CLASS = "https://example.org/Thing"               # transitive superclass
 
 VDIM = 128
 CONFIG = {"feature_config": {"vector_dim": VDIM}}
@@ -103,6 +111,123 @@ def test_class_identity_distinguishes_types(spark):
     ser = _seg(feats["cpi_Series"][0], ci_start, ci_dim)
     # Different type URIs must produce different class-identity fingerprints.
     assert not np.array_equal(idx, ser)
+
+
+# ======================================================================
+# Segment 1b — class hierarchy (rdfs:subClassOf, depth-weighted)
+# ======================================================================
+
+def test_class_hierarchy_encodes_depth_weighted_superclasses(spark):
+    # cpi:Index subClassOf BASE subClassOf ROOT. The transitive closure gives
+    # node a superclasses (BASE, depth 1) and (ROOT, depth 2); each is hashed
+    # with 2 seeds at weight 1/depth. cpi:Series has no hierarchy → zeros.
+    feats = _node_features(spark, [
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/b", RDF_TYPE, CPI_SERIES),
+        (CPI_INDEX, RDFS_SUBCLASS_OF, BASE_CLASS),
+        (BASE_CLASS, RDFS_SUBCLASS_OF, ROOT_CLASS),
+    ])
+    L = VectorLayout(VDIM)
+    ch_start, ch_dim = L.seg1_class_hierarchy_start, L.seg1_class_hierarchy_dim
+
+    expected = np.zeros(ch_dim, dtype=np.float32)
+    for seed in _HASH_SEEDS[:2]:
+        for super_uri, depth in [(BASE_CLASS, 1), (ROOT_CLASS, 2)]:
+            slot = _hash_slot(spark, [super_uri, seed + 100], ch_dim, ch_start)
+            expected[slot - ch_start] += 1.0 / depth
+
+    np.testing.assert_allclose(
+        _seg(feats["cpi_Index"][0], ch_start, ch_dim), expected, atol=1e-6
+    )
+    # Negative: a type outside the hierarchy contributes nothing here.
+    np.testing.assert_allclose(
+        _seg(feats["cpi_Series"][0], ch_start, ch_dim), 0.0, atol=1e-6
+    )
+
+
+# ======================================================================
+# Segment 2 — property schema (presence, domain/range, hierarchy)
+# ======================================================================
+
+def test_property_presence_sets_reserved_slots(spark):
+    # Node a has the SECTOR property → 3-seed multi-hot of the predicate URI
+    # in the property-presence sub-segment. Node b has no properties → zeros.
+    feats = _node_features(spark, [
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/b", RDF_TYPE, CPI_INDEX),
+        ("https://ex/a", SECTOR, "Energy"),
+    ])["cpi_Index"]
+    L = VectorLayout(VDIM)
+    pp_start, pp_dim = (
+        L.seg2_property_presence_start, L.seg2_property_presence_dim
+    )
+
+    expected = np.zeros(pp_dim, dtype=np.float32)
+    for seed in _HASH_SEEDS[:3]:
+        slot = _hash_slot(spark, [SECTOR, seed + 200], pp_dim, pp_start)
+        assert pp_start <= slot < pp_start + pp_dim
+        expected[slot - pp_start] += 1.0
+
+    np.testing.assert_allclose(_seg(feats[0], pp_start, pp_dim), expected,
+                               atol=1e-6)
+    # Negative: node without the property has an empty presence sub-segment.
+    np.testing.assert_allclose(_seg(feats[1], pp_start, pp_dim), 0.0,
+                               atol=1e-6)
+
+
+def test_domain_range_signals_land_in_their_halves(spark):
+    # SECTOR declares rdfs:domain (cpi:Index) and rdfs:range (xsd:string).
+    # A node carrying SECTOR gets the domain URI hashed (seed 300) into the
+    # lower half of the domain-range sub-segment and the range URI (seed 301)
+    # into the upper half.
+    x = _node_features(spark, [
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/a", SECTOR, "Energy"),
+        (SECTOR, RDFS_DOMAIN, CPI_INDEX),
+        (SECTOR, RDFS_RANGE, XSD_STRING),
+    ])["cpi_Index"]
+    L = VectorLayout(VDIM)
+    dr_start, dr_dim = L.seg2_domain_range_start, L.seg2_domain_range_dim
+    dr_half = max(1, dr_dim // 2)
+
+    expected = np.zeros(dr_dim, dtype=np.float32)
+    domain_slot = _hash_slot(spark, [CPI_INDEX, 300], dr_half, dr_start)
+    range_slot = _hash_slot(
+        spark, [XSD_STRING, 301], dr_dim - dr_half, dr_start + dr_half
+    )
+    expected[domain_slot - dr_start] += 1.0
+    expected[range_slot - dr_start] += 1.0
+
+    np.testing.assert_allclose(_seg(x[0], dr_start, dr_dim), expected,
+                               atol=1e-6)
+
+
+def test_property_hierarchy_encodes_super_property(spark):
+    # SECTOR subPropertyOf SUPER_PROP → the super-property URI is hashed with
+    # 2 seeds (offset 400) into the property-hierarchy sub-segment for every
+    # node carrying SECTOR. A schema-less predicate leaves it untouched.
+    feats = _node_features(spark, [
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/b", RDF_TYPE, CPI_INDEX),
+        ("https://ex/a", SECTOR, "Energy"),
+        ("https://ex/b", REGION, "West"),          # no subPropertyOf declared
+        (SECTOR, RDFS_SUBPROPERTY_OF, SUPER_PROP),
+    ])["cpi_Index"]
+    L = VectorLayout(VDIM)
+    ph_start, ph_dim = (
+        L.seg2_property_hierarchy_start, L.seg2_property_hierarchy_dim
+    )
+
+    expected = np.zeros(ph_dim, dtype=np.float32)
+    for seed in _HASH_SEEDS[:2]:
+        slot = _hash_slot(spark, [SUPER_PROP, seed + 400], ph_dim, ph_start)
+        expected[slot - ph_start] += 1.0
+
+    np.testing.assert_allclose(_seg(feats[0], ph_start, ph_dim), expected,
+                               atol=1e-6)
+    # Negative: REGION has no declared super-property → zeros for node b.
+    np.testing.assert_allclose(_seg(feats[1], ph_start, ph_dim), 0.0,
+                               atol=1e-6)
 
 
 # ======================================================================

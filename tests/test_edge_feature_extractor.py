@@ -45,6 +45,19 @@ HAS_YEAR = "https://example.org/hasYear"
 STRIKE = "https://example.org/strikePrice"
 PRICE = "https://example.org/observedPrice"
 
+RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
+CORRELATES = "https://example.org/correlatesWith"      # correlation
+CORRELATES_REL = "unknown_correlatesWith"
+ESCALATES = "https://example.org/escalatesTo"          # escalation
+ESCALATES_REL = "unknown_escalatesTo"
+SEVERITY_SRC = "https://example.org/severityNum"       # src-only severity
+SEVERITY_DST = "https://example.org/severityLevel"     # dst-only severity
+
+# Correlation is NOT in the default enabled_categories — label similarity
+# only runs when it's switched on. Pinned here so a config regression that
+# silently drops the category fails a value test, not just e2e.
+CORR_CONFIG = {"edge_feature_config": {"enabled_categories": ["correlation"]}}
+
 
 def _edge_features(spark, rows, config=None):
     """Run the real edge-feature path; return (features, edge_indices, layout)."""
@@ -197,6 +210,90 @@ def test_option_stock_cross_property_moneyness(spark):
     # strike - stock = 10 (magnitude sub-segment)
     assert _subsum(row, L.seg2_magnitude_start, L.seg2_magnitude_dim) == (
         pytest.approx(10.0, abs=1e-4)
+    )
+
+
+# ======================================================================
+# _encode_relational_context — label similarity (correlation edges)
+# ======================================================================
+
+def _correlation_rows(src_label, dst_label):
+    return [
+        ("https://ex/src", RDF_TYPE, CPI_INDEX),
+        ("https://ex/dst", RDF_TYPE, CPI_SERIES),
+        ("https://ex/src", RDFS_LABEL, src_label),
+        ("https://ex/dst", RDFS_LABEL, dst_label),
+        ("https://ex/src", CORRELATES, "https://ex/dst"),
+    ]
+
+
+def test_correlation_label_similarity_overlapping_labels(spark):
+    # "Energy Prices" / "Energy Stocks" (lowercased by the extractor):
+    # Jaccard = |{energy}| / |{energy, prices, stocks}| = 1/3.
+    feats, _ei, L = _edge_features(
+        spark, _correlation_rows("Energy Prices", "Energy Stocks"),
+        config=CORR_CONFIG,
+    )
+    row = feats[("cpi_Index", CORRELATES_REL, "cpi_Series")].numpy()[0]
+
+    ls_start, ls_dim = (
+        L.seg3_label_similarity_start, L.seg3_label_similarity_dim
+    )
+    # The similarity value sits in the first label-similarity slot...
+    assert row[ls_start] == pytest.approx(1.0 / 3.0, abs=1e-5)
+    # ...and the label-pair hash slot repeats it, so the sub-segment sums
+    # to exactly twice the similarity (hash slot is in [ls_start+1, end)).
+    if ls_dim >= 2:
+        assert _subsum(row, ls_start, ls_dim) == pytest.approx(
+            2.0 / 3.0, abs=1e-5
+        )
+
+
+def test_correlation_label_similarity_disjoint_labels(spark):
+    # No shared words → similarity 0 → the entire sub-segment stays zero.
+    feats, _ei, L = _edge_features(
+        spark, _correlation_rows("Energy Prices", "Wheat Futures"),
+        config=CORR_CONFIG,
+    )
+    row = feats[("cpi_Index", CORRELATES_REL, "cpi_Series")].numpy()[0]
+    assert _subsum(
+        row, L.seg3_label_similarity_start, L.seg3_label_similarity_dim
+    ) == pytest.approx(0.0, abs=1e-6)
+
+
+# ======================================================================
+# _encode_cross_property_contrast — escalation severity delta
+# ======================================================================
+
+@pytest.mark.parametrize("src_sev,dst_sev,expected_delta", [
+    ("1", "3", 2.0),     # escalation: dst more severe → positive delta
+    ("3", "1", -2.0),    # de-escalation: dst less severe → negative delta
+])
+def test_escalation_severity_delta(spark, src_sev, dst_sev, expected_delta):
+    # Endpoints carry severity under DIFFERENT predicates (severityNum vs
+    # severityLevel, both matching the severity regex), so the shared-
+    # predicate numeric contrast finds nothing and the cross-property
+    # escalation fallback must fire.
+    feats, _ei, L = _edge_features(spark, [
+        ("https://ex/src", RDF_TYPE, CPI_INDEX),
+        ("https://ex/dst", RDF_TYPE, CPI_SERIES),
+        ("https://ex/src", SEVERITY_SRC, src_sev),
+        ("https://ex/dst", SEVERITY_DST, dst_sev),
+        ("https://ex/src", ESCALATES, "https://ex/dst"),
+    ])
+    row = feats[("cpi_Index", ESCALATES_REL, "cpi_Series")].numpy()[0]
+
+    # severity delta = dst - src, written into the difference sub-segment
+    assert _subsum(row, L.seg2_difference_start, L.seg2_difference_dim) == (
+        pytest.approx(expected_delta, abs=1e-5)
+    )
+    # The escalation branch writes ONLY the delta — ratio and magnitude
+    # sub-segments stay empty (unlike the option_stock branch).
+    assert _subsum(row, L.seg2_ratio_start, L.seg2_ratio_dim) == (
+        pytest.approx(0.0, abs=1e-6)
+    )
+    assert _subsum(row, L.seg2_magnitude_start, L.seg2_magnitude_dim) == (
+        pytest.approx(0.0, abs=1e-6)
     )
 
 
