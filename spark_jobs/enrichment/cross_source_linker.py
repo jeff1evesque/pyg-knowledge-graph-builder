@@ -538,32 +538,32 @@ class CrossSourceLinker:
         if 'noaa' in self.available_sources:
             noaa_link_dfs: List[DataFrame] = []
 
+            # Structural chain shared by both strategies (lazy — defining
+            # these costs nothing until joined):
+            #   Alert → hasInfo → Info → hasArea → Area
+            info_areas = self.triples_df.filter(
+                F.col("predicate") == _CAP_HAS_AREA
+            ).select(
+                F.col("subject").alias("info"),
+                F.col("object").alias("area"),
+            )
+
+            alert_infos = self.triples_df.filter(
+                F.col("predicate") == _CAP_HAS_INFO
+            ).select(
+                F.col("subject").alias("alert"),
+                F.col("object").alias("info"),
+            )
+
             # Strategy 1: Area description contains state name
-            # Area descriptions are on cap:Area subjects.
-            # Trace back: Area → Info (via hasArea inverse) → Alert (via hasInfo inverse)
-            # But it's easier to join through the forward chain:
-            #   Alert → hasInfo → Info → hasArea → Area → hasAreaDescription
+            # Area descriptions are on cap:Area subjects, so join through the
+            # forward chain: Alert → Info → Area → hasAreaDescription
             area_descs = extract_property(
                 self.triples_df, _CAP_HAS_AREA_DESC, "area_desc"
             )
 
             if area_descs.head(1):
                 # area_descs has (subject=area_uri, area_desc)
-                # Join Area → Info via hasArea (Info → Area, so we need reverse)
-                info_areas = self.triples_df.filter(
-                    F.col("predicate") == _CAP_HAS_AREA
-                ).select(
-                    F.col("subject").alias("info"),
-                    F.col("object").alias("area"),
-                )
-
-                alert_infos = self.triples_df.filter(
-                    F.col("predicate") == _CAP_HAS_INFO
-                ).select(
-                    F.col("subject").alias("alert"),
-                    F.col("object").alias("info"),
-                )
-
                 # Join: area_desc → area → info → alert
                 area_to_alert = (
                     area_descs
