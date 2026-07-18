@@ -563,9 +563,11 @@ class MetadataCollector:
         }
 
     def _build_encoding_config(self) -> Dict[str, Any]:
-        """Build encoding_config.json content."""
+        """Build encoding_config.json content, stamped with a contract digest."""
         if self._encoding_config:
-            return self._encoding_config
+            config = dict(self._encoding_config)
+            config["checksum"] = _encoding_contract_digest(config)
+            return config
 
         # Fallback: build from known constants if register was not called
         return {
@@ -592,6 +594,42 @@ class MetadataCollector:
             "version": "1.0",
             "note": "slot_mapping was not explicitly registered",
         }
+
+
+def _encoding_contract_digest(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Digest of the encoding contract — what must match for a model to stay valid.
+
+    Replaces a field that was named ``checksum`` but only held
+    ``{"total_node_feature_dim": N}``. A dimension detects nothing: two builds
+    with different hash seeds, namespace indices or slot boundaries produced
+    identical values as long as the vector width matched. A model trained
+    against one encoding and served against a graph built with another would
+    load cleanly and return plausible, silently wrong numbers -- every feature
+    sitting in a different slot than the weights expect.
+
+    Hashes the whole merged node+edge config (minus any existing checksum), so
+    it automatically covers every seed, dimension, segment boundary, namespace
+    table and encoding convention already recorded there, and keeps covering
+    new fields as they are added.
+
+    This is a CONTRACT hash, not a data hash: it is derived purely from
+    configuration, so rebuilding a different month with the same settings
+    yields the same digest. Only a change that would invalidate a trained model
+    changes it -- which is what makes it usable as a compatibility gate in a
+    deployed inference path.
+    """
+    import hashlib
+
+    payload = {k: v for k, v in config.items() if k != "checksum"}
+    canonical = json.dumps(
+        _sanitize_config(payload), sort_keys=True, separators=(",", ":")
+    )
+    return {
+        "algorithm": "sha256",
+        "contract_digest": hashlib.sha256(
+            canonical.encode("utf-8")
+        ).hexdigest(),
+    }
 
 
 def _sanitize_config(config: Dict[str, Any]) -> Dict[str, Any]:

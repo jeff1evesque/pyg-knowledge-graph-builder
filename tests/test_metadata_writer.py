@@ -393,3 +393,82 @@ def test_write_metadata_to_local_creates_missing_dir(tmp_path):
     dest = tmp_path / "a" / "b" / "metadata"
     write_metadata_to_local({"graph_schema.json": {"version": "1.0"}}, str(dest))
     assert (dest / "graph_schema.json").exists()
+
+
+# ======================================================================
+# Encoding contract digest (encoding_config.checksum)
+# ======================================================================
+
+def _encoding_config(**overrides):
+    """A minimal but realistic merged node+edge encoding config."""
+    config = {
+        "version": "1.0",
+        "hash_algorithm": "spark_murmur3",
+        "node_features": {
+            "total_dim": 1024,
+            "class_identity": {"dim": 256, "seeds": [0, 7, 13, 31]},
+        },
+        "edge_features": {
+            "total_dim": 32,
+            "temporal_signals": {"time_delta_seed": 0},
+        },
+    }
+    config.update(overrides)
+    return config
+
+
+def _digest_of(config):
+    collector = MetadataCollector("2099-01", 1024, 32, True, {})
+    collector.register_encoding_config(config)
+    written = collector.to_metadata_files()["encoding_config.json"]
+    return written["checksum"]["contract_digest"]
+
+
+def test_encoding_digest_is_stable_for_identical_config():
+    """Same contract in, same digest out — it must not depend on dict order."""
+    assert _digest_of(_encoding_config()) == _digest_of(_encoding_config())
+
+
+def test_encoding_digest_changes_when_a_seed_changes():
+    """A different hash seed invalidates a trained model, so it must be detected.
+
+    This is the case the old "checksum" could not see: it recorded only the
+    total vector dimension, which is unchanged here.
+    """
+    baseline = _encoding_config()
+    reseeded = _encoding_config()
+    reseeded["node_features"]["class_identity"]["seeds"] = [1, 7, 13, 31]
+
+    assert (
+        baseline["node_features"]["total_dim"]
+        == reseeded["node_features"]["total_dim"]
+    ), "fixture must hold dimensions constant, or it proves nothing"
+    assert _digest_of(baseline) != _digest_of(reseeded)
+
+
+def test_encoding_digest_changes_when_a_layout_dim_changes():
+    changed = _encoding_config()
+    changed["node_features"]["class_identity"]["dim"] = 512
+    assert _digest_of(_encoding_config()) != _digest_of(changed)
+
+
+def test_encoding_digest_covers_the_edge_side_too():
+    """Both halves are merged before hashing.
+
+    The old per-extractor checksums collided on the same top-level key, so the
+    shallow merge in constructor.py dropped the node one entirely.
+    """
+    changed = _encoding_config()
+    changed["edge_features"]["temporal_signals"]["time_delta_seed"] = 99
+    assert _digest_of(_encoding_config()) != _digest_of(changed)
+
+
+def test_encoding_digest_ignores_a_previous_checksum_field():
+    """Re-stamping a config that already carries a checksum is a no-op.
+
+    The digest is computed over the contract with any existing checksum
+    removed, so it does not hash its own previous output.
+    """
+    stamped = _encoding_config()
+    stamped["checksum"] = {"algorithm": "sha256", "contract_digest": "stale"}
+    assert _digest_of(stamped) == _digest_of(_encoding_config())
