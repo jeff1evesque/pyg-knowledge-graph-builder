@@ -118,6 +118,25 @@ def _assert_valid_graph_and_metadata(config, work_dir):
             content = json.load(fh)
         assert content, f"{name} is empty"
 
+    # --- node_index: every graph row is attributable to a real entity ---
+    # Without this the .pt is anonymous -- row 5 of cpi_Index is some specific
+    # series and nothing on disk says which, which blocks joining training
+    # labels and attributing predictions. Assert it covers the graph exactly.
+    index = _load_node_index(config.pyg_output_path)
+    per_type = index.groupby("node_type")["node_id"]
+
+    assert set(index["node_type"]) == set(map(str, data.node_types)), (
+        "node_index node types do not match the graph's"
+    )
+    for nt in data.node_types:
+        ids = sorted(per_type.get_group(str(nt)).tolist())
+        assert ids == list(range(data[nt].num_nodes)), (
+            f"{nt}: node_index ids are not exactly 0..num_nodes-1"
+        )
+
+    assert index["uri"].is_unique, "node_index maps two rows to one entity"
+    assert len(index) == sum(data[nt].num_nodes for nt in data.node_types)
+
 
 # --------------------------------------------------------------------------- #
 # full mode — both loaders
@@ -259,6 +278,29 @@ def _finish_pipeline_subprocess(work_dir, proc):
         f"STDOUT tail:\n{stdout[-3000:]}\n"
         f"STDERR tail:\n{stderr[-3000:]}"
     )
+
+
+def _load_node_index(pyg_output_path):
+    """Read the node_index Parquet written beside the .pt into a DataFrame.
+
+    Read with pandas rather than Spark: these tests already hold a
+    SparkSession, but the artifact's whole point is being consumable by a
+    downstream trainer or inference process that has no Spark at all. Reading it
+    the way such a consumer would is the more meaningful assertion.
+    """
+    import pandas as pd
+
+    from spark_jobs.pyg_builder.metadata_writer import derive_node_index_prefix
+
+    path = Path(derive_node_index_prefix(pyg_output_path))
+    assert path.is_dir(), f"missing node_index at {path}"
+    return pd.read_parquet(path)
+
+
+def _node_index_under(work_dir):
+    """Locate and load the node_index for a pipeline run's work dir."""
+    pt = next(Path(work_dir).rglob("hetero_data.pt"))
+    return _load_node_index(str(pt))
 
 
 def _metadata_by_name(work_dir):
@@ -433,6 +475,14 @@ def test_output_is_reproducible(twin_runs):
         j1 = _load_metadata(m1[name], name)
         j2 = _load_metadata(m2[name], name)
         assert j1 == j2, f"{name} differs between runs"
+
+    # --- identity map reproducible, rows and order alike ---
+    # A drifting node_index is worse than none: it would silently attribute
+    # predictions to the WRONG entity rather than failing. Compared with row
+    # order intact, since the artifact is written sorted and coalesced to one
+    # file precisely so it is stable.
+    i1, i2 = _node_index_under(twin_runs.run1), _node_index_under(twin_runs.run2)
+    assert i1.equals(i2), "node_index differs between runs"
 
 
 def test_jolts_features_reproducible(twin_runs):
