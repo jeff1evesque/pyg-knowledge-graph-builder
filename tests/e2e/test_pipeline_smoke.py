@@ -118,6 +118,15 @@ def _assert_valid_graph_and_metadata(config, work_dir):
             content = json.load(fh)
         assert content, f"{name} is empty"
 
+    # --- owl:sameAs only ever links temporal entities to temporal entities ---
+    # cross_source_linker used to match subjects with "(January|...)$" -- anchored
+    # only at the end -- so any URI merely ENDING with a month name was asserted
+    # to BE that month (unified:September owl:sameAs cpi:...PercentChange_...
+    # _September). owl:sameAs is RDF's strongest claim, so those became real
+    # graph edges. Guarded here as well as in the unit tests because this asserts
+    # the property of the WHOLE pipeline -- any enricher reintroducing it fails.
+    _assert_sameas_links_only_temporal(config)
+
     # --- every edge type records where it came from ---
     # "unknown" is the not-supplied fallback, so seeing it in a real build means
     # constructor.py stopped passing edge_origins. Distinguishing an observed
@@ -292,6 +301,43 @@ def _finish_pipeline_subprocess(work_dir, proc):
         f"STDERR tail:\n{stderr[-3000:]}"
     )
 
+
+
+def _assert_sameas_links_only_temporal(config):
+    """Every owl:sameAs in the enriched output must link two temporal entities."""
+    import re
+
+    import pandas as pd
+
+    files = sorted(
+        Path(config.enriched_parquet_path).rglob("*.parquet")
+    )
+    if not files:
+        return  # split-mode runs may not re-emit the enriched frame
+    df = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
+    same_as = df[df["predicate"].str.endswith("#sameAs", na=False)]
+    if same_as.empty:
+        return
+
+    months = (
+        "January|February|March|April|May|June|July|August|September"
+        "|October|November|December"
+    )
+
+    def temporal(uri):
+        local = str(uri).rsplit("/", 1)[-1]
+        return bool(
+            re.fullmatch(months, local)
+            or re.fullmatch(r"\d{4}", local)
+            or re.fullmatch(rf"Year\d{{4}}", local)
+            or re.fullmatch(r"Q[1-4]", local)
+        )
+
+    bad = same_as[~same_as["object"].map(temporal)]
+    assert bad.empty, (
+        f"{len(bad)} owl:sameAs triples point at a NON-temporal entity, e.g. "
+        f"{bad['object'].iloc[0]}"
+    )
 
 def _load_node_index(pyg_output_path):
     """Read the node_index Parquet written beside the .pt into a DataFrame.

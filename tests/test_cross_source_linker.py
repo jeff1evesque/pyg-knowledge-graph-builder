@@ -67,13 +67,36 @@ def test_cross_source_company_linking_shares_unified_company(spark, make_triples
     assert (company, TICKER_PRED, "AAPL") in triples
 
 
-def test_cross_source_temporal_alignment_unifies_months(spark, make_triples):
-    """A BLS subject ending in a month name gets owl:sameAs from a typed,
-    labeled unified month entity."""
-    cpi_month = str(CPI) + "month/2024-January"
+def test_cross_source_does_not_unify_temporal_entities(spark, make_triples):
+    """Temporal alignment belongs to TemporalUnifier, not here.
+
+    This module used to run its own temporal alignment as step 1, matching
+    subjects with ``(January|...|December)$`` -- anchored only at the END, with
+    no separator required. That matched any URI merely ENDING with a month name
+    and asserted a measurement IS a month:
+
+        unified:September owl:sameAs cpi:...PercentChange_..._2025_September
+
+    owl:sameAs is RDF's strongest claim (the two URIs denote one individual), so
+    those became real graph edges and licensed a reasoner to merge them. On the
+    e2e fixtures 263 subjects end with a month name and only 13 are actual month
+    URIs -- the other 250 are measurements.
+
+    It was also redundant: TemporalUnifier runs as enrichment PHASE 2, before
+    this module, with its output merged into triples_df. Measured on the
+    fixtures, this step produced 273 sameAs triples -- 259 false, 14 vacuous
+    self-links (unified:April sameAs unified:April, from matching the node
+    Phase 2 had just created) and 0 correct links TemporalUnifier had not
+    already found.
+
+    The previous test here asserted the buggy behaviour was correct, using a
+    fixture (``cpi/month/2024-January``) chosen to match the regex. No such URI
+    exists in real data, which contains only bare month URIs and measurements.
+    """
+    measurement = str(CPI) + "SeasonallyAdjustedPercentChange_Food_2025_September"
     snapshot = str(MARKET) + "snapshot/AAPL_1"
     rows = [
-        (cpi_month, RDFS_LABEL, "January 2024"),
+        (measurement, RDFS_LABEL, "Food, Sep 2025"),
         (snapshot, RDFS_LABEL, "AAPL snapshot"),  # second source, no month
     ]
 
@@ -81,10 +104,39 @@ def test_cross_source_temporal_alignment_unifies_months(spark, make_triples):
         CrossSourceLinker(spark, make_triples(rows)).enrich()
     )
 
-    unified_month = str(UNIFIED) + "January"
-    assert (unified_month, OWL_SAME_AS, cpi_month) in triples
-    assert (unified_month, RDF_TYPE, UNIFIED_MONTH_TYPE) in triples
-    assert (unified_month, RDFS_LABEL, "January") in triples
+    assert not [
+        t for t in triples if t[1] == OWL_SAME_AS and t[2] == measurement
+    ], "a measurement was asserted to BE a month"
+    assert not [
+        t for t in triples if t[0] == str(UNIFIED) + "September"
+    ], "cross-source linker must not mint unified month entities"
+
+
+def test_cross_source_does_not_unify_year_suffixed_uris(spark, make_triples):
+    """Same guard for the four-digit year path.
+
+    The removed step matched years with ``(\\d{4})$`` -- also anchored only at
+    the end -- so any URI ending in four digits was treated as a year entity and
+    given an owl:sameAs from unified:Year{YYYY}. A measurement whose name ends
+    in a year is not the year.
+    """
+    measurement = str(CPI) + "UnadjustedIndex_Apparel_2024"
+    snapshot = str(MARKET) + "snapshot/AAPL_1"
+    rows = [
+        (measurement, RDFS_LABEL, "Apparel index 2024"),
+        (snapshot, RDFS_LABEL, "AAPL snapshot"),  # second source
+    ]
+
+    triples = _triple_set(
+        CrossSourceLinker(spark, make_triples(rows)).enrich()
+    )
+
+    assert not [
+        t for t in triples if t[1] == OWL_SAME_AS and t[2] == measurement
+    ], "a measurement was asserted to BE a year"
+    assert not [
+        t for t in triples if t[0] == str(UNIFIED) + "Year2024"
+    ], "cross-source linker must not mint unified year entities"
 
 
 def test_cross_source_single_source_short_circuits(spark, make_triples):
