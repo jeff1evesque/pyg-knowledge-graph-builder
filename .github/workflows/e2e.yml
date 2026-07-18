@@ -28,6 +28,12 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-test.txt
 
+      # CPU-only torch: this runner has no GPU, and the default PyPI wheel for
+      # `torch>=2.5.0` on Linux is the CUDA build (~3.8GB with its nvidia/* deps).
+      # See the equivalent step in tests.yml for the full rationale.
+      - name: Install CPU-only torch
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
       - name: Install test dependencies
         run: pip install -r requirements-test.txt
 
