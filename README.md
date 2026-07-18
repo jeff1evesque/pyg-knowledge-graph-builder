@@ -761,6 +761,8 @@ Complete inventory of every node type and edge type in the graph. The entry poin
 **Contents:**
 - Every node type with its count, source ontology URI, and category tag
 - Every edge type as a full three-part tuple with its count, predicate URI, origin, whether it has edge features, and if so the feature dimension
+  - `origin` is one of **`raw`** (the relationship was stated in the source RDF), **`enrichment`** (this pipeline inferred it), or **`unification`** (a cross-source identity link). Enrichment adds ~91,000 triples on top of the raw data, so some edges are reported facts and others are derived — a distinction a model consumer should weight differently. Classified by `classify_edge_origin()` in `rdf_utils.py` from the predicate namespace **and both endpoint node types**, since the pipeline marks its output in two places: inferred links carry a minted *predicate* (`bls.gov/enrichment/...`), while unification links carry a minted *node* but a standard predicate (`unified:November owl:sameAs cpi:November`). Checking the predicate alone reports every unification edge as `raw`.
+  - Deliberately three values rather than separating intra- from cross-source enrichment: those share a namespace, so nothing at this layer can tell them apart, and a field promising a distinction it never emits is worse than a narrower honest one. It records *that* an edge was derived, not *why* — per-edge lineage is a much larger change, worth building only once a model's predictions need explaining.
 - Summary statistics: total node types, total edge types, total nodes, total edges, edge types with features
 - Build metadata: time period, build timestamp, pipeline config
 
