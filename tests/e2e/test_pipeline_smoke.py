@@ -186,8 +186,8 @@ def test_split_enrichment_then_pyg(spark, tmp_path):
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _run_pipeline_subprocess(work_dir):
-    """Run the real build_graph CLI once, in its own JVM process.
+def _start_pipeline_subprocess(work_dir):
+    """Launch the real build_graph CLI once, in its own JVM process (non-blocking).
 
     Determinism requires two runs, but the enrichment fans out into ~1,300
     cumulative Spark stages *per run* regardless of source count (every source's
@@ -196,6 +196,13 @@ def _run_pipeline_subprocess(work_dir):
     run). Each single run fits — the other e2e tests prove it — so we isolate the
     two runs in separate processes. Independent JVMs, independent shuffle
     scheduling: this is also the strongest form of a reproducibility check.
+
+    Returns the Popen handle (does not wait) so the caller can start both runs and
+    then wait on them together: the two runs are fully independent, so overlapping
+    them ~halves the twin-run wall-clock. The trade-off is ~2x peak memory (two
+    --driver-memory 2g local[4] JVMs alive at once), acceptable on the machines
+    that run the e2e suite; drop to sequential on a memory-constrained host. Pair
+    with _finish_pipeline_subprocess.
 
     PYSPARK_PYTHON is pinned to this interpreter so the turtle_parquet parse UDF
     finds rdflib (see the e2e conftest note); heap/retention are passed through
@@ -231,14 +238,26 @@ def _run_pipeline_subprocess(work_dir):
         "--local_work_dir", str(work_dir),
         "--source_paths", ",".join(_turtle_parquet_source_paths()),
     ]
-    proc = subprocess.run(
+    return subprocess.Popen(
         cmd, cwd=str(REPO_ROOT), env=env,
-        capture_output=True, text=True, timeout=1200,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
+
+
+def _finish_pipeline_subprocess(work_dir, proc):
+    """Wait for a _start_pipeline_subprocess run and assert it succeeded."""
+    import subprocess
+
+    try:
+        stdout, stderr = proc.communicate(timeout=1200)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout, stderr = proc.communicate()
+        raise AssertionError(f"build_graph subprocess for {work_dir} timed out")
     assert proc.returncode == 0, (
-        "build_graph subprocess failed\n"
-        f"STDOUT tail:\n{proc.stdout[-3000:]}\n"
-        f"STDERR tail:\n{proc.stderr[-3000:]}"
+        f"build_graph subprocess for {work_dir} failed\n"
+        f"STDOUT tail:\n{stdout[-3000:]}\n"
+        f"STDERR tail:\n{stderr[-3000:]}"
     )
 
 
@@ -304,14 +323,18 @@ def twin_runs(tmp_path_factory):
 
     Determinism is an integration property no unit test can cover: it only emerges
     when every construction module composes over the real pipeline. Each run is
-    isolated in its own process (see _run_pipeline_subprocess); the pair is
-    module-scoped so the expensive twin runs execute exactly once and are shared
-    by every reproducibility test below.
+    isolated in its own process (see _start_pipeline_subprocess) and the two are
+    launched concurrently, then waited on together — overlapping the independent
+    runs ~halves the twin-run wall-clock. The pair is module-scoped so the
+    expensive twin runs execute exactly once and are shared by every
+    reproducibility test below.
     """
     base = tmp_path_factory.mktemp("reproducibility")
     run1, run2 = base / "run1", base / "run2"
-    _run_pipeline_subprocess(run1)
-    _run_pipeline_subprocess(run2)
+    # Start both independent runs, then wait on both (concurrent, not sequential).
+    running = [(wd, _start_pipeline_subprocess(wd)) for wd in (run1, run2)]
+    for wd, proc in running:
+        _finish_pipeline_subprocess(wd, proc)
 
     d1 = _load_hetero(next(run1.rglob("hetero_data.pt")))
     d2 = _load_hetero(next(run2.rglob("hetero_data.pt")))
