@@ -118,6 +118,19 @@ def _assert_valid_graph_and_metadata(config, work_dir):
             content = json.load(fh)
         assert content, f"{name} is empty"
 
+    # --- every edge type records where it came from ---
+    # "unknown" is the not-supplied fallback, so seeing it in a real build means
+    # constructor.py stopped passing edge_origins. Distinguishing an observed
+    # fact from an enrichment-inferred link is what makes an edge trustworthy.
+    schema = json.loads(Path(found["graph_schema.json"]).read_bytes())
+    origins = {
+        e["origin"] for e in schema["edge_types"].values()
+    }
+    assert "unknown" not in origins, "edge types with unrecorded origin"
+    assert origins <= {"raw", "enrichment", "unification"}, (
+        f"unexpected origin values: {origins}"
+    )
+
     # --- node_index: every graph row is attributable to a real entity ---
     # Without this the .pt is anonymous -- row 5 of cpi_Index is some specific
     # series and nothing on disk says which, which blocks joining training

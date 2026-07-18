@@ -499,3 +499,51 @@ def test_encoding_digest_ignores_a_previous_checksum_field():
     stamped = _encoding_config()
     stamped["checksum"] = {"algorithm": "sha256", "contract_digest": "stale"}
     assert _digest_of(stamped) == _digest_of(_encoding_config())
+
+
+# ======================================================================
+# Edge origin — raw vs pipeline-minted
+# ======================================================================
+
+def test_edge_origin_is_populated_not_unknown():
+    """graph_schema.json must say where each edge came from.
+
+    Every edge type used to report "unknown": the field was plumbed and
+    documented but constructor.py never passed edge_origins. A consumer could
+    not tell a reported fact from a link the enrichment pipeline inferred, which
+    are worth very different trust to a model.
+    """
+    c = MetadataCollector("2099-01", 1024, 64, True, {})
+    c.register_edge_types(
+        edge_counts={
+            ("Company", "reports", "Observation"): 3,
+            ("Sector", "correlatesWith", "Sector"): 2,
+        },
+        edge_predicate_uris={
+            "reports": "https://www.bls.gov/cpi/reports",
+            "correlatesWith": (
+                "https://www.bls.gov/enrichment/correlatesWith"
+            ),
+        },
+        edge_origins={"reports": "raw", "correlatesWith": "enrichment"},
+    )
+    edges = c._build_graph_schema()["edge_types"]
+
+    origins = {v["relation"]: v["origin"] for v in edges.values()}
+    assert origins == {"reports": "raw", "correlatesWith": "enrichment"}
+    assert "unknown" not in origins.values()
+
+
+def test_edge_origin_falls_back_to_unknown_when_not_supplied():
+    """The fallback still exists — this pins that it is the ONLY way to get it.
+
+    If a future caller forgets edge_origins, "unknown" reappears; that is the
+    signal something regressed, not a normal value.
+    """
+    c = MetadataCollector("2099-01", 1024, 64, True, {})
+    c.register_edge_types(
+        edge_counts={("A", "rel", "B"): 1},
+        edge_predicate_uris={"rel": "http://ex/rel"},
+    )
+    edges = c._build_graph_schema()["edge_types"]
+    assert next(iter(edges.values()))["origin"] == "unknown"
