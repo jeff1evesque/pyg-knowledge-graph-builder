@@ -32,6 +32,15 @@
 # Environment variables:
 #   VENV_PYTHON    python to use; default .venv/bin/python
 #   DRIVER_MEMORY  driver heap for the e2e runs; default 4g
+#   PYTEST_WORKERS xdist workers for the FAST suite only; unset = sequential.
+#                  Each worker builds its own SparkSession, so this trades memory
+#                  for wall-clock -- a local-machine optimization, off by default
+#                  so CI is unaffected. Try 4; do not exceed physical cores.
+#   TWIN_RUNS_SEQUENTIAL=1
+#                  Run the e2e reproducibility twin pipelines one-at-a-time
+#                  instead of overlapped. Halves their peak memory (one 2g driver
+#                  JVM instead of two) at roughly double their wall-clock; for
+#                  memory-constrained hosts.
 #   RAPIDS_JAR     explicit RAPIDS jar (else newest under RAPIDS_JAR_DIR)
 #   RAPIDS_JAR_DIR dir to search for the jar; default /opt/spark/jars
 #
@@ -73,8 +82,16 @@ unset SPARK_HOME
 status=0
 declare -a SPECS
 
-echo "==> Fast unit suite (CPU)"
+echo "==> Fast unit suite (CPU)${PYTEST_WORKERS:+ [${PYTEST_WORKERS} workers]}"
+# Parallelism is opt-in and local-only. Each xdist worker is its own process and
+# therefore builds its OWN SparkSession (tests/conftest.py's `spark` fixture is
+# session-scoped), so N workers means N local-mode JVMs. That trades memory for
+# wall-clock: fine on a developer machine, not on a small CI runner -- which is
+# why CI (.github/workflows/tests.yml) calls pytest directly and stays
+# sequential. Deliberately NOT `-n auto`: that keys off core count, so the same
+# command would behave completely differently across machines.
 "$VENV_PYTHON" -m pytest tests/ -m "not e2e" \
+  ${PYTEST_WORKERS:+-n "$PYTEST_WORKERS"} \
   --junitxml="$JUNIT_DIR/fast.xml" -q || status=1
 SPECS+=("Fast (unit) suite=CPU=$JUNIT_DIR/fast.xml")
 

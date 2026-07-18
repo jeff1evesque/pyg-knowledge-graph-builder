@@ -317,24 +317,86 @@ class _TwinRuns:
         self.run1, self.run2 = run1, run2
 
 
+def _twin_runs_sequential():
+    """Whether to run the twin pipelines one-at-a-time instead of overlapped.
+
+    Escape hatch for memory-constrained hosts: concurrent twin runs keep two
+    ``--driver-memory 2g`` local[4] JVMs alive at once (and, with the early
+    launch below, alongside the suite's own SparkSession). Set
+    ``TWIN_RUNS_SEQUENTIAL=1`` to trade the wall-clock saving back for a lower
+    memory ceiling. Correctness is identical either way — the runs are
+    independent regardless of whether they overlap.
+    """
+    import os
+
+    return os.environ.get("TWIN_RUNS_SEQUENTIAL", "") == "1"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _twin_runs_launcher(request, tmp_path_factory):
+    """Start the twin pipeline runs *before* the other e2e tests in this module.
+
+    The twin runs are external subprocesses, so while they execute this pytest
+    process is only blocked in ``communicate()`` — time the rest of the module's
+    tests can use. Launching here (module setup, before the first test) instead
+    of lazily inside ``twin_runs`` overlaps the ~64s of subprocess time with the
+    ~98s of in-session tests that run ahead of the reproducibility tests, rather
+    than adding the two costs. ``twin_runs`` then joins whatever is already
+    running.
+
+    Only launches when a selected test actually needs ``twin_runs`` — a filtered
+    run (e.g. ``-k full_turtle_parquet``) must not pay for two pipeline runs it
+    will never read. Under ``TWIN_RUNS_SEQUENTIAL=1`` nothing is pre-launched;
+    ``twin_runs`` does the work itself, one run at a time.
+
+    Peak memory during the overlap is the suite's SparkSession plus two 2g
+    driver JVMs. That is the trade for the wall-clock; see
+    ``_twin_runs_sequential`` for the way out.
+    """
+    wanted = any(
+        "twin_runs" in getattr(item, "fixturenames", ())
+        for item in request.session.items
+    )
+    if not wanted or _twin_runs_sequential():
+        yield None
+        return
+
+    base = tmp_path_factory.mktemp("reproducibility")
+    run1, run2 = base / "run1", base / "run2"
+    running = [(wd, _start_pipeline_subprocess(wd)) for wd in (run1, run2)]
+    try:
+        yield running
+    finally:
+        # A test may have failed before joining; never leak a live JVM.
+        for _, proc in running:
+            if proc.poll() is None:
+                proc.kill()
+
+
 @pytest.fixture(scope="module")
-def twin_runs(tmp_path_factory):
+def twin_runs(tmp_path_factory, _twin_runs_launcher):
     """Run the full pipeline twice over the same fixture, once, for both tests.
 
     Determinism is an integration property no unit test can cover: it only emerges
     when every construction module composes over the real pipeline. Each run is
     isolated in its own process (see _start_pipeline_subprocess) and the two are
-    launched concurrently, then waited on together — overlapping the independent
-    runs ~halves the twin-run wall-clock. The pair is module-scoped so the
-    expensive twin runs execute exactly once and are shared by every
-    reproducibility test below.
+    launched concurrently — overlapping the independent runs ~halves the twin-run
+    wall-clock. The pair is module-scoped so the expensive twin runs execute
+    exactly once and are shared by every reproducibility test below.
+
+    The runs are normally started early by ``_twin_runs_launcher`` and merely
+    joined here. Under ``TWIN_RUNS_SEQUENTIAL=1`` there is nothing pre-launched,
+    so this runs them itself, strictly one at a time.
     """
-    base = tmp_path_factory.mktemp("reproducibility")
-    run1, run2 = base / "run1", base / "run2"
-    # Start both independent runs, then wait on both (concurrent, not sequential).
-    running = [(wd, _start_pipeline_subprocess(wd)) for wd in (run1, run2)]
-    for wd, proc in running:
-        _finish_pipeline_subprocess(wd, proc)
+    if _twin_runs_launcher is None:
+        base = tmp_path_factory.mktemp("reproducibility")
+        run1, run2 = base / "run1", base / "run2"
+        for wd in (run1, run2):
+            _finish_pipeline_subprocess(wd, _start_pipeline_subprocess(wd))
+    else:
+        (run1, _), (run2, _) = _twin_runs_launcher
+        for wd, proc in _twin_runs_launcher:
+            _finish_pipeline_subprocess(wd, proc)
 
     d1 = _load_hetero(next(run1.rglob("hetero_data.pt")))
     d2 = _load_hetero(next(run2.rglob("hetero_data.pt")))
