@@ -51,7 +51,7 @@ def _build(spark, rows, config=None):
         rows, schema="subject STRING, predicate STRING, object STRING"
     )
     cfg = NO_EDGE_FEATURES if config is None else config
-    data, metadata = build_hetero_data(spark, triples, config=cfg)
+    data, metadata, _node_index = build_hetero_data(spark, triples, config=cfg)
     return data
 
 
