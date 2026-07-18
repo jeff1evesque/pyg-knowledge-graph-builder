@@ -26,3 +26,12 @@
 # pyspark is cluster-provided in production; pin to the cluster's 3.5.x line.
 pyspark>=3.5.0,<3.6.0
 pytest>=8.0.0
+
+# Optional parallelism for the fast unit suite. NOT enabled by default: each
+# xdist worker is a separate process and so builds its OWN SparkSession (the
+# `spark` fixture in tests/conftest.py is session-scoped), meaning N workers =
+# N local-mode JVMs. That is a win on a developer machine with spare cores and
+# RAM, and a memory regression on a small CI runner -- so parallelism is opt-in
+# via PYTEST_WORKERS (see bin/generate_report.sh); a plain `pytest tests/` and
+# the GitHub Actions run stay strictly sequential.
+pytest-xdist>=3.5.0
