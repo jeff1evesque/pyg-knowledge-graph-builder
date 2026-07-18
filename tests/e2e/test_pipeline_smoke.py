@@ -278,25 +278,6 @@ def _is_jolts(node_type):
     return str(node_type).startswith("jolts_")
 
 
-def _canon_json(value):
-    """Recursively order-normalize a JSON value so reordered lists compare equal.
-
-    slot_mapping.json's predicate lists get reordered run-to-run by the known
-    jolts_* non-determinism (identical hash_slots/global_dims, different order).
-    Canonicalizing lets the green guard assert the *content* is reproducible —
-    which it is — while the byte-level ordering stays under the jolts_* xfail
-    (test_jolts_features_reproducible).
-    """
-    if isinstance(value, list):
-        return sorted(
-            (_canon_json(v) for v in value),
-            key=lambda v: json.dumps(v, sort_keys=True),
-        )
-    if isinstance(value, dict):
-        return {k: _canon_json(v) for k, v in value.items()}
-    return value
-
-
 def _load_metadata(path, name):
     """Parse a metadata JSON, dropping the one field allowed to differ per run.
 
@@ -406,14 +387,17 @@ def twin_runs(tmp_path_factory, _twin_runs_launcher):
 def test_output_is_reproducible(twin_runs):
     """Two runs over the same fixture → identical graph, tensors, and metadata.
 
-    Green guard for everything already reproducible: node/edge inventory,
-    per-type counts, every edge_index, edge features, all metadata (byte-identical
-    modulo the allow-listed build_timestamp; metadata list ordering compared
-    order-insensitively — see below), and the feature tensors of every
-    non-jolts_* node type. A new reproducibility regression anywhere outside
-    jolts_* fails this test rather than being masked by an xfail. The jolts_*
-    tensors and the metadata entry ordering are checked separately
-    (test_jolts_features_reproducible).
+    Full-strength determinism guard: node/edge inventory, per-type counts, every
+    edge_index, edge features, the feature tensors of EVERY node type, and every
+    metadata file compared exactly (modulo the allow-listed build_timestamp).
+
+    This used to carry two concessions to a known bug — jolts_* feature tensors
+    were skipped, and metadata was compared order-insensitively because list
+    entries drifted between runs. Both causes are fixed (#221: rdflib's random
+    per-parse blank-node labels, and unordered collect() in the metadata
+    builders), so the comparisons are now exact and the guard is strictly
+    stronger than before the bug existed. Do not reintroduce a canonicalizing
+    comparison here: ordering drift is itself the regression this catches.
     """
     import torch
 
@@ -423,12 +407,12 @@ def test_output_is_reproducible(twin_runs):
     assert sorted(d1.node_types) == sorted(d2.node_types)
     assert sorted(map(tuple, d1.edge_types)) == sorted(map(tuple, d2.edge_types))
 
-    # --- per-type counts + non-jolts_* feature tensors bit-identical ---
+    # --- per-type counts + ALL feature tensors bit-identical ---
     for nt in d1.node_types:
         assert d1[nt].num_nodes == d2[nt].num_nodes, f"{nt} count drift"
         x1, x2 = _store_get(d1[nt], "x"), _store_get(d2[nt], "x")
         assert (x1 is None) == (x2 is None), f"{nt} feature presence drift"
-        if x1 is not None and not _is_jolts(nt):
+        if x1 is not None:
             assert torch.equal(x1, x2), f"node features differ for {nt}"
 
     for et in d1.edge_types:
@@ -440,43 +424,29 @@ def test_output_is_reproducible(twin_runs):
         if a1 is not None:
             assert torch.equal(a1, a2), f"edge features differ for {et}"
 
-    # --- metadata content reproducible (modulo the allow-listed timestamp) ---
-    # The jolts_* non-determinism reorders list entries inside the metadata JSON
-    # (identical content, drifting order — seen in slot_mapping.json and
-    # ontology_schema.json). Compare order-insensitively here so this guard tracks
-    # content reproducibility; the byte-level ordering is guarded by the jolts_*
-    # xfail (test_jolts_features_reproducible).
+    # --- metadata reproducible EXACTLY (modulo the allow-listed timestamp) ---
+    # Compared with ordering intact: entry order drifting run-to-run is exactly
+    # the #221 regression, so canonicalizing it away here would blind the guard.
     m1, m2 = _metadata_by_name(twin_runs.run1), _metadata_by_name(twin_runs.run2)
     assert set(m1) == METADATA_FILES and set(m2) == METADATA_FILES
     for name in METADATA_FILES:
         j1 = _load_metadata(m1[name], name)
         j2 = _load_metadata(m2[name], name)
-        assert _canon_json(j1) == _canon_json(j2), (
-            f"{name} content differs between runs"
-        )
+        assert j1 == j2, f"{name} differs between runs"
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Known jolts_* categorical non-determinism: the multi-hot flags + "
-        "group-by-sum combine in feature_extractor drift run-to-run "
-        "(observed on jolts_MonthlyHiresData node features). Tracked as its "
-        "own bug. Non-strict so an occasionally-deterministic run does not "
-        "flip this red; remove the marker once reproducibility is fixed. Also "
-        "covers the metadata JSON (e.g. slot_mapping.json, ontology_schema.json), "
-        "whose jolts_* list entries the same bug reorders run-to-run (identical "
-        "content, drifting order)."
-    ),
-    strict=False,
-)
 def test_jolts_features_reproducible(twin_runs):
     """The jolts_* feature tensors + metadata entry ordering must match across runs.
 
-    Isolates the one genuinely non-reproducible slice so it xfails on its own
-    without masking regressions elsewhere (guarded by test_output_is_reproducible).
-    Flips green the moment the jolts_* non-determinism is fixed. Asserts the
-    jolts_* type(s) are actually present so an empty selection can't silently
-    xpass on a comparison that never ran.
+    Was a non-strict xfail for the known jolts_* non-determinism; both causes are
+    fixed in #221 so it is now an ordinary passing guard. jolts_* is where the bug
+    surfaced (JOLTS models measurements as RDF blank nodes, and rdflib assigned
+    them a fresh random label on every parse, which then hashed into different
+    feature slots), which is why this slice keeps a dedicated test — a regression
+    in blank-node handling shows up here first and most legibly.
+
+    Asserts the jolts_* type(s) are actually present so an empty selection cannot
+    silently pass on a comparison that never ran.
     """
     import torch
 
@@ -491,12 +461,12 @@ def test_jolts_features_reproducible(twin_runs):
         if x1 is not None:
             assert torch.equal(x1, x2), f"jolts node features differ for {nt}"
 
-    # Same non-determinism reorders entries inside the metadata JSON (identical
-    # content, drifting order): list reordering (slot_mapping.json) and dict
-    # key/insertion-order (ontology_schema.json). Compare serialized form so both
-    # are honored — this is the full "byte-reproducible modulo build_timestamp"
-    # property. It flips green alongside the tensors once the bug is fixed;
-    # test_output_is_reproducible meanwhile guards the order-insensitive content.
+    # Metadata compared in SERIALIZED form, which catches what the parsed-object
+    # comparison in test_output_is_reproducible cannot: dict key/insertion order
+    # (ontology_schema.json), on top of list ordering (slot_mapping.json). Both
+    # drifted before #221 — the unordered collect() in the metadata builders fed
+    # dict insertion order as well as list order. Together the two tests assert
+    # the full "byte-reproducible modulo build_timestamp" property.
     m1, m2 = _metadata_by_name(twin_runs.run1), _metadata_by_name(twin_runs.run2)
     for name in METADATA_FILES:
         s1 = json.dumps(_load_metadata(m1[name], name))
