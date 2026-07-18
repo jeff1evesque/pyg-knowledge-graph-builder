@@ -19,3 +19,6 @@ extract_*.py
 
 # Packed virtualenv shipped to Spark executors (bin/package_venv.sh); ~GB, never commit.
 /dist/
+
+# Per-machine settings
+*/settings.local.json
