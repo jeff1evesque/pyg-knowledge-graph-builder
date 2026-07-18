@@ -130,6 +130,96 @@ ONTOLOGY_NAMESPACE_INDICES: List[Tuple[str, int]] = [
 
 
 # ============================================
+# EDGE ORIGIN CLASSIFICATION
+# ============================================
+# Namespaces this pipeline mints itself, as opposed to reading from a source.
+ENRICHMENT_NAMESPACES: Tuple[str, ...] = (
+    str(BLS_ENRICHMENT),
+    str(SEC_ENRICHMENT),
+    str(NOAA_ENRICHMENT),
+    str(MARKET_ENRICHMENT),
+)
+
+ORIGIN_RAW = "raw"
+ORIGIN_ENRICHMENT = "enrichment"
+ORIGIN_UNIFICATION = "unification"
+
+# Node-type prefixes that only this pipeline mints. Derived from
+# NAMESPACE_PREFIXES so a new enrichment namespace is picked up automatically
+# rather than needing a second list kept in sync.
+_PIPELINE_NAMESPACES = ENRICHMENT_NAMESPACES + (str(UNIFIED),)
+PIPELINE_NODE_TYPE_PREFIXES: Tuple[str, ...] = tuple(
+    f"{prefix}_"
+    for ns, prefix in NAMESPACE_PREFIXES
+    if ns in _PIPELINE_NAMESPACES
+)
+
+# Identity linking uses the standard OWL vocabulary, not a pipeline namespace.
+OWL_SAME_AS = "http://www.w3.org/2002/07/owl#sameAs"
+
+
+def classify_edge_origin(
+    predicate_uri: str,
+    src_type: str = "",
+    dst_type: str = "",
+) -> str:
+    """Whether an edge was observed in the source data or created by this pipeline.
+
+    Enrichment adds ~91,000 triples on top of the raw data, so a graph edge may
+    be a reported fact or something the pipeline inferred. Those deserve very
+    different trust from a downstream model, and nothing recorded the difference
+    — graph_schema.json reported "unknown" for every edge type.
+
+    Both the predicate AND the endpoints are consulted, because the pipeline
+    marks its output in two different places:
+
+      * inferred links carry a minted PREDICATE
+        (``bls.gov/enrichment/apparelSectorCorrelation``)
+      * unification links carry a minted NODE but a standard predicate
+        (``unified:November owl:sameAs cpi:November``)
+
+    Classifying on the predicate alone therefore reports every unification edge
+    as ``raw`` — an inferred link presented as an observed fact, the exact
+    mislabelling this exists to prevent. On the e2e fixtures that was 16 of 19
+    supposedly-raw edge types.
+
+    Anything whose predicate and both endpoints are outside the pipeline's own
+    namespaces came from a source scraper.
+
+    Three values, not the four the metadata docstring once listed (raw /
+    intra-enrichment / cross-enrichment / unification): intra- and cross-source
+    enrichment share a namespace, so nothing here can separate them, and
+    promising a distinction that is never emitted is the same defect as the
+    "unknown" it replaces.
+
+    Says *that* an edge was derived, not *why* — which source facts justified
+    it. That is triple-level lineage, a much larger change, worth building only
+    once a model's predictions need explaining.
+    """
+    minted = (
+        predicate_uri.startswith(_PIPELINE_NAMESPACES)
+        if predicate_uri
+        else False
+    ) or any(
+        t.startswith(PIPELINE_NODE_TYPE_PREFIXES)
+        for t in (src_type or "", dst_type or "")
+    )
+
+    if not minted:
+        return ORIGIN_RAW
+    if predicate_uri == OWL_SAME_AS or predicate_uri.endswith("#sameAs"):
+        return ORIGIN_UNIFICATION
+    return ORIGIN_ENRICHMENT
+
+
+    if predicate_uri.startswith(str(UNIFIED)):
+        return ORIGIN_UNIFICATION
+    if predicate_uri.startswith(ENRICHMENT_NAMESPACES):
+        return ORIGIN_ENRICHMENT
+    return ORIGIN_RAW
+
+
+# ============================================
 # HELPER FUNCTIONS
 # ============================================
 
