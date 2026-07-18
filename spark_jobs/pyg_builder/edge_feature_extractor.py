@@ -645,10 +645,12 @@ class EdgeFeatureExtractor:
                     "skip": list(_SKIP_RELATION_FRAGMENTS),
                 },
             },
-            "checksum": {
-                "total_edge_feature_dim": layout.edge_vector_dim,
-            },
         }
+        # NOTE: no "checksum" key here -- see the same note in
+        # feature_extractor.get_encoding_config(). It was also silently
+        # overwriting the node-side one: constructor.py merges the two configs
+        # with a shallow dict.update(), so whichever ran last won and the other
+        # total never reached encoding_config.json at all.
 
     def get_edge_classification(
         self,

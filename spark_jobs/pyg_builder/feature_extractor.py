@@ -511,10 +511,13 @@ class FeatureExtractor:
                     "seeds": [s + 600 for s in _HASH_SEEDS],
                 },
             },
-            "checksum": {
-                "total_node_feature_dim": layout.vector_dim,
-            },
         }
+        # NOTE: no "checksum" key here. The total dim it used to carry is
+        # already recorded as node_features.total_dim, and a dimension is not a
+        # checksum -- two builds with different seeds but the same vector width
+        # produced identical values. The real contract digest is computed once
+        # over the MERGED node+edge config in MetadataCollector, which is the
+        # only place that sees the whole contract.
 
     def get_metadata_artifacts(self) -> Dict[str, Any]:
         """
