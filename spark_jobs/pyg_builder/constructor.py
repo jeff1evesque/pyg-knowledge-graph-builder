@@ -92,7 +92,7 @@ def build_hetero_data(
     triples_df: DataFrame,
     config: Optional[Dict[str, Any]] = None,
     time_period: str = "",
-) -> Tuple[Any, MetadataCollector]:
+) -> Tuple[Any, MetadataCollector, DataFrame]:
     """
     Build a PyTorch Geometric HeteroData object from an enriched triples
     DataFrame.
@@ -128,7 +128,12 @@ def build_hetero_data(
         time_period: Time period label (e.g., "2024-12") for metadata.
 
     Returns:
-        Tuple of (HeteroData, MetadataCollector)
+        Tuple of (HeteroData, MetadataCollector, node_index DataFrame).
+
+        The third element maps (node_type, node_id) -> uri: the identity of
+        every row in the graph. It is persisted beside the .pt so the graph can
+        be joined to labels and predictions attributed back to entities --
+        see _node_index().
     """
     import torch
     from torch_geometric.data import HeteroData
@@ -189,7 +194,7 @@ def build_hetero_data(
 
     if total_nodes == 0:
         logger.warning("No nodes found — returning empty HeteroData")
-        return HeteroData(), metadata
+        return HeteroData(), metadata, _node_index(node_id_df)
 
     # Log estimated driver memory for feature tensors
     total_feature_bytes = sum(
@@ -429,4 +434,27 @@ def build_hetero_data(
     total_mb = total_bytes / (1024 * 1024)
     logger.info(f"  Total HeteroData tensor memory: {total_mb:,.1f} MB")
 
-    return data, metadata
+    return data, metadata, _node_index(node_id_df)
+
+
+def _node_index(node_id_df: DataFrame) -> DataFrame:
+    """The identity map: which real-world entity each graph row is.
+
+    hetero_data.pt stores only ``x`` and ``num_nodes`` per node type, so row 5 of
+    cpi_Index is some specific CPI series and nothing on disk says which. That
+    makes the graph impossible to attach labels to (training) or to attribute
+    predictions from (inference).
+
+    node_id_df already carries (uri, node_id, node_type) and every later stage
+    joins against it — this only persists what is already computed.
+
+    Sorted so the written Parquet is content-stable run to run: node IDs come
+    from row_number() over a uri-ordered window and are deterministic, but the
+    ROW order Spark emits is not, and this artifact is covered by the
+    reproducibility guard.
+    """
+    return (
+        node_id_df
+        .select("node_type", "node_id", "uri")
+        .orderBy("node_type", "node_id")
+    )

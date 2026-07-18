@@ -24,6 +24,7 @@ from spark_jobs.pyg_builder.metadata_writer import (
     MetadataCollector,
     _sanitize_config,
     derive_metadata_prefix,
+    derive_node_index_prefix,
     write_metadata_to_local,
 )
 
@@ -337,6 +338,32 @@ def test_sub_builders_fallback_when_unregistered():
 ])
 def test_derive_metadata_prefix(key, expected):
     assert derive_metadata_prefix(key) == expected
+
+
+@pytest.mark.parametrize("key,expected", [
+    ("pyg/2099-01/hetero_data.pt", "pyg/2099-01/node_index/"),
+    ("pyg/2099-01/hetero_data_512d.pt", "pyg/2099-01/hetero_data_512d_node_index/"),
+    ("hetero_data.pt", "node_index/"),
+    ("experiment_a.pt", "experiment_a_node_index/"),
+    ("pyg/2099-01/hetero_data", "pyg/2099-01/node_index/"),
+])
+def test_derive_node_index_prefix(key, expected):
+    assert derive_node_index_prefix(key) == expected
+
+
+def test_node_index_and_metadata_prefixes_are_siblings():
+    """The identity map sits beside the metadata it belongs to, not inside it.
+
+    Both share _derive_sibling_prefix, so experiment variants keep their
+    artifacts separated the same way rather than colliding in one directory.
+    """
+    key = "pyg/2099-01/hetero_data_512d.pt"
+    meta = derive_metadata_prefix(key)
+    index = derive_node_index_prefix(key)
+
+    assert meta.rsplit("/", 2)[0] == index.rsplit("/", 2)[0]
+    assert meta != index
+    assert not index.startswith(meta)
 
 
 # ======================================================================

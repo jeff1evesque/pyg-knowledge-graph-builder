@@ -82,6 +82,7 @@ from spark_jobs.pyg_builder.metadata_writer import (
     write_metadata_to_s3,
     write_metadata_to_local,
     derive_metadata_prefix,
+    derive_node_index_prefix,
 )
 
 # PyG builder — imported conditionally since enrichment_only mode doesn't need it
@@ -991,7 +992,7 @@ def run_pyg_construction(
     start_time = time.time()
 
     config = pyg_config or {}
-    hetero_data, metadata = build_hetero_data(
+    hetero_data, metadata, node_index_df = build_hetero_data(
         spark, triples_df, config, time_period=time_period
     )
 
@@ -1000,7 +1001,7 @@ def run_pyg_construction(
     logger.info(f"PyG construction completed in {elapsed:.1f}s")
     _log_hetero_data_summary(hetero_data)
 
-    return hetero_data, metadata
+    return hetero_data, metadata, node_index_df
 
 
 def _log_hetero_data_summary(hetero_data):
@@ -1053,15 +1054,51 @@ def get_spark_session() -> SparkSession:
 # ============================================
 # Final-artifact persistence (local + optional S3 mirror)
 # ============================================
+def save_node_index(node_index_df: DataFrame, output_path: str) -> None:
+    """Write the (node_type, node_id) -> uri identity map beside the .pt.
+
+    hetero_data.pt stores only feature tensors and counts, so without this the
+    graph is anonymous: nothing says which real-world entity each row is, which
+    blocks joining training labels and attributing predictions.
+
+    Parquet rather than a seventh JSON: production is ~30-50M triples/month, so
+    this can reach millions of rows. A single JSON would be hundreds of MB and
+    must be parsed whole to resolve one entity, where Parquet supports
+    predicate pushdown and matches how the rest of the pipeline stores bulk
+    data.
+
+    coalesce(1) keeps the output a single deterministic file. The row content
+    is already ordered by _node_index(); leaving it partitioned would spread it
+    across part-files whose count and boundaries depend on cluster shape, which
+    would make the artifact vary between environments for no benefit. These are
+    identity rows (three short strings), not a compute-heavy dataset.
+    """
+    (
+        node_index_df
+        .coalesce(1)
+        .write
+        .mode("overwrite")
+        .parquet(output_path)
+    )
+    logger.info(f"Saved node index to {output_path}")
+
+
 def save_final_artifacts(
-    config: JobConfig, s3_client, hetero_data, metadata
+    config: JobConfig, s3_client, hetero_data, metadata, node_index_df=None
 ) -> Dict[str, Any]:
     """
-    Persist the final .pt HeteroData and the six metadata JSON files.
+    Persist the final .pt HeteroData, the six metadata JSON files, and the
+    node index.
 
     Always writes locally under config.local_work_dir. When an S3 archive
-    is configured (config.archive_to_s3), the same artifacts are also
+    is configured (config.archive_to_s3), the .pt and metadata are also
     mirrored to S3 via boto3 as a durable, reusable catalog.
+
+    The node index is written by Spark straight from the executors, so it
+    lands wherever the output path points -- a local dir, or object storage
+    when local_work_dir is an s3a:// URI (how the cluster runs). It is NOT
+    part of the boto3 mirror: it is a distributed Parquet dataset, not a
+    single driver-side blob.
 
     Returns a dict of output locations for the job result/manifest.
     """
@@ -1076,7 +1113,12 @@ def save_final_artifacts(
     local_metadata_dir = derive_metadata_prefix(config.pyg_output_path)
     write_metadata_to_local(metadata_files, local_metadata_dir)
 
+    node_index_dir = derive_node_index_prefix(config.pyg_output_path)
+    if node_index_df is not None:
+        save_node_index(node_index_df, node_index_dir)
+
     locations: Dict[str, Any] = {
+        "node_index_location": node_index_dir,
         "pyg_location": config.pyg_output_path,
         "metadata_location": local_metadata_dir,
     }
@@ -1157,14 +1199,14 @@ def execute_full_pipeline(
     )
 
     # Step 4: Build PyG (executors → compact tensors → driver)
-    hetero_data, metadata = run_pyg_construction(
+    hetero_data, metadata, node_index_df = run_pyg_construction(
         spark, enriched_df, config.pyg_config,
         time_period=config.time_period,
     )
 
     # Step 5: Save final artifacts (local + optional S3)
     locations = save_final_artifacts(
-        config, s3_client, hetero_data, metadata
+        config, s3_client, hetero_data, metadata, node_index_df
     )
 
     return {
@@ -1270,14 +1312,14 @@ def execute_pyg_only(
     logger.info("")
 
     # Step 2: Build PyG (executors → compact tensors → driver)
-    hetero_data, metadata = run_pyg_construction(
+    hetero_data, metadata, node_index_df = run_pyg_construction(
         spark, triples_df, config.pyg_config,
         time_period=config.time_period,
     )
 
     # Step 3: Save final artifacts (local + optional S3)
     locations = save_final_artifacts(
-        config, s3_client, hetero_data, metadata
+        config, s3_client, hetero_data, metadata, node_index_df
     )
 
     return {

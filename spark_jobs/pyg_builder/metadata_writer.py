@@ -743,6 +743,30 @@ def derive_metadata_prefix(pyg_output_key: str) -> str:
         parent = ""
         filename = pyg_output_key
 
+    return _derive_sibling_prefix(pyg_output_key, "metadata")
+
+
+def derive_node_index_prefix(pyg_output_key: str) -> str:
+    """Derive the node-index prefix from the PyG output key.
+
+    Same convention as derive_metadata_prefix, so the identity map sits beside
+    the metadata it belongs to and experiment variants stay separated:
+
+        "pyg/2024-12/hetero_data.pt"      -> "pyg/2024-12/node_index/"
+        "pyg/2024-12/hetero_data_512d.pt" -> "pyg/2024-12/hetero_data_512d_node_index/"
+    """
+    return _derive_sibling_prefix(pyg_output_key, "node_index")
+
+
+def _derive_sibling_prefix(pyg_output_key: str, suffix: str) -> str:
+    """Shared derivation for artifact directories that sit beside the .pt."""
+    if "/" in pyg_output_key:
+        parent = pyg_output_key.rsplit("/", 1)[0]
+        filename = pyg_output_key.rsplit("/", 1)[1]
+    else:
+        parent = ""
+        filename = pyg_output_key
+
     # Strip .pt extension
     if filename.endswith(".pt"):
         stem = filename[:-3]
@@ -750,11 +774,11 @@ def derive_metadata_prefix(pyg_output_key: str) -> str:
         stem = filename
 
     if stem == "hetero_data":
-        metadata_dir = "metadata"
+        directory = suffix
     else:
-        metadata_dir = f"{stem}_metadata"
+        directory = f"{stem}_{suffix}"
 
     if parent:
-        return f"{parent}/{metadata_dir}/"
+        return f"{parent}/{directory}/"
     else:
-        return f"{metadata_dir}/"
+        return f"{directory}/"
