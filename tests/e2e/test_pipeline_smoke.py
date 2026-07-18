@@ -254,49 +254,63 @@ def _store_get(store, key):
     return store[key] if key in store and store[key] is not None else None
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Known jolts_* categorical non-determinism: the multi-hot flags + "
-        "group-by-sum combine in feature_extractor drift run-to-run "
-        "(observed on jolts_MonthlyHiresData node features). Tracked as its "
-        "own bug. Non-strict so an occasionally-deterministic run does not "
-        "flip this red; remove the marker once reproducibility is fixed."
-    ),
-    strict=False,
-)
-def test_output_is_reproducible(tmp_path):
-    """Two runs over the same fixture → identical graph, tensors, and metadata.
+def _is_jolts(node_type):
+    """The categorical node type(s) with the known run-to-run drift."""
+    return str(node_type).startswith("jolts_")
 
-    Guards the class of defect the jolts_* categorical non-determinism belongs
-    to: individually-plausible modules that, composed, drift run-to-run. The
-    metadata build_timestamp is the one field allowed to differ. Runs each
-    pipeline in its own process (see _run_pipeline_subprocess).
 
-    Currently xfails on the jolts_* categorical non-determinism (see the marker).
-    The full assertion set is kept intact so the guard flips green the moment
-    the bug is fixed.
+class _TwinRuns:
+    """Both loaded graphs + their metadata dirs from two identical pipeline runs."""
+
+    def __init__(self, d1, d2, run1, run2):
+        self.d1, self.d2 = d1, d2
+        self.run1, self.run2 = run1, run2
+
+
+@pytest.fixture(scope="module")
+def twin_runs(tmp_path_factory):
+    """Run the full pipeline twice over the same fixture, once, for both tests.
+
+    Determinism is an integration property no unit test can cover: it only emerges
+    when every construction module composes over the real pipeline. Each run is
+    isolated in its own process (see _run_pipeline_subprocess); the pair is
+    module-scoped so the expensive twin runs execute exactly once and are shared
+    by every reproducibility test below.
     """
-    import torch
-
-    run1, run2 = tmp_path / "run1", tmp_path / "run2"
+    base = tmp_path_factory.mktemp("reproducibility")
+    run1, run2 = base / "run1", base / "run2"
     _run_pipeline_subprocess(run1)
     _run_pipeline_subprocess(run2)
 
-    pt1 = next(run1.rglob("hetero_data.pt"))
-    pt2 = next(run2.rglob("hetero_data.pt"))
-    d1 = _load_hetero(pt1)
-    d2 = _load_hetero(pt2)
+    d1 = _load_hetero(next(run1.rglob("hetero_data.pt")))
+    d2 = _load_hetero(next(run2.rglob("hetero_data.pt")))
+    return _TwinRuns(d1, d2, run1, run2)
+
+
+def test_output_is_reproducible(twin_runs):
+    """Two runs over the same fixture → identical graph, tensors, and metadata.
+
+    Green guard for everything already reproducible: node/edge inventory,
+    per-type counts, every edge_index, edge features, all metadata (byte-identical
+    modulo the allow-listed build_timestamp), and the feature tensors of every
+    non-jolts_* node type. A new reproducibility regression anywhere outside
+    jolts_* fails this test rather than being masked by an xfail. The jolts_*
+    tensors themselves are checked separately (test_jolts_features_reproducible).
+    """
+    import torch
+
+    d1, d2 = twin_runs.d1, twin_runs.d2
 
     # --- same node/edge type inventory ---
     assert sorted(d1.node_types) == sorted(d2.node_types)
     assert sorted(map(tuple, d1.edge_types)) == sorted(map(tuple, d2.edge_types))
 
-    # --- per-type counts + feature tensors bit-identical ---
+    # --- per-type counts + non-jolts_* feature tensors bit-identical ---
     for nt in d1.node_types:
         assert d1[nt].num_nodes == d2[nt].num_nodes, f"{nt} count drift"
         x1, x2 = _store_get(d1[nt], "x"), _store_get(d2[nt], "x")
         assert (x1 is None) == (x2 is None), f"{nt} feature presence drift"
-        if x1 is not None:
+        if x1 is not None and not _is_jolts(nt):
             assert torch.equal(x1, x2), f"node features differ for {nt}"
 
     for et in d1.edge_types:
@@ -309,7 +323,7 @@ def test_output_is_reproducible(tmp_path):
             assert torch.equal(a1, a2), f"edge features differ for {et}"
 
     # --- metadata byte-identical, except the allow-listed build timestamp ---
-    m1, m2 = _metadata_by_name(run1), _metadata_by_name(run2)
+    m1, m2 = _metadata_by_name(twin_runs.run1), _metadata_by_name(twin_runs.run2)
     assert set(m1) == METADATA_FILES and set(m2) == METADATA_FILES
     for name in METADATA_FILES:
         b1, b2 = m1[name].read_bytes(), m2[name].read_bytes()
@@ -320,3 +334,36 @@ def test_output_is_reproducible(tmp_path):
             assert j1 == j2, "graph_schema.json differs beyond the timestamp"
         else:
             assert b1 == b2, f"{name} differs between runs"
+
+
+@pytest.mark.xfail(
+    reason=(
+        "Known jolts_* categorical non-determinism: the multi-hot flags + "
+        "group-by-sum combine in feature_extractor drift run-to-run "
+        "(observed on jolts_MonthlyHiresData node features). Tracked as its "
+        "own bug. Non-strict so an occasionally-deterministic run does not "
+        "flip this red; remove the marker once reproducibility is fixed."
+    ),
+    strict=False,
+)
+def test_jolts_features_reproducible(twin_runs):
+    """The jolts_* feature tensors must match across the two runs.
+
+    Isolates the one genuinely non-reproducible slice so it xfails on its own
+    without masking regressions elsewhere (guarded by test_output_is_reproducible).
+    Flips green the moment the jolts_* non-determinism is fixed. Asserts the
+    jolts_* type(s) are actually present so an empty selection can't silently
+    xpass on a comparison that never ran.
+    """
+    import torch
+
+    d1, d2 = twin_runs.d1, twin_runs.d2
+
+    jolts_types = [nt for nt in d1.node_types if _is_jolts(nt)]
+    assert jolts_types, "no jolts_* node types present — nothing to compare"
+
+    for nt in jolts_types:
+        x1, x2 = _store_get(d1[nt], "x"), _store_get(d2[nt], "x")
+        assert (x1 is None) == (x2 is None), f"{nt} feature presence drift"
+        if x1 is not None:
+            assert torch.equal(x1, x2), f"jolts node features differ for {nt}"
