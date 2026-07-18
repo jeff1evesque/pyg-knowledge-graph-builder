@@ -10,7 +10,9 @@ fixtures over the shared local SparkSession (`spark` / `make_triples`):
   * meta-ontology types are dropped,
   * a multi-type entity is assigned its single canonical (most specific) type,
   * config filters (whitelist / temporal / sector) select the right types,
-  * the mapping is reproducible run-to-run.
+  * the mapping is reproducible run-to-run,
+  * get_type_uri_mapping resolves a node type with several candidate type URIs
+    identically regardless of the order Spark returns rows in.
 
 Type URIs / prefixes are taken from the code (NAMESPACE_PREFIXES, RDF_TYPE) so the
 tests track the implementation rather than hardcoding IRIs.
@@ -194,3 +196,43 @@ def test_mapping_is_deterministic_across_runs(spark, make_triples):
     first = _mapping(NodeMapper(spark, {}).build_node_id_table(make_triples(rows))[0])
     second = _mapping(NodeMapper(spark, {}).build_node_id_table(make_triples(rows))[0])
     assert first == second
+
+
+def test_type_uri_mapping_is_deterministic_for_multi_typed_node(
+    spark, make_triples
+):
+    """A node type with several candidate type URIs must resolve identically.
+
+    get_type_uri_mapping keeps ONE type URI per node type. e1 carries both
+    CPI_INDEX and CPI_SERIES, and its canonical node type is cpi_Series (the
+    rarer type — see test_multitype_entity_gets_most_specific_type), so BOTH
+    URIs join to node type cpi_Series and one of them has to win.
+
+    That choice used to be "whichever row Spark returned first", which is
+    task-completion order and therefore varied run-to-run — the same input
+    produced different metadata on different runs. The rows are now sorted
+    before the fold, so the smallest URI wins deterministically.
+
+    Feeding the same triples in two different orders pins that property: row
+    order must not reach the result. Note the winner (CPI_INDEX) is NOT the
+    node type's own URI (CPI_SERIES) — the pick is arbitrary by design, and
+    this test guards that it is *stably* arbitrary, not that it is meaningful.
+    """
+    rows = [
+        ("https://ex/e1", RDF_TYPE, CPI_INDEX),
+        ("https://ex/e1", RDF_TYPE, CPI_SERIES),
+        ("https://ex/e2", RDF_TYPE, CPI_INDEX),
+        ("https://ex/e3", RDF_TYPE, CPI_INDEX),
+    ]
+
+    def resolve(triple_rows):
+        mapper = NodeMapper(spark, {})
+        triples = make_triples(triple_rows)
+        node_id_df, _ = mapper.build_node_id_table(triples)
+        return mapper.get_type_uri_mapping(triples, node_id_df)
+
+    forward = resolve(rows)
+    reversed_ = resolve(list(reversed(rows)))
+
+    assert forward == reversed_, "input row order changed the type URI mapping"
+    assert forward["cpi_Series"] == min(CPI_INDEX, CPI_SERIES)

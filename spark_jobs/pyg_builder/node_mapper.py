@@ -31,6 +31,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
 from spark_jobs.utils.rdf_utils import NAMESPACE_PREFIXES
+from spark_jobs.utils.spark_rdf_utils import collect_sorted
 
 logger = logging.getLogger(__name__)
 
@@ -271,11 +272,16 @@ class NodeMapper:
             )
             .select("node_type", "type_uri")
             .distinct()
-            .collect()
         )
+        # Sorted, NOT a bare collect(): Spark returns rows in task-completion
+        # order, so "first URI per type" below would pick a different URI on
+        # different runs for any node type carrying multiple rdf:type URIs --
+        # a content non-determinism in the emitted metadata.
+        type_uri_rows = collect_sorted(type_uri_rows)
 
-        # Keep first URI per type (most common would require a count,
-        # but for metadata purposes first-encountered is sufficient)
+        # Keep the first URI per type in this deterministic order (picking the
+        # most common would require a count; for metadata purposes the smallest
+        # URI is sufficient, and unlike "first encountered" it is stable).
         result: Dict[str, str] = {}
         for row in type_uri_rows:
             if row.node_type not in result:

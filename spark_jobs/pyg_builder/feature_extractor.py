@@ -57,6 +57,7 @@ from spark_jobs.utils.rdf_utils import (
     NAMESPACE_PREFIXES,
     ONTOLOGY_NAMESPACE_INDICES,
 )
+from spark_jobs.utils.spark_rdf_utils import collect_sorted
 
 logger = logging.getLogger(__name__)
 
@@ -129,27 +130,6 @@ _NUM_CATEGORICAL_HASHES = 4
 
 # Seed offsets for independent hash functions
 _HASH_SEEDS = [0, 7, 13, 31]
-
-
-def _collect_sorted(df) -> list:
-    """``collect()`` with a deterministic row order.
-
-    Spark returns collected rows in task-completion order, which varies between
-    runs. Every metadata structure assembled from a bare ``collect()`` inherited
-    that: list entries in slot_mapping.json / ontology_schema.json drifted
-    run-to-run (identical content, different order), so the outputs were never
-    byte-reproducible.
-
-    Worse than ordering, some callers fold the rows into a dict keeping the
-    FIRST value seen per key (see the node_type -> type_uri map below). Without a
-    fixed order that is a *content* non-determinism, not a cosmetic one: a
-    different type_uri can win on each run.
-
-    Sorting by every column stringified is deterministic regardless of schema,
-    and these frames are small (hundreds to a few thousand rows) — this is
-    driver-side metadata collection, not a hot path.
-    """
-    return sorted(df.collect(), key=lambda row: tuple(str(v) for v in row))
 
 
 class VectorLayout:
@@ -1317,7 +1297,7 @@ class FeatureExtractor:
             )
         )
 
-        rows = _collect_sorted(stats_with_counts)
+        rows = collect_sorted(stats_with_counts)
 
         collected = []
         zero_variance = []
@@ -1372,7 +1352,7 @@ class FeatureExtractor:
             .select(F.col("object").alias("type_uri"))
             .distinct()
         )
-        type_mapping_rows = _collect_sorted(type_mapping_rows)
+        type_mapping_rows = collect_sorted(type_mapping_rows)
 
         uri_to_pyg: Dict[str, str] = {}
         for row in type_mapping_rows:
@@ -1404,7 +1384,7 @@ class FeatureExtractor:
             .select("node_type", "type_uri")
             .distinct()
         )
-        type_uri_rows = _collect_sorted(type_uri_rows)
+        type_uri_rows = collect_sorted(type_uri_rows)
 
         type_uri_map: Dict[str, str] = {}
         for row in type_uri_rows:
@@ -1414,7 +1394,7 @@ class FeatureExtractor:
         # Collect class hierarchy — transitive closure.
         # Typically ~5000 rows (500 classes × avg depth ~10).
         hierarchy_rows = (
-            _collect_sorted(class_hierarchy_df)
+            collect_sorted(class_hierarchy_df)
             if class_hierarchy_df.head(1)
             else []
         )
@@ -1430,7 +1410,7 @@ class FeatureExtractor:
         # Collect property schema — one row per property.
         # Typically <500 rows.
         prop_schema_rows = (
-            _collect_sorted(property_schema_df)
+            collect_sorted(property_schema_df)
             if property_schema_df.head(1)
             else []
         )
@@ -1524,7 +1504,7 @@ class FeatureExtractor:
         numeric_slots = []
         if numeric_df is not None:
             pred_rows = (
-                _collect_sorted(
+                collect_sorted(
                     numeric_df.select("predicate").distinct()
                 )
             )
@@ -1549,7 +1529,7 @@ class FeatureExtractor:
         categorical_slots = []
         if categorical_df is not None:
             cat_pred_rows = (
-                _collect_sorted(
+                collect_sorted(
                     categorical_df.select("predicate").distinct()
                 )
             )
@@ -1581,7 +1561,7 @@ class FeatureExtractor:
         # --- Class identity slots ---
         class_slots = []
         class_uri_rows = (
-            _collect_sorted(type_uri_df.select("type_uri").distinct())
+            collect_sorted(type_uri_df.select("type_uri").distinct())
         )
         for row in class_uri_rows:
             uri = row.type_uri
@@ -1632,7 +1612,7 @@ class FeatureExtractor:
         hierarchy_slots = []
         if class_hierarchy_df.head(1):
             super_rows = (
-                _collect_sorted(
+                collect_sorted(
                     class_hierarchy_df.select("superclass_uri").distinct()
                 )
             )

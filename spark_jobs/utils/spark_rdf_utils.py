@@ -28,6 +28,26 @@ TRIPLES_SCHEMA = StructType([
 ])
 
 
+def collect_sorted(df: DataFrame) -> List:
+    """``collect()`` with a deterministic row order.
+
+    Spark returns collected rows in task-completion order, which varies between
+    runs. Anything built from a bare ``collect()`` inherits that: metadata list
+    entries drift run-to-run, so outputs are never byte-reproducible.
+
+    Worse than ordering, callers that fold rows into a dict keeping the FIRST
+    value per key turn this into a *content* non-determinism — a different value
+    can win on each run. Both patterns caused real reproducibility bugs (see the
+    metadata builders in feature_extractor.py and the node_type -> type_uri map
+    in node_mapper.py).
+
+    Sorting by every column stringified is deterministic regardless of schema,
+    and callers use this on small driver-side frames (hundreds to a few thousand
+    rows), not in hot paths.
+    """
+    return sorted(df.collect(), key=lambda row: tuple(str(v) for v in row))
+
+
 # ============================================
 # LOADING: S3 → Spark DataFrame (fully distributed)
 # ============================================
