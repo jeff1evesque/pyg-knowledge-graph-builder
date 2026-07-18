@@ -421,6 +421,77 @@ def load_ntriples_to_dataframe(
     return triples_df
 
 
+def deterministic_bnode_labels(graph, rounds: int = 3) -> dict:
+    """Map every blank node in an rdflib graph to a content-derived label.
+
+    rdflib mints a FRESH RANDOM identifier for each blank node on every parse
+    (``_:nd0dc1ff...`` one run, ``_:n54d9d7...`` the next). Those labels flow
+    into the triples as subject/object values and are later hashed into feature
+    vector slots, so an identical input produced a different graph on every run
+    — the ``jolts_*`` non-determinism (JOLTS models measurements as blank nodes).
+    Replacing the random label with one derived from the blank node's *content*
+    makes the parse reproducible.
+
+    A blank node's signature is the sorted set of its outgoing
+    ``(predicate, object)`` and incoming ``(subject, predicate)`` edges. Nested
+    blank-node references would be circular, so they contribute the neighbour's
+    signature from the previous round and the whole thing is refined ``rounds``
+    times (standard colour-refinement). Three rounds distinguishes any nesting
+    depth this data actually uses; more only matters for pathologically
+    symmetric graphs.
+
+    Structurally identical blank nodes hash alike, and collapsing them would
+    silently merge two distinct measurements, so a group of colliding nodes gets
+    a positional suffix. Which member takes which index depends on set iteration
+    order and is therefore NOT stable — but it does not need to be: identical
+    signatures mean the nodes are interchangeable, so any assignment yields the
+    same triple multiset.
+    """
+    import hashlib
+
+    from rdflib import BNode
+
+    bnodes = {
+        term
+        for triple in graph
+        for term in (triple[0], triple[2])
+        if isinstance(term, BNode)
+    }
+    if not bnodes:
+        return {}
+
+    def _ref(term, labels):
+        return labels[term] if isinstance(term, BNode) else str(term)
+
+    labels = {b: "" for b in bnodes}
+    for _ in range(rounds):
+        labels = {
+            b: hashlib.sha1(
+                "\n".join(
+                    sorted(
+                        f">|{p}|{_ref(o, labels)}"
+                        for p, o in graph.predicate_objects(b)
+                    )
+                    + sorted(
+                        f"<|{p}|{_ref(s, labels)}"
+                        for s, p in graph.subject_predicates(b)
+                    )
+                ).encode("utf-8")
+            ).hexdigest()
+            for b in bnodes
+        }
+
+    by_signature: dict = {}
+    for b in bnodes:
+        by_signature.setdefault(labels[b], []).append(b)
+
+    return {
+        b: (f"{sig[:32]}_{i}" if len(group) > 1 else sig[:32])
+        for sig, group in by_signature.items()
+        for i, b in enumerate(group)
+    }
+
+
 # ============================================
 # Turtle Parquet parsing (source Parquet → triples DataFrame)
 # ============================================
@@ -512,7 +583,9 @@ def load_turtle_parquet_to_dataframe(
     #   - URIRef  → str(uri)
     #   - Literal → str(literal.toPython()) for numerics,
     #               str(literal) for strings (lexical form, no ^^datatype)
-    #   - BNode   → f"_:{bnode}" (kept as blank node identifier)
+    #   - BNode   → f"_:{content_hash}" (see deterministic_bnode_labels;
+    #               rdflib's own labels are random per parse, which made the
+    #               whole pipeline non-reproducible)
     #
     # Malformed blobs return an empty list so that parse errors skip
     # the row rather than failing the job. The zero-triple contribution
@@ -541,13 +614,18 @@ def load_turtle_parquet_to_dataframe(
             g = Graph()
             g.parse(data=turtle_str, format="turtle")
 
+            # rdflib's blank-node labels are random per parse, so emitting them
+            # verbatim made the whole pipeline non-reproducible (they end up
+            # hashed into feature slots). Relabel by content instead.
+            bnode_labels = deterministic_bnode_labels(g)
+
             triples = []
             for s, p, o in g:
                 # Subject
                 if isinstance(s, URIRef):
                     subj = str(s)
                 elif isinstance(s, BNode):
-                    subj = f"_:{str(s)}"
+                    subj = f"_:{bnode_labels[s]}"
                 else:
                     # Skip unexpected subject types (should not occur
                     # in well-formed Turtle)
@@ -560,7 +638,7 @@ def load_turtle_parquet_to_dataframe(
                 if isinstance(o, URIRef):
                     obj = str(o)
                 elif isinstance(o, BNode):
-                    obj = f"_:{str(o)}"
+                    obj = f"_:{bnode_labels[o]}"
                 elif isinstance(o, Literal):
                     # toPython() returns a Python native type for
                     # numeric/date XSD types; str() of that matches
