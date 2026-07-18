@@ -34,6 +34,26 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-test.txt
 
+      # Install the CPU-only torch build BEFORE the requirements resolve.
+      #
+      # requirements.txt asks for a bare `torch>=2.5.0`, and on Linux the default
+      # PyPI wheel for that is the CUDA build: ~921MB of torch plus ~2.9GB of
+      # nvidia/* CUDA runtime libraries pulled in as its dependencies. This runner
+      # has no GPU and the unit suite is CPU-only (local SparkSession, no RAPIDS),
+      # so every byte of that is downloaded, unpacked and cached for nothing.
+      #
+      # Installing torch from the CPU wheel index first leaves `torch>=2.5.0`
+      # already satisfied below, so pip never considers the CUDA wheel. Done as a
+      # separate step rather than an --extra-index-url on the install below,
+      # because with both indexes visible pip is free to pick either wheel (the
+      # +cpu local-version suffix makes the comparison subtle) -- installing first
+      # is unambiguous.
+      #
+      # This is CI-only. Developer machines and the cluster genuinely need the
+      # CUDA build (GPU e2e suite, RAPIDS path) and are unaffected.
+      - name: Install CPU-only torch
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
       - name: Install test dependencies
         run: pip install -r requirements-test.txt
 
