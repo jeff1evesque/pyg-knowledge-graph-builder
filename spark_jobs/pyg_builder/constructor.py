@@ -70,6 +70,8 @@ from typing import Dict, Any, Optional, Tuple
 
 from pyspark.sql import SparkSession, DataFrame
 
+from spark_jobs.utils.rdf_utils import classify_edge_origin
+
 from spark_jobs.pyg_builder.node_mapper import NodeMapper
 from spark_jobs.pyg_builder.edge_mapper import EdgeMapper
 from spark_jobs.pyg_builder.feature_extractor import (
@@ -341,9 +343,23 @@ def build_hetero_data(
         edge_feature_dims[rel] = (
             edge_vector_dim if has_feat else 0
         )
+    # Whether each edge was observed in the source data or minted by this
+    # pipeline. Without it graph_schema.json reported "unknown" for every edge
+    # type, so a consumer could not tell a reported fact from an inferred link.
+    # Endpoints matter as well as the predicate: unification links carry a
+    # minted NODE but a standard predicate (unified:Nov owl:sameAs cpi:Nov), so
+    # predicate alone reports them as raw -- an inferred link passed off as an
+    # observed fact.
+    edge_origins = {
+        rel: classify_edge_origin(
+            edge_predicate_uris.get(rel, ""), src, dst
+        )
+        for (src, rel, dst) in edge_counts
+    }
     metadata.register_edge_types(
         edge_counts=edge_counts,
         edge_predicate_uris=edge_predicate_uris,
+        edge_origins=edge_origins,
         edge_feature_flags=edge_feature_flags,
         edge_feature_dims=edge_feature_dims,
     )

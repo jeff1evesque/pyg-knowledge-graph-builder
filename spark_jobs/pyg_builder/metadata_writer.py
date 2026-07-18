@@ -108,8 +108,12 @@ class MetadataCollector:
             edge_counts: Dict[(src, rel, dst) -> num_edges]
             edge_predicate_uris: Dict[relation_name -> predicate_uri]
             edge_origins: Optional Dict[relation_name -> origin] where
-                origin is one of: raw, intra-enrichment,
-                cross-enrichment, unification
+                origin is one of: raw, enrichment, unification
+                (see rdf_utils.classify_edge_origin). Three values, not
+                the four once listed here: intra- and cross-source enrichment
+                share a namespace, so nothing available at this layer can
+                separate them, and promising a distinction that is never
+                emitted is the same defect as the "unknown" default below.
             edge_feature_flags: Dict[relation_name -> has_features]
             edge_feature_dims: Dict[relation_name -> feature_dim]
         """

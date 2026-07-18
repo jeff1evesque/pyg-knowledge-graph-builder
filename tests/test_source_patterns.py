@@ -169,3 +169,75 @@ def test_sec_known_correlations_well_formed():
                 "relationship", "strength"} <= set(c), c["name"]
         assert _is_uri(c["relationship"]), c["name"]
         assert c["strength"] in {"weak", "medium", "strong"}, c["name"]
+
+
+# ======================================================================
+# Edge origin classification (rdf_utils.classify_edge_origin)
+# ======================================================================
+
+def test_classify_edge_origin_by_predicate_namespace():
+    """A minted predicate means the pipeline inferred the link."""
+    from spark_jobs.utils.rdf_utils import (
+        classify_edge_origin, BLS_ENRICHMENT, SEC_ENRICHMENT,
+        NOAA_ENRICHMENT, MARKET_ENRICHMENT, CPI,
+    )
+
+    for ns in (BLS_ENRICHMENT, SEC_ENRICHMENT, NOAA_ENRICHMENT,
+               MARKET_ENRICHMENT):
+        assert classify_edge_origin(f"{ns}linkedTo", "a_X", "b_Y") == (
+            "enrichment"
+        ), ns
+
+    assert classify_edge_origin(f"{CPI}hasValue", "cpi_S", "cpi_I") == "raw"
+    # Missing predicate and plain endpoints must not raise.
+    assert classify_edge_origin("", "cpi_S", "cpi_I") == "raw"
+
+
+def test_unification_is_detected_via_endpoints_not_predicate():
+    """The regression that made this function take endpoints at all.
+
+    Unification links carry a MINTED NODE but a STANDARD predicate
+    (unified:November owl:sameAs cpi:November). Classifying on the predicate
+    alone reported them as "raw" -- an inferred link presented as an observed
+    fact, which is exactly the mislabelling edge origin exists to prevent. On
+    the e2e fixtures that was 16 of 19 supposedly-raw edge types.
+    """
+    from spark_jobs.utils.rdf_utils import classify_edge_origin, OWL_SAME_AS
+
+    # owl:sameAs is NOT in any pipeline namespace ...
+    assert classify_edge_origin(OWL_SAME_AS, "cpi_Month", "ppi_Month") == "raw"
+    # ... so only the minted endpoint reveals the edge as pipeline-made.
+    assert classify_edge_origin(
+        OWL_SAME_AS, "bls_enrichment_UnifiedMonth", "cpi_PercentChange"
+    ) == "unification"
+    assert classify_edge_origin(
+        OWL_SAME_AS, "cpi_PercentChange", "bls_enrichment_UnifiedMonth"
+    ) == "unification"
+
+
+def test_enrichment_namespace_is_more_specific_than_its_source():
+    """bls.gov/enrichment/ must not be swallowed by bls.gov/.
+
+    The enrichment namespaces are sub-paths of their source domains, so a naive
+    prefix check against the source would classify every inferred BLS link as
+    raw -- silently defeating the whole point.
+    """
+    from spark_jobs.utils.rdf_utils import (
+        classify_edge_origin, BLS_ENRICHMENT,
+    )
+
+    assert str(BLS_ENRICHMENT).startswith("https://www.bls.gov/")
+    assert classify_edge_origin(
+        f"{BLS_ENRICHMENT}apparelSectorCorrelation", "a_X", "b_Y"
+    ) == "enrichment"
+
+
+def test_pipeline_node_type_prefixes_derive_from_the_namespace_registry():
+    """Adding an enrichment namespace must not need a second list updated."""
+    from spark_jobs.utils.rdf_utils import PIPELINE_NODE_TYPE_PREFIXES
+
+    assert "bls_enrichment_" in PIPELINE_NODE_TYPE_PREFIXES
+    assert "unified_" in PIPELINE_NODE_TYPE_PREFIXES
+    # Source namespaces must NOT be treated as pipeline-minted.
+    assert "cpi_" not in PIPELINE_NODE_TYPE_PREFIXES
+    assert "cap_" not in PIPELINE_NODE_TYPE_PREFIXES
