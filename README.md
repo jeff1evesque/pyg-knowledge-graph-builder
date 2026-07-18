@@ -1499,9 +1499,9 @@ def link_options_to_underlying(self, triples_df):
 
 Discovers and creates relationships across different data source families:
 
-**Linking Strategies** (applied across 100+ ontologies):
+> **Note:** temporal alignment is **not** part of cross-source linking. It runs earlier, as its own enrichment phase (`TemporalUnifier`), and its output is merged before this stage runs. Cross-source linking previously duplicated it with a matcher anchored only at the end of the URI, so anything merely *ending* with a month name (e.g. `...PercentChange_..._2025_September`) was asserted to **be** that month via `owl:sameAs`. That step has been removed; the example below is what `TemporalUnifier` produces correctly.
 
-1. **Temporal Alignment** — Unifies temporal entities across all sources
+**Temporal Alignment** (enrichment phase 2, `TemporalUnifier`) — unifies temporal entities across all sources
 ```turtle
 # Before: each source has its own temporal entities
 cpi:November, ppi:November, jolts:November, sec:November, market:November
@@ -1512,7 +1512,9 @@ unified:November2024 a bls:UnifiedMonth ;
                sec:November, market:November, noaa:November .
 ```
 
-2. **Sector-Based Linking** — Links entities sharing economic sectors
+**Linking Strategies** (applied across 100+ ontologies):
+
+1. **Sector-Based Linking** — Links entities sharing economic sectors
 ```turtle
 unified:EnergySector a bls:EconomicSector .
 
@@ -1522,7 +1524,7 @@ market:XOM_Ticker bls:belongsToSector unified:EnergySector .
 sec:EnergyCompanyFiling bls:belongsToSector unified:EnergySector .
 ```
 
-3. **Company/Ticker-Based Linking** — Links entities referencing same companies
+2. **Company/Ticker-Based Linking** — Links entities referencing same companies
 ```turtle
 unified:Company_AAPL a bls:UnifiedCompany ;
     bls:ticker "AAPL" .
@@ -1531,7 +1533,7 @@ sec:AAPL_10K_Filing bls:refersToCompany unified:Company_AAPL .
 market:AAPL_20241115T143000Z bls:refersToCompany unified:Company_AAPL .
 ```
 
-4. **Geographic/Regional Linking** — Links entities by geographic region
+3. **Geographic/Regional Linking** — Links entities by geographic region
 ```turtle
 unified:CaliforniaRegion a bls:GeographicRegion .
 
@@ -1539,14 +1541,14 @@ laus:California_LaborForce bls:hasRegion unified:CaliforniaRegion .
 noaa:California_HeatAlert bls:affectsRegion unified:CaliforniaRegion .
 ```
 
-5. **Causal/Impact Relationships** — Discovers potential causal links
+4. **Causal/Impact Relationships** — Discovers potential causal links
 ```turtle
 ppi:EnergyGoods bls:leadsTo cpi:EnergyConsumer .
 noaa:HurricaneAlert bls:impacts market:EnergyTicker .
 sec:Form10K_Filing bls:affects market:StockTicker .
 ```
 
-6. **Measurement Type Alignment** — Links similar measurement types
+5. **Measurement Type Alignment** — Links similar measurement types
 ```turtle
 cpi:IndexMeasurement a bls:PriceIndex .
 ppi:IndexMeasurement a bls:PriceIndex .

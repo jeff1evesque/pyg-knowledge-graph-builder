@@ -118,23 +118,36 @@ class CrossSourceLinker:
 
         new_dfs: List[DataFrame] = []
 
-        logger.info("\n[Step 1/6] Aligning temporal entities...")
-        self._append(new_dfs, self._align_temporal_entities())
-
-        logger.info("\n[Step 2/6] Creating sector-based links...")
+        # NOTE: temporal alignment used to be step 1 here and has been removed.
+        # TemporalUnifier (enrichment PHASE 2) already does it correctly, and
+        # runs BEFORE this one with its output merged into triples_df -- so this
+        # step duplicated the job on a frame that already contained the unified
+        # nodes. Its matcher was also anchored only at the end
+        # (``(January|...)$`` against the whole subject), so it matched any URI
+        # merely ENDING with a month name and asserted
+        # ``unified:September owl:sameAs cpi:...PercentChange_..._September`` --
+        # i.e. that a measurement IS the month. owl:sameAs is RDF's strongest
+        # claim, so those became real graph edges and licensed a reasoner to
+        # merge the two. On the e2e fixtures it produced 273 sameAs triples: 259
+        # false, 14 vacuous self-links (unified:April sameAs unified:April, from
+        # matching the node Phase 2 had just created), and 0 that TemporalUnifier
+        # did not already find correctly. Deleted rather than repaired: fixing
+        # the regex would still leave two implementations minting the same
+        # unified:{Month} URIs.
+        logger.info("\n[Step 1/5] Creating sector-based links...")
         self._append(new_dfs, self._link_by_sector())
 
-        logger.info("\n[Step 3/6] Linking by company/ticker...")
+        logger.info("\n[Step 2/5] Linking by company/ticker...")
         if 'sec' in self.available_sources and 'market' in self.available_sources:
             self._append(new_dfs, self._link_by_company())
 
-        logger.info("\n[Step 4/6] Linking by geographic region...")
+        logger.info("\n[Step 3/5] Linking by geographic region...")
         self._append(new_dfs, self._link_by_geography())
 
-        logger.info("\n[Step 5/6] Creating causal relationships...")
+        logger.info("\n[Step 4/5] Creating causal relationships...")
         self._append(new_dfs, self._create_causal_links())
 
-        logger.info("\n[Step 6/6] Aligning measurement types...")
+        logger.info("\n[Step 5/5] Aligning measurement types...")
         self._append(new_dfs, self._align_measurement_types())
 
         if not new_dfs:
@@ -145,7 +158,7 @@ class CrossSourceLinker:
             all_new = all_new.unionByName(df)
 
         # Truncate the plan before the dedup pass (see EnrichmentPipeline._settle).
-        # Each step above is a join over triples_df, so this union carries six of
+        # Each step above is a join over triples_df, so this union carries five of
         # those subtrees; feeding it straight into dropDuplicates + the anti-join
         # against triples_df makes Catalyst's constraint inference blow the driver
         # heap while *planning* (OutOfMemoryError inside .cache(), before any task
@@ -165,130 +178,6 @@ class CrossSourceLinker:
     def _append(lst: list, item: Optional[DataFrame]):
         if item is not None:
             lst.append(item)
-
-    # ================================================================
-    # Step 1: Temporal Alignment
-    # ================================================================
-
-    def _align_temporal_entities(self) -> Optional[DataFrame]:
-        """
-        Create unified temporal entities across all sources.
-
-        Finds month/year URIs across all source namespaces,
-        groups by normalized name, creates unified:MonthName entities
-        with owl:sameAs links.
-        """
-        month_names = [
-            'January', 'February', 'March', 'April', 'May', 'June',
-            'July', 'August', 'September', 'October', 'November', 'December'
-        ]
-
-        # Find all subjects that end with a month name
-        month_pattern = "|".join(month_names)
-
-        month_uris = (
-            self.triples_df
-            .select("subject")
-            .distinct()
-            .filter(F.regexp_extract("subject", f"({month_pattern})$", 1) != "")
-            .withColumn(
-                "month_name",
-                F.regexp_extract("subject", f"({month_pattern})$", 1)
-            )
-            .select(
-                F.col("subject").alias("source_uri"),
-                "month_name"
-            )
-        )
-
-        # Create unified month entities
-        unified_uri = F.concat(F.lit(str(UNIFIED)), F.col("month_name"))
-
-        # Type triples: unified:January rdf:type bls:UnifiedMonth
-        type_triples = (
-            month_uris
-            .select("month_name")
-            .distinct()
-            .select(
-                unified_uri.alias("subject"),
-                F.lit(_RDF_TYPE).alias("predicate"),
-                F.lit(str(BLS_ENRICHMENT.UnifiedMonth)).alias("object")
-            )
-        )
-
-        # Label triples
-        label_triples = (
-            month_uris
-            .select("month_name")
-            .distinct()
-            .select(
-                unified_uri.alias("subject"),
-                F.lit(_RDFS_LABEL).alias("predicate"),
-                F.col("month_name").alias("object")
-            )
-        )
-
-        # sameAs triples: unified:January owl:sameAs cpi:January, ppi:January, ...
-        sameas_triples = month_uris.select(
-            F.concat(F.lit(str(UNIFIED)), F.col("month_name")).alias("subject"),
-            F.lit(_OWL_SAME_AS).alias("predicate"),
-            F.col("source_uri").alias("object")
-        )
-
-        # Same for years (4-digit endings)
-        year_uris = (
-            self.triples_df
-            .select("subject")
-            .distinct()
-            .filter(F.regexp_extract("subject", r"(\d{4})$", 1) != "")
-            .withColumn(
-                "year_value",
-                F.regexp_extract("subject", r"(\d{4})$", 1)
-            )
-            .filter(
-                (F.col("year_value").cast("int") >= 1900) &
-                (F.col("year_value").cast("int") <= 2100)
-            )
-            .select(F.col("subject").alias("source_uri"), "year_value")
-        )
-
-        year_unified_uri = F.concat(F.lit(str(UNIFIED)), F.lit("Year"), F.col("year_value"))
-
-        year_type_triples = (
-            year_uris.select("year_value").distinct()
-            .select(
-                year_unified_uri.alias("subject"),
-                F.lit(_RDF_TYPE).alias("predicate"),
-                F.lit(str(BLS_ENRICHMENT.UnifiedYear)).alias("object")
-            )
-        )
-
-        year_label_triples = (
-            year_uris.select("year_value").distinct()
-            .select(
-                year_unified_uri.alias("subject"),
-                F.lit(_RDFS_LABEL).alias("predicate"),
-                F.col("year_value").alias("object")
-            )
-        )
-
-        year_sameas_triples = year_uris.select(
-            F.concat(F.lit(str(UNIFIED)), F.lit("Year"), F.col("year_value")).alias("subject"),
-            F.lit(_OWL_SAME_AS).alias("predicate"),
-            F.col("source_uri").alias("object")
-        )
-
-        result = (
-            type_triples
-            .unionByName(label_triples)
-            .unionByName(sameas_triples)
-            .unionByName(year_type_triples)
-            .unionByName(year_label_triples)
-            .unionByName(year_sameas_triples)
-        )
-
-        logger.info("  Temporal alignment triples prepared (lazy)")
-        return result
 
     # ================================================================
     # Step 2: Sector Linking
