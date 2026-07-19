@@ -5,9 +5,17 @@ Unifies temporal entities (months, years, quarters) across all data sources.
 Creates unified temporal entities and links source-specific temporal entities
 to them using owl:sameAs.
 
+Also types the SOURCE temporal URIs it links to (temporal:Source{Month,Year,
+Quarter}). Those arrive untyped from the sources, and node_mapper only makes
+nodes out of typed URIs — so without this neither the measurement->period edges
+nor the sameAs links resolve. See _create_source_temporal_types.
+
 All operations run as distributed PySpark DataFrame transformations.
 
 Example output triples:
+    cpi:November      rdf:type      temporal:SourceMonth
+    cpi:November      rdfs:label    "November"
+
     unified:November  rdf:type      bls:UnifiedMonth
     unified:November  rdfs:label    "November"
     unified:November  owl:sameAs    cpi:November
@@ -32,7 +40,7 @@ from functools import reduce
 from typing import List, Optional
 
 from spark_jobs.utils.rdf_utils import (
-    BLS_ENRICHMENT, UNIFIED,
+    BLS_ENRICHMENT, UNIFIED, SOURCE_TEMPORAL,
     CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER, WKYENG,
     SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP,
     MARKET, CAP, NWS,
@@ -54,6 +62,19 @@ UNIFIED_MONTH_TYPE = str(BLS_ENRICHMENT.UnifiedMonth)
 UNIFIED_YEAR_TYPE = str(BLS_ENRICHMENT.UnifiedYear)
 UNIFIED_QUARTER_TYPE = str(BLS_ENRICHMENT.UnifiedQuarter)
 COVERS_MONTH_PRED = str(BLS_ENRICHMENT.coversMonth)
+
+# Types for the source-side temporal URIs the unifier links TO — see the
+# SOURCE_TEMPORAL note in rdf_utils for why these are their own namespace
+# rather than reusing the Unified* types.
+SOURCE_MONTH_TYPE = str(SOURCE_TEMPORAL.SourceMonth)
+SOURCE_YEAR_TYPE = str(SOURCE_TEMPORAL.SourceYear)
+SOURCE_QUARTER_TYPE = str(SOURCE_TEMPORAL.SourceQuarter)
+
+SOURCE_TEMPORAL_TYPE_BY_KIND = {
+    "month": SOURCE_MONTH_TYPE,
+    "year": SOURCE_YEAR_TYPE,
+    "quarter": SOURCE_QUARTER_TYPE,
+}
 
 UNIFIED_BASE = str(UNIFIED)
 
@@ -221,6 +242,8 @@ class TemporalUnifier:
 
         # Produce unified triples
         new_dfs: List[DataFrame] = []
+
+        new_dfs.append(self._create_source_temporal_types(all_temporals))
 
         df = self._create_unified_months(all_temporals)
         if df is not None:
@@ -462,6 +485,71 @@ class TemporalUnifier:
     # ================================================================
     # Produce unified entities
     # ================================================================
+
+    def _create_source_temporal_types(
+        self, all_temporals: DataFrame
+    ) -> DataFrame:
+        """
+        Type the SOURCE temporal URIs so they can become graph nodes.
+
+        Source data references periods as bare URIs — cpi:February, eci:2024,
+        jolts:August — and none of them carries an rdf:type. node_mapper only
+        creates nodes for typed URIs, so they were never nodes, and every triple
+        pointing at them (hasMonth / hasYear / hasStartMonth / hasEndMonth /
+        hasStartYear / hasEndYear — ~1,205 on the e2e fixtures) was silently
+        dropped during edge resolution. The graph had no temporal dimension: no
+        measurement was connected to when it happened.
+
+        The unifier's own owl:sameAs links pointed at the same untyped URIs, so
+        they were dropped too, leaving the Unified{Month,Year} nodes as isolated
+        vertices a GNN can propagate nothing through.
+
+        This method emits the missing rdf:type (plus a label) for exactly the
+        set of temporal URIs the unifier already collects — the same set it
+        links to — which completes the intended bridge:
+
+            cpi obs -> cpi:February -> unified:February <- eci:February <- eci obs
+
+        Both hops are edges only once BOTH endpoints are typed.
+
+        Produces, per source temporal URI:
+            cpi:February  rdf:type    temporal:SourceMonth
+            cpi:February  rdfs:label  "February"
+
+        Note the synthetic URIs minted by the date-literal collectors
+        (sec/noaa/market temporal/{Month}) are typed here too — they are equally
+        untyped otherwise, and their only edges are the sameAs links.
+        """
+        distinct = all_temporals.select(
+            "temporal_uri", "normalized_name", "kind"
+        ).dropDuplicates()
+
+        type_expr = None
+        for kind, type_uri in SOURCE_TEMPORAL_TYPE_BY_KIND.items():
+            cond = F.col("kind") == kind
+            type_expr = (
+                F.when(cond, F.lit(type_uri)) if type_expr is None
+                else type_expr.when(cond, F.lit(type_uri))
+            )
+
+        typed = distinct.withColumn("type_uri", type_expr.otherwise(F.lit(None)))
+        # An unrecognized kind would otherwise emit `<uri> rdf:type NULL`, which
+        # node_mapper would turn into a garbage node type rather than failing.
+        typed = typed.filter(F.col("type_uri").isNotNull())
+
+        type_triples = typed.select(
+            F.col("temporal_uri").alias("subject"),
+            F.lit(RDF_TYPE).alias("predicate"),
+            F.col("type_uri").alias("object"),
+        )
+
+        label_triples = typed.select(
+            F.col("temporal_uri").alias("subject"),
+            F.lit(RDFS_LABEL).alias("predicate"),
+            F.col("normalized_name").alias("object"),
+        )
+
+        return type_triples.unionAll(label_triples)
 
     def _create_unified_months(
         self, all_temporals: DataFrame

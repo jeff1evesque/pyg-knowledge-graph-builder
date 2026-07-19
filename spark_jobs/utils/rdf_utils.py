@@ -78,6 +78,20 @@ NOAA_ENRICHMENT = Namespace("https://www.noaa.gov/enrichment/")
 MARKET_ENRICHMENT = Namespace("https://financial-data.org/enrichment/")
 UNIFIED = Namespace("https://example.org/unified/")
 
+# Types for the SOURCE-side temporal entities (cpi:February, eci:2024, ...).
+# Those URIs are referenced by measurements but carry no rdf:type of their own,
+# so node_mapper never made them nodes and every hasMonth/hasYear/hasStart*/
+# hasEnd* triple pointing at them was dropped during edge resolution. The
+# TemporalUnifier types them (see _create_source_temporal_types).
+#
+# Deliberately NOT under a *_ENRICHMENT namespace: an enrichment prefix would
+# make classify_edge_origin() read those measurement->month edges as pipeline-
+# inferred, when they are observed source facts — only the TYPE is ours. And
+# deliberately distinct from UNIFIED: collapsing both onto UnifiedMonth would
+# make `unified:February sameAs cpi:February` a link between two nodes of the
+# same type, erasing which one is canonical.
+SOURCE_TEMPORAL = Namespace("https://example.org/temporal/")
+
 # ============================================
 # CANONICAL NAMESPACE → PREFIX MAPPING
 # ============================================
@@ -118,6 +132,7 @@ NAMESPACE_PREFIXES: List[Tuple[str, str]] = [
     (str(NOAA), "noaa"),
     (str(GEOSPARQL), "geosparql"),
     (str(UNIFIED), "unified"),
+    (str(SOURCE_TEMPORAL), "temporal"),
     (str(OWL), "owl"),
     (str(RDFS), "rdfs"),
 ]
@@ -210,13 +225,6 @@ def classify_edge_origin(
     if predicate_uri == OWL_SAME_AS or predicate_uri.endswith("#sameAs"):
         return ORIGIN_UNIFICATION
     return ORIGIN_ENRICHMENT
-
-
-    if predicate_uri.startswith(str(UNIFIED)):
-        return ORIGIN_UNIFICATION
-    if predicate_uri.startswith(ENRICHMENT_NAMESPACES):
-        return ORIGIN_ENRICHMENT
-    return ORIGIN_RAW
 
 
 # ============================================

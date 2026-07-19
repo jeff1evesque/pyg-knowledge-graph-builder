@@ -29,6 +29,8 @@ import pytest
 
 pytestmark = pytest.mark.e2e
 
+_RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "e2e"
 TURTLE_PARQUET = FIXTURES / "turtle_parquet"
 NTRIPLES = FIXTURES / "ntriples"
@@ -158,6 +160,22 @@ def _assert_valid_graph_and_metadata(config, work_dir):
 
     assert index["uri"].is_unique, "node_index maps two rows to one entity"
     assert len(index) == sum(data[nt].num_nodes for nt in data.node_types)
+
+    # --- the graph has a temporal dimension ---
+    _assert_temporal_edges_present(config, data)
+
+    # --- unification is a real origin category, not an empty one ---
+    # It went empty when the fabricated sameAs links (matched by an end-anchored
+    # month regex, so they pointed at MEASUREMENTS, which are typed nodes) were
+    # removed: the correct links pointed at untyped source temporal URIs and
+    # were dropped. Non-empty here means the real links now resolve.
+    assert "unification" in origins, (
+        "no edge type has origin 'unification' — the owl:sameAs links from "
+        "unified temporal entities to source temporal URIs did not resolve "
+        "into edges (are the source temporal URIs typed?)"
+    )
+
+    _assert_no_node_type_is_orphaned(data)
 
 
 # --------------------------------------------------------------------------- #
@@ -301,6 +319,228 @@ def _finish_pipeline_subprocess(work_dir, proc):
         f"STDERR tail:\n{stderr[-3000:]}"
     )
 
+
+
+def _incident_edge_counts(data):
+    """Total incident edges (in + out) per node type."""
+    counts = {str(nt): 0 for nt in data.node_types}
+    for src, _rel, dst in data.edge_types:
+        n = data[(src, _rel, dst)].edge_index.shape[1]
+        counts[str(src)] += n
+        counts[str(dst)] += n
+    return counts
+
+
+# Node types that are STILL orphaned on the e2e fixtures. Measured directly:
+# the fixtures produced 20 orphaned types before source temporal URIs were
+# typed and 18 after — i.e. that fix cleared exactly bls_enrichment_UnifiedMonth
+# and bls_enrichment_UnifiedYear and introduced no new orphan. The remaining 18
+# are pre-existing and each is its own defect, mostly the same untyped-URI class
+# one hop up: the BLS measurements that would link these types (cpi:...
+# _PercentChange and friends) carry no rdf:type either, so they are not nodes
+# and their edges cannot resolve.
+#
+# Listed explicitly rather than weakening the assertion, so the guard below
+# stays exact — a NEW orphan fails — and so shrinking this list as each is
+# fixed needs no change to the check.
+KNOWN_ORPHANED_NODE_TYPES = {
+    "bls_enrichment_GeographicRegion",
+    "cpi_ExpenditureCategory",
+    "cpi_TwelveMonthPercentChange",
+    "cpi_Year",
+    "eci_BenefitsPercentChangeData",
+    "eci_WagesAndSalariesIndexData",
+    "empsit_EmploymentStatusByEducationData",
+    "empsit_HouseholdData",
+    "empsit_Industry",
+    "empsit_OccupationData",
+    "empsit_PeriodOfService",
+    "empsit_UnemploymentDurationData",
+    "empsit_UnemploymentReasonData",
+    "filings_SECFiling",
+    "jolts_SeparationsLevel",
+    "jolts_SeparationsRate",
+    "unknown_EquitySnapshot",
+    "unknown_OptionSnapshot",
+}
+
+
+def _assert_no_node_type_is_orphaned(data):
+    """No node type may exist with zero edges attached to it.
+
+    A whole type with no incident edges is the visible symptom of a silent drop
+    in edge resolution — those nodes were created but every triple that would
+    have connected them went nowhere. That is exactly how the missing temporal
+    dimension hid: bls_enrichment_UnifiedMonth (12) and UnifiedYear (8) sat in
+    the graph as 20 isolated vertices a GNN can propagate nothing through, and
+    nothing failed. Asserted for EVERY type, not just the temporal ones, so the
+    next instance of this class of bug fails loudly instead of shipping.
+
+    See KNOWN_ORPHANED_NODE_TYPES for the ones this does not yet cover — and
+    note that both Unified* types are deliberately NOT on that list, so this is
+    a live regression guard for the fix that removed them from it.
+    """
+    orphaned = {
+        nt for nt, cnt in _incident_edge_counts(data).items()
+        if data[nt].num_nodes > 0 and cnt == 0
+    }
+    assert not (orphaned - KNOWN_ORPHANED_NODE_TYPES), (
+        "node types present in the graph with ZERO edges: "
+        f"{sorted(orphaned - KNOWN_ORPHANED_NODE_TYPES)} — their triples were "
+        "dropped during edge resolution"
+    )
+
+    # Keep the allowlist honest: an entry that is no longer orphaned must be
+    # removed, or it silently exempts a type that later regresses.
+    stale = KNOWN_ORPHANED_NODE_TYPES & set(map(str, data.node_types)) - orphaned
+    assert not stale, (
+        f"{sorted(stale)} are no longer orphaned — remove them from "
+        "KNOWN_ORPHANED_NODE_TYPES"
+    )
+
+
+# The predicates that connect a measurement to when it happened. Source data
+# references periods as bare URIs (cpi:February, eci:2024) and these are the
+# only things pointing at them.
+_TEMPORAL_PREDICATES = (
+    "hasMonth", "hasYear", "hasStartMonth", "hasEndMonth",
+    "hasStartYear", "hasEndYear",
+)
+
+
+def _assert_temporal_edges_present(config, data):
+    """Measurements must actually be connected to their period.
+
+    Every one of these triples used to be dropped (~1,205 on the turtle-parquet
+    fixtures) because the URI on the object side carried no rdf:type, so
+    node_mapper never made it a node. The graph had no temporal dimension at all:
+    nothing recorded WHEN any measurement happened.
+
+    The expectation is derived from the enriched triples rather than hardcoded:
+    only BLS states periods as URIs this way, and not every fixture includes a
+    BLS source (the ntriples fixture is market/noaa/sec only), so a fixed edge
+    type would fail on data that never had the defect.
+
+    Asserted precisely: every temporal triple whose BOTH endpoints are typed
+    must become an edge. Typing the period fixed the object side (0 of 980 typed
+    before, 891 after on the turtle-parquet fixtures). It does NOT reach the
+    ~968 triples whose SUBJECT — the measurement itself, e.g.
+    cpi:..._PercentChange — is also untyped and therefore also not a node. That
+    is the same class of bug one hop up and a separate fix; counting it here
+    would make this test a to-do rather than a guard.
+    """
+    import pandas as pd
+
+    files = sorted(Path(config.enriched_parquet_path).rglob("*.parquet"))
+    if not files:
+        return  # split-mode runs may not re-emit the enriched frame
+    df = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
+
+    local = df["predicate"].str.rsplit("/", n=1).str[-1].str.rsplit("#", n=1).str[-1]
+    temporal = df[local.isin(_TEMPORAL_PREDICATES)]
+    if temporal.empty:
+        return  # source has no URI-valued periods (e.g. the BLS-less fixture)
+
+    typed = set(df.loc[df["predicate"] == _RDF_TYPE, "subject"])
+    resolvable = temporal[
+        temporal["subject"].isin(typed) & temporal["object"].isin(typed)
+    ]
+    assert not resolvable.empty, (
+        f"all {len(temporal)} measurement->period triples have an untyped "
+        "endpoint, so none can become an edge — the graph has no temporal "
+        "dimension at all"
+    )
+
+    # PyG relation names are prefixed with the predicate's namespace
+    # ("cpi_hasEndMonth"), so match on the suffix rather than equality.
+    edges = sum(
+        data[et].edge_index.shape[1]
+        for et in data.edge_types
+        if any(str(et[1]).endswith(p) for p in _TEMPORAL_PREDICATES)
+    )
+    assert edges >= len(resolvable), (
+        f"{len(resolvable)} measurement->period triples have both endpoints "
+        f"typed but only {edges} became edges — they were dropped during edge "
+        "resolution"
+    )
+
+
+def _source_prefix(node_type):
+    """The namespace prefix a node type belongs to, e.g. cpi_Index -> 'cpi'."""
+    return str(node_type).split("_", 1)[0]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "BLOCKED on a second untyped-URI defect, one hop up. Typing the source "
+        "periods made them nodes, so the 52 owl:sameAs links now resolve and "
+        "UnifiedMonth/UnifiedYear are no longer orphans — but ~968 of the 980 "
+        "measurement->period triples have an untyped SUBJECT too (the BLS "
+        "measurements themselves: cpi:..._PercentChange, jolts:..._QuitsRate, "
+        "empsit:..., eci:...). Those measurements are not nodes either, so the "
+        "first hop of the bridge still cannot form. Written as a strict xfail "
+        "rather than deleted: it is the acceptance criterion, and it will fail "
+        "loudly the moment the measurements get typed, which is the signal "
+        "that the bridge is real."
+    ),
+)
+def test_cross_source_temporal_bridge(twin_runs):
+    """A measurement from one source must reach one from another via a period."""
+    _assert_cross_source_temporal_bridge(twin_runs.d1)
+
+
+def _assert_cross_source_temporal_bridge(data):
+    """A measurement from one source must reach one from another via a period.
+
+    The design intends:
+
+        cpi obs -> cpi:February -> unified:February <- eci:February <- eci obs
+
+    Both hops used to be missing, and the gap was masked: cross_source_linker's
+    temporal matcher was anchored only at the end, so it emitted
+    `unified:September sameAs cpi:...PercentChange_..._September` — links to
+    MEASUREMENTS, which are typed and therefore resolved into real edges. That
+    fabricated 16 edge types' worth of connectivity and made unification look
+    functional. Asserted end to end here so a bridge that only appears to exist
+    cannot pass again.
+
+    Traversed at the INSTANCE level, not over node types: a type-level path
+    would be satisfied by cpi reaching February and eci reaching March, which
+    is not a bridge. The two measurements must meet at the same period node.
+    """
+    # (node_type, node_id) -> set of neighbouring (node_type, node_id)
+    neighbors = {}
+    for et in data.edge_types:
+        src_t, _rel, dst_t = (str(x) for x in et)
+        edge_index = data[et].edge_index
+        for s, d in zip(edge_index[0].tolist(), edge_index[1].tolist()):
+            neighbors.setdefault((src_t, s), set()).add((dst_t, d))
+            neighbors.setdefault((dst_t, d), set()).add((src_t, s))
+
+    unified_nodes = [
+        (nt, i)
+        for nt in map(str, data.node_types)
+        if "Unified" in nt
+        for i in range(data[nt].num_nodes)
+    ]
+    assert unified_nodes, "no unified temporal nodes in the graph"
+
+    for unified in unified_nodes:
+        # unified period -> the source periods it is sameAs -> what they date
+        reached = {
+            _source_prefix(measured[0])
+            for source_period in neighbors.get(unified, ())
+            for measured in neighbors.get(source_period, ())
+            if measured != unified
+        }
+        if len(reached) >= 2:
+            return
+
+    raise AssertionError(
+        "no unified temporal entity connects measurements from two different "
+        "sources — the cross-source temporal bridge does not form"
+    )
 
 
 def _assert_sameas_links_only_temporal(config):
