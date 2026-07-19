@@ -73,6 +73,15 @@ def spark(tmp_path_factory):
         .config("spark.ui.retainedStages", "80")
         .config("spark.ui.retainedTasks", "1000")
         .config("spark.sql.ui.retainedExecutions", "40")
+        # Bound the *plan description* string, not the data. Every SQL execution
+        # posts an event carrying its physical plan rendered as text, built via
+        # QueryExecution.explainString. The enrichment plans are deeply nested
+        # and the entity-complete fixtures (#240) widened them enough that
+        # rendering one exhausted the heap outright -- OutOfMemoryError inside
+        # StringConcat.toString, before any row was collected. The default cap
+        # (2^20 chars) is far too generous for a plan this shape. Truncating
+        # costs only debug readability in `explain()` output.
+        .config("spark.sql.maxPlanStringLength", "4096")
     )
 
     # Opt-in GPU acceleration (SPARK_RAPIDS=1). Mirrors
