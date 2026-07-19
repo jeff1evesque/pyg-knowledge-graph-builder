@@ -618,7 +618,8 @@ triples_df (enriched, on executors)
     │   ├── Discover node types from rdf:type triples
     │   ├── Filter out meta-ontology types (OWL, RDFS, RDF)
     │   ├── Convert type URIs to PyG names via pure Spark WHEN expressions
-    │   ├── Assign canonical type per entity (most specific wins via type count)
+    │   ├── Assign canonical type per entity (pinned temporal types first, then
+    │   │   most specific wins via type count)
     │   ├── Assign per-type 0-indexed integer IDs via Window functions
     │   ├── Cache and materialize node_id_df on executors
     │   ├── Collect type URI mapping for metadata (small collect, <500 rows)
@@ -1523,6 +1524,8 @@ cpi:November a temporal:SourceMonth ; rdfs:label "November" .
 > ```
 >
 > The type is deliberately **not** in an `*/enrichment/` namespace: `classify_edge_origin()` reads a minted endpoint type as a pipeline-derived edge, and a measurement's link to its own period is an observed source fact — only the type is ours. It is deliberately distinct from `UnifiedMonth` as well, so `unified:February owl:sameAs cpi:February` still says which node is canonical.
+>
+> **These types are pinned as canonical.** Many source periods already carry a source type — `cpi:2024` is both `cpi:Year` and `temporal:SourceYear`. `node_mapper`'s default rule (fewest instances wins) picks the *source* type, because it is per-namespace and therefore rarer, which shards one concept across every namespace that names it: measured on the e2e fixtures, 37 months split over `cpi_Month`/`jolts_Month`/`empsit_Month`/`eci_Month`/`temporal_SourceMonth` and 14 years likewise, leaving `temporal_SourceYear` holding a single node. The `owl:sameAs` edges then land on whichever shard a period fell into, and a heterogeneous GNN sees unrelated node types with no path between them. `node_mapper._CANONICAL_TYPE_PRIORITY` pins `temporal_Source*` ahead of the count heuristic so every period lands in one node type per granularity. The source type is not lost — it remains an `rdf:type` triple and appears in `ontology_schema.json`; only the canonical type used for graph *structure* is overridden. Predicates stay per-source (`cpi_hasYear`, `jolts_hasYear`, …), so the sources agree on what a year *is* without being forced to share measurement semantics.
 
 **Linking Strategies** (applied across 100+ ontologies):
 
