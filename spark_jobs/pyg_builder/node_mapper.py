@@ -21,7 +21,9 @@ Multi-type entities:
     An entity may have multiple rdf:type triples. We assign each entity
     to exactly one canonical type using priority:
     1. If config specifies node_types, first match wins
-    2. Otherwise, most specific type (fewest instances) wins
+    2. Otherwise, a type in _CANONICAL_TYPE_PRIORITY wins (temporal types, which
+       must not shard across per-namespace source types -- see that constant)
+    3. Otherwise, most specific type (fewest instances) wins
 """
 import logging
 from typing import Dict, Any, Tuple
@@ -57,6 +59,30 @@ _EXCLUDED_TYPE_PREFIXES = (
 _TEMPORAL_TYPE_FRAGMENTS = (
     "Month", "Year", "Quarter", "UnifiedMonth",
     "UnifiedYear", "UnifiedQuarter", "TimePeriod",
+)
+
+# Node types that must win the canonical-type contest outright, ahead of the
+# "fewest instances" heuristic.
+#
+# TemporalUnifier types EVERY source period it collects as temporal_Source*,
+# and many of those URIs already carry a source type (cpi:2024 is both cpi:Year
+# and temporal_SourceYear). Left to instance counts the source type always wins,
+# because it is per-namespace and therefore rarer: cpi:2024 -> cpi_Year (4),
+# eci:2024 -> eci_Year (4), and so on. That splits one semantic concept across
+# as many node types as there are namespaces -- measured on the e2e fixtures,
+# 37 months over 5 types and 14 years over 5 types, leaving temporal_SourceYear
+# holding a single node. The owl:sameAs edges from Unified{Month,Year} then land
+# on whichever shard each period fell into, and a GNN treats those shards as
+# unrelated types with no path between them.
+#
+# Pinning the temporal types collapses the shards back into one node type per
+# granularity, which is the whole point of the unifier. The source type is not
+# lost -- it stays an rdf:type triple on the entity and is still available as a
+# feature; only the *canonical* type used for graph structure is overridden.
+_CANONICAL_TYPE_PRIORITY = (
+    "temporal_SourceMonth",
+    "temporal_SourceYear",
+    "temporal_SourceQuarter",
 )
 _SECTOR_TYPE_FRAGMENTS = ("EconomicSector", "Sector")
 
@@ -179,13 +205,24 @@ class NodeMapper:
             .agg(F.count("*").alias("type_count"))
         )
 
+        # Pinned types sort ahead of everything else; ties within the pinned set
+        # follow declaration order, so a multi-granularity entity is still
+        # deterministic. Everything unpinned keeps the existing behaviour.
+        priority_expr = F.lit(len(_CANONICAL_TYPE_PRIORITY))
+        for position, pinned_type in enumerate(_CANONICAL_TYPE_PRIORITY):
+            priority_expr = F.when(
+                F.col("node_type") == pinned_type, F.lit(position)
+            ).otherwise(priority_expr)
+
         ranked = (
             type_triples
             .join(F.broadcast(type_counts), "node_type", "inner")
+            .withColumn("type_priority", priority_expr)
             .withColumn(
                 "rank",
                 F.row_number().over(
                     Window.partitionBy("uri").orderBy(
+                        F.col("type_priority").asc(),
                         F.col("type_count").asc(),
                         F.col("node_type").asc(),
                     )
