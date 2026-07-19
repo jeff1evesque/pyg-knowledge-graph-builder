@@ -22,6 +22,7 @@ machine (see the README "Testing" section). No cluster, no GPU/RAPIDS required �
 identical logic runs on CPU.
 """
 
+import collections
 import json
 from pathlib import Path
 
@@ -163,6 +164,9 @@ def _assert_valid_graph_and_metadata(config, work_dir):
 
     # --- the graph has a temporal dimension ---
     _assert_temporal_edges_present(config, data)
+
+    # --- that dimension is ONE node type per granularity, not one per source ---
+    _assert_temporal_types_are_not_sharded(data)
 
     # --- unification is a real origin category, not an empty one ---
     # It went empty when the fabricated sameAs links (matched by an end-anchored
@@ -343,26 +347,67 @@ def _incident_edge_counts(data):
 # Listed explicitly rather than weakening the assertion, so the guard below
 # stays exact — a NEW orphan fails — and so shrinking this list as each is
 # fixed needs no change to the check.
+# Seven BLS entries were removed when the e2e fixtures were regenerated with
+# entity-complete sampling (#240): cpi_ExpenditureCategory, cpi_Year,
+# eci_BenefitsPercentChangeData, empsit_EmploymentStatusByEducationData,
+# empsit_Industry, jolts_SeparationsLevel, jolts_SeparationsRate. They were
+# never a pipeline defect — the old fixtures were sampled by triple, so the
+# entities on the other end of their edges were not typed and never became
+# nodes. What remains is either non-BLS (filings_*, unknown_*, which draw on
+# separate fixtures) or a BLS type the sample genuinely does not connect.
 KNOWN_ORPHANED_NODE_TYPES = {
     "bls_enrichment_GeographicRegion",
-    "cpi_ExpenditureCategory",
     "cpi_TwelveMonthPercentChange",
-    "cpi_Year",
-    "eci_BenefitsPercentChangeData",
     "eci_WagesAndSalariesIndexData",
-    "empsit_EmploymentStatusByEducationData",
     "empsit_HouseholdData",
-    "empsit_Industry",
     "empsit_OccupationData",
     "empsit_PeriodOfService",
     "empsit_UnemploymentDurationData",
     "empsit_UnemploymentReasonData",
     "filings_SECFiling",
-    "jolts_SeparationsLevel",
-    "jolts_SeparationsRate",
     "unknown_EquitySnapshot",
     "unknown_OptionSnapshot",
 }
+
+
+def _assert_temporal_types_are_not_sharded(data):
+    """Periods must land in one node type per granularity, not one per source.
+
+    TemporalUnifier types every source period as temporal_Source*, but many of
+    those URIs already carry a source type -- cpi:2024 is both cpi:Year and
+    temporal_SourceYear. node_mapper's default rule (fewest instances wins) then
+    picks the per-namespace source type, because it is rarer, and one concept
+    shards across every namespace that names it: on these fixtures 37 months
+    over cpi_Month/jolts_Month/empsit_Month/eci_Month/temporal_SourceMonth, and
+    14 years likewise, leaving temporal_SourceYear holding a single node. The
+    sameAs edges from Unified{Month,Year} then land on whichever shard a period
+    fell into, and a GNN sees unrelated types with no path between them.
+
+    node_mapper._CANONICAL_TYPE_PRIORITY pins the temporal types ahead of the
+    count heuristic to prevent that. This asserts the outcome rather than the
+    mechanism: no per-namespace Month/Year/Quarter node type may survive
+    alongside the unified temporal ones.
+
+    Deliberately not scoped to a hardcoded list of namespaces -- a new BLS feed
+    that types its periods must fail here too, not slip through.
+    """
+    granularities = ("Month", "Year", "Quarter")
+    sharded = collections.defaultdict(list)
+    for node_type in map(str, data.node_types):
+        prefix, _, leaf = node_type.partition("_")
+        # Unified* are the unifier's own hub nodes and are meant to be distinct;
+        # only the SOURCE side is at risk of sharding.
+        if prefix == "temporal" or leaf.startswith("Unified"):
+            continue
+        if leaf in granularities:
+            sharded[leaf].append(f"{node_type} (n={data[node_type].num_nodes})")
+
+    assert not sharded, (
+        "temporal entities are sharded across per-source node types instead of "
+        f"the unified temporal_Source* types: {dict(sharded)} — the owl:sameAs "
+        "edges from Unified* cannot reach them all. Check "
+        "node_mapper._CANONICAL_TYPE_PRIORITY."
+    )
 
 
 def _assert_no_node_type_is_orphaned(data):
@@ -470,21 +515,6 @@ def _source_prefix(node_type):
     return str(node_type).split("_", 1)[0]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BLOCKED on a second untyped-URI defect, one hop up. Typing the source "
-        "periods made them nodes, so the 52 owl:sameAs links now resolve and "
-        "UnifiedMonth/UnifiedYear are no longer orphans — but ~968 of the 980 "
-        "measurement->period triples have an untyped SUBJECT too (the BLS "
-        "measurements themselves: cpi:..._PercentChange, jolts:..._QuitsRate, "
-        "empsit:..., eci:...). Those measurements are not nodes either, so the "
-        "first hop of the bridge still cannot form. Written as a strict xfail "
-        "rather than deleted: it is the acceptance criterion, and it will fail "
-        "loudly the moment the measurements get typed, which is the signal "
-        "that the bridge is real."
-    ),
-)
 def test_cross_source_temporal_bridge(twin_runs):
     """A measurement from one source must reach one from another via a period."""
     _assert_cross_source_temporal_bridge(twin_runs.d1)
