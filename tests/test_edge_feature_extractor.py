@@ -323,3 +323,61 @@ def test_edge_encoding_is_deterministic_across_runs(spark):
     first = _edge_features(spark, rows)[0][key]
     again = _edge_features(spark, rows)[0][key]
     assert torch.equal(first, again)
+
+
+# ======================================================================
+# Chunked collection path for large edge types
+# ======================================================================
+
+def _temporal_edge_set(n, year=2020):
+    """n edges of a single type (cpi_Index -precedes-> cpi_Series)."""
+    rows = []
+    for i in range(n):
+        src, dst = f"https://ex/src{i}", f"https://ex/dst{i}"
+        rows += [
+            (src, RDF_TYPE, CPI_INDEX),
+            (dst, RDF_TYPE, CPI_SERIES),
+            (src, HAS_MONTH, str((i % 12) + 1)),
+            (src, HAS_YEAR, str(year)),
+            (dst, HAS_MONTH, str(((i + 1) % 12) + 1)),
+            (dst, HAS_YEAR, str(year)),
+            (src, PRECEDES, dst),
+        ]
+    return rows
+
+
+def test_large_edge_type_streams_via_chunked_path(spark, caplog):
+    """A type over chunk_edge_threshold streams, and streaming changes nothing.
+
+    Small types are collected in batches, one grouped toPandas per batch; a type
+    larger than the threshold instead streams by edge_idx range so a single huge
+    type can never materialize whole on the driver (the #186 guarantee). The e2e
+    fixtures cannot cover this branch — the threshold is 1,000,000 edges and the
+    biggest fixture type has 169 — so the split is exercised here by lowering
+    the threshold rather than by enlarging the data.
+
+    Asserts both halves of the contract: the chunked branch actually ran, and it
+    produced byte-identical output to the batched branch.
+    """
+    import logging
+
+    rows = _temporal_edge_set(6)
+    key = ("cpi_Index", PRECEDES_REL, "cpi_Series")
+
+    batched, _ei, layout = _edge_features(spark, rows)
+
+    logger_name = "spark_jobs.pyg_builder.edge_feature_extractor"
+    with caplog.at_level(logging.INFO, logger=logger_name):
+        chunked, _ei2, _layout2 = _edge_features(
+            spark,
+            rows,
+            config={"edge_feature_config": {"chunk_edge_threshold": 2}},
+        )
+
+    # 6 edges over a threshold of 2 must take the streaming branch, in 3 chunks.
+    assert "Chunked collection" in caplog.text
+    assert "0 large" not in caplog.text
+
+    assert batched[key].shape == (6, layout.edge_vector_dim)
+    assert chunked[key].shape == batched[key].shape
+    assert torch.equal(batched[key], chunked[key])
