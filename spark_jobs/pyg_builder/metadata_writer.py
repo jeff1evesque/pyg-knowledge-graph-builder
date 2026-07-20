@@ -805,7 +805,15 @@ def derive_node_index_prefix(pyg_output_key: str) -> str:
 
 
 def _derive_sibling_prefix(pyg_output_key: str, suffix: str) -> str:
-    """Shared derivation for artifact directories that sit beside the .pt."""
+    """Shared derivation for artifact directories that sit beside the .pt.
+
+    The parent is split off the key rather than parsed, so a Hive-partitioned
+    parent carries through untouched and every artifact for a period stays in
+    one directory:
+
+        pyg/year=2024/month=12/hetero_data.pt
+            -> pyg/year=2024/month=12/{suffix}/
+    """
     if "/" in pyg_output_key:
         parent = pyg_output_key.rsplit("/", 1)[0]
         filename = pyg_output_key.rsplit("/", 1)[1]

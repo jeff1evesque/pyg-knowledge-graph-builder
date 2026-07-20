@@ -32,8 +32,13 @@ def _config(work_dir: str) -> SimpleNamespace:
         source_format="turtle_parquet",
         turtle_column="triples",
         local_work_dir=work_dir.rstrip("/"),
-        enriched_parquet_path=f"{work_dir}/enriched/2099-01/triples",
-        pyg_output_path=f"{work_dir}/pyg/2099-01/hetero_data.pt",
+        period_partition="year=2099/month=01",
+        enriched_parquet_path=(
+            f"{work_dir}/enriched/year=2099/month=01/triples"
+        ),
+        pyg_output_path=(
+            f"{work_dir}/pyg/year=2099/month=01/hetero_data.pt"
+        ),
         s3_archive_bucket="",
         s3_pyg_key="",
         enable_ontology_mapping=False,
@@ -44,8 +49,15 @@ def _config(work_dir: str) -> SimpleNamespace:
 
 
 def _find_manifest(base_dir) -> str:
-    matches = glob.glob(os.path.join(str(base_dir), "manifests", "2099-01", "*.json"))
-    assert matches, f"no manifest written under {base_dir}/manifests/2099-01/"
+    matches = glob.glob(
+        os.path.join(
+            str(base_dir), "manifests", "year=2099", "month=01", "*.json"
+        )
+    )
+    assert matches, (
+        f"no manifest written under "
+        f"{base_dir}/manifests/year=2099/month=01/"
+    )
     return matches[0]
 
 

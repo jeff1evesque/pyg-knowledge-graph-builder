@@ -329,6 +329,17 @@ def test_sub_builders_fallback_when_unregistered():
 @pytest.mark.parametrize("key,expected", [
     ("pyg/2099-01/hetero_data.pt", "pyg/2099-01/metadata/"),
     ("pyg/2024-12/hetero_data.pt", "pyg/2024-12/metadata/"),
+    # Hive-partitioned parent: the helper splits the parent off the key rather
+    # than parsing it, so the partition directories carry through untouched and
+    # a period's artifacts stay together. This is what production keys look like.
+    (
+        "pyg/year=2024/month=12/hetero_data.pt",
+        "pyg/year=2024/month=12/metadata/",
+    ),
+    (
+        "pyg/year=2024/month=12/hetero_data_512d.pt",
+        "pyg/year=2024/month=12/hetero_data_512d_metadata/",
+    ),
     ("pyg/2099-01/hetero_data_512d.pt", "pyg/2099-01/hetero_data_512d_metadata/"),
     ("hetero_data.pt", "metadata/"),
     ("experiment_a.pt", "experiment_a_metadata/"),
@@ -344,6 +355,10 @@ def test_derive_metadata_prefix(key, expected):
 @pytest.mark.parametrize("key,expected", [
     ("pyg/2099-01/hetero_data.pt", "pyg/2099-01/node_index/"),
     ("pyg/2099-01/hetero_data_512d.pt", "pyg/2099-01/hetero_data_512d_node_index/"),
+    (
+        "pyg/year=2024/month=12/hetero_data.pt",
+        "pyg/year=2024/month=12/node_index/",
+    ),
     ("hetero_data.pt", "node_index/"),
     ("experiment_a.pt", "experiment_a_node_index/"),
     ("pyg/2099-01/hetero_data", "pyg/2099-01/node_index/"),
