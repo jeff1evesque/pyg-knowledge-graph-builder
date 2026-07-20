@@ -45,7 +45,7 @@ Example (N-Triples, local source, local + S3 archive):
     spark_jobs/build_graph.py \\
         --mode full \\
         --source_paths /data/rdf/monthly/2024-12/ \\
-        --local_work_dir /data/pyg \\
+        --local_work_dir /data \\
         --s3_archive_bucket my-archive \\
         --s3_pyg_key pyg/year=2024/month=12/hetero_data.pt \\
         --enable_ontology_mapping true \\
@@ -55,7 +55,7 @@ Example (Turtle Parquet, s3a source, local only):
     spark_jobs/build_graph.py \\
         --mode enrichment_only \\
         --source_paths s3a://my-data-lake/raw/sec/filings/2024-12/ \\
-        --local_work_dir /data/pyg \\
+        --local_work_dir /data \\
         --source_format turtle_parquet \\
         --turtle_column triples \\
         --time_period 2024-12
@@ -840,7 +840,8 @@ def save_enriched_parquet(
 
     Args:
         triples_df: Enriched triples DataFrame (subject, predicate, object)
-        output_path: Local (shared) path, e.g. "/data/pyg/enriched/2024-12/triples"
+        output_path: Local (shared) path, e.g.
+            "/data/enriched/year=2024/month=12/triples"
         num_partitions: Number of output Parquet partitions
     """
     (
@@ -1377,7 +1378,7 @@ def execute_pyg_only(
 def _write_manifest_bytes(spark: SparkSession, path: str, body: bytes):
     """Write ``body`` to ``path``, honoring the path's URI scheme.
 
-    ``local_work_dir`` may be a bare POSIX path (``/data/pyg``) or a URI on shared
+    ``local_work_dir`` may be a bare POSIX path (``/data``) or a URI on shared
     storage (``s3a://bucket/prefix``). A plain ``open()`` treats the latter
     literally and creates a junk ``./s3a:/...`` tree on the driver's local disk
     instead of writing to the object store. Route any non-local URI through the

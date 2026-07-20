@@ -749,7 +749,7 @@ def write_metadata_to_local(
     Args:
         metadata_files: Dict[filename -> content_dict]
         metadata_dir: Local directory for the metadata JSON files
-            (e.g., "/data/pyg/2024-12/metadata/")
+            (e.g., "/data/pyg/year=2024/month=12/metadata/")
     """
     import os
 

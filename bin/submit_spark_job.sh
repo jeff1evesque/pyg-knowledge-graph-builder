@@ -11,7 +11,7 @@
 #     bin/submit_spark_job.sh \
 #       --mode full \
 #       --source_paths /data/rdf/monthly/2024-12/ \
-#       --local_work_dir /data/pyg \
+#       --local_work_dir /data \
 #       --time_period 2024-12
 #
 # Environment variables:
