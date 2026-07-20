@@ -22,6 +22,7 @@ from spark_jobs.pyg_builder.feature_extractor import VectorLayout
 from spark_jobs.pyg_builder.edge_feature_extractor import EdgeVectorLayout
 from spark_jobs.pyg_builder.metadata_writer import (
     MetadataCollector,
+    _round_floats,
     _sanitize_config,
     derive_metadata_prefix,
     derive_node_index_prefix,
@@ -547,3 +548,49 @@ def test_edge_origin_falls_back_to_unknown_when_not_supplied():
     )
     edges = c._build_graph_schema()["edge_types"]
     assert next(iter(edges.values()))["origin"] == "unknown"
+
+
+# ======================================================================
+# _round_floats — keeps normalization.json byte-reproducible
+# ======================================================================
+
+def test_round_floats_collapses_last_ulp_drift():
+    """The two std values actually observed drifting between twin runs.
+
+    stddev is a parallel reduction and parallel float reductions are not
+    order-deterministic, so two runs over identical data produced statistics
+    differing in the final ULP. The node tensors still compared equal (they are
+    float32; both values round to the same float32), but normalization.json did
+    not — which broke the byte-reproducibility the e2e tests assert. Pinned with
+    the real values so the guard cannot be weakened without noticing.
+    """
+    a, b = 265.6434939473693, 265.64349394736934
+    assert a != b
+    assert _round_floats(a) == _round_floats(b)
+    assert json.dumps(_round_floats(a)) == json.dumps(_round_floats(b))
+
+
+def test_round_floats_preserves_meaningful_precision():
+    # Differences well inside 12 significant digits must survive — the rounding
+    # discards noise, not signal.
+    assert _round_floats(1.23456789012) != _round_floats(1.23456789013)
+
+
+def test_round_floats_recurses_and_leaves_non_floats_alone():
+    out = _round_floats(
+        {"per_property": [{"std": 265.64349394736934, "count": 438}],
+         "flag": True, "name": "x", "none": None}
+    )
+    assert out["per_property"][0]["std"] == _round_floats(265.6434939473693)
+    # count must stay an int, not become a float
+    assert out["per_property"][0]["count"] == 438
+    assert isinstance(out["per_property"][0]["count"], int)
+    # bool is an int subclass — it must not be rounded into a number
+    assert out["flag"] is True
+    assert out["name"] == "x" and out["none"] is None
+
+
+@pytest.mark.parametrize("value", [0.0, float("inf"), float("-inf")])
+def test_round_floats_handles_non_finite_and_zero(value):
+    # log10 of these is undefined or -inf; they must pass through untouched.
+    assert _round_floats(value) == value or value != value

@@ -78,6 +78,7 @@ Why this requires zero enrichment changes:
 """
 import logging
 import gc
+import time
 from typing import Dict, Any, List, Optional, Tuple, Set
 
 import numpy as np
@@ -195,6 +196,18 @@ _EDGE_HASH_SEEDS = [0, 7, 13, 31]
 # Driver memory safety constants
 # ============================================
 _CHUNK_EDGE_THRESHOLD = 1_000_000
+
+# Upper bound on how many edge types may be unioned into a single
+# batched collect.
+#
+# Small edge types are collected in batches so the driver pays one
+# Spark round-trip per batch instead of one per type. The edge budget
+# alone is not a sufficient cap: every type contributes its own join
+# subtree to the batch's Catalyst plan, so a few hundred tiny types
+# would satisfy any edge budget while producing a plan large enough to
+# reproduce the plan-size blowup that forced localCheckpoint into the
+# enrichment phases. This caps plan width independently of row count.
+_MAX_EDGE_TYPES_PER_BATCH = 8
 
 
 class EdgeVectorLayout:
@@ -547,6 +560,11 @@ class EdgeFeatureExtractor:
       - gc.collect() between types reclaims fragmented memory
     """
 
+    # Columns identifying an edge type. These travel with every sparse
+    # entry in a batched collect, because edge_idx is only unique
+    # within a type.
+    _TYPE_COLS: Tuple[str, ...] = ("src_type", "relation", "dst_type")
+
     def __init__(self, spark: SparkSession, config: Dict[str, Any]):
         self.spark = spark
         self.config = config
@@ -558,6 +576,9 @@ class EdgeFeatureExtractor:
         self._enabled = edge_feat_config.get("enabled", True)
         self._chunk_threshold = edge_feat_config.get(
             "chunk_edge_threshold", _CHUNK_EDGE_THRESHOLD
+        )
+        self._max_types_per_batch = edge_feat_config.get(
+            "max_edge_types_per_batch", _MAX_EDGE_TYPES_PER_BATCH
         )
 
         # Which categories of edge types to featurize.
@@ -731,6 +752,8 @@ class EdgeFeatureExtractor:
             logger.info("  Edge features disabled by config")
             return {}
 
+        phase_start = time.monotonic()
+
         layout = self._layout
         edge_vector_dim = layout.edge_vector_dim
 
@@ -792,8 +815,15 @@ class EdgeFeatureExtractor:
             ).cast("long"),
         )
 
-        edges_with_idx = edges_with_idx.cache()
-        edges_with_idx.count()  # force materialization
+        # Materialize *and truncate* the logical plan, for the same
+        # reason EnrichmentPipeline._settle does. .cache() materializes
+        # the rows but leaves the plan intact, so every per-edge-type
+        # query below re-analyzes the full enrichment lineage on the
+        # driver. That analysis is pure driver CPU: flat per edge type,
+        # independent of how many edges the type has, and unaffected by
+        # how the collects are batched or how the joins are planned.
+        # It was the dominant cost of this phase.
+        edges_with_idx = edges_with_idx.localCheckpoint(eager=True)
 
         # ============================================
         # Pre-extract endpoint literal properties (on executors)
@@ -806,13 +836,30 @@ class EdgeFeatureExtractor:
         )
         label_df = self._extract_node_labels(triples_df, node_id_df)
 
+        # Resolve the segment-2 shared/cross-property decision for every
+        # edge type in one pass, instead of one probe job per type.
+        shared_numeric_types = self._types_with_shared_numerics(
+            edges_with_idx, numeric_props_df
+        )
+
         # ============================================
-        # Build features per eligible edge type
+        # Build features for all eligible edge types
+        #
+        # Each type's sparse (edge_idx, dim, value) entries are built
+        # lazily; the collect is then done in bounded BATCHES rather
+        # than one Spark action per type. The per-type driver
+        # round-trip previously dominated pipeline wall-clock — the
+        # same defect #188 fixed on the node side.
         # ============================================
         edge_features: Dict[Tuple[str, str, str], torch.Tensor] = {}
 
+        collect_start = time.monotonic()
+
+        # (edge_type_key, num_edges, entries_df) awaiting collection
+        large: List[Tuple[Tuple[str, str, str], int, DataFrame]] = []
+        small: List[Tuple[Tuple[str, str, str], int, DataFrame]] = []
+
         for edge_type_key, category in eligible_types:
-            src_type, relation, dst_type = edge_type_key
             num_edges = edge_indices[edge_type_key].shape[1]
 
             logger.info(
@@ -820,28 +867,69 @@ class EdgeFeatureExtractor:
                 f"category={category}"
             )
 
-            tensor = self._build_edge_type_vectors(
+            if num_edges == 0:
+                edge_features[edge_type_key] = torch.zeros(
+                    0, edge_vector_dim, dtype=torch.float32
+                )
+                continue
+
+            entries = self._build_edge_type_entries(
                 edge_type_key=edge_type_key,
-                num_edges=num_edges,
                 category=category,
                 edges_with_idx=edges_with_idx,
                 numeric_props_df=numeric_props_df,
                 label_df=label_df,
+                has_shared_numerics=(
+                    edge_type_key in shared_numeric_types
+                ),
             )
 
-            if tensor is not None:
-                edge_features[edge_type_key] = tensor
-                feat_mb = tensor.numel() * 4 / (1024 * 1024)
-                logger.info(
-                    f"      → shape {list(tensor.shape)}, "
-                    f"{feat_mb:.1f} MB"
+            if entries is None:
+                # No segment produced entries for this type — its
+                # feature vector is legitimately all zeros, and no
+                # Spark work is needed to say so.
+                edge_features[edge_type_key] = torch.zeros(
+                    num_edges, edge_vector_dim, dtype=torch.float32
                 )
+                continue
 
-            # Force GC between edge types to reclaim Pandas/numpy
-            # intermediaries. Safe because it runs on the driver
-            # process only — all Spark executor work is complete
-            # before collection.
+            if num_edges > self._chunk_threshold:
+                large.append((edge_type_key, num_edges, entries))
+            else:
+                small.append((edge_type_key, num_edges, entries))
+
+        # Large types stay on the streaming path, collected one at a
+        # time by edge_idx range. This preserves the #186 driver-memory
+        # guarantee: a single huge type never materialises whole.
+        for edge_type_key, num_edges, entries in large:
+            logger.info(
+                f"    [{edge_type_key}] {num_edges:,} edges "
+                f"(chunked collection)"
+            )
+            tensor = np.zeros(
+                (num_edges, edge_vector_dim), dtype=np.float32
+            )
+            self._collect_and_scatter_chunked(
+                self._aggregate_entries(entries),
+                tensor,
+                num_edges,
+                edge_vector_dim,
+            )
+            edge_features[edge_type_key] = (
+                torch.from_numpy(tensor).contiguous()
+            )
             gc.collect()
+
+        self._collect_small_batches(
+            small, edge_features, edge_vector_dim
+        )
+
+        collect_elapsed = time.monotonic() - collect_start
+
+        logger.info(
+            f"    Collected {len(small)} small + {len(large)} large "
+            f"edge types"
+        )
 
         # Cleanup cached intermediates
         edges_with_idx.unpersist()
@@ -859,6 +947,19 @@ class EdgeFeatureExtractor:
         logger.info(
             f"  Edge features complete: {len(edge_features)} types, "
             f"{total_mb:.1f} MB total"
+        )
+        # Explicit phase timings. These replace the old practice of
+        # inferring cost from the span between the first and last
+        # per-edge-type log line, which stops being measurable once the
+        # per-type loop is collapsed into batched collects.
+        logger.info(
+            f"  [timing] edge feature collect: "
+            f"{collect_elapsed:.1f}s "
+            f"({len(eligible_types)} eligible types)"
+        )
+        logger.info(
+            f"  [timing] edge feature phase total: "
+            f"{time.monotonic() - phase_start:.1f}s"
         )
 
         return edge_features
@@ -921,7 +1022,10 @@ class EdgeFeatureExtractor:
             .agg(F.mean("numeric_value").alias("numeric_value"))
         )
 
-        numeric_df = numeric_df.cache()
+        # Truncate the plan, not just materialize it — this frame is
+        # referenced by every edge type's segment-1/2 encoding. See the
+        # note on edges_with_idx in build_edge_features.
+        numeric_df = numeric_df.localCheckpoint(eager=True)
         count = numeric_df.count()
         logger.info(
             f"    Endpoint numeric properties: {count:,} "
@@ -970,48 +1074,112 @@ class EdgeFeatureExtractor:
             .distinct()
         )
 
-        label_df = label_df.cache()
+        # Plan truncation, same rationale as numeric_df above.
+        label_df = label_df.localCheckpoint(eager=True)
         count = label_df.count()
         logger.info(f"    Endpoint labels: {count:,} (node, label) pairs")
 
         return label_df
 
+    def _types_with_shared_numerics(
+        self,
+        edges_with_idx: DataFrame,
+        numeric_props_df: DataFrame,
+    ) -> Set[Tuple[str, str, str]]:
+        """
+        Determine, in ONE distributed pass, which edge types have at
+        least one edge whose endpoints share a numeric predicate.
+
+        Segment 2 needs this to choose between the shared-property
+        encoding and the cross-property fallback. It used to be answered
+        per edge type with a `head(1)` probe, which forced that type's
+        endpoint joins to execute — one Spark action per type, and the
+        dominant cost of the whole edge-feature phase (measured ~6s per
+        type on the e2e fixtures, flat regardless of edge count).
+        Answering it once for every type is the same question asked in
+        one job instead of N.
+
+        Equivalence with the old probe: for a given type, the probe
+        joined that type's edges to its endpoints' numerics on src_id,
+        then on dst_id AND matching predicate. Because every edge of a
+        type shares the same (src_type, dst_type), filtering the
+        property table by node_type and joining on node_id alone is the
+        same as joining on the (node_type, node_id) pair — which is what
+        this does for all types at once.
+
+        Returns the set of (src_type, relation, dst_type) keys with at
+        least one shared-predicate edge.
+        """
+        src_numerics = numeric_props_df.select(
+            F.col("node_type").alias("_s_nt"),
+            F.col("node_id").alias("_s_nid"),
+            F.col("predicate").alias("_s_pred"),
+        )
+        dst_numerics = numeric_props_df.select(
+            F.col("node_type").alias("_d_nt"),
+            F.col("node_id").alias("_d_nid"),
+            F.col("predicate").alias("_d_pred"),
+        )
+
+        shared = (
+            edges_with_idx
+            .join(
+                src_numerics,
+                (F.col("src_type") == F.col("_s_nt"))
+                & (F.col("src_id") == F.col("_s_nid")),
+                "inner",
+            )
+            .join(
+                dst_numerics,
+                (F.col("dst_type") == F.col("_d_nt"))
+                & (F.col("dst_id") == F.col("_d_nid"))
+                & (F.col("_s_pred") == F.col("_d_pred")),
+                "inner",
+            )
+            .select("src_type", "relation", "dst_type")
+            .distinct()
+        )
+
+        keys = {
+            (row["src_type"], row["relation"], row["dst_type"])
+            for row in shared.collect()
+        }
+        logger.info(
+            f"    {len(keys)} edge types have endpoint-shared numeric "
+            f"properties (resolved in one pass)"
+        )
+        return keys
+
     # ================================================================
     # Per-edge-type vector assembly (on executors, collect to driver)
     # ================================================================
 
-    def _build_edge_type_vectors(
+    def _build_edge_type_entries(
         self,
         edge_type_key: Tuple[str, str, str],
-        num_edges: int,
         category: str,
         edges_with_idx: DataFrame,
         numeric_props_df: DataFrame,
         label_df: DataFrame,
-    ) -> Optional[torch.Tensor]:
+        has_shared_numerics: bool,
+    ) -> Optional[DataFrame]:
         """
-        Build the full vector for all edges of one type.
+        Build the lazy sparse entries for all edges of one type.
 
         Each segment is computed on executors as a DataFrame of
-        (edge_idx, dim, value) sparse entries. These are aggregated on
-        executors (sum at same edge_idx+dim), then collected to the
-        driver and scattered into a pre-allocated dense numpy array.
-
-        For large edge types (>chunk_threshold edges), collection is
-        split into edge_idx ranges to bound peak Pandas memory on the
-        driver.
+        (edge_idx, dim, value) sparse entries, which are unioned but
+        deliberately NOT aggregated or collected here. The caller unions
+        several types together and issues one grouped collect per batch,
+        so the driver round-trip is paid once per batch rather than once
+        per edge type.
 
         No data round-trips through the driver — edges_with_idx was
         received from EdgeMapper's cache, not reconstructed.
-        """
-        layout = self._layout
-        edge_vector_dim = layout.edge_vector_dim
-        src_type, relation, dst_type = edge_type_key
 
-        if num_edges == 0:
-            return torch.zeros(
-                0, edge_vector_dim, dtype=torch.float32
-            )
+        Returns DataFrame(edge_idx, dim, value), or None when no segment
+        produced entries (caller supplies a zero tensor).
+        """
+        src_type, relation, dst_type = edge_type_key
 
         # ============================================
         # Filter resolved edges to this type (on executors)
@@ -1044,6 +1212,7 @@ class EdgeFeatureExtractor:
             dst_type=dst_type,
             category=category,
             numeric_props_df=numeric_props_df,
+            has_shared_numerics=has_shared_numerics,
         )
 
         seg3_entries = self._encode_relational_context(
@@ -1064,45 +1233,13 @@ class EdgeFeatureExtractor:
         ]
 
         if not all_parts:
-            return torch.zeros(
-                num_edges, edge_vector_dim, dtype=torch.float32
-            )
+            return None
 
         combined = all_parts[0]
         for df in all_parts[1:]:
             combined = combined.unionAll(df)
 
-        # Aggregate on executors: sum values at same (edge_idx, dim).
-        # Hash collisions from different sub-segments landing on the
-        # same dim are summed — same pattern as node feature vectors.
-        combined = (
-            combined
-            .groupBy("edge_idx", "dim")
-            .agg(F.sum("value").alias("value"))
-            .select(
-                F.col("edge_idx").cast("long"),
-                F.col("dim").cast("int"),
-                F.col("value").cast("float"),
-            )
-        )
-
-        # ============================================
-        # Collect to driver and scatter into dense array
-        # ============================================
-        tensor = np.zeros(
-            (num_edges, edge_vector_dim), dtype=np.float32
-        )
-
-        if num_edges <= self._chunk_threshold:
-            self._collect_and_scatter(
-                combined, tensor, edge_vector_dim
-            )
-        else:
-            self._collect_and_scatter_chunked(
-                combined, tensor, num_edges, edge_vector_dim
-            )
-
-        return torch.from_numpy(tensor).contiguous()
+        return combined
 
     # ================================================================
     # Segment 1: Temporal Signals encoding
@@ -1194,28 +1331,34 @@ class EdgeFeatureExtractor:
             # Join temporal properties to edges (on executors).
             # Left joins ensure edges without temporal properties
             # still get zero-valued features rather than being dropped.
+            # Broadcast the endpoint property side explicitly. These
+            # frames are tiny (order 1e3 rows) but are derived through
+            # an anti-join and an aggregation, so Catalyst's size
+            # estimate is far too pessimistic to auto-broadcast them.
+            # Without this each join plans as a shuffle, and the phase
+            # pays one shuffle stage per join per edge type.
             temporal_edges = (
                 edge_df
                 .join(
-                    src_month,
+                    F.broadcast(src_month),
                     edge_df["src_id"] == src_month["_src_nid"],
                     "left",
                 )
                 .drop("_src_nid")
                 .join(
-                    src_year,
+                    F.broadcast(src_year),
                     edge_df["src_id"] == src_year["_src_nid"],
                     "left",
                 )
                 .drop("_src_nid")
                 .join(
-                    dst_month,
+                    F.broadcast(dst_month),
                     edge_df["dst_id"] == dst_month["_dst_nid"],
                     "left",
                 )
                 .drop("_dst_nid")
                 .join(
-                    dst_year,
+                    F.broadcast(dst_year),
                     edge_df["dst_id"] == dst_year["_dst_nid"],
                     "left",
                 )
@@ -1383,6 +1526,7 @@ class EdgeFeatureExtractor:
         dst_type: str,
         category: str,
         numeric_props_df: DataFrame,
+        has_shared_numerics: bool,
     ) -> Optional[DataFrame]:
         """
         Encode Segment 2: numeric differences, ratios, and magnitudes
@@ -1406,6 +1550,16 @@ class EdgeFeatureExtractor:
         """
         layout = self._layout
         parts: List[DataFrame] = []
+
+        if not has_shared_numerics:
+            # No edge of this type has endpoints sharing a numeric
+            # predicate — derive contrast across different properties
+            # instead. Decided once for all types by
+            # _types_with_shared_numerics, so this branch costs no
+            # Spark job of its own.
+            return self._encode_cross_property_contrast(
+                edge_df, src_type, dst_type, category, numeric_props_df
+            )
 
         # Get numeric properties for source and destination types
         src_numerics = (
@@ -1431,10 +1585,12 @@ class EdgeFeatureExtractor:
         # Join edge endpoints with their numeric properties.
         # Inner join on predicate ensures we only get properties
         # that both endpoints share.
+        # Broadcast for the same reason as the segment-1 joins: the
+        # property side is tiny but its size estimate is not.
         edge_with_src = (
             edge_df
             .join(
-                src_numerics,
+                F.broadcast(src_numerics),
                 edge_df["src_id"] == src_numerics["_src_nid"],
                 "inner",
             )
@@ -1444,7 +1600,7 @@ class EdgeFeatureExtractor:
         edge_with_both = (
             edge_with_src
             .join(
-                dst_numerics,
+                F.broadcast(dst_numerics),
                 (edge_with_src["dst_id"] == dst_numerics["_dst_nid"])
                 & (edge_with_src["src_pred"] == dst_numerics["dst_pred"]),
                 "inner",
@@ -1452,14 +1608,6 @@ class EdgeFeatureExtractor:
             .drop("_dst_nid", "dst_pred")
             .withColumnRenamed("src_pred", "predicate")
         )
-
-        if not edge_with_both.head(1):
-            # No shared numeric properties — try cross-property
-            # derivation for specific categories (e.g., moneyness
-            # for option-stock, severity delta for escalation)
-            return self._encode_cross_property_contrast(
-                edge_df, src_type, dst_type, category, numeric_props_df
-            )
 
         # --- Sub-segment 2a: Difference (dst - src) ---
         diff_start = layout.seg2_difference_start
@@ -2055,31 +2203,143 @@ class EdgeFeatureExtractor:
     # Collection helpers (mirror node feature_extractor pattern)
     # ================================================================
 
-    def _collect_and_scatter(
+    def _aggregate_entries(
         self,
-        combined: DataFrame,
-        tensor: np.ndarray,
+        entries: DataFrame,
+        key_cols: Tuple[str, ...] = (),
+    ) -> DataFrame:
+        """
+        Sum sparse values that land on the same slot, on executors.
+
+        Hash collisions from different sub-segments landing on the same
+        dim are summed — same pattern as node feature vectors.
+
+        key_cols carries the edge-type columns when several types share
+        one aggregation; it is empty when aggregating a single type.
+        """
+        return (
+            entries
+            .groupBy(*key_cols, "edge_idx", "dim")
+            .agg(F.sum("value").alias("value"))
+            .select(
+                *key_cols,
+                F.col("edge_idx").cast("long"),
+                F.col("dim").cast("int"),
+                F.col("value").cast("float"),
+            )
+        )
+
+    def _collect_small_batches(
+        self,
+        small: List[Tuple[Tuple[str, str, str], int, DataFrame]],
+        edge_features: Dict[Tuple[str, str, str], torch.Tensor],
         edge_vector_dim: int,
     ) -> None:
         """
-        Collect all sparse entries and scatter into dense array.
-        Used for small-to-medium edge types.
+        Collect small edge types in bounded batches — one grouped
+        toPandas per batch instead of one per edge type.
 
-        The Pandas DataFrame is deleted immediately after scatter
-        to free driver memory.
+        Batches are capped on two independent axes: total edges (so a
+        batch's collect stays bounded in driver memory) and type count
+        (so the batch's Catalyst plan stays bounded in width). Either
+        cap alone is insufficient — see _MAX_EDGE_TYPES_PER_BATCH.
         """
-        pdf = combined.toPandas()
+        if not small:
+            return
 
-        if not pdf.empty:
-            edge_idxs = pdf["edge_idx"].values
-            dims = pdf["dim"].values
-            values = pdf["value"].values
+        budget = max(1, self._chunk_threshold)
+        max_types = max(1, self._max_types_per_batch)
 
-            valid_mask = (dims >= 0) & (dims < edge_vector_dim)
-            tensor[
-                edge_idxs[valid_mask], dims[valid_mask]
-            ] = values[valid_mask]
+        batch: List[Tuple[Tuple[str, str, str], int, DataFrame]] = []
+        batch_edges = 0
+        num_batches = 0
 
+        for item in small:
+            num_edges = item[1]
+            if batch and (
+                batch_edges + num_edges > budget
+                or len(batch) >= max_types
+            ):
+                self._flush_batch(
+                    batch, edge_features, edge_vector_dim
+                )
+                num_batches += 1
+                batch = []
+                batch_edges = 0
+            batch.append(item)
+            batch_edges += num_edges
+
+        if batch:
+            self._flush_batch(batch, edge_features, edge_vector_dim)
+            num_batches += 1
+
+        logger.info(
+            f"    {len(small)} small edge types collected in "
+            f"{num_batches} batch(es)"
+        )
+
+    def _flush_batch(
+        self,
+        batch: List[Tuple[Tuple[str, str, str], int, DataFrame]],
+        edge_features: Dict[Tuple[str, str, str], torch.Tensor],
+        edge_vector_dim: int,
+    ) -> None:
+        """
+        Union one batch of edge types, aggregate and collect once, then
+        scatter into per-type dense tensors on the driver.
+
+        edge_idx is per-type 0-based (assigned by a window partitioned
+        on the type triple), so the type columns must travel with every
+        row and the scatter has to be done per group — unlike the node
+        side, where node_id alone identifies the row.
+        """
+        unioned: Optional[DataFrame] = None
+        for edge_type_key, _, entries in batch:
+            src_type, relation, dst_type = edge_type_key
+            tagged = entries.select(
+                F.lit(src_type).alias("src_type"),
+                F.lit(relation).alias("relation"),
+                F.lit(dst_type).alias("dst_type"),
+                F.col("edge_idx"),
+                F.col("dim"),
+                F.col("value"),
+            )
+            unioned = (
+                tagged if unioned is None
+                else unioned.unionAll(tagged)
+            )
+
+        pdf = self._aggregate_entries(
+            unioned, self._TYPE_COLS
+        ).toPandas()
+
+        groups = (
+            {k: g for k, g in pdf.groupby(list(self._TYPE_COLS))}
+            if not pdf.empty else {}
+        )
+
+        for edge_type_key, num_edges, _ in batch:
+            tensor = np.zeros(
+                (num_edges, edge_vector_dim), dtype=np.float32
+            )
+            g = groups.get(edge_type_key)
+            if g is not None and not g.empty:
+                edge_idxs = g["edge_idx"].values
+                dims = g["dim"].values
+                values = g["value"].values
+
+                valid_mask = (dims >= 0) & (dims < edge_vector_dim)
+                tensor[
+                    edge_idxs[valid_mask], dims[valid_mask]
+                ] = values[valid_mask]
+
+            edge_features[edge_type_key] = (
+                torch.from_numpy(tensor).contiguous()
+            )
+
+        # Reclaim the batch's Pandas intermediaries before the next
+        # batch allocates its own. Driver-side only — all executor work
+        # for this batch is complete.
         del pdf
         gc.collect()
 

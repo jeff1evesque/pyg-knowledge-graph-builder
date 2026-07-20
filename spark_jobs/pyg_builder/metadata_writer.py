@@ -18,10 +18,47 @@ Metadata files are small JSON (<1 MB each) — no driver memory concern.
 """
 import json
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# Significant digits retained for serialized normalization statistics.
+# float64 carries ~15-17; the drift this guards against appears at the
+# 16th, so 12 discards only noise.
+_STAT_SIGNIFICANT_DIGITS = 12
+
+
+def _round_floats(obj: Any, sig: int = _STAT_SIGNIFICANT_DIGITS) -> Any:
+    """Recursively round floats to `sig` significant digits.
+
+    Aggregations like stddev are parallel reductions, and parallel
+    float reductions are not order-deterministic — partitions combine
+    in whatever order they finish. Two runs over identical data can
+    therefore produce statistics differing in the last ULP
+    (observed: std 265.6434939473693 vs 265.64349394736934). That is
+    numerically meaningless — the node feature tensors are float32 and
+    both values round to the same float32, which is why the tensors
+    compare equal while the metadata did not — but it makes
+    normalization.json non-reproducible byte-for-byte, which the
+    pipeline promises and the e2e reproducibility tests assert.
+
+    Rounding at serialization keeps the artifact stable without
+    touching the statistics used to normalize features.
+    """
+    if isinstance(obj, bool):
+        return obj
+    if isinstance(obj, float):
+        if obj == 0.0 or not math.isfinite(obj):
+            return obj
+        decimals = -int(math.floor(math.log10(abs(obj)))) + (sig - 1)
+        return round(obj, decimals)
+    if isinstance(obj, dict):
+        return {k: _round_floats(v, sig) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_round_floats(v, sig) for v in obj]
+    return obj
 
 
 class MetadataCollector:
@@ -540,7 +577,12 @@ class MetadataCollector:
         }
 
     def _build_normalization(self) -> Dict[str, Any]:
-        """Build normalization.json content."""
+        """Build normalization.json content.
+
+        Statistics are rounded to _STAT_SIGNIFICANT_DIGITS before
+        serialization so the file is byte-reproducible across runs —
+        see _round_floats for why the raw values are not.
+        """
         per_property = []
         if self._norm_stats:
             for stat in self._norm_stats:
@@ -555,7 +597,7 @@ class MetadataCollector:
         if self._edge_norm_stats:
             per_edge_type = self._edge_norm_stats
 
-        return {
+        return _round_floats({
             "version": "1.0",
             "method": "z-score",
             "node_properties": {
@@ -564,7 +606,7 @@ class MetadataCollector:
                 "per_property": per_property,
             },
             "edge_derived_features": per_edge_type,
-        }
+        })
 
     def _build_encoding_config(self) -> Dict[str, Any]:
         """Build encoding_config.json content, stamped with a contract digest."""

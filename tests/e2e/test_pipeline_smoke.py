@@ -288,6 +288,14 @@ def _start_pipeline_subprocess(work_dir):
         "--conf spark.ui.retainedJobs=40 "
         "--conf spark.ui.retainedStages=80 "
         "--conf spark.sql.ui.retainedExecutions=40 "
+        # Same plan-string cap the in-session fixture sets (see the e2e
+        # conftest): every SQL execution renders its physical plan to
+        # text, and these plans are wide enough that the default cap
+        # lets one rendering exhaust the heap. The in-session fixture
+        # had this; this subprocess path did not, so it kept Spark's
+        # ~2GB default until batched edge-feature collects widened the
+        # plans enough to hit it.
+        "--conf spark.sql.maxPlanStringLength=4096 "
         "pyspark-shell"
     )
 
