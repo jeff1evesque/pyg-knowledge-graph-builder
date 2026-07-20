@@ -1205,7 +1205,7 @@ SPARK_MASTER_URL=spark://<host>:7077 \
   bin/submit_spark_job.sh \
     --mode full \
     --source_paths /data/rdf/monthly/2024-12/ \
-    --local_work_dir /data/pyg \
+    --local_work_dir /data \
     --s3_archive_bucket my-archive \
     --s3_pyg_key pyg/year=2024/month=12/hetero_data.pt \
     --enable_ontology_mapping true \
@@ -1217,14 +1217,14 @@ SPARK_MASTER_URL=spark://<host>:7077 \
 Outputs (local; and mirrored to `s3://my-archive/...` because an archive
 bucket was given):
 ```
-/data/pyg/enriched/year=2024/month=12/triples/            # interim, local only
-/data/pyg/pyg/year=2024/month=12/hetero_data.pt
-/data/pyg/pyg/year=2024/month=12/metadata/graph_schema.json
-/data/pyg/pyg/year=2024/month=12/metadata/feature_spec.json
-/data/pyg/pyg/year=2024/month=12/metadata/normalization.json
-/data/pyg/pyg/year=2024/month=12/metadata/encoding_config.json
-/data/pyg/pyg/year=2024/month=12/metadata/ontology_schema.json
-/data/pyg/pyg/year=2024/month=12/metadata/slot_mapping.json
+/data/enriched/year=2024/month=12/triples/            # interim, local only
+/data/pyg/year=2024/month=12/hetero_data.pt
+/data/pyg/year=2024/month=12/metadata/graph_schema.json
+/data/pyg/year=2024/month=12/metadata/feature_spec.json
+/data/pyg/year=2024/month=12/metadata/normalization.json
+/data/pyg/year=2024/month=12/metadata/encoding_config.json
+/data/pyg/year=2024/month=12/metadata/ontology_schema.json
+/data/pyg/year=2024/month=12/metadata/slot_mapping.json
 ```
 
 **Example — reduced-dimension experiment from existing enriched Parquet:**
@@ -1233,7 +1233,7 @@ bucket was given):
 SPARK_MASTER_URL=spark://<host>:7077 \
   bin/submit_spark_job.sh \
     --mode pyg_only \
-    --local_work_dir /data/pyg \
+    --local_work_dir /data \
     --pyg_filename hetero_data_512d.pt \
     --time_period 2024-12 \
     --pyg_config '{"feature_config": {"vector_dim": 512, "normalize": true}, "edge_feature_config": {"edge_vector_dim": 16}}'
@@ -1241,9 +1241,9 @@ SPARK_MASTER_URL=spark://<host>:7077 \
 
 Outputs:
 ```
-/data/pyg/pyg/year=2024/month=12/hetero_data_512d.pt
-/data/pyg/pyg/year=2024/month=12/hetero_data_512d_metadata/graph_schema.json
-/data/pyg/pyg/year=2024/month=12/hetero_data_512d_metadata/feature_spec.json
+/data/pyg/year=2024/month=12/hetero_data_512d.pt
+/data/pyg/year=2024/month=12/hetero_data_512d_metadata/graph_schema.json
+/data/pyg/year=2024/month=12/hetero_data_512d_metadata/feature_spec.json
 ... (remaining four files)
 ```
 
@@ -1253,7 +1253,7 @@ Outputs:
 SPARK_MASTER_URL=spark://<host>:7077 \
   bin/submit_spark_job.sh \
     --mode pyg_only \
-    --local_work_dir /data/pyg \
+    --local_work_dir /data \
     --pyg_filename hetero_data_full_edge_features.pt \
     --time_period 2024-12 \
     --pyg_config '{"edge_feature_config": {"enabled_categories": ["temporal", "option_stock", "escalation", "correlation", "causal"]}}'
@@ -1265,7 +1265,7 @@ SPARK_MASTER_URL=spark://<host>:7077 \
 SPARK_MASTER_URL=spark://<host>:7077 \
   bin/submit_spark_job.sh \
     --mode pyg_only \
-    --local_work_dir /data/pyg \
+    --local_work_dir /data \
     --pyg_filename hetero_data_no_edge_features.pt \
     --time_period 2024-12 \
     --pyg_config '{"edge_feature_config": {"enabled": false}}'
@@ -1278,7 +1278,7 @@ SPARK_MASTER_URL=spark://<host>:7077 \
   bin/submit_spark_job.sh \
     --mode enrichment_only \
     --source_paths s3a://my-data-lake/raw/sec/filings/2024-12/ \
-    --local_work_dir /data/pyg \
+    --local_work_dir /data \
     --source_format turtle_parquet \
     --turtle_column triples \
     --time_period 2024-12 \
@@ -1295,7 +1295,7 @@ SPARK_MASTER_URL=spark://<host>:7077 \
   bin/submit_spark_job.sh \
     --mode full \
     --source_paths s3a://my-data-lake/raw/sec/filings/2024-12/ \
-    --local_work_dir /data/pyg \
+    --local_work_dir /data \
     --source_format turtle_parquet \
     --turtle_column triples \
     --time_period 2024-12 \
