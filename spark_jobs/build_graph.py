@@ -45,9 +45,9 @@ Example (N-Triples, local source, local + S3 archive):
     spark_jobs/build_graph.py \\
         --mode full \\
         --source_paths /data/rdf/monthly/2024-12/ \\
-        --local_work_dir /data/pyg \\
+        --local_work_dir /data \\
         --s3_archive_bucket my-archive \\
-        --s3_pyg_key pyg/2024-12/hetero_data.pt \\
+        --s3_pyg_key pyg/year=2024/month=12/hetero_data.pt \\
         --enable_ontology_mapping true \\
         --time_period 2024-12
 
@@ -55,7 +55,7 @@ Example (Turtle Parquet, s3a source, local only):
     spark_jobs/build_graph.py \\
         --mode enrichment_only \\
         --source_paths s3a://my-data-lake/raw/sec/filings/2024-12/ \\
-        --local_work_dir /data/pyg \\
+        --local_work_dir /data \\
         --source_format turtle_parquet \\
         --turtle_column triples \\
         --time_period 2024-12
@@ -63,6 +63,7 @@ Example (Turtle Parquet, s3a source, local only):
 import sys
 import json
 import logging
+import re
 import time
 import io
 from datetime import datetime, timezone
@@ -103,6 +104,37 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("build_graph")
+
+_PERIOD_RE = re.compile(r"^(\d{4})-(\d{2})$")
+
+
+def period_partition(time_period: str) -> str:
+    """Render a ``YYYY-MM`` period label as Hive-style partition directories.
+
+        "2024-12" -> "year=2024/month=12"
+
+    Spark's partition discovery turns ``key=value`` directory names into real
+    columns, so reading a parent directory across several periods yields
+    ``year``/``month`` to filter and prune on. An opaque ``2024-12`` directory
+    gives it nothing -- the period is only recoverable by parsing the path.
+
+    ``time_period`` is a free-form label (nothing validates its shape, and
+    ``--time_period`` accepts any string), so a value that is not ``YYYY-MM``
+    is passed through as a single segment rather than forced into a partition
+    shape that would misdescribe what it holds. Only ``day=`` is deliberately
+    absent: ``time_period`` is monthly, so a day level would carry one value
+    per month -- path depth with no pruning benefit.
+    """
+    match = _PERIOD_RE.match(time_period)
+    if not match:
+        logger.warning(
+            f"time_period '{time_period}' is not YYYY-MM; writing it as a "
+            f"single path segment with no year=/month= partitioning"
+        )
+        return time_period
+
+    year, month = match.groups()
+    return f"year={year}/month={month}"
 
 
 def _utcnow() -> datetime:
@@ -205,18 +237,27 @@ class JobConfig:
             args.get("pyg_filename") or DEFAULT_PYG_FILENAME
         )
 
+        # Hive-style partition directories for the period, so a read across
+        # several periods gets year/month as real columns to prune on.
+        #
+        # Everything a period produces stays under one partition directory,
+        # so a build can be copied, archived or deleted as a unit.
+        self.period_partition = period_partition(self.time_period)
+
         # Derived local paths (under local_work_dir)
         self.enriched_parquet_path = (
-            f"{self.local_work_dir}/enriched/{self.time_period}/triples"
+            f"{self.local_work_dir}/enriched/"
+            f"{self.period_partition}/triples"
         )
         self.pyg_output_path = (
-            f"{self.local_work_dir}/pyg/{self.time_period}/{self.pyg_filename}"
+            f"{self.local_work_dir}/pyg/"
+            f"{self.period_partition}/{self.pyg_filename}"
         )
 
         # Derived S3 key for the archived .pt (only used when archiving)
         if self.s3_archive_bucket and not self.s3_pyg_key:
             self.s3_pyg_key = (
-                f"pyg/{self.time_period}/{self.pyg_filename}"
+                f"pyg/{self.period_partition}/{self.pyg_filename}"
             )
 
         self._validate()
@@ -310,7 +351,7 @@ def parse_args() -> JobConfig:
         "--s3_pyg_key",
         default="",
         help="Optional S3 key for the archived .pt (metadata prefix derived "
-        "from it); defaults to pyg/<time_period>/<pyg_filename>",
+        "from it); defaults to pyg/year=YYYY/month=MM/<pyg_filename>",
     )
     parser.add_argument("--pyg_filename", default=DEFAULT_PYG_FILENAME)
     parser.add_argument("--enable_ontology_mapping", default="false")
@@ -799,7 +840,8 @@ def save_enriched_parquet(
 
     Args:
         triples_df: Enriched triples DataFrame (subject, predicate, object)
-        output_path: Local (shared) path, e.g. "/data/pyg/enriched/2024-12/triples"
+        output_path: Local (shared) path, e.g.
+            "/data/enriched/year=2024/month=12/triples"
         num_partitions: Number of output Parquet partitions
     """
     (
@@ -1336,7 +1378,7 @@ def execute_pyg_only(
 def _write_manifest_bytes(spark: SparkSession, path: str, body: bytes):
     """Write ``body`` to ``path``, honoring the path's URI scheme.
 
-    ``local_work_dir`` may be a bare POSIX path (``/data/pyg``) or a URI on shared
+    ``local_work_dir`` may be a bare POSIX path (``/data``) or a URI on shared
     storage (``s3a://bucket/prefix``). A plain ``open()`` treats the latter
     literally and creates a junk ``./s3a:/...`` tree on the driver's local disk
     instead of writing to the object store. Route any non-local URI through the
@@ -1400,7 +1442,7 @@ def save_job_manifest(
     filename = (
         f"{config.mode}_{_utcnow().strftime('%Y%m%d_%H%M%S')}.json"
     )
-    rel_key = f"manifests/{config.time_period}/{filename}"
+    rel_key = f"manifests/{config.period_partition}/{filename}"
 
     # Work dir (always) — local path or shared-storage URI (s3a://, hdfs://, ...).
     try:
