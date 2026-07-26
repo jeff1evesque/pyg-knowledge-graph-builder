@@ -127,9 +127,14 @@ def _truthy(val) -> bool:
     return str(val).strip().lower() in {"1", "true", "yes", "on"}
 
 
-@pytest.fixture(scope="module")
-def submission():
-    """Submit the job once through its own launcher; hand the result to the tests."""
+def _submit(mode: str):
+    """Submit the job once through its own launcher; return (result, work_dir).
+
+    ``mode`` selects how far the pipeline runs. ``enrichment_only`` is the fast
+    check on launcher/submit/IAM wiring; ``full`` additionally exercises PyG
+    construction and the driver-side artifact writes, which is the only way to
+    see those writes meet a real object store.
+    """
     work_dir = _run_output_path()
 
     env = {
@@ -143,7 +148,7 @@ def submission():
 
     cmd = [
         str(LAUNCHER),
-        "--mode", "enrichment_only",
+        "--mode", mode,
         "--source_paths", _staged_source_paths(),
         "--source_format", "turtle_parquet",
         "--turtle_column", "triples",
@@ -183,6 +188,24 @@ def submission():
         )
 
     return SimpleNamespace(returncode=proc.returncode, stdout=stdout, stderr=stderr), work_dir
+
+
+@pytest.fixture(scope="module")
+def submission():
+    """The fast leg: enrichment only, no PyG construction."""
+    return _submit("enrichment_only")
+
+
+@pytest.fixture(scope="module")
+def full_submission():
+    """The full pipeline, so the driver-side artifact writers run for real.
+
+    Separate submission rather than replacing the enrichment_only one: that leg
+    is the quick signal on launcher/submit/IAM wiring and stays worth having on
+    its own. This one costs a few minutes more and is the only place PyG
+    construction meets a real filesystem.
+    """
+    return _submit("full")
 
 
 @requires_cluster
@@ -249,4 +272,155 @@ def test_job_actually_ran_on_the_gpu(submission):
         "Check that the workers advertise a GPU (spark.worker.resource.gpu.amount) "
         "and that the RAPIDS jar is on the cluster classpath.\n"
         f"RAPIDS output tail:\n{output[-2000:]}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# --mode full — the driver-side artifact writers against real object storage
+#
+# Until this existed, the cluster only ever ran --mode enrichment_only, so PyG
+# construction had NO cluster coverage and neither save_pyg_local nor
+# write_metadata_to_local was ever invoked with a non-local URI. Both used
+# os.makedirs + plain open(), which treats "s3a://bucket/key" as a relative path:
+# they wrote a junk ./s3a:/... tree onto the driver's disk, logged "Saved ... to
+# s3a://...", and the job exited 0 with its most important artifacts stranded.
+# That is the same defect #197 fixed for the job manifest.
+#
+# These tests are the regression guard. They assert on the object store, not on
+# the job's exit code -- the whole point is that the broken version succeeded.
+# --------------------------------------------------------------------------- #
+
+def _s3_keys_under(work_dir: str):
+    """Every key the run wrote, via a paginator (a full run exceeds one page)."""
+    import boto3
+
+    bucket, _, prefix = work_dir[len("s3a://"):].partition("/")
+    paginator = boto3.client("s3").get_paginator("list_objects_v2")
+
+    keys = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        keys.extend(obj["Key"] for obj in page.get("Contents", []))
+    return bucket, keys
+
+
+@requires_cluster
+def test_full_mode_completes_on_the_cluster(full_submission):
+    proc, _ = full_submission
+    assert proc.returncode == 0, (
+        f"--mode full submission failed (exit {proc.returncode}).\n"
+        f"stderr tail:\n{proc.stderr[-3000:]}"
+    )
+
+
+@requires_cluster
+def test_full_mode_writes_the_pt_to_object_storage(full_submission):
+    """hetero_data.pt must reach the object store, not the driver's local disk."""
+    _, work_dir = full_submission
+
+    if not work_dir.startswith("s3a://"):
+        pytest.skip("only meaningful when the work dir is an object-store URI")
+
+    bucket, keys = _s3_keys_under(work_dir)
+
+    pt_keys = [k for k in keys if k.endswith("hetero_data.pt")]
+    assert pt_keys, (
+        f"no hetero_data.pt under s3a://{bucket}/ -- the job reported success but "
+        "the graph never reached shared storage. Check that save_pyg_local routed "
+        "through spark_jobs.utils.fs_utils.write_bytes (it silently writes to the "
+        "driver's local disk when handed an s3a:// path with plain torch.save)."
+    )
+
+    # A zero-byte object would satisfy the existence check while still being useless.
+    import boto3
+
+    size = boto3.client("s3").head_object(Bucket=bucket, Key=pt_keys[0])["ContentLength"]
+    assert size > 0, f"s3a://{bucket}/{pt_keys[0]} is empty"
+
+
+@requires_cluster
+def test_full_mode_writes_all_six_metadata_jsons(full_submission):
+    """All six metadata JSONs must reach the object store too.
+
+    They are what a downstream trainer reads to interpret the .pt, so a graph
+    that arrives without them is not usable.
+    """
+    _, work_dir = full_submission
+
+    if not work_dir.startswith("s3a://"):
+        pytest.skip("only meaningful when the work dir is an object-store URI")
+
+    expected = {
+        "graph_schema.json",
+        "feature_spec.json",
+        "normalization.json",
+        "encoding_config.json",
+        "ontology_schema.json",
+        "slot_mapping.json",
+    }
+
+    bucket, keys = _s3_keys_under(work_dir)
+    found = {k.rsplit("/", 1)[-1] for k in keys if "/metadata/" in k}
+
+    missing = expected - found
+    assert not missing, (
+        f"metadata missing from s3a://{bucket}/: {sorted(missing)} -- "
+        "write_metadata_to_local wrote them to the driver's local disk instead "
+        "of shared storage."
+    )
+
+
+@requires_cluster
+def test_full_mode_writes_the_node_index(full_submission):
+    """The node index makes the .pt attributable; it must land beside it.
+
+    Written by Spark from the executors rather than by the driver, so it was
+    never affected by the plain-open() bug -- asserted here so a full-mode run
+    checks the complete artifact set rather than only the parts that broke.
+    """
+    _, work_dir = full_submission
+
+    if not work_dir.startswith("s3a://"):
+        pytest.skip("only meaningful when the work dir is an object-store URI")
+
+    bucket, keys = _s3_keys_under(work_dir)
+    index_keys = [
+        k for k in keys if "/node_index" in k and k.endswith(".parquet")
+    ]
+    assert index_keys, f"no node_index Parquet under s3a://{bucket}/"
+
+
+@requires_cluster
+def test_full_mode_commits_cleanly(full_submission):
+    """No _temporary left behind: a reported success with an unfinished commit
+    is exactly the kind of half-written output this suite exists to catch."""
+    _, work_dir = full_submission
+
+    if not work_dir.startswith("s3a://"):
+        pytest.skip("only meaningful when the work dir is an object-store URI")
+
+    bucket, keys = _s3_keys_under(work_dir)
+    leftovers = [k for k in keys if "_temporary" in k]
+    assert not leftovers, (
+        f"commit did not complete; _temporary files remain: {leftovers[:3]}"
+    )
+
+
+@requires_cluster
+def test_full_mode_creates_no_junk_uri_tree_on_the_driver(full_submission):
+    """The driver's working directory must not contain a ./s3a:/... tree.
+
+    This is the bug's fingerprint, and the most direct assertion available: a
+    plain open() on "s3a://bucket/key" creates literally that directory under
+    the process CWD. The launcher runs with cwd=REPO_ROOT, so the tree would
+    appear in the checkout.
+
+    Checked even though the object-store assertions above would also fail,
+    because the two can come apart -- a partial fix that writes to S3 while some
+    other writer still uses open() would pass those and fail this.
+    """
+    junk = [p for p in REPO_ROOT.glob("s3a:*")] + [p for p in REPO_ROOT.glob("s3:*")]
+    assert not junk, (
+        f"the driver wrote a junk URI tree into the repo: {junk}. A driver-side "
+        "writer is still using plain local I/O on an s3a:// path; route it "
+        "through spark_jobs.utils.fs_utils.write_bytes."
     )

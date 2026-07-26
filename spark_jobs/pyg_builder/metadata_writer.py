@@ -739,28 +739,32 @@ def write_metadata_to_s3(
 def write_metadata_to_local(
     metadata_files: Dict[str, Dict[str, Any]],
     metadata_dir: str,
+    spark=None,
 ) -> None:
     """
-    Write all metadata files to a local directory.
+    Write all metadata files to the job's work dir.
 
-    Creates the directory if needed. Mirror of write_metadata_to_s3() for
-    the local-first storage model.
+    Mirror of write_metadata_to_s3() for the local-first storage model.
+
+    Despite the name (kept for its callers), the destination is not necessarily
+    local: ``local_work_dir`` is an ``s3a://`` URI on the cluster, and
+    ``os.makedirs`` + ``open()`` would silently write a junk ``./s3a:/...`` tree
+    on the driver's disk. Routing through the scheme-aware writer keeps bare
+    POSIX paths on direct local I/O and sends URIs through Hadoop.
 
     Args:
         metadata_files: Dict[filename -> content_dict]
-        metadata_dir: Local directory for the metadata JSON files
+        metadata_dir: Directory for the metadata JSON files — bare path or URI
             (e.g., "/data/pyg/year=2024/month=12/metadata/")
+        spark: Active SparkSession; required when metadata_dir is a non-local URI
     """
-    import os
-
-    os.makedirs(metadata_dir, exist_ok=True)
+    from spark_jobs.utils.fs_utils import join_path, write_bytes
 
     for filename, content in metadata_files.items():
-        path = os.path.join(metadata_dir, filename)
+        path = join_path(metadata_dir, filename)
         body = json.dumps(content, indent=2, default=str).encode("utf-8")
 
-        with open(path, "wb") as f:
-            f.write(body)
+        write_bytes(path, body, spark=spark)
 
         size_kb = len(body) / 1024
         logger.info(f"  Saved {filename} ({size_kb:.1f} KB) to {path}")
