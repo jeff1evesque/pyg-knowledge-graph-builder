@@ -270,6 +270,25 @@ def build_hetero_data(
         feature_extractor.get_layout().to_dict()
     )
 
+    # Which types actually carry literal-value features, for graph_schema.json's
+    # per-type has_features flag. Read off the assembled tensors rather than
+    # tracked through the encoders: the tensors are the artifact the flag
+    # describes, so deriving it from them cannot drift from what ships. They are
+    # already on the driver and this is one vectorised any() per type over the
+    # last segment -- no Spark job, negligible cost.
+    #
+    # The literal_values segment is the discriminating one. Every type has an x
+    # (constructor falls back to zeros below), and ontology_structure is
+    # populated for every typed node, so neither distinguishes anything; literal
+    # values are what taxonomy types (EconomicSector, TimePeriod, ...) genuinely
+    # lack.
+    seg3_start = feature_extractor.get_layout().seg3_start
+    metadata.register_node_literal_features(
+        ntype
+        for ntype, tensor in feature_tensors.items()
+        if bool(tensor[:, seg3_start:].any())
+    )
+
     artifacts = feature_extractor.get_metadata_artifacts()
     if artifacts["normalization_stats"] is not None:
         metadata.register_normalization_stats(

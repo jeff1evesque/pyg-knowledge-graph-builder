@@ -74,6 +74,11 @@ def _fully_registered_collector():
         },
     )
 
+    # Only Observation carries literal values -- Company is a pure entity type,
+    # the taxonomy-node shape that makes has_features discriminating. Mirrors
+    # the edge types below, where one has features and one does not.
+    collector.register_node_literal_features(["Observation"])
+
     collector.register_edge_types(
         edge_counts={
             ("Company", "reports", "Observation"): 30,
@@ -150,6 +155,8 @@ def test_graph_schema_node_types():
         "has_features": True,
     }
     assert nodes["Company"]["category"] == "entity"
+    # Company registered no literal features, so the flag distinguishes it.
+    assert nodes["Company"]["has_features"] is False
 
 
 def test_graph_schema_edge_types_keyed_and_detailed():
@@ -179,7 +186,10 @@ def test_graph_schema_summary_counts():
     assert summary["total_edge_types"] == 2
     assert summary["total_nodes"] == 17          # 12 + 5
     assert summary["total_edges"] == 34          # 30 + 4
-    assert summary["node_types_with_literal_features"] == 2
+    # 1 of 2, not 2 of 2: the counter follows the per-type has_features flag,
+    # so it can differ from total_node_types. Through schema 1.0 it was derived
+    # from `count > 0` and was therefore always equal to it.
+    assert summary["node_types_with_literal_features"] == 1
     assert summary["edge_types_with_features"] == 1
     assert summary["edge_types_without_features"] == 1
 
@@ -196,16 +206,63 @@ def test_graph_schema_build_metadata_and_config_sanitized():
     json.dumps(schema, default=str)
 
 
-def test_graph_schema_zero_count_node_has_no_features():
+def test_graph_schema_unregistered_literal_features_defaults_to_false():
+    """A collector that never reached feature building reports False, not True.
+
+    Was test_graph_schema_zero_count_node_has_no_features, back when
+    has_features was `count > 0`. The flag no longer has anything to do with
+    the count, so what matters now is the absent-information case: an unknown
+    fact must not be published as a positive claim.
+    """
     c = MetadataCollector("2099-01", 1024, 64, True, {})
     c.register_node_types(
-        node_counts={"Empty": 0},
+        node_counts={"Empty": 0, "Populated": 7},
         node_type_uris={"Empty": "http://ex/Empty"},
     )
     nodes = c._build_graph_schema()["node_types"]
+
     assert nodes["Empty"]["has_features"] is False
+    # And a non-zero count does NOT imply features -- the old bug exactly.
+    assert nodes["Populated"]["count"] == 7
+    assert nodes["Populated"]["has_features"] is False
+    assert c._build_graph_schema()["summary"][
+        "node_types_with_literal_features"
+    ] == 0
     # Default category when none registered.
     assert nodes["Empty"]["category"] == "entity"
+
+
+def test_graph_schema_literal_features_are_independent_of_node_count():
+    """The regression guard: has_features must track features, not counts.
+
+    Through schema 1.0 this field was `count > 0`, so every type with nodes
+    claimed features and summary.node_types_with_literal_features was identical
+    to total_node_types by construction (observed: 100 and 100 on a real
+    build). Pins the two apart -- the type with FEWER nodes is the one with
+    features here, so any reintroduction of a count-derived flag fails.
+    """
+    c = MetadataCollector("2099-01", 1024, 64, True, {})
+    c.register_node_types(
+        node_counts={"Taxonomy": 500, "Measurement": 3},
+        node_type_uris={},
+    )
+    c.register_node_literal_features(["Measurement"])
+
+    schema = c._build_graph_schema()
+    nodes = schema["node_types"]
+    assert nodes["Taxonomy"]["has_features"] is False
+    assert nodes["Measurement"]["has_features"] is True
+    assert schema["summary"]["node_types_with_literal_features"] == 1
+    assert schema["summary"]["total_node_types"] == 2
+
+
+def test_graph_schema_version_is_bumped_for_the_new_semantics():
+    """1.1 signals the changed meaning of node-type has_features.
+
+    A consumer reading 1.0 and 1.1 gets different values from the same field,
+    so the version is the only way to tell the two apart.
+    """
+    assert _fully_registered_collector()._build_graph_schema()["version"] == "1.1"
 
 
 # ======================================================================

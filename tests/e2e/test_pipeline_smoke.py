@@ -453,6 +453,13 @@ def _assert_metadata_describes_the_graph(data, found):
         f"mismatch here misattributes every feature past the bad segment."
     )
 
+    # Where the literal_values segment starts, for the has_features check below.
+    literal_segment = next(
+        s for s in node_spec["segments"] if s["name"] == "literal_values"
+    )
+    literal_start = int(literal_segment["start"])
+
+    schema_nodes = schema["node_types"]
     for nt in data.node_types:
         store = data[nt]
         if "x" in store and store.x is not None:
@@ -462,6 +469,21 @@ def _assert_metadata_describes_the_graph(data, found):
                 f"declared {declared_node_dim}, actual {actual}. A trainer "
                 f"sizes its input layer from the declared value, so this fails "
                 f"at the first batch -- or silently mis-slices if it does not."
+            )
+
+            # has_features means "carries literal-value features" (schema 1.1).
+            # Asserting it against the tensor is what makes the flag
+            # trustworthy: through schema 1.0 it was `count > 0` -- the node
+            # count -- so it was true for every type and said nothing. The
+            # equivalent edge-side check is a few lines below.
+            declared_has = bool(schema_nodes[str(nt)]["has_features"])
+            actual_has = bool(store.x[:, literal_start:].any())
+            assert declared_has == actual_has, (
+                f"{nt}: graph_schema.json declares has_features="
+                f"{declared_has}, but the tensor's literal_values segment "
+                f"(columns {literal_start}..{declared_node_dim - 1}) "
+                f"{'has' if actual_has else 'has no'} non-zero values. The "
+                f"flag must describe the tensor, not the node count."
             )
 
     # --- 2. edge feature width -------------------------------------------- #

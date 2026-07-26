@@ -20,7 +20,7 @@ import json
 import logging
 import math
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +92,10 @@ class MetadataCollector:
         self._node_counts: Dict[str, int] = {}
         self._node_type_uris: Dict[str, str] = {}
         self._node_type_categories: Dict[str, str] = {}
+        # Node types whose literal_values segment carries a non-zero value.
+        # None until register_node_literal_features() is called; see
+        # _build_graph_schema for what that distinction means in the output.
+        self._node_types_with_literal_features: Optional[set] = None
         self._edge_counts: Dict[str, int] = {}
         self._edge_type_details: Dict[str, Dict[str, Any]] = {}
         self._node_layout: Optional[Dict[str, Any]] = None
@@ -129,6 +133,25 @@ class MetadataCollector:
         self._node_counts = dict(node_counts)
         self._node_type_uris = dict(node_type_uris)
         self._node_type_categories = dict(node_type_categories or {})
+
+    def register_node_literal_features(
+        self,
+        node_types_with_literal_features: Iterable[str],
+    ) -> None:
+        """
+        Register which node types actually carry literal-value features (Step 3).
+
+        Separate from register_node_types because that runs at Step 1, before
+        any feature tensor exists. This is called after FeatureExtractor has
+        built them.
+
+        Args:
+            node_types_with_literal_features: pyg_names whose literal_values
+                segment holds at least one non-zero value
+        """
+        self._node_types_with_literal_features = set(
+            node_types_with_literal_features
+        )
 
     def register_edge_types(
         self,
@@ -302,7 +325,36 @@ class MetadataCollector:
     # ================================================================
 
     def _build_graph_schema(self) -> Dict[str, Any]:
-        """Build graph_schema.json content."""
+        """Build graph_schema.json content.
+
+        ``has_features`` on a node type means it carries LITERAL-value features
+        -- a non-zero literal_values segment (the third and last segment of the
+        node vector).
+
+        It cannot usefully mean "a feature tensor exists": constructor.py gives
+        every node type an ``x``, falling back to a zeros placeholder, so that
+        reading would be true for every entry and carry no information. Nor is
+        "any non-zero value" useful -- the ontology_structure segment is
+        populated for every typed node, so that is true for every entry too.
+        Literal values are the segment that actually varies: on the e2e
+        fixtures 76 of 100 node types have them, the other 24 being pure
+        taxonomy types (EconomicSector, GeographicRegion, TimePeriod, ...)
+        that carry structure but no measurements.
+
+        This is a CHANGED MEANING as of schema version 1.1. Through 1.0 the
+        field was ``count > 0`` -- the node count, not features at all -- so it
+        was true for essentially every type, and
+        ``summary.node_types_with_literal_features`` was identical to
+        ``total_node_types`` by construction.
+
+        Caveat worth knowing: a type whose literal values all normalize to
+        exactly 0.0 (a constant numeric property under z-score) reads as
+        False here. That is the honest answer for a consumer asking "does this
+        type carry usable literal signal", but it is not the same question as
+        "were literals present in the source".
+        """
+        with_literals = self._node_types_with_literal_features
+
         # Node types
         node_types = {}
         for pyg_name, count in sorted(self._node_counts.items()):
@@ -312,7 +364,14 @@ class MetadataCollector:
                 "category": self._node_type_categories.get(
                     pyg_name, "entity"
                 ),
-                "has_features": count > 0,
+                # Unregistered (a caller that never reached feature building)
+                # reports False rather than guessing: an absent fact must not
+                # masquerade as a positive one.
+                "has_features": (
+                    pyg_name in with_literals
+                    if with_literals is not None
+                    else False
+                ),
             }
 
         # Edge types
@@ -324,12 +383,16 @@ class MetadataCollector:
         total_nodes = sum(self._node_counts.values())
         total_edges = sum(self._edge_counts.values())
         node_types_with_features = sum(
-            1 for c in self._node_counts.values() if c > 0
+            1 for entry in node_types.values() if entry["has_features"]
         )
         edge_types_with_features = len(self._edge_types_with_features)
 
         return {
-            "version": "1.0",
+            # 1.1: node-type `has_features` now means "carries literal-value
+            # features". Through 1.0 it was `count > 0` -- the node count --
+            # which made it, and summary.node_types_with_literal_features,
+            # true/total for every build. See _build_graph_schema's docstring.
+            "version": "1.1",
             "build_metadata": {
                 "time_period": self._time_period,
                 "build_timestamp": self._build_timestamp,
