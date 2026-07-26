@@ -173,6 +173,9 @@ def _assert_valid_graph_and_metadata(config, work_dir):
         f"unexpected origin values: {origins}"
     )
 
+    # --- the metadata actually describes the tensors that were emitted ---
+    _assert_metadata_describes_the_graph(data, found)
+
     # --- node_index: every graph row is attributable to a real entity ---
     # Without this the .pt is anonymous -- row 5 of cpi_Index is some specific
     # series and nothing on disk says which, which blocks joining training
@@ -406,6 +409,155 @@ KNOWN_ORPHANED_NODE_TYPES = {
     "unknown_EquitySnapshot",
     "unknown_OptionSnapshot",
 }
+
+
+def _assert_metadata_describes_the_graph(data, found):
+    """The metadata JSONs must describe the tensors that were actually emitted.
+
+    These six files are the contract a downstream trainer reads: it sizes its
+    input layers from the declared dims and interprets each column through
+    slot_mapping.json. The suite already checks the files exist, parse, and are
+    non-empty -- but nothing checked they AGREE with the .pt beside them.
+
+    They can drift because they come from different code paths: the tensors from
+    FeatureExtractor / EdgeFeatureExtractor, the declarations from
+    MetadataWriter (metadata_writer.py:304 onwards). When they drift nothing
+    raises. A trainer builds an input layer of the declared width and either
+    fails on a shape mismatch at the first batch -- far from the cause -- or, if
+    the widths happen to match while the layout reordered, trains happily on
+    features whose meaning does not match the declared slots and converges to
+    something meaningless.
+
+    Read from the run's own output (the `found` mapping of written files) rather
+    than re-derived from the builders, so this tests the artifact that ships, not
+    the code that produced it.
+
+    Every message reports declared vs actual side by side: the whole failure mode
+    is two numbers that should be equal and are not, so the diagnosis is the
+    comparison.
+    """
+    schema = json.loads(Path(found["graph_schema.json"]).read_bytes())
+    spec = json.loads(Path(found["feature_spec.json"]).read_bytes())
+
+    # --- 1. node feature width -------------------------------------------- #
+    # The node layout is global, not per-node-type, so one declared width applies
+    # to every type that carries features.
+    node_spec = spec["node_features"]
+    declared_node_dim = int(node_spec["total_dim"])
+
+    segment_sum = sum(int(s["dim"]) for s in node_spec["segments"])
+    assert segment_sum == declared_node_dim, (
+        f"feature_spec.json is internally inconsistent: node segments sum to "
+        f"{segment_sum} but total_dim declares {declared_node_dim}. The "
+        f"segment boundaries are what slot_mapping.json indexes into, so a "
+        f"mismatch here misattributes every feature past the bad segment."
+    )
+
+    for nt in data.node_types:
+        store = data[nt]
+        if "x" in store and store.x is not None:
+            actual = int(store.x.shape[1])
+            assert actual == declared_node_dim, (
+                f"{nt}.x width disagrees with feature_spec.json: "
+                f"declared {declared_node_dim}, actual {actual}. A trainer "
+                f"sizes its input layer from the declared value, so this fails "
+                f"at the first batch -- or silently mis-slices if it does not."
+            )
+
+    # --- 2. edge feature width -------------------------------------------- #
+    edge_spec = spec["edge_features"]
+    declared_edge_dim = int(edge_spec["total_dim"])
+
+    if edge_spec.get("enabled"):
+        edge_segment_sum = sum(int(s["dim"]) for s in edge_spec["segments"])
+        assert edge_segment_sum == declared_edge_dim, (
+            f"feature_spec.json is internally inconsistent: edge segments sum "
+            f"to {edge_segment_sum} but total_dim declares {declared_edge_dim}."
+        )
+
+    schema_edges = schema["edge_types"]
+    for et in data.edge_types:
+        store = data[et]
+        key = _schema_edge_key(et)
+        entry = schema_edges.get(key)
+        assert entry is not None, (
+            f"edge type {key} is in the graph but absent from "
+            f"graph_schema.json's edge_types"
+        )
+
+        has_attr = "edge_attr" in store and store.edge_attr is not None
+        assert bool(entry["has_features"]) == has_attr, (
+            f"{key}: graph_schema.json declares has_features="
+            f"{entry['has_features']} but the tensor "
+            f"{'has' if has_attr else 'has no'} edge_attr"
+        )
+
+        if has_attr:
+            actual = int(store.edge_attr.shape[1])
+            assert int(entry["feature_dim"]) == actual, (
+                f"{key} edge_attr width disagrees with graph_schema.json: "
+                f"declared {entry['feature_dim']}, actual {actual}"
+            )
+            assert declared_edge_dim == actual, (
+                f"{key} edge_attr width disagrees with feature_spec.json: "
+                f"declared {declared_edge_dim}, actual {actual}"
+            )
+        else:
+            assert int(entry["feature_dim"]) == 0, (
+                f"{key}: graph_schema.json declares feature_dim="
+                f"{entry['feature_dim']} but the tensor carries no edge_attr"
+            )
+
+    # --- 3. node type inventory ------------------------------------------- #
+    declared_nodes = set(schema["node_types"])
+    actual_nodes = {str(nt) for nt in data.node_types}
+    assert declared_nodes == actual_nodes, (
+        f"graph_schema.json node types disagree with the graph.\n"
+        f"  declared not in graph: {sorted(declared_nodes - actual_nodes)}\n"
+        f"  in graph not declared: {sorted(actual_nodes - declared_nodes)}"
+    )
+
+    # --- 4. edge type inventory ------------------------------------------- #
+    declared_edges = set(schema_edges)
+    actual_edges = {_schema_edge_key(et) for et in data.edge_types}
+    assert declared_edges == actual_edges, (
+        f"graph_schema.json edge types disagree with the graph.\n"
+        f"  declared not in graph: {sorted(declared_edges - actual_edges)[:5]}\n"
+        f"  in graph not declared: {sorted(actual_edges - declared_edges)[:5]}"
+    )
+
+    # --- 5. counts --------------------------------------------------------- #
+    # Not redundant with the inventory checks above: identical type NAMES with
+    # wrong COUNTS is what a metadata writer fed a stale or pre-deduplication
+    # view of the graph produces, and that passes 3 and 4 untouched.
+    for nt in data.node_types:
+        declared = int(schema["node_types"][str(nt)]["count"])
+        actual = int(data[nt].num_nodes)
+        assert declared == actual, (
+            f"{nt}: graph_schema.json declares count {declared}, graph has "
+            f"{actual} nodes -- the writer saw a different version of the graph"
+        )
+
+    for et in data.edge_types:
+        declared = int(schema_edges[_schema_edge_key(et)]["count"])
+        actual = int(data[et].edge_index.shape[1])
+        assert declared == actual, (
+            f"{_schema_edge_key(et)}: graph_schema.json declares count "
+            f"{declared}, graph has {actual} edges -- the writer saw a "
+            f"different version of the graph (deduplication ordering?)"
+        )
+
+
+def _schema_edge_key(edge_type):
+    """Render a PyG edge type the way MetadataWriter keys it.
+
+    MetadataWriter builds ``f"({src}, {rel}, {dst})"`` (metadata_writer.py:158).
+    Reproduced rather than imported because the point is to check the WRITTEN
+    artifact against the graph; importing the writer's own formatting would make
+    a change to that format invisible here.
+    """
+    src, rel, dst = edge_type
+    return f"({src}, {rel}, {dst})"
 
 
 def _assert_all_finite(tensor, label):
