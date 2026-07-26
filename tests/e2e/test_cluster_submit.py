@@ -424,3 +424,96 @@ def test_full_mode_creates_no_junk_uri_tree_on_the_driver(full_submission):
         "writer is still using plain local I/O on an s3a:// path; route it "
         "through spark_jobs.utils.fs_utils.write_bytes."
     )
+
+
+# --------------------------------------------------------------------------- #
+# --mode full — the graph itself, not just the bytes
+#
+# Everything above asserts that artifacts ARRIVED: the .pt is present and
+# non-empty, the six JSONs are there, the commit is clean. None of it opens the
+# .pt. A cluster run that produced a structurally broken graph -- dangling edge
+# indices, float64 features, a NaN column, metadata disagreeing with the tensors
+# -- passes every one of those checks, because the file is the right size in the
+# right place.
+#
+# Meanwhile test_pipeline_smoke.py has a thorough validator that only ever runs
+# against local[*] output. So the halves were complementary the wrong way round:
+# the local run validates a graph it built itself, and the cluster run checks
+# that a graph it never inspects landed in a bucket.
+#
+# This downloads the run's own artifacts and puts them through THE SAME helper,
+# so the cluster's graph is held to exactly the standard the local one is.
+# --------------------------------------------------------------------------- #
+
+def _download_run_artifacts(work_dir: str, dest: Path) -> None:
+    """Mirror the run's S3 prefix into `dest`, preserving relative layout.
+
+    The layout matters: the validator locates the metadata and node_index
+    directories RELATIVE to the .pt, exactly as JobConfig derives them. Copying
+    the keys' relative paths verbatim reproduces the tree the pipeline wrote, so
+    a plain JobConfig pointed at `dest` resolves every path without the
+    validator needing to know it is looking at a downloaded copy.
+    """
+    import boto3
+
+    bucket, _, prefix = work_dir[len("s3a://"):].partition("/")
+    s3 = boto3.client("s3")
+    paginator = s3.get_paginator("list_objects_v2")
+
+    count = 0
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if key.endswith("/"):
+                continue
+            target = dest / key[len(prefix):].lstrip("/")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            s3.download_file(bucket, key, str(target))
+            count += 1
+
+    assert count, f"nothing to download under s3a://{bucket}/{prefix}"
+
+
+@requires_cluster
+def test_full_mode_produces_a_structurally_valid_graph(full_submission, tmp_path):
+    """The cluster's graph must pass the same validator as the local one.
+
+    Deliberately reuses ``_assert_valid_graph_and_metadata`` rather than
+    reimplementing its checks here. That helper has accumulated real depth --
+    edge indices in range, tensor dtypes, finiteness, metadata/tensor agreement,
+    node_index coverage, temporal structure, edge origins -- and a second copy
+    would drift from it the first time either side gained a check. One
+    definition of "a valid graph", applied to both places that produce one.
+
+    The .pt is byte-identical between a local and a cluster run given the same
+    input (two cluster runs produced the same 6,573,987-byte file), so this is
+    not hunting a different GRAPH. It closes a cluster leg whose only claim was
+    "a file exists", and catches the cluster-only failures that would corrupt or
+    truncate an artifact in transit.
+    """
+    _, work_dir = full_submission
+
+    if not work_dir.startswith("s3a://"):
+        pytest.skip("only meaningful when the work dir is an object-store URI")
+
+    from spark_jobs.build_graph import JobConfig
+    from test_pipeline_smoke import _assert_valid_graph_and_metadata
+
+    _download_run_artifacts(work_dir, tmp_path)
+
+    # A real JobConfig over the downloaded tree derives pyg_output_path and
+    # enriched_parquet_path exactly as the job did -- the same code, so the
+    # test cannot disagree with the pipeline about where things live.
+    # time_period must match what the submission used.
+    #
+    # mode is pyg_only rather than the full mode that produced these artifacts:
+    # path derivation is identical between the two, but `full` requires
+    # source_paths, and there is no source to name when reading back finished
+    # output. Same choice the split-mode smoke test makes.
+    config = JobConfig({
+        "mode": "pyg_only",
+        "local_work_dir": str(tmp_path),
+        "time_period": "2099-01",
+    })
+
+    _assert_valid_graph_and_metadata(config, tmp_path)
