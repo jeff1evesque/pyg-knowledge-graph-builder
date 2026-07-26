@@ -711,10 +711,12 @@ triples_df (enriched, on executors)
     │   └── Output: HeteroData ready for torch.save() and GNN training
     │
     └── Post-construction: Save outputs (build_graph.py)
-        ├── torch.save() → BytesIO → upload_fileobj → S3 (.pt file)
+        ├── torch.save() → BytesIO → fs_utils.write_bytes() → work dir (.pt file)
+        │   (local path → open(); s3a:// URI → Hadoop FileSystem)
         ├── MetadataCollector.to_metadata_files() → six JSON dicts
-        └── write_metadata_to_local() → six JSON files → local (metadata/ dir)
-            (and write_metadata_to_s3() when an S3 archive is configured)
+        └── write_metadata_to_local() → fs_utils.write_bytes() → six JSON files
+            (same scheme routing; write_metadata_to_s3() adds the boto3
+             mirror when an S3 archive is configured)
 ```
 
 ## Metadata Files
@@ -1079,7 +1081,7 @@ Post-construction: Save outputs
 | Metadata collection | Driver | Small aggregated DataFrames only (<5000 rows per collect), <1 MB total |
 | Metadata serialization | Driver | `json.dumps()` on small Python dicts; six local writes (+ `put_object` calls when archiving) |
 | Enriched Parquet write | Spark executors | `repartition` + `write.parquet` — executors write directly to the shared local dir |
-| PyG .pt write | Driver | `torch.save` to local file (+ `upload_fileobj` streaming to S3 when archiving) |
+| PyG .pt write | Driver | `torch.save` to a `BytesIO` buffer, then written by scheme — direct local I/O for a POSIX `--local_work_dir`, Hadoop FileSystem for an `s3a://` one (+ `upload_fileobj` streaming to S3 when archiving) |
 
 **Universal node feature width**: HeteroData stores node feature tensors of the same `vector_dim` for every node type. The ontology-aware encoding keeps vectors informative even for types with few literal properties — the ontology structure and property schema segments still carry meaningful signal.
 
@@ -1886,6 +1888,8 @@ Everything above runs against a local `SparkSession`. That leaves one path untes
 
 [`tests/e2e/test_cluster_submit.py`](tests/e2e/test_cluster_submit.py) (marker: `cluster`) submits the real job through [`bin/submit_spark_job.sh`](bin/submit_spark_job.sh) and asserts it completes, writes its artifacts to shared storage, and **actually placed operators on the GPU**. The submission is bounded by a timeout, because an unschedulable GPU request hangs rather than failing. It is **skipped unless `SPARK_MASTER_URL` and `CLUSTER_SMOKE_OUTPUT_PATH` are set**, so CI and contributors without a cluster are unaffected.
 
+It submits **two** jobs. `--mode enrichment_only` is the fast leg — the quick signal on launcher, submit, and IAM wiring. `--mode full` additionally runs PyG construction, which is the only place the **driver-side artifact writers** meet real object storage. That distinction is not academic: `save_pyg_local()` and `write_metadata_to_local()` both used `os.makedirs` + plain `open()`, and plain Python I/O treats `s3a://bucket/key` as a *relative path* — it creates a junk `./s3a:/bucket/key` tree under the driver's working directory, logs `Saved ... to s3a://...`, and exits 0. The graph and its metadata never reach the object store, and nothing raises. Because the cluster leg only ever ran `enrichment_only`, neither writer was ever invoked with a non-local URI and the defect survived undetected (it is the same defect `#197` fixed for the job manifest). All three writers now share one scheme-aware implementation, [`spark_jobs/utils/fs_utils.py`](spark_jobs/utils/fs_utils.py) — **any new driver-side write must go through `write_bytes()`**, which routes local paths to direct I/O, URIs through the Hadoop FileSystem API, and *raises* rather than silently localizing a URI it cannot reach.
+
 ```bash
 export SPARK_HOME=/opt/spark
 export SPARK_MASTER_URL=spark://<master>:7077
@@ -1899,7 +1903,7 @@ export CLUSTER_SMOKE_OUTPUT_PATH=s3a://<bucket>/<prefix>   # must be reachable b
 | `CLUSTER_SMOKE_OUTPUT_PATH` | — | Required. Where the job writes. On a cluster this must be shared storage (`s3a://`): executors are spread across machines, so a `file://` path resolves to a different local disk on each one and the commit protocol cannot assemble the output. |
 | `CLUSTER_SMOKE_SOURCE_PATH` | staged fixtures | Source data. If unset, the repo's own e2e fixtures are uploaded under the output path, so a fresh clone can run this against any cluster with nothing copied onto the nodes by hand. |
 | `CLUSTER_SMOKE_TIMEOUT` | `900` | Seconds before a hung submission is killed (with its driver). |
-| `CLUSTER_SMOKE_MAX_SOURCES` | all | Cap the number of sources, for a faster signal. The pipeline's cost scales with **source count**, not data size — one source ≈ 30s, all seven ≈ 6min. |
+| `CLUSTER_SMOKE_MAX_SOURCES` | all | Cap the number of sources, for a faster signal. The pipeline's cost scales with **source count**, not data size — one source ≈ 30s, all seven ≈ 6min. Applies to both legs, so it roughly halves the suite's wall-clock. |
 | `CLUSTER_SMOKE_EXPECT_GPU` | `1` | Set `0` to skip the GPU-placement assertion (e.g. a CPU-only cluster). |
 
 Two failure modes this test exists to catch, both of which otherwise produce a **green** suite: RAPIDS silently falling back to CPU (the job still succeeds and still produces a correct graph), and the driver OOMing while *planning* the multi-source query — see [`bin/submit_spark_job.sh`](bin/submit_spark_job.sh) on `spark.sql.maxPlanStringLength`, and `_settle()` in [`spark_jobs/enrichment/pipeline.py`](spark_jobs/enrichment/pipeline.py) on why the enrichment phases truncate their logical plans.
