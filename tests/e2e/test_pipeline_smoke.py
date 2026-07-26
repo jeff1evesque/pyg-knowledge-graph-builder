@@ -93,6 +93,9 @@ def _assert_valid_graph_and_metadata(config, work_dir):
     assert total_nodes > 0, "graph has no nodes"
     assert total_edges > 0, "graph has no edges"
 
+    # --- every edge index actually addresses a node that exists ---
+    _assert_indices_are_in_range(data)
+
     # --- node feature tensors: 2D, row-aligned, width is a valid layout dim ---
     node_types_with_features = 0
     for nt in data.node_types:
@@ -376,6 +379,52 @@ KNOWN_ORPHANED_NODE_TYPES = {
     "unknown_EquitySnapshot",
     "unknown_OptionSnapshot",
 }
+
+
+def _assert_indices_are_in_range(data):
+    """Every edge index must address a node that exists in its node type.
+
+    The suite already checks each ``edge_index`` is shaped ``[2, E]``, but shape
+    says nothing about the VALUES. An off-by-one or a stale mapping in
+    node_mapper.py / edge_mapper.py can emit a destination id past the end of
+    its node type and still satisfy every other assertion here. Downstream that
+    either raises deep inside the first ``scatter``/``index_select`` -- far from
+    the cause and hard to trace back -- or, worse, silently gathers the wrong
+    feature rows, so the model trains on mismatched features and simply learns
+    less than it should. Nothing fails; the graph is just quietly wrong.
+
+    Delegates to PyG's own validator rather than hand-rolling the comparison, so
+    the check tracks PyG's definition of a well-formed HeteroData as the library
+    evolves. In torch-geometric 2.8 ``validate`` covers exactly the conditions
+    that matter here -- negative indices, source indices >= num_src_nodes,
+    destination indices >= num_dst_nodes -- plus undefined ``num_nodes`` and node
+    types referenced by an edge type but absent from the graph. Its messages name
+    the edge type, which endpoint, and the offending value.
+
+    Asserts the RETURN VALUE as well as relying on the raise. ``validate``
+    reports some conditions through ``warn_or_raise``, and requirements.txt
+    admits any torch-geometric >= 2.6; if a version downgrades one of these to a
+    warning, the raise would not fire but the returned status would still be
+    False. Checking both means this guard cannot silently weaken under a version
+    bump.
+    """
+    try:
+        status = data.validate(raise_on_error=True)
+    except ValueError as exc:  # pragma: no cover - only on a corrupt graph
+        raise AssertionError(
+            f"the graph is structurally invalid: {exc}\n\n"
+            "An edge index addresses a node that does not exist in its node "
+            "type. Look at the node_id assignment in node_mapper.py and the "
+            "src/dst resolution in edge_mapper.py -- an edge whose endpoint id "
+            "is >= that type's num_nodes means the two disagree about how many "
+            "nodes the type has, or about which ids belong to it."
+        ) from exc
+
+    assert status, (
+        "HeteroData.validate() reported the graph as invalid without raising "
+        "(this torch-geometric version warns where 2.8 raises). Re-run with "
+        "`-W error` to surface the specific condition."
+    )
 
 
 def _assert_temporal_types_are_not_sharded(data):
