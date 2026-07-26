@@ -120,6 +120,7 @@ def _assert_valid_graph_and_metadata(config, work_dir):
                 f"it. Cast at the construction boundary (constructor.py), not "
                 f"here."
             )
+            _assert_all_finite(x, f"{nt}.x")
             VectorLayout(int(x.shape[1]))  # raises if width violates the layout
             node_types_with_features += 1
     assert node_types_with_features > 0, "no node type carries a feature tensor"
@@ -138,6 +139,7 @@ def _assert_valid_graph_and_metadata(config, work_dir):
                 f"{et} edge_attr has dtype {store.edge_attr.dtype}, expected "
                 f"torch.float32 (same reason as node features above)."
             )
+            _assert_all_finite(store.edge_attr, f"{et} edge_attr")
             EdgeVectorLayout(int(store.edge_attr.shape[1]))
 
     # --- all six metadata JSONs present, non-empty, valid JSON ---
@@ -404,6 +406,55 @@ KNOWN_ORPHANED_NODE_TYPES = {
     "unknown_EquitySnapshot",
     "unknown_OptionSnapshot",
 }
+
+
+def _assert_all_finite(tensor, label):
+    """Every entry of a feature tensor must be finite.
+
+    The realistic source is normalization: a feature that is constant across
+    every node has zero variance, so a z-score divides by zero and the whole
+    column becomes NaN. Nothing else in this suite notices. The tensor is still
+    2D, still row-aligned, still a valid VectorLayout width -- the .pt looks
+    perfect. NaN then propagates through the first forward pass and turns every
+    gradient in the model to NaN, with no crash and no error message: training
+    just silently produces nothing.
+
+    The reproducibility tests are blind to it too. A NaN-poisoned tensor is
+    produced identically on every run, so test_output_is_reproducible passes
+    beside it -- confirming only that the graph is *consistently* broken.
+
+    The message names the offending columns rather than just reporting "has
+    NaN", because the column index is what maps back to a slot in
+    slot_mapping.json and therefore to the feature that failed to normalize.
+    NaN and infinity are counted separately: NaN means 0/0 (a constant column
+    under z-score), infinity means x/0 (a non-zero value over a zero range).
+    They point at different bugs, so collapsing them would discard the most
+    useful part of the diagnosis.
+    """
+    import torch
+
+    finite = torch.isfinite(tensor)
+    if bool(finite.all()):
+        return
+
+    bad_columns = (~finite.all(dim=0)).nonzero().flatten().tolist()
+    shown = ", ".join(str(c) for c in bad_columns[:8])
+    if len(bad_columns) > 8:
+        shown += f", ... ({len(bad_columns)} columns total)"
+
+    nan_count = int(torch.isnan(tensor).sum())
+    inf_count = int(torch.isinf(tensor).sum())
+
+    raise AssertionError(
+        f"{label} contains non-finite values: {nan_count} NaN, {inf_count} inf "
+        f"across {int((~finite).sum())} of {tensor.numel()} entries.\n"
+        f"Affected column(s): {shown}\n"
+        f"Look up those indices in slot_mapping.json to identify the feature. "
+        f"A NaN column is normally a zero-variance feature divided by its own "
+        f"standard deviation during normalization; an inf column is a non-zero "
+        f"value divided by a zero range. Fix the normalization path -- these "
+        f"values reach the trainer and silently NaN out every gradient."
+    )
 
 
 def _assert_indices_are_in_range(data):
