@@ -78,6 +78,8 @@ def _load_hetero(pt_path):
 def _assert_valid_graph_and_metadata(config, work_dir):
     import os
 
+    import torch
+
     from spark_jobs.pyg_builder.edge_feature_extractor import EdgeVectorLayout
     from spark_jobs.pyg_builder.feature_extractor import VectorLayout
 
@@ -96,7 +98,15 @@ def _assert_valid_graph_and_metadata(config, work_dir):
     # --- every edge index actually addresses a node that exists ---
     _assert_indices_are_in_range(data)
 
-    # --- node feature tensors: 2D, row-aligned, width is a valid layout dim ---
+    # --- node feature tensors: 2D, row-aligned, valid width, float32 ---
+    #
+    # dtype is asserted alongside shape because torch enforces it only at the
+    # point of use, far downstream. Spark's DoubleType lands as float64 through
+    # a pandas round-trip, and a float64 `x` survives every other check here --
+    # it is the right shape, the right width, and (being deterministic) it is
+    # even bit-reproducible, so test_output_is_reproducible passes beside it.
+    # The failure surfaces only when a trainer multiplies it against float32
+    # weights, by which point nothing points back at the pipeline.
     node_types_with_features = 0
     for nt in data.node_types:
         store = data[nt]
@@ -104,15 +114,30 @@ def _assert_valid_graph_and_metadata(config, work_dir):
             x = store.x
             assert x.dim() == 2, f"{nt}.x not 2D"
             assert x.shape[0] == store.num_nodes, f"{nt}.x row count != num_nodes"
+            assert x.dtype == torch.float32, (
+                f"{nt}.x has dtype {x.dtype}, expected torch.float32 -- "
+                f"standard conv layers hold float32 weights and will not accept "
+                f"it. Cast at the construction boundary (constructor.py), not "
+                f"here."
+            )
             VectorLayout(int(x.shape[1]))  # raises if width violates the layout
             node_types_with_features += 1
     assert node_types_with_features > 0, "no node type carries a feature tensor"
 
-    # --- edge tensors: edge_index [2, E]; edge features (if any) valid width ---
+    # --- edge tensors: edge_index [2, E] int64; edge features valid + float32 ---
     for et in data.edge_types:
         store = data[et]
         assert store.edge_index.dim() == 2 and store.edge_index.shape[0] == 2
+        assert store.edge_index.dtype == torch.int64, (
+            f"{et} edge_index has dtype {store.edge_index.dtype}, expected "
+            f"torch.int64 -- PyG indexes with it, so anything else raises "
+            f"inside the first scatter/index_select rather than here."
+        )
         if "edge_attr" in store and store.edge_attr is not None:
+            assert store.edge_attr.dtype == torch.float32, (
+                f"{et} edge_attr has dtype {store.edge_attr.dtype}, expected "
+                f"torch.float32 (same reason as node features above)."
+            )
             EdgeVectorLayout(int(store.edge_attr.shape[1]))
 
     # --- all six metadata JSONs present, non-empty, valid JSON ---
@@ -407,9 +432,27 @@ def _assert_indices_are_in_range(data):
     warning, the raise would not fire but the returned status would still be
     False. Checking both means this guard cannot silently weaken under a version
     bump.
+
+    One condition is filtered out: ``validate`` also reports isolated node types,
+    always as a warning (it hardcodes ``raise_on_error=False``, since an isolated
+    type "may be intended"). Here it IS intended -- these fixtures legitimately
+    contain orphaned types, enumerated in KNOWN_ORPHANED_NODE_TYPES -- and
+    ``_assert_no_node_type_is_orphaned`` already guards that property properly,
+    against the allow-list rather than against zero. Letting the warning through
+    would add known-benign noise to every report, which is how real warnings stop
+    being read. Only this exact message is filtered; anything else ``validate``
+    emits still surfaces.
     """
+    import warnings
+
     try:
-        status = data.validate(raise_on_error=True)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r".*are isolated and are not referenced.*",
+                category=UserWarning,
+            )
+            status = data.validate(raise_on_error=True)
     except ValueError as exc:  # pragma: no cover - only on a corrupt graph
         raise AssertionError(
             f"the graph is structurally invalid: {exc}\n\n"
