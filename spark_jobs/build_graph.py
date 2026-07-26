@@ -921,25 +921,66 @@ def save_pyg_to_s3(s3_client, hetero_data, bucket: str, key: str):
     )
 
 
-def save_pyg_local(hetero_data, local_path: str) -> None:
+def save_pyg_local(hetero_data, local_path: str, spark: SparkSession = None) -> None:
     """
-    Save PyTorch Geometric HeteroData to a local file.
+    Save PyTorch Geometric HeteroData to the job's work dir.
 
-    Creates parent directories as needed. Runs on the driver — only
-    compact tensors are in memory.
+    Runs on the driver — only compact tensors are in memory.
+
+    Despite the name (kept for its callers), the destination is not necessarily
+    local: ``local_work_dir`` is an ``s3a://`` URI on the cluster, and
+    ``torch.save`` to such a path writes a junk ``./s3a:/...`` tree on the
+    driver's disk and reports success.
+
+    The two destinations are handled differently on purpose:
+
+    * A local path keeps the direct ``torch.save(obj, path)`` stream. torch
+      writes incrementally to the file handle, so peak memory stays at the
+      HeteroData itself.
+    * A URI has no file handle to stream to, so the graph is serialized to a
+      buffer first and the bytes handed to the Hadoop writer — the same shape as
+      save_pyg_to_s3 above. This costs a second in-memory copy of the (compact)
+      tensors, which is simply what writing to object storage costs; it is the
+      same trade the S3 archive path already makes.
+
+    Buffering unconditionally would be simpler, but it would impose that second
+    copy on every local run — including the e2e suite and any single-machine
+    build — to serve a case those runs never hit.
 
     Args:
         hetero_data: PyG HeteroData object
-        local_path: Local filesystem path for the .pt file
+        local_path: Destination for the .pt file — bare path or URI
+        spark: Active SparkSession; required when local_path is a non-local URI
     """
     import os
+
     import torch
 
-    os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
-    torch.save(hetero_data, local_path)
+    from spark_jobs.utils.fs_utils import (
+        is_local_path,
+        local_filesystem_path,
+        write_bytes,
+    )
 
-    size_mb = os.path.getsize(local_path) / (1024 * 1024)
-    logger.info(f"Saved PyG HeteroData ({size_mb:.2f} MB) to {local_path}")
+    if is_local_path(local_path):
+        path = local_filesystem_path(local_path)
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        torch.save(hetero_data, path)
+        size_mb = os.path.getsize(path) / (1024 * 1024)
+        logger.info(f"Saved PyG HeteroData ({size_mb:.2f} MB) to {path}")
+        return
+
+    buffer = io.BytesIO()
+    torch.save(hetero_data, buffer)
+    size_mb = buffer.tell() / (1024 * 1024)
+
+    # getbuffer() rather than getvalue(): a memoryview onto the buffer instead of
+    # yet another full copy of a graph that may be gigabytes.
+    write_bytes(local_path, buffer.getbuffer(), spark=spark)
+
+    logger.info(
+        f"Saved PyG HeteroData ({size_mb:.2f} MB) to {local_path} (via Hadoop FS)"
+    )
 
 
 # ============================================
@@ -1126,15 +1167,25 @@ def save_node_index(node_index_df: DataFrame, output_path: str) -> None:
 
 
 def save_final_artifacts(
-    config: JobConfig, s3_client, hetero_data, metadata, node_index_df=None
+    config: JobConfig, s3_client, hetero_data, metadata, node_index_df=None,
+    spark: SparkSession = None,
 ) -> Dict[str, Any]:
     """
     Persist the final .pt HeteroData, the six metadata JSON files, and the
     node index.
 
-    Always writes locally under config.local_work_dir. When an S3 archive
+    Always writes under config.local_work_dir. When an S3 archive
     is configured (config.archive_to_s3), the .pt and metadata are also
     mirrored to S3 via boto3 as a durable, reusable catalog.
+
+    The .pt and the metadata JSONs are driver-side blobs, so they are written
+    through the scheme-aware writer: local_work_dir is a bare POSIX path on a
+    developer machine but an s3a:// URI on the cluster, and plain open() would
+    put the cluster's artifacts on the driver's local disk under a junk
+    ./s3a:/... tree while reporting success. `spark` is what makes the URI case
+    possible (it carries the Hadoop config) and is required whenever
+    local_work_dir is not a plain path. This is the same defect #197 fixed for
+    the job manifest; all three writers now share one implementation.
 
     The node index is written by Spark straight from the executors, so it
     lands wherever the output path points -- a local dir, or object storage
@@ -1146,14 +1197,14 @@ def save_final_artifacts(
     """
     metadata_files = metadata.to_metadata_files()
 
-    # --- Local (always) ---
+    # --- Job work dir (always) ---
     logger.info("")
     logger.info("=" * 80)
-    logger.info("PHASE: SAVING PyG HETERODATA + METADATA (local)")
+    logger.info("PHASE: SAVING PyG HETERODATA + METADATA")
     logger.info("=" * 80)
-    save_pyg_local(hetero_data, config.pyg_output_path)
+    save_pyg_local(hetero_data, config.pyg_output_path, spark=spark)
     local_metadata_dir = derive_metadata_prefix(config.pyg_output_path)
-    write_metadata_to_local(metadata_files, local_metadata_dir)
+    write_metadata_to_local(metadata_files, local_metadata_dir, spark=spark)
 
     node_index_dir = derive_node_index_prefix(config.pyg_output_path)
     if node_index_df is not None:
@@ -1248,7 +1299,7 @@ def execute_full_pipeline(
 
     # Step 5: Save final artifacts (local + optional S3)
     locations = save_final_artifacts(
-        config, s3_client, hetero_data, metadata, node_index_df
+        config, s3_client, hetero_data, metadata, node_index_df, spark=spark
     )
 
     return {
@@ -1361,7 +1412,7 @@ def execute_pyg_only(
 
     # Step 3: Save final artifacts (local + optional S3)
     locations = save_final_artifacts(
-        config, s3_client, hetero_data, metadata, node_index_df
+        config, s3_client, hetero_data, metadata, node_index_df, spark=spark
     )
 
     return {
@@ -1385,29 +1436,14 @@ def _write_manifest_bytes(spark: SparkSession, path: str, body: bytes):
     Hadoop FileSystem API so it lands on the same filesystem (with the same S3A/IAM
     config) that Spark writes every other artifact to; keep the plain-local path on
     the direct filesystem call.
+
+    Thin wrapper kept for its call site and for the #197 history; the logic now
+    lives in spark_jobs.utils.fs_utils.write_bytes, shared with the .pt and
+    metadata writers, which turned out to have the identical defect.
     """
-    from urllib.parse import urlparse
+    from spark_jobs.utils.fs_utils import write_bytes
 
-    scheme = urlparse(path).scheme
-    if scheme and scheme != "file":
-        jvm = spark._jvm
-        hconf = spark._jsc.hadoopConfiguration()
-        juri = jvm.java.net.URI(path)
-        fs = jvm.org.apache.hadoop.fs.FileSystem.get(juri, hconf)
-        jpath = jvm.org.apache.hadoop.fs.Path(path)
-        stream = fs.create(jpath, True)  # overwrite
-        try:
-            stream.write(bytearray(body))
-        finally:
-            stream.close()
-        return
-
-    import os
-
-    local_path = urlparse(path).path if scheme == "file" else path
-    os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
-    with open(local_path, "wb") as f:
-        f.write(body)
+    write_bytes(path, body, spark=spark)
 
 
 def save_job_manifest(
