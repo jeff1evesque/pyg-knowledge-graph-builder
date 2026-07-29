@@ -1196,7 +1196,7 @@ When config is empty, sensible defaults are inferred from the data.
 | `--pyg_config` | No | `{}` | JSON string with PyG construction config |
 | `--parquet_partitions` | No | `200` | Number of Parquet output partitions |
 | `--source_format` | No | `ntriples` | Source RDF format: `ntriples` (one triple per line in `.nt` files) or `turtle_parquet` (self-contained Turtle blobs in a Parquet column). Applies to modes `full` and `enrichment_only` only — `pyg_only` always reads enriched Parquet written by this pipeline |
-| `--turtle_column` | No | `triples` | Column name containing Turtle strings when `--source_format=turtle_parquet`. Ignored for `ntriples` format. Configurable so that different source Parquet schemas can be handled without code changes |
+| `--turtle_column` | No | *(auto)* | Column name containing Turtle strings when `--source_format=turtle_parquet`. Ignored for `ntriples` format. Left unset, the column is resolved **per source** against `TURTLE_COLUMN_CANDIDATES` (`triples`, then `rdf_turtle`), so one run can span sources whose schemas disagree; set it to force a single name everywhere |
 | `--market_sector_definitions_bucket` | No | `""` | S3 bucket containing the S&P 500 tickers CSV for dynamic sector classification. If empty, falls back to hardcoded sector patterns |
 | `--market_sector_definitions_key` | No | `""` | S3 key for the tickers CSV (e.g., `market/sp500/tickers/latest.csv`). Tickers are grouped by `GICS Sector` column to build sector patterns at runtime |
 
@@ -1294,8 +1294,21 @@ SPARK_MASTER_URL=spark://<host>:7077 \
     --parquet_partitions 200
 ```
 
-If your Parquet column is named something other than `triples`, set
-`--source_format turtle_parquet --turtle_column rdf_turtle`.
+If your Parquet column is named something other than `triples`, nothing needs to be
+said: with `--turtle_column` unset the loader resolves the name against
+`TURTLE_COLUMN_CANDIDATES` for each source path independently, so
+`triples` and `rdf_turtle` sources can be submitted together and enrich into a single
+graph. Pass `--turtle_column rdf_turtle` only to force one name across every source —
+useful when a schema carries both columns and only one of them is meant, and the source
+of truth when a third name appears.
+
+Source Parquet written by pandas/pyarrow commonly carries **nanosecond** timestamps,
+which Spark's Parquet reader rejects outright (`Illegal Parquet type: INT64
+(TIMESTAMP(NANOS,true))`) during schema conversion — before a single triple is read, and
+regardless of the fact that this pipeline goes on to select nothing but the Turtle
+column. [`bin/submit_spark_job.sh`](bin/submit_spark_job.sh) therefore sets
+`spark.sql.legacy.parquet.nanosAsLong=true` by default; set `PARQUET_NANOS_AS_LONG=false`
+to restore Spark's behavior.
 
 **Full pipeline from a Turtle Parquet source:**
 

@@ -39,7 +39,8 @@ Launch with spark-submit (see bin/submit_spark_job.sh). Parameters:
     --parquet_partitions:      number of Parquet output partitions (default 200)
     --source_format:           ntriples | turtle_parquet (default ntriples)
     --turtle_column:           Turtle column name when
-                               source_format=turtle_parquet (default triples)
+                               source_format=turtle_parquet (default: empty,
+                               auto-detected per source)
 
 Example (N-Triples, local source, local + S3 archive):
     spark_jobs/build_graph.py \\
@@ -215,9 +216,10 @@ class JobConfig:
         )
 
         # Column name containing Turtle strings when
-        # source_format=turtle_parquet. Configurable so that different
-        # source Parquet schemas can be handled without code changes.
-        self.turtle_column = args.get("turtle_column", "triples")
+        # source_format=turtle_parquet. Empty means auto-detect per source
+        # (see resolve_turtle_column), so one run can span sources whose
+        # scrapers named the column differently; set it to force one name.
+        self.turtle_column = args.get("turtle_column", "")
 
         # Optional
         self.enable_ontology_mapping = (
@@ -365,7 +367,7 @@ def parse_args() -> JobConfig:
         choices=list(VALID_SOURCE_FORMATS),
         default="ntriples",
     )
-    parser.add_argument("--turtle_column", default="triples")
+    parser.add_argument("--turtle_column", default="")
     parser.add_argument("--market_sector_definitions_bucket", default="")
     parser.add_argument("--market_sector_definitions_key", default="")
 
@@ -537,10 +539,58 @@ def deterministic_bnode_labels(graph, rounds: int = 3) -> dict:
 # ============================================
 # Turtle Parquet parsing (source Parquet → triples DataFrame)
 # ============================================
+# Column names a Turtle Parquet source may use for its blob, in preference
+# order. Sources written by different scrapers disagree — 'triples' for most,
+# 'rdf_turtle' for others — and --source_paths takes many prefixes in a single
+# run, so the column is resolved per source rather than once for the whole job.
+# One submission can therefore span sources that do not agree on the name: each
+# is parsed into the same (subject, predicate, object) schema before the union,
+# so what the column was called on disk never reaches downstream steps.
+TURTLE_COLUMN_CANDIDATES = ("triples", "rdf_turtle")
+
+
+def resolve_turtle_column(columns, turtle_column: str = "") -> str:
+    """
+    Pick the column holding the Turtle blob for one source.
+
+    An explicit --turtle_column is honored verbatim and must exist, so a source
+    with a third name — or one carrying two candidates where only one is meant —
+    stays forceable. Otherwise the first candidate present wins.
+
+    Args:
+        columns: Column names in the source Parquet schema.
+        turtle_column: Explicit override; empty means auto-detect.
+
+    Returns:
+        Name of the column to read Turtle strings from.
+
+    Raises:
+        ValueError: If the override is absent, or no candidate is present.
+    """
+    if turtle_column:
+        if turtle_column not in columns:
+            raise ValueError(
+                f"Column '{turtle_column}' not found in Parquet schema. "
+                f"Available columns: {list(columns)}. "
+                f"Set --turtle_column to the correct column name."
+            )
+        return turtle_column
+
+    for candidate in TURTLE_COLUMN_CANDIDATES:
+        if candidate in columns:
+            return candidate
+
+    raise ValueError(
+        f"No Turtle column found. Tried {list(TURTLE_COLUMN_CANDIDATES)}; "
+        f"available columns: {list(columns)}. Set --turtle_column to the "
+        f"correct column name."
+    )
+
+
 def load_turtle_parquet_to_dataframe(
     spark: SparkSession,
     source_path: str,
-    turtle_column: str = "triples",
+    turtle_column: str = "",
 ) -> DataFrame:
     """
     Load RDF Turtle strings from a Parquet file column into a PySpark
@@ -574,9 +624,10 @@ def load_turtle_parquet_to_dataframe(
     Args:
         spark: Active SparkSession
         source_path: Local path or s3a:// URI to source Parquet files
-        turtle_column: Name of the column containing Turtle strings.
-                       Default "triples". Configurable via
-                       --turtle_column Glue job parameter.
+        turtle_column: Name of the column containing Turtle strings. Empty
+                       (the default) auto-detects from
+                       TURTLE_COLUMN_CANDIDATES; set it via --turtle_column
+                       to force one name.
 
     Returns:
         DataFrame with columns (subject: string, predicate: string,
@@ -584,23 +635,17 @@ def load_turtle_parquet_to_dataframe(
         downstream pipeline steps.
 
     Raises:
-        ValueError: If turtle_column is not found in the Parquet schema.
+        ValueError: If no usable Turtle column is found in the Parquet schema.
     """
     from pyspark.sql.types import ArrayType
+
+    raw_df = spark.read.parquet(source_path)
+    turtle_column = resolve_turtle_column(raw_df.columns, turtle_column)
 
     logger.info(
         f"Loading Turtle Parquet from {source_path}, "
         f"column='{turtle_column}'"
     )
-
-    raw_df = spark.read.parquet(source_path)
-
-    if turtle_column not in raw_df.columns:
-        raise ValueError(
-            f"Column '{turtle_column}' not found in Parquet schema. "
-            f"Available columns: {raw_df.columns}. "
-            f"Set --turtle_column to the correct column name."
-        )
 
     # Select only the turtle column — all other metadata columns
     # (scraped content, timestamps, etc.) are not needed for the
