@@ -30,6 +30,7 @@
 #   DRIVER_MEMORY               (optional, default 4g) driver heap. The pipeline fans
 #                               out into ~1,300 stages and OOMs Spark's 1g default.
 #   MAX_PLAN_STRING_LENGTH      (optional, default 16k) see note below
+#   PARQUET_NANOS_AS_LONG       (optional, default true) see note below
 #   SPARK_EXTRA_CONF            (optional) extra "--conf k=v" flags, space-separated
 #
 # SPARK_DRIVER_HOST: in client mode the driver picks its own advertised address from
@@ -41,6 +42,14 @@
 # driver connects over loopback and runs the whole job. The cluster looks healthy, the
 # job succeeds, and every task lands on one node. Set this to the driver's address on
 # the same network as SPARK_MASTER_URL.
+#
+# nanosAsLong: source Parquet written by pandas/pyarrow carries nanosecond timestamps
+# (INT64 TIMESTAMP(NANOS)), which Spark's Parquet reader rejects outright --
+# "Illegal Parquet type: INT64 (TIMESTAMP(NANOS,true))" -- and it rejects them during
+# schema conversion, so the job dies on the very first read even though it goes on to
+# select nothing but the Turtle blob column. Reading those columns as raw longs costs
+# this pipeline nothing (it never looks at them) and is the difference between a source
+# being readable and not. Set PARQUET_NANOS_AS_LONG=false to restore Spark's default.
 #
 # maxPlanStringLength: Spark renders the physical plan to a STRING for the SQL UI on
 # every execution (SQLExecution.withNewExecutionId -> explainString), and that string
@@ -127,6 +136,7 @@ fi
   --conf spark.rapids.sql.format.parquet.reader.type=MULTITHREADED \
   --conf spark.rapids.sql.explain="${RAPIDS_EXPLAIN:-NONE}" \
   --conf spark.sql.maxPlanStringLength="${MAX_PLAN_STRING_LENGTH:-16k}" \
+  --conf spark.sql.legacy.parquet.nanosAsLong="${PARQUET_NANOS_AS_LONG:-true}" \
   --conf spark.hadoop.fs.s3a.path.style.access="${S3A_PATH_STYLE_ACCESS:-true}" \
   --conf spark.hadoop.fs.s3a.connection.establish.timeout=5000 \
   --conf spark.hadoop.fs.s3a.connection.timeout=10000 \
