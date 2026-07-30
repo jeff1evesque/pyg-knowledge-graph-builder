@@ -96,9 +96,13 @@ _SEG3_FRAC = 0.375  # = 1.0 - 0.25 - 0.375
 #
 # The dims come from class_hierarchy rather than from vector_dim, which would
 # have doubled driver memory. class_hierarchy is the cheapest source: it encodes
-# rdfs:subClassOf chains, and with ontology mapping off -- the case in every
-# build so far -- it is entirely zero. At 0.25 it still has 64 dims for 2 hashes
-# per superclass once mapping is switched on.
+# rdfs:subClassOf chains taken straight from the source triples
+# (_extract_class_hierarchy), and none of the sources declare any -- so it is
+# entirely zero in every build so far. Note this does NOT depend on
+# --enable_ontology_mapping: OntologyMapper emits owl:equivalentClass /
+# owl:equivalentProperty / skos:prefLabel and no rdfs:subClassOf, so enabling it
+# would not populate this segment either. At 0.25 there are still 64 dims for 2
+# hashes per superclass if a source ever does ship a hierarchy.
 _SEG1_CLASS_IDENTITY_FRAC = 0.50
 _SEG1_CLASS_HIERARCHY_FRAC = 0.25
 _SEG1_ONTOLOGY_SOURCE_FRAC = 0.25
