@@ -234,11 +234,21 @@ def test_skip_as_enabled_category_raises_with_its_own_message(spark):
         )
 
 
-def test_default_enabled_categories_are_the_documented_three(spark):
+def test_default_enabled_categories_are_the_documented_set(spark):
+    """Pinned deliberately: the default decides whether a run that configures
+    nothing gets edge features at all.
+
+    "correlation" is in the set because the cross-source linkers make it the
+    dominant relation family on real data (542 of 704 edge types on a
+    two-source build); without it the default produced a graph with no
+    edge_attr anywhere. "generic" stays out -- it is the no-fragment-matched
+    fallback and would featurize nearly every edge type.
+    """
     efe = EdgeFeatureExtractor(spark, {})
     assert efe._enabled_categories == {
-        "temporal", "option_stock", "escalation",
+        "temporal", "option_stock", "escalation", "correlation",
     }
+    assert "generic" not in efe._enabled_categories
 
 
 # ======================================================================
