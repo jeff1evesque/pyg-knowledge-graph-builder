@@ -58,6 +58,10 @@ from spark_jobs.utils.rdf_utils import (
     ONTOLOGY_NAMESPACE_INDICES,
 )
 from spark_jobs.utils.spark_rdf_utils import collect_sorted
+# One resolution of "which class is this node type from", shared with the
+# mapping graph_schema.json publishes. node_mapper does not import this module,
+# so there is no cycle.
+from spark_jobs.pyg_builder.node_mapper import build_type_uri_mapping
 
 logger = logging.getLogger(__name__)
 
@@ -1385,32 +1389,12 @@ class FeatureExtractor:
                         uri_to_pyg[uri] = f"{prefix}_{local}"
                     break
 
-        # Collect per-node-type source URI.
-        # One row per (node_type, type_uri) — typically <1000.
-        type_uri_rows = (
-            triples_df
-            .filter(F.col("predicate") == RDF_TYPE)
-            .select(
-                F.col("subject").alias("_subj"),
-                F.col("object").alias("type_uri"),
-            )
-            .join(
-                node_id_df.select(
-                    F.col("uri").alias("_subj"),
-                    F.col("node_type"),
-                ),
-                "_subj",
-                "inner",
-            )
-            .select("node_type", "type_uri")
-            .distinct()
-        )
-        type_uri_rows = collect_sorted(type_uri_rows)
-
-        type_uri_map: Dict[str, str] = {}
-        for row in type_uri_rows:
-            if row.node_type not in type_uri_map:
-                type_uri_map[row.node_type] = row.type_uri
+        # Collect per-node-type source URI. Shared with the mapping
+        # graph_schema.json publishes: the two files had independent copies of
+        # this resolution and both kept the alphabetically smallest rdf:type,
+        # which is not necessarily the class the node type was named after.
+        # Sharing it also keeps the two artifacts from disagreeing.
+        type_uri_map = build_type_uri_mapping(triples_df, node_id_df)
 
         # Collect class hierarchy — transitive closure.
         # Typically ~5000 rows (500 classes × avg depth ~10).
