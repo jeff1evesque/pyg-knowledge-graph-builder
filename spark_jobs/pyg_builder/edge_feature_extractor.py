@@ -167,8 +167,16 @@ _ESCALATION_RELATION_FRAGMENTS = (
 )
 
 # Relation name fragments that identify correlation edges
+#
+# "Correlation" is a suffix fragment, not a whole relation name: the
+# cross-source linkers emit one relation per sector
+# (bls_enrichment_energySectorCorrelation,
+# bls_enrichment_employmentSizeSectorCorrelation, ...), and matching only
+# the hand-written names below classified all 22 of them "generic" —
+# which no enabled_categories set contains, so every one was silently
+# dropped from featurization.
 _CORRELATION_RELATION_FRAGMENTS = (
-    "correlatesWith", "relatedTo",
+    "correlatesWith", "relatedTo", "Correlation",
 )
 
 # Relation name fragments that identify causal edges
@@ -188,6 +196,21 @@ _SKIP_RELATION_FRAGMENTS = (
     "refersToCompany", "hasRegion", "affectsRegion",
     "sameEventType", "affectsSameRegion",
 )
+
+# Every category _classify_relation can return. "skip" is a verdict, not a
+# selectable category: structural edges are excluded before enabled_categories
+# is consulted, so naming it here would promise something the classifier
+# refuses to honour.
+_FEATURIZABLE_CATEGORIES = frozenset({
+    "temporal", "option_stock", "escalation", "correlation", "causal",
+    "strategy", "generic",
+})
+
+# Default: the three highest-value categories. "generic" is deliberately out —
+# it is the fallback for relations no fragment matched, so enabling it
+# featurizes essentially every edge type in the graph. It is selectable
+# (see _resolve_enabled_categories), just not by default.
+_DEFAULT_ENABLED_CATEGORIES = ("temporal", "option_stock", "escalation")
 
 # Hash seeds for deterministic encoding
 _EDGE_HASH_SEEDS = [0, 7, 13, 31]
@@ -528,6 +551,53 @@ def _classify_relation(relation: str) -> str:
     return "generic"
 
 
+def _resolve_enabled_categories(configured: Any) -> Set[str]:
+    """
+    Validate and normalize edge_feature_config.enabled_categories.
+
+    A name that no category ever matches is not a harmless typo: the
+    extractor logs "Building N-d edge feature vectors", featurizes nothing,
+    and the job exits 0 with a graph whose edge_attr is silently absent.
+    An hour of cluster time later, the only evidence is a zero in
+    graph_schema.json. So reject it at construction instead.
+
+    Args:
+        configured: The configured value, or None to take the default.
+
+    Returns:
+        The resolved category set.
+
+    Raises:
+        ValueError: If a name is not a featurizable category. "skip" is
+            called out separately because it is a real classifier verdict
+            and the confusion is worth a specific message.
+    """
+    if configured is None:
+        return set(_DEFAULT_ENABLED_CATEGORIES)
+
+    requested = set(configured)
+    if "skip" in requested:
+        raise ValueError(
+            "enabled_categories contains 'skip', which is a classification "
+            "verdict rather than a selectable category: structural edges "
+            "(sameAs, hasParent, belongsToSector, ...) are excluded before "
+            "enabled_categories is consulted and cannot be featurized. "
+            f"Remove it. Selectable: {sorted(_FEATURIZABLE_CATEGORIES)}"
+        )
+
+    unknown = requested - _FEATURIZABLE_CATEGORIES
+    if unknown:
+        raise ValueError(
+            f"enabled_categories contains unknown categor"
+            f"{'ies' if len(unknown) > 1 else 'y'} {sorted(unknown)}. "
+            f"No relation ever classifies as such a name, so edge features "
+            f"would be silently empty. "
+            f"Selectable: {sorted(_FEATURIZABLE_CATEGORIES)}"
+        )
+
+    return requested
+
+
 class EdgeFeatureExtractor:
     """
     Builds fixed-width edge feature vectors derived from endpoint node
@@ -581,13 +651,11 @@ class EdgeFeatureExtractor:
             "max_edge_types_per_batch", _MAX_EDGE_TYPES_PER_BATCH
         )
 
-        # Which categories of edge types to featurize.
-        # Default: only the three highest-value categories.
-        self._enabled_categories: Set[str] = set(
-            edge_feat_config.get(
-                "enabled_categories",
-                ["temporal", "option_stock", "escalation"],
-            )
+        # Which categories of edge types to featurize. Validated here so a
+        # name that can never match fails at construction, not after an
+        # hour of cluster time that produced no edge_attr.
+        self._enabled_categories: Set[str] = _resolve_enabled_categories(
+            edge_feat_config.get("enabled_categories")
         )
 
         # Compute layout from edge_vector_dim — all segment boundaries
@@ -770,10 +838,15 @@ class EdgeFeatureExtractor:
         # ============================================
         eligible_types: List[Tuple[Tuple[str, str, str], str]] = []
         skipped = 0
+        # What the graph actually contains, for the diagnostic below. Without
+        # it a zero-eligible run cannot be told apart from a graph that has
+        # no featurizable edges at all.
+        observed: Dict[str, int] = {}
 
         for edge_type_key in edge_indices:
             src_type, relation, dst_type = edge_type_key
             category = _classify_relation(relation)
+            observed[category] = observed.get(category, 0) + 1
 
             if category == "skip":
                 skipped += 1
@@ -791,6 +864,39 @@ class EdgeFeatureExtractor:
         )
 
         if not eligible_types:
+            # Edge features were asked for and none were produced. Every
+            # artifact of this run still looks healthy — exit 0, a valid
+            # .pt, graph_schema.json honestly reporting
+            # edge_types_with_features: 0 — so nothing else in the pipeline
+            # will ever say this out loud.
+            missed = sorted(
+                (cat for cat in observed if cat != "skip"
+                 and cat not in self._enabled_categories),
+                key=lambda cat: -observed[cat],
+            )
+            logger.warning(
+                "  NO EDGE TYPES WERE FEATURIZED, but edge features are "
+                "enabled. Every edge type in this graph will have no "
+                "edge_attr, and the job will still succeed."
+            )
+            logger.warning(
+                f"    enabled categories : {sorted(self._enabled_categories)}"
+            )
+            logger.warning(
+                "    categories present : "
+                + ", ".join(
+                    f"{cat}={observed[cat]}" for cat in sorted(
+                        observed, key=lambda c: -observed[c]
+                    )
+                )
+            )
+            if missed:
+                logger.warning(
+                    f"    add {missed} to edge_feature_config."
+                    f"enabled_categories to featurize the "
+                    f"{sum(observed[c] for c in missed)} edge type(s) that "
+                    f"classified into them"
+                )
             return {}
 
         # ============================================
