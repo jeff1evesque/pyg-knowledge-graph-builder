@@ -405,10 +405,24 @@ Edge types are classified by relation name into categories. Only categories in t
 | **temporal** | `precedes`, `follows`, `hasNext` | **ON** | Month delta, same-year flag, consecutive-month flag, direction |
 | **option_stock** | `hasUnderlyingPriceObservation` | **ON** | Moneyness (strike/stock), log-moneyness, strike-stock difference |
 | **escalation** | `escalatesTo`, `severityChange` | **ON** | Severity delta between alerts |
-| **correlation** | `correlatesWith`, `relatedTo` | OFF | Label Jaccard similarity, same-namespace flag |
+| **correlation** | `correlatesWith`, `relatedTo`, `*Correlation` | OFF | Label Jaccard similarity, same-namespace flag |
 | **causal** | `leadsTo`, `impacts`, `affects` | OFF | Label similarity, cross-source indicator |
 | **strategy** | `straddleWith`, `spreadWith` | OFF | Strike distance, same-expiry flag |
+| **generic** | anything no fragment matched | OFF | Category indicator hash, relational context |
 | **skip** (never featurized) | `belongsToSector`, `owl:sameAs`, `hasParent` | — | Relation name alone is sufficient |
+
+The `*Correlation` fragment matters more than it looks: the cross-source linkers emit one
+relation per sector (`energySectorCorrelation`, `employmentSizeSectorCorrelation`, …), so
+matching only the literal names `correlatesWith` / `relatedTo` classified all of them
+**generic** — which no `enabled_categories` value could select. Every such edge type was
+silently dropped from featurization while the job logged `Building 32-d edge feature
+vectors` and exited 0.
+
+`generic` is the fallback for relations no fragment matched, so enabling it featurizes
+essentially every non-skip edge type in the graph. It is selectable, but off by default.
+A category name that is not in this table now raises at construction rather than producing
+an empty result an hour later, and a run that featurizes **nothing** while edge features
+are enabled logs a `WARNING` naming the categories the graph actually contains.
 
 #### Segment 1: Temporal Signals (37.5% of edge_vector_dim)
 
