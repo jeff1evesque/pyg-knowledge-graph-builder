@@ -58,6 +58,24 @@ SEVERITY_DST = "https://example.org/severityLevel"     # dst-only severity
 # silently drops the category fails a value test, not just e2e.
 CORR_CONFIG = {"edge_feature_config": {"enabled_categories": ["correlation"]}}
 
+# A relation no fragment matches -> "generic". Matches the shape of the real
+# relations the linkers emit (cpi_hasArea, jolts_hasQuitsRate).
+GENERIC = "https://example.org/hasThing"
+GENERIC_REL = "unknown_hasThing"
+
+
+def _generic_edge_rows(year=2020):
+    """One edge of a single generic-category type, with numeric endpoints."""
+    return [
+        ("https://ex/src", RDF_TYPE, CPI_INDEX),
+        ("https://ex/dst", RDF_TYPE, CPI_SERIES),
+        ("https://ex/src", HAS_MONTH, "1"),
+        ("https://ex/src", HAS_YEAR, str(year)),
+        ("https://ex/dst", HAS_MONTH, "2"),
+        ("https://ex/dst", HAS_YEAR, str(year)),
+        ("https://ex/src", GENERIC, "https://ex/dst"),
+    ]
+
 
 def _edge_features(spark, rows, config=None):
     """Run the real edge-feature path; return (features, edge_indices, layout)."""
@@ -107,6 +125,157 @@ def test_classify_relation_skip_takes_precedence():
     # classified skip — skip is checked first so structural edges never get
     # features.
     assert _classify_relation("sameAs_precedes") == "skip"
+
+
+# ======================================================================
+# _classify_relation over the relations a real cluster run produced
+# ======================================================================
+
+# Every relation name below is taken verbatim from feature_spec.json's
+# derivation_methods on the 2026-07-29 cluster run (SEC filings + BLS cpi/jolts,
+# 704 edge types). On that run all 46 of them classified "generic", which is in
+# no enabled_categories set, so not one edge type was featurized — the job still
+# exited 0 and graph_schema.json honestly reported edge_types_with_features: 0.
+# Pinning the real names is what makes this regression visible: the hand-written
+# fragments matched the vocabulary the linkers were *designed* around, not the
+# vocabulary they *emit*.
+@pytest.mark.parametrize("relation,expected", [
+    # The 22 per-sector correlation relations the cross-source linker emits.
+    ("bls_enrichment_employmentSizeSectorCorrelation", "correlation"),
+    ("bls_enrichment_energySectorCorrelation", "correlation"),
+    ("bls_enrichment_geographicRegionsSectorCorrelation", "correlation"),
+    ("bls_enrichment_educationCommunicationSectorCorrelation", "correlation"),
+    ("bls_enrichment_miscellaneousGoodsSectorCorrelation", "correlation"),
+    # Structural, and must stay excluded even though it is a sector relation.
+    ("bls_enrichment_belongsToSector", "skip"),
+    # Genuinely unclassified: featurizable only by opting "generic" in.
+    ("bls_enrichment_goodsServicesRelation", "generic"),
+    ("cpi_hasArea", "generic"),
+    ("cpi_measuresInflationFor", "generic"),
+    ("jolts_hasQuitsRate", "generic"),
+    ("jolts_hasSeparationsLevel", "generic"),
+])
+def test_classify_relation_on_real_cluster_relations(relation, expected):
+    assert _classify_relation(relation) == expected
+
+
+def test_correlation_fragment_matches_case_insensitively():
+    """The suffix is 'Correlation' but matching must not depend on case.
+
+    The linkers camel-case it (energySectorCorrelation); a hand-written config
+    or a future linker may not.
+    """
+    for relation in ("x_sectorcorrelation", "x_SECTORCORRELATION",
+                     "x_SectorCorrelation"):
+        assert _classify_relation(relation) == "correlation"
+
+
+# ======================================================================
+# enabled_categories validation
+# ======================================================================
+
+def test_generic_is_selectable_but_not_default(spark):
+    """'generic' is a real classifier verdict, so config must be able to ask
+    for it.
+
+    Before #issue-6 it was unreachable: _classify_relation returned it, but no
+    enabled_categories value could select it, so every relation the fragments
+    missed was silently unfeaturizable. Asserted as a behavioural pair — the
+    same rows, features only when the category is switched on.
+    """
+    rows = _generic_edge_rows()
+    key = ("cpi_Index", GENERIC_REL, "cpi_Series")
+
+    default_feats, _ei, _L = _edge_features(spark, rows)
+    assert key not in default_feats, (
+        "a generic relation must not be featurized by default"
+    )
+
+    opted_in, _ei2, layout = _edge_features(
+        spark, rows,
+        config={"edge_feature_config": {"enabled_categories": ["generic"]}},
+    )
+    assert key in opted_in, (
+        "enabled_categories=['generic'] must featurize generic edge types"
+    )
+    assert opted_in[key].shape == (1, layout.edge_vector_dim)
+
+
+@pytest.mark.parametrize("categories,expected_fragment", [
+    (["temporal", "corelation"], "corelation"),      # typo
+    (["Temporal"], "Temporal"),                      # wrong case
+    (["structural"], "structural"),                  # never a verdict
+])
+def test_unknown_enabled_category_raises(spark, categories, expected_fragment):
+    """A name nothing classifies as must fail at construction.
+
+    Left to run, it logs "Building 32-d edge feature vectors", featurizes
+    nothing, and exits 0 — an hour of cluster time whose only trace is a zero
+    in graph_schema.json.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        EdgeFeatureExtractor(
+            spark,
+            {"edge_feature_config": {"enabled_categories": categories}},
+        )
+    assert expected_fragment in str(excinfo.value)
+    # The message must say what IS selectable, not merely what is not.
+    assert "temporal" in str(excinfo.value)
+
+
+def test_skip_as_enabled_category_raises_with_its_own_message(spark):
+    """'skip' is a verdict, not a category — structural edges are excluded
+    before enabled_categories is consulted, so accepting it would promise
+    features that can never appear."""
+    with pytest.raises(ValueError, match="verdict"):
+        EdgeFeatureExtractor(
+            spark,
+            {"edge_feature_config": {"enabled_categories": ["skip"]}},
+        )
+
+
+def test_default_enabled_categories_are_the_documented_three(spark):
+    efe = EdgeFeatureExtractor(spark, {})
+    assert efe._enabled_categories == {
+        "temporal", "option_stock", "escalation",
+    }
+
+
+# ======================================================================
+# The silent-empty diagnostic
+# ======================================================================
+
+def test_zero_featurized_edge_types_warns_loudly(spark, caplog):
+    """Edge features enabled + nothing featurized must WARN, not stay silent.
+
+    This is the shape of the 2026-07-29 run: enabled, 704 edge types, zero
+    featurized, exit 0. Nothing else in the pipeline reports it — the .pt is
+    valid and graph_schema.json's edge_types_with_features: 0 is accurate — so
+    this log line is the only signal the run was not what was asked for.
+    """
+    import logging
+
+    logger_name = "spark_jobs.pyg_builder.edge_feature_extractor"
+    with caplog.at_level(logging.WARNING, logger=logger_name):
+        feats, _ei, _L = _edge_features(spark, _generic_edge_rows())
+
+    assert feats == {}
+    assert "NO EDGE TYPES WERE FEATURIZED" in caplog.text
+    # Actionable: which categories the graph actually holds, and the fix.
+    assert "generic=1" in caplog.text
+    assert "enabled_categories" in caplog.text
+
+
+def test_featurized_run_does_not_warn(spark, caplog):
+    """The converse guard: the warning must not cry wolf on a healthy run."""
+    import logging
+
+    logger_name = "spark_jobs.pyg_builder.edge_feature_extractor"
+    with caplog.at_level(logging.WARNING, logger=logger_name):
+        feats, _ei, _L = _edge_features(spark, _temporal_rows(1, 2))
+
+    assert feats, "temporal edges are featurized by default"
+    assert "NO EDGE TYPES WERE FEATURIZED" not in caplog.text
 
 
 # ======================================================================
