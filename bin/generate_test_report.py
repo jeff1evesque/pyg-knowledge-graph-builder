@@ -98,7 +98,51 @@ def _parse_suite(path: str) -> dict:
     }
 
 
-def build_report(specs: list[tuple[str, str, str]]) -> dict:
+def _encoding_capacity(artifact_dir: str) -> list[dict]:
+    """class_identity capacity from every slot_mapping.json a run produced.
+
+    Tracked in the report rather than only asserted in a test because it
+    DEGRADES rather than breaks: the class count grows with every source
+    added while the segment width does not, and past the segment width class
+    identity stops being linearly recoverable although every code stays
+    distinct. A number that drifts toward a cliff needs to be visible on each
+    run, not discovered by a test failing after the cliff.
+    """
+    rows = []
+    for path in sorted(Path(artifact_dir).rglob("slot_mapping.json")):
+        try:
+            ci = json.loads(path.read_text())["collision_report"][
+                "class_identity"
+            ]
+        except (json.JSONDecodeError, KeyError, OSError):
+            continue
+        total = ci.get("total_classes")
+        dim = ci.get("segment_dim")
+        if not dim:
+            continue   # slot mapping < 1.1 cannot report capacity
+        rows.append({
+            # The fixture set is the run's identity here; basetemp names it
+            # (e.g. test_full_turtle_parquet0).
+            "build": next(
+                (p.name for p in path.parents if p.name.startswith("test_")),
+                path.parent.name,
+            ),
+            "total_classes": total,
+            "segment_dim": dim,
+            "headroom_classes": ci.get("headroom_classes"),
+            "used_pct": round(100.0 * total / dim, 1) if total else 0.0,
+            "distinct_codes": ci.get("distinct_codes"),
+            "classes_sharing_a_code": len(
+                ci.get("classes_sharing_a_code") or []
+            ),
+            "linearly_separable": ci.get("linearly_separable"),
+        })
+    return rows
+
+
+def build_report(
+    specs: list[tuple[str, str, str]], artifact_dir: str = "",
+) -> dict:
     suites = []
     for label, mode, path in specs:
         s = _parse_suite(path)
@@ -120,6 +164,9 @@ def build_report(specs: list[tuple[str, str, str]]) -> dict:
         "has_gpu_suite": has_gpu,
         "totals": totals,
         "suites": suites,
+        "encoding_capacity": (
+            _encoding_capacity(artifact_dir) if artifact_dir else []
+        ),
     }
 
 
@@ -167,6 +214,36 @@ def render_html(rep: dict) -> str:
         <p class="hint">{'All ' + str(s['total']) + ' tests' if show_all else 'Top 10 by duration (of ' + str(s['total']) + ')'}:</p>
         <ul class="tests">{items}</ul>
       </details>""")
+
+    # Encoding capacity — a number that drifts toward a cliff, so it belongs on
+    # every report rather than only in a test that fails after the cliff.
+    capacity_section = ""
+    if rep.get("encoding_capacity"):
+        cap_rows = []
+        for c in rep["encoding_capacity"]:
+            ok = c["linearly_separable"] and not c["classes_sharing_a_code"]
+            cap_rows.append(f"""
+      <tr class="suite {'ok' if ok else 'bad'}">
+        <td class="s-name">{html.escape(str(c['build']))}</td>
+        <td class="num">{c['total_classes']}</td>
+        <td class="num">{c['segment_dim']}</td>
+        <td class="num">{c['used_pct']}%</td>
+        <td class="num">{c['headroom_classes']}</td>
+        <td class="num {'pass' if ok else 'fail'}">
+          {'separable' if ok else 'NOT separable'}</td>
+      </tr>""")
+        capacity_section = f"""
+  <h2>Encoding capacity &mdash; class_identity</h2>
+  <div class="card"><table>
+    <thead><tr><th>Build</th><th class="num">Classes</th>
+      <th class="num">Segment dims</th><th class="num">Used</th>
+      <th class="num">Headroom</th><th class="num">Verdict</th></tr></thead>
+    <tbody>{''.join(cap_rows)}</tbody>
+  </table></div>
+  <p class="hint">A d-dimensional segment separates at most d classes. The class
+    count grows with every source added while the segment width does not, so
+    headroom shrinking toward zero is the signal to re-tune
+    <code>_SEG1_CLASS_IDENTITY_FRAC</code> or <code>vector_dim</code>.</p>"""
 
     envline = (
         f"branch <code>{html.escape(env['branch'])}</code> @ "
@@ -262,6 +339,8 @@ def render_html(rep: dict) -> str:
     <tbody>{''.join(rows)}</tbody>
   </table></div>
 
+  {capacity_section}
+
   <h2>Per-suite detail</h2>
   {''.join(detail)}
 
@@ -277,10 +356,16 @@ def main() -> None:
         sys.exit(__doc__)
     out_dir = Path(sys.argv[1])
     specs = []
+    artifact_dir = ""
     for arg in sys.argv[2:]:
+        # Optional, and kept out of the spec grammar so callers that do not
+        # retain e2e artifacts are unaffected.
+        if arg.startswith("--artifacts="):
+            artifact_dir = arg.split("=", 1)[1]
+            continue
         label, mode, path = arg.split("=", 2)
         specs.append((label, mode, path))
-    rep = build_report(specs)
+    rep = build_report(specs, artifact_dir=artifact_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "report.json").write_text(json.dumps(rep, indent=2) + "\n")
     (out_dir / "report.html").write_text(render_html(rep))

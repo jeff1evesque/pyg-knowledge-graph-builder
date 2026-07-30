@@ -85,8 +85,26 @@ _SEG2_FRAC = 0.375
 _SEG3_FRAC = 0.375  # = 1.0 - 0.25 - 0.375
 
 # Sub-segment fractions within each segment
-_SEG1_CLASS_IDENTITY_FRAC = 0.25
-_SEG1_CLASS_HIERARCHY_FRAC = 0.50
+#
+# class_identity holds a multi-hot code per class, and a d-dim segment holds at
+# most d linearly independent codes -- so this fraction, not the property count,
+# is what bounds how many ontology CLASSES the encoding can represent. At the
+# previous 0.25 it was 64 dims of a 1024-d vector: enough for the 44 classes of
+# a two-source run, but not for the 118 of a full sec+noaa+market+BLS build,
+# where identity stopped being recoverable while every code stayed distinct (so
+# nothing looked wrong).
+#
+# The dims come from class_hierarchy rather than from vector_dim, which would
+# have doubled driver memory. class_hierarchy is the cheapest source: it encodes
+# rdfs:subClassOf chains taken straight from the source triples
+# (_extract_class_hierarchy), and none of the sources declare any -- so it is
+# entirely zero in every build so far. Note this does NOT depend on
+# --enable_ontology_mapping: OntologyMapper emits owl:equivalentClass /
+# owl:equivalentProperty / skos:prefLabel and no rdfs:subClassOf, so enabling it
+# would not populate this segment either. At 0.25 there are still 64 dims for 2
+# hashes per superclass if a source ever does ship a hierarchy.
+_SEG1_CLASS_IDENTITY_FRAC = 0.50
+_SEG1_CLASS_HIERARCHY_FRAC = 0.25
 _SEG1_ONTOLOGY_SOURCE_FRAC = 0.25
 
 _SEG2_PROPERTY_PRESENCE_FRAC = 0.50
@@ -1642,10 +1660,18 @@ class FeatureExtractor:
         collision_report = _compute_collision_report(
             numeric_slots, categorical_slots, class_slots,
             namespace_slots, hierarchy_slots,
+            class_identity_dim=layout.seg1_class_identity_dim,
         )
+        _warn_if_class_identity_is_saturated(collision_report)
 
         self._collected_slot_mapping = {
-            "version": "1.0",
+            # 1.1: class_identity in collision_report reports code
+            # separability (distinct_codes, linearly_separable, headroom)
+            # instead of slot occupancy. The 1.0 keys `collisions` /
+            # `collision_rate` counted multi-hot slot reuse, which pigeonhole
+            # forces high on a healthy code -- they are now `slot_reuse` /
+            # `slot_reuse_rate` so the number cannot be read as lost identity.
+            "version": "1.1",
             "numeric_properties": numeric_slots,
             "categorical_properties": categorical_slots,
             "classes": class_slots,
@@ -2117,18 +2143,75 @@ def _hash_approx(value: str, seed: int) -> int:
     return int(h[:8], 16)
 
 
+def _warn_if_class_identity_is_saturated(report: Dict[str, Any]) -> None:
+    """
+    Warn when the class_identity segment can no longer carry class identity.
+
+    Two distinct failures, both silent: the graph builds, the vectors are the
+    declared width, and every metadata file is internally consistent.
+
+      * two classes share an identical code -- indistinguishable to any
+        downstream model, whatever the segment width;
+      * more classes than the segment has dimensions -- a d-dim segment holds
+        at most d linearly independent codes, so beyond that a readout layer
+        cannot recover class identity even though the codes stay distinct.
+        Empirically the codes remain unique well past that point (4-hot into
+        64 slots gives C(64,4) patterns), so distinctness alone will not warn
+        anyone.
+
+    Headroom is worth a nudge before it becomes a wall, because the class
+    count grows with every source added and the segment does not.
+    """
+    ci = report.get("class_identity")
+    if not ci:
+        return
+
+    shared = ci.get("classes_sharing_a_code") or []
+    if shared:
+        logger.warning(
+            f"  {len(shared)} group(s) of classes share an identical "
+            f"class_identity code and are indistinguishable downstream: "
+            f"{shared[:3]}"
+        )
+
+    total, dim = ci.get("total_classes", 0), ci.get("segment_dim", 0)
+    if not dim:
+        return
+    if total > dim:
+        logger.warning(
+            f"  class_identity segment is over-subscribed: {total} classes "
+            f"into {dim} dims. At most {dim} codes can be linearly "
+            f"independent, so class identity is no longer fully recoverable. "
+            f"Raise feature_config.vector_dim, or reduce the class count."
+        )
+    elif total > 0.85 * dim:
+        logger.warning(
+            f"  class_identity segment is near capacity: {total} classes in "
+            f"{dim} dims ({dim - total} left). Adding a source will "
+            f"over-subscribe it."
+        )
+
+
 def _compute_collision_report(
     numeric_slots: List[Dict],
     categorical_slots: List[Dict],
     class_slots: List[Dict],
     namespace_slots: List[Dict],
     hierarchy_slots: List[Dict],
+    class_identity_dim: int = 0,
 ) -> Dict[str, Any]:
     """
     Compute hash collision statistics across all slot assignments.
 
     Returns a report with collision counts and rates per sub-segment.
+
+    Args:
+        class_identity_dim: Width of the class_identity sub-segment. Needed
+            because class identity is a multi-hot code whose health depends
+            on the segment width, not on slot occupancy alone -- see the
+            class_identity branch below.
     """
+    dim = class_identity_dim
     report: Dict[str, Any] = {}
 
     if numeric_slots:
@@ -2151,13 +2234,62 @@ def _compute_collision_report(
             all_dims.extend(s["global_dims"])
         unique_dims = len(set(all_dims))
         total = len(all_dims)
-        collisions = total - unique_dims
+
+        # Class identity is a MULTI-HOT code: each class occupies
+        # num_hashes slots, and what identifies it is the set of slots, not
+        # any single one. So slot reuse is not identity loss -- 44 classes x
+        # 4 hashes into 64 slots reuses ~67% of slot entries while still
+        # giving all 44 classes distinct codes, full rank, and a condition
+        # number near 12. Reported as `collisions` / `collision_rate` (slot
+        # mapping 1.0) that number read as "two thirds of class identity is
+        # aliased", which is false and alarming: with total > dim, pigeonhole
+        # forces a high value no matter how healthy the code is.
+        #
+        # What actually costs identity is measured instead:
+        #   - two classes sharing an identical code (genuinely
+        #     indistinguishable), and
+        #   - the class count outgrowing the segment, past which no set of
+        #     codes can be linearly separable, so a readout layer cannot
+        #     recover class identity however distinct the codes look.
+        codes = [tuple(sorted(set(s["global_dims"]))) for s in class_slots]
+        by_code: Dict[Tuple[int, ...], List[str]] = {}
+        for slot, code in zip(class_slots, codes):
+            by_code.setdefault(code, []).append(
+                slot.get("pyg_name") or slot.get("class_uri", "?")
+            )
+        shared = sorted(
+            (sorted(names) for names in by_code.values() if len(names) > 1),
+            key=lambda names: names[0],
+        )
+        max_overlap = 0
+        for i in range(len(codes)):
+            for j in range(i + 1, len(codes)):
+                overlap = len(set(codes[i]) & set(codes[j]))
+                if overlap > max_overlap:
+                    max_overlap = overlap
+
+        num_classes = len(class_slots)
         report["class_identity"] = {
+            "total_classes": num_classes,
+            "segment_dim": dim,
+            # Raw occupancy, kept because it is a fact about the slots --
+            # but named so it is not mistaken for lost identity.
             "total_hash_entries": total,
             "unique_slots": unique_dims,
-            "collisions": collisions,
-            "collision_rate": (
-                round(collisions / total, 4) if total > 0 else 0.0
+            "slot_reuse": total - unique_dims,
+            "slot_reuse_rate": (
+                round((total - unique_dims) / total, 4) if total > 0 else 0.0
+            ),
+            # Identity, which is what a reader actually needs.
+            "distinct_codes": len(by_code),
+            "classes_sharing_a_code": shared,
+            "max_pairwise_slot_overlap": max_overlap,
+            # Capacity. A d-dim segment holds at most d linearly independent
+            # codes, so this is a hard ceiling, not a heuristic.
+            "capacity_classes": dim,
+            "headroom_classes": (dim - num_classes) if dim else None,
+            "linearly_separable": (
+                bool(dim) and num_classes <= dim and not shared
             ),
         }
 

@@ -206,11 +206,18 @@ _FEATURIZABLE_CATEGORIES = frozenset({
     "strategy", "generic",
 })
 
-# Default: the three highest-value categories. "generic" is deliberately out —
-# it is the fallback for relations no fragment matched, so enabling it
-# featurizes essentially every edge type in the graph. It is selectable
-# (see _resolve_enabled_categories), just not by default.
-_DEFAULT_ENABLED_CATEGORIES = ("temporal", "option_stock", "escalation")
+# Default categories. "generic" is deliberately out — it is the fallback for
+# relations no fragment matched, so enabling it featurizes essentially every
+# edge type in the graph. It is selectable (see _resolve_enabled_categories),
+# just not by default.
+#
+# "correlation" is IN, despite being off historically: the cross-source linkers
+# make correlation the dominant relation family on real data (22 of 46 relations
+# and 542 of 704 edge types on a two-source build), so leaving it out meant the
+# default config produced a graph with no edge features at all.
+_DEFAULT_ENABLED_CATEGORIES = (
+    "temporal", "option_stock", "escalation", "correlation",
+)
 
 # Hash seeds for deterministic encoding
 _EDGE_HASH_SEEDS = [0, 7, 13, 31]
