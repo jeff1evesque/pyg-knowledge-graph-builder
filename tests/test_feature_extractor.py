@@ -18,6 +18,8 @@ the shared local SparkSession and assert the encoded rows at the value level:
 Vector width is pinned to 128 for speed; every assertion derives its slots from
 VectorLayout(128), so nothing depends on the production 1024 default.
 """
+import itertools
+
 import numpy as np
 import pytest
 import torch
@@ -28,6 +30,8 @@ from spark_jobs.pyg_builder.feature_extractor import (
     FeatureExtractor,
     VectorLayout,
     _HASH_SEEDS,
+    _compute_collision_report,
+    _warn_if_class_identity_is_saturated,
 )
 
 CPI_INDEX = "https://www.bls.gov/cpi/Index"        # -> cpi_Index
@@ -351,3 +355,212 @@ def test_categorical_encoding_is_deterministic_across_runs(spark):
     assert np.array_equal(first, again), (
         "categorical encoding is order-dependent (jolts_* regression)"
     )
+
+
+# ======================================================================
+# class_identity capacity — the collision_report metric and its guard
+# ======================================================================
+#
+# The 2026-07-29 cluster run reported collision_rate 0.6705 on class_identity
+# (176 hash entries, 58 unique slots, 64 dims) and that number was read as
+# "two thirds of class identity is aliased". It is not: class identity is a
+# multi-hot code, and on that very build all 44 classes had distinct codes, the
+# 44x64 code matrix was full rank, and its condition number was ~12. With
+# entries > dims, pigeonhole forces a high slot-reuse rate on a perfectly
+# healthy code, so the metric could not distinguish healthy from broken.
+#
+# These tests pin the metric that can: identical codes, and the class count
+# against the segment width.
+
+# A REQUIREMENT, not an implementation fact: the number of ontology classes the
+# encoding must be able to keep separable. Measured from a full
+# sec+noaa+market+BLS build (the turtle_parquet e2e fixtures). Raise it when the
+# source set grows; the layout then has to be re-tuned to meet it, which is the
+# point -- the test states the need and lets the composition of the vector
+# change underneath it.
+SUPPORTED_CLASS_COUNT = 118
+
+
+def _distinct_codes(n, dim, k=4):
+    """The first n distinct k-hot codes over `dim` slots, in lexical order.
+
+    Enumerated with itertools.combinations rather than constructed by hand:
+    distinctness is then guaranteed by the enumeration itself, so a failure in
+    a test using this fixture always means "capacity", never "the fixture
+    happened to collide". (An earlier hand-rolled spread did collide, at
+    exactly n = dim/2.)
+    """
+    k = max(1, min(k, dim))
+    codes = list(itertools.islice(itertools.combinations(range(dim), k), n))
+    assert len(codes) == n, (
+        f"cannot draw {n} distinct {k}-hot codes from {dim} slots"
+    )
+    return codes
+
+
+def _class_slots(codes, start=0):
+    """Build class_slots entries with the given per-class slot lists."""
+    return [
+        {
+            "class_uri": f"https://ex/C{i}",
+            "pyg_name": f"C{i}",
+            "hash_slots": list(slots),
+            "global_dims": [s + start for s in slots],
+        }
+        for i, slots in enumerate(codes)
+    ]
+
+
+def _class_report(codes, dim, start=0):
+    report = _compute_collision_report(
+        [], [], _class_slots(codes, start), [], [], class_identity_dim=dim,
+    )
+    return report["class_identity"]
+
+
+def test_class_identity_reports_separability_not_slot_reuse():
+    """Heavy slot reuse with distinct codes is healthy, and must read as such.
+
+    Four classes, 4 hashes each, into 6 dims: 16 entries over 6 slots is 62%
+    slot reuse -- the shape that produced the 0.67 figure -- yet every code is
+    distinct and 4 <= 6, so identity is fully recoverable.
+    """
+    ci = _class_report(
+        [(0, 1, 2, 3), (1, 2, 3, 4), (2, 3, 4, 5), (0, 2, 4, 5)], dim=6,
+    )
+    assert ci["distinct_codes"] == 4
+    assert ci["classes_sharing_a_code"] == []
+    assert ci["linearly_separable"] is True
+    assert ci["headroom_classes"] == 2
+    # Slot reuse is still reported -- it is a fact -- but under a name that
+    # cannot be mistaken for lost identity.
+    assert ci["slot_reuse_rate"] > 0.5
+    assert "collision_rate" not in ci, (
+        "the misleading 1.0 key must be gone, not merely supplemented"
+    )
+
+
+def test_class_identity_flags_classes_sharing_a_code():
+    """Two classes hashing to the same slot set ARE indistinguishable."""
+    ci = _class_report([(0, 1), (0, 1), (2, 3)], dim=8)
+    assert ci["distinct_codes"] == 2
+    assert ci["classes_sharing_a_code"] == [["C0", "C1"]]
+    assert ci["linearly_separable"] is False, (
+        "an identical code pair is not separable at any segment width"
+    )
+
+
+def test_class_identity_flags_more_classes_than_dimensions():
+    """Past d classes in d dims no code set can be linearly independent.
+
+    Distinctness does not catch this -- these 10 codes are all distinct -- so
+    the capacity check is the only thing standing between a saturated segment
+    and a silently unrecoverable feature.
+    """
+    codes = [(i % 4, (i + 1) % 4) for i in range(10)]
+    codes = [(a, b, 4 + i) for i, (a, b) in enumerate(codes)]  # keep distinct
+    ci = _class_report(codes, dim=4)
+    assert ci["distinct_codes"] == len(codes)
+    assert ci["total_classes"] == 10
+    assert ci["capacity_classes"] == 4
+    assert ci["headroom_classes"] == -6
+    assert ci["linearly_separable"] is False
+
+
+def test_class_identity_max_pairwise_overlap_is_reported():
+    ci = _class_report([(0, 1, 2), (1, 2, 3), (7, 8, 9)], dim=16)
+    assert ci["max_pairwise_slot_overlap"] == 2
+
+
+@pytest.mark.parametrize("num_classes,dim,expect", [
+    (44, 64, None),                       # the real build: quiet
+    (56, 64, "near capacity"),            # 87.5% full
+    (70, 64, "over-subscribed"),          # past the ceiling
+])
+def test_saturation_warning_fires_only_when_identity_is_at_risk(
+    caplog, num_classes, dim, expect,
+):
+    import logging
+
+    codes = [(i % dim, (i * 7 + 1) % dim, (i * 13 + 2) % dim, (i * 29 + 3) % dim)
+             for i in range(num_classes)]
+    report = {"class_identity": {
+        "total_classes": num_classes,
+        "segment_dim": dim,
+        "classes_sharing_a_code": [],
+    }}
+    logger_name = "spark_jobs.pyg_builder.feature_extractor"
+    with caplog.at_level(logging.WARNING, logger=logger_name):
+        _warn_if_class_identity_is_saturated(report)
+
+    if expect is None:
+        assert "class_identity" not in caplog.text, (
+            f"{num_classes} classes in {dim} dims is healthy and must not warn"
+        )
+    else:
+        assert expect in caplog.text
+
+
+def test_saturation_warning_names_the_shared_code_groups(caplog):
+    import logging
+
+    report = {"class_identity": {
+        "total_classes": 4,
+        "segment_dim": 64,
+        "classes_sharing_a_code": [["cpi_Area", "cpi_Region"]],
+    }}
+    with caplog.at_level(
+        logging.WARNING, logger="spark_jobs.pyg_builder.feature_extractor"
+    ):
+        _warn_if_class_identity_is_saturated(report)
+    assert "indistinguishable" in caplog.text
+    assert "cpi_Area" in caplog.text
+
+
+def test_class_identity_capacity_holds_for_the_real_class_count(spark):
+    """The end-to-end budget check, on the real default layout.
+
+    A 1024-d vector gives class_identity 64 dims. The 2026-07-29 build had 44
+    classes -- inside capacity, but at 69% of it. This is the test that fails
+    when a future source pushes the class count past the segment, which is the
+    point at which the feature silently stops working.
+    """
+    layout = VectorLayout(1024)
+    ci_dim = layout.seg1_class_identity_dim
+    assert ci_dim >= SUPPORTED_CLASS_COUNT, (
+        f"class_identity has {ci_dim} dims at the production default "
+        f"vector_dim, which cannot separate the {SUPPORTED_CLASS_COUNT} "
+        f"classes a full-source build produces. Raise "
+        f"_SEG1_CLASS_IDENTITY_FRAC or vector_dim -- whichever segment the "
+        f"dims come from, this is the requirement the layout has to meet."
+    )
+
+
+@pytest.mark.parametrize("vector_dim", [256, 512, 1024, 2048])
+def test_separability_flips_exactly_at_the_segment_width(vector_dim):
+    """The capacity rule, asserted against whatever the layout happens to be.
+
+    Deliberately derives every number from VectorLayout rather than pinning a
+    width: the segment fractions are a tuning decision and the composition of
+    the feature vector is expected to change. What must not change is the rule
+    -- a d-dim segment separates at most d classes -- so that is what is
+    tested, at four widths, with no hardcoded dims anywhere.
+    """
+    ci_dim = VectorLayout(vector_dim).seg1_class_identity_dim
+
+    for num_classes, separable in (
+        (max(1, ci_dim // 2), True),   # comfortably inside
+        (ci_dim, True),                # exactly at capacity
+        (ci_dim + 1, False),           # one past it
+    ):
+        ci = _class_report(_distinct_codes(num_classes, ci_dim), dim=ci_dim)
+        assert ci["distinct_codes"] == num_classes, (
+            "test fixture must supply distinct codes so the assertion below "
+            "isolates capacity from code collisions"
+        )
+        assert ci["linearly_separable"] is separable, (
+            f"vector_dim={vector_dim} -> class_identity={ci_dim} dims: "
+            f"{num_classes} classes should be "
+            f"{'separable' if separable else 'NOT separable'}"
+        )
+        assert ci["headroom_classes"] == ci_dim - num_classes
