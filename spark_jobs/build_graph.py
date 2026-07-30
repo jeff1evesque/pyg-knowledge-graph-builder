@@ -33,7 +33,7 @@ Launch with spark-submit (see bin/submit_spark_job.sh). Parameters:
     --s3_archive_bucket:       optional S3 bucket to mirror final artifacts
     --s3_pyg_key:              optional S3 key for the .pt (metadata prefix
                                is derived from it)
-    --enable_ontology_mapping: true | false (default: false)
+    --enable_ontology_mapping: true | false (default: true)
     --time_period:             label (e.g. "2024-12") for output naming
     --pyg_config:              optional JSON string with PyG config
     --parquet_partitions:      number of Parquet output partitions (default 200)
@@ -223,7 +223,7 @@ class JobConfig:
 
         # Optional
         self.enable_ontology_mapping = (
-            args.get("enable_ontology_mapping", "false").lower() == "true"
+            args.get("enable_ontology_mapping", "true").lower() == "true"
         )
         self.time_period = args.get("time_period") or datetime.now().strftime(
             "%Y-%m"
@@ -356,7 +356,7 @@ def parse_args() -> JobConfig:
         "from it); defaults to pyg/year=YYYY/month=MM/<pyg_filename>",
     )
     parser.add_argument("--pyg_filename", default=DEFAULT_PYG_FILENAME)
-    parser.add_argument("--enable_ontology_mapping", default="false")
+    parser.add_argument("--enable_ontology_mapping", default="true")
     parser.add_argument("--time_period", default="")
     parser.add_argument("--pyg_config", default="")
     parser.add_argument(
@@ -1034,7 +1034,7 @@ def save_pyg_local(hetero_data, local_path: str, spark: SparkSession = None) -> 
 def run_enrichment(
     spark: SparkSession,
     triples_df: DataFrame,
-    enable_ontology_mapping: bool = False,
+    enable_ontology_mapping: bool = True,
     market_sector_definitions_bucket: str = "",
     market_sector_definitions_key: str = "",
 ) -> tuple:
