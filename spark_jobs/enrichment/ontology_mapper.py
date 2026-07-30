@@ -206,17 +206,22 @@ class OntologyMapper:
 
         new_dfs: List[DataFrame] = []
 
-        logger.info("[Step 1/3] Creating property equivalences...")
+        logger.info("[Step 1/4] Creating property equivalences...")
         df = self._create_property_equivalences()
         if df is not None:
             new_dfs.append(df)
 
-        logger.info("[Step 2/3] Creating class equivalences...")
+        logger.info("[Step 2/4] Creating class equivalences...")
         df = self._create_class_equivalences()
         if df is not None:
             new_dfs.append(df)
 
-        logger.info("[Step 3/3] Normalizing labels (skos:prefLabel)...")
+        logger.info("[Step 3/4] Folding predicates to their unified form...")
+        df = self._fold_predicates_to_unified(triples_df)
+        if df is not None:
+            new_dfs.append(df)
+
+        logger.info("[Step 4/4] Normalizing labels (skos:prefLabel)...")
         df = self._normalize_labels(triples_df)
         if df is not None:
             new_dfs.append(df)
@@ -298,7 +303,71 @@ class OntologyMapper:
         return df
 
     # ================================================================
-    # Step 3: Label Normalization
+    # Step 3: Predicate Folding
+    # ================================================================
+
+    def _fold_predicates_to_unified(
+        self,
+        triples_df: DataFrame,
+    ) -> Optional[DataFrame]:
+        """
+        Restate triples whose predicate has a unified form under that form.
+
+        This is the step that makes the equivalences mean something. Emitting
+        ``cpi:hasMonth owl:equivalentProperty unified:hasMonth`` declares a
+        relationship but changes nothing downstream: nothing in this project
+        reasons over OWL, and the feature encoder hashes the predicate URI it
+        is given, so cpi:hasMonth and jolts:hasMonth landed in two unrelated
+        slots however many equivalence triples were present. Ten source month
+        predicates meant ten slots for one concept, and a model could not see
+        that two sources were talking about the same thing.
+
+        Restating the triple under the unified predicate gives that concept ONE
+        slot shared across sources. Measured on the e2e fixtures, 22% of
+        triples carry a foldable predicate, and four different month predicates
+        (cpi/jolts/eci/empsit, 200 triples each) collapse onto unified:hasMonth.
+
+        ADDITIVE, not a rewrite. The source predicate stays, for two reasons:
+        every other enrichment phase only adds triples, and per-source
+        predicates are a deliberate design decision (see the canonical-type
+        note in the README) -- sources agree on what a year *is* without being
+        forced to share measurement semantics. So a folded fact is available
+        both ways: cpi:hasMonth for source-specific signal, unified:hasMonth
+        for the cross-source view.
+
+        Unlike the two equivalence steps, this one is data-driven: only
+        predicates actually present produce output, so loading one source does
+        not emit anything for vocabularies that are absent.
+        """
+        if not PROPERTY_MAPPINGS:
+            return None
+
+        mapping_df = self.spark.createDataFrame(
+            list(PROPERTY_MAPPINGS.items()),
+            ["predicate", "unified_predicate"],
+        )
+
+        # Broadcast: 46 rows against the full triple set.
+        folded = (
+            triples_df
+            .join(F.broadcast(mapping_df), "predicate", "inner")
+            .select(
+                F.col("subject"),
+                F.col("unified_predicate").alias("predicate"),
+                F.col("object"),
+            )
+            .distinct()
+        )
+
+        if folded.head(1) == []:
+            logger.info("  No foldable predicates present")
+            return None
+
+        logger.info("  Predicate folding complete")
+        return folded
+
+    # ================================================================
+    # Step 4: Label Normalization
     # ================================================================
 
     def _normalize_labels(self, triples_df: DataFrame) -> Optional[DataFrame]:
