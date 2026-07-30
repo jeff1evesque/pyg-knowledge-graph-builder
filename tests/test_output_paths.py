@@ -105,3 +105,29 @@ def test_non_monthly_period_still_yields_usable_paths():
     c = _config(time_period="latest")
     assert c.enriched_parquet_path == "/work/enriched/latest/triples"
     assert c.pyg_output_path == "/work/pyg/latest/hetero_data.pt"
+
+
+# ======================================================================
+# JobConfig — ontology mapping default
+# ======================================================================
+
+def test_ontology_mapping_is_on_by_default():
+    """PHASE 4 runs unless explicitly disabled.
+
+    It defaulted to false and nothing passed the flag, so ontology mapping had
+    never executed on any data. That left predicate folding -- the step that
+    gives one concept one feature slot across sources instead of one per
+    scraper vocabulary -- doing nothing. Pinned as a default rather than left
+    to the caller, because a phase nobody opts into is a phase that never runs.
+    """
+    assert _config().enable_ontology_mapping is True
+
+
+def test_ontology_mapping_can_still_be_disabled():
+    assert _config(enable_ontology_mapping="false").enable_ontology_mapping is (
+        False
+    )
+    # Parsed case-insensitively, like the other boolean flags.
+    assert _config(enable_ontology_mapping="FALSE").enable_ontology_mapping is (
+        False
+    )
