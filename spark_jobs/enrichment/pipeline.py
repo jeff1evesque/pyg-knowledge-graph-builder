@@ -69,7 +69,7 @@ class EnrichmentPipeline:
 
     def run(
         self,
-        enable_ontology_mapping: bool = False,
+        enable_ontology_mapping: bool = True,
         enable_skos: bool = False,
     ) -> Dict[str, any]:
         logger.info("=" * 80)
@@ -222,7 +222,7 @@ class EnrichmentPipeline:
 def enrich_graph(
     spark: SparkSession,
     triples_df: DataFrame,
-    enable_ontology_mapping: bool = False,
+    enable_ontology_mapping: bool = True,
     enable_skos: bool = False,
 ) -> Dict[str, any]:
     """Main entry point for graph enrichment."""
