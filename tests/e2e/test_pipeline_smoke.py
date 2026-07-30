@@ -530,6 +530,8 @@ def _assert_metadata_describes_the_graph(data, found):
                 f"{entry['feature_dim']} but the tensor carries no edge_attr"
             )
 
+    _assert_edge_features_are_not_vacuous(data, spec, schema, found)
+
     # --- 3. node type inventory ------------------------------------------- #
     declared_nodes = set(schema["node_types"])
     actual_nodes = {str(nt) for nt in data.node_types}
@@ -568,6 +570,88 @@ def _assert_metadata_describes_the_graph(data, found):
             f"{declared}, graph has {actual} edges -- the writer saw a "
             f"different version of the graph (deduplication ordering?)"
         )
+
+
+def _assert_edge_features_are_not_vacuous(data, spec, schema, found):
+    """If any relation classified into an enabled category, edge_attr must
+    exist.
+
+    Every other edge-side assertion in this file is guarded by
+    `if has_attr:` / `if "edge_attr" in store:`, which is right for consistency
+    checking -- an edge type without features has nothing to compare -- but
+    means a graph where NO edge type got features satisfies all of them
+    vacuously. That is what shipped: the 2026-07-29 cluster run produced 704
+    edge types, zero with edge_attr, and would have passed every check here,
+    because each relation classified "generic" and no enabled_categories value
+    could select it.
+
+    The expectation is derived from the run's OWN artifacts rather than
+    recomputed here -- `derivation_methods` (relation -> category, skip already
+    excluded) crossed with `encoding_config.json`'s enabled_categories. Two
+    reasons: the test must not carry a second copy of the classification rules
+    it is checking, and a fixture set that legitimately contains no featurizable
+    relation must not fail. The ntriples fixtures are exactly that case today
+    (4 generic + 2 skip edge types, nothing else), so a flat "must be non-empty"
+    would be red for a reason that is not this contract.
+
+    What that leaves uncovered is deliberate: zero featurizable relations is
+    reported at runtime by EdgeFeatureExtractor's warning, not here.
+    """
+    edge_spec = spec["edge_features"]
+    if not edge_spec.get("enabled"):
+        # A deliberately disabled run has nothing to be vacuous about.
+        return
+
+    encoding = json.loads(Path(found["encoding_config.json"]).read_bytes())
+    enabled = set(encoding["edge_features"]["enabled_categories"])
+    # relation -> category, as production classified it. "skip" is already
+    # filtered out by MetadataWriter.
+    categories = edge_spec.get("derivation_methods", {})
+    featurizable = sorted(
+        rel for rel, cat in categories.items() if cat in enabled
+    )
+
+    with_attr = [
+        str(et) for et in data.edge_types
+        if _store_get(data[et], "edge_attr") is not None
+    ]
+    declared = list(edge_spec.get("edge_types_with_features", []))
+
+    if featurizable:
+        assert with_attr, (
+            f"{len(featurizable)} relation(s) classified into an enabled "
+            f"category, but NOT ONE of the {len(data.edge_types)} edge types "
+            f"carries edge_attr. Every consistency check above passes "
+            f"vacuously, so nothing else fails and the job exits 0.\n"
+            f"  enabled categories: {sorted(enabled)}\n"
+            f"  should have been featurized: {featurizable[:8]}"
+            f"{'...' if len(featurizable) > 8 else ''}\n"
+            f"  feature_spec.json declares edge_types_with_features="
+            f"{declared[:5]}{'...' if len(declared) > 5 else ''}"
+        )
+        assert declared, (
+            f"{len(with_attr)} edge type(s) carry edge_attr but "
+            f"feature_spec.json declares edge_types_with_features empty. A "
+            f"trainer reading the spec would never look at the features that "
+            f"are there.\n  carry edge_attr: {sorted(with_attr)[:5]}"
+        )
+    else:
+        # No relation could be featurized under this config. Absence is then
+        # correct -- but it must be absence on BOTH sides.
+        assert not with_attr, (
+            f"no relation classified into an enabled category "
+            f"({sorted(enabled)}), yet {len(with_attr)} edge type(s) carry "
+            f"edge_attr: {sorted(with_attr)[:5]}"
+        )
+
+    # The count must agree either way: graph_schema.json's summary is what a
+    # reader trusts for "how many relations are featurized".
+    summary_count = int(schema["summary"]["edge_types_with_features"])
+    assert summary_count == len(with_attr), (
+        f"graph_schema.json summary declares edge_types_with_features="
+        f"{summary_count} but {len(with_attr)} edge type(s) actually carry "
+        f"edge_attr"
+    )
 
 
 def _schema_edge_key(edge_type):
