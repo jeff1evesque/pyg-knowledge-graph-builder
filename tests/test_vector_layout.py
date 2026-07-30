@@ -74,36 +74,59 @@ def test_accepts_minimum_dim():
 # ======================================================================
 # Exact boundaries (ground truth — guards against silent drift)
 # ======================================================================
+#
+# A SNAPSHOT of the current composition, not a guarantee about it. The
+# guarantees live in the invariant tests above, which hold for any set of
+# fractions. Rebalancing what the vector carries is expected, and is *supposed*
+# to fail these two: the point is that such a change is reviewed rather than
+# silent. When you make one deliberately, update the numbers below -- the
+# labelled form means the failure names the sub-segment that moved.
+#
+# Current tuning note: class_identity is 50% of segment 1 (128 dims at 1024),
+# funded by class_hierarchy at 25%. It bounds how many ontology CLASSES the
+# encoding can keep separable, and 64 dims could not cover a 118-class
+# full-source build.
+
+_SUBSEGMENT_NAMES = (
+    "class_identity", "class_hierarchy", "ontology_source",
+    "property_presence", "domain_range", "property_hierarchy",
+    "numeric", "categorical",
+)
+
+
+def _labelled(layout):
+    return dict(zip(_SUBSEGMENT_NAMES, _subsegments(layout)))
+
 
 def test_exact_layout_1024():
     L = VectorLayout(1024)
     assert (L.seg1_total, L.seg2_total, L.seg3_total) == (256, 384, 384)
-    # (start, dim) per sub-segment — the real computed values.
-    assert _subsegments(L) == [
-        (0, 64),      # class identity
-        (64, 128),    # class hierarchy
-        (192, 64),    # ontology source
-        (256, 192),   # property presence
-        (448, 111),   # domain/range
-        (559, 81),    # property hierarchy
-        (640, 257),   # numeric
-        (897, 127),   # categorical
-    ]
+    # name -> (start, dim), the real computed values.
+    assert _labelled(L) == {
+        "class_identity": (0, 128),
+        "class_hierarchy": (128, 64),
+        "ontology_source": (192, 64),
+        "property_presence": (256, 192),
+        "domain_range": (448, 111),
+        "property_hierarchy": (559, 81),
+        "numeric": (640, 257),
+        "categorical": (897, 127),
+    }
 
 
 def test_exact_layout_512():
     L = VectorLayout(512)
     assert (L.seg1_total, L.seg2_total, L.seg3_total) == (128, 192, 192)
-    assert _subsegments(L) == [
-        (0, 32),
-        (32, 64),
-        (96, 32),
-        (128, 96),
-        (224, 56),
-        (280, 40),
-        (320, 129),
-        (449, 63),
-    ]
+    assert _labelled(L) == {
+        "class_identity": (0, 64),
+        "class_hierarchy": (64, 32),
+        "ontology_source": (96, 32),
+        "property_presence": (128, 96),
+        "domain_range": (224, 56),
+        "property_hierarchy": (280, 40),
+        "numeric": (320, 129),
+        "categorical": (449, 63),
+    }
 
 
 def test_halving_dim_halves_segment_totals():
