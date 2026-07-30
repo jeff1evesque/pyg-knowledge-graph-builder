@@ -130,6 +130,85 @@ def _build_uri_to_pyg_name_expr(uri_col: str = "type_uri") -> F.Column:
     return expr
 
 
+def build_type_uri_mapping(
+    triples_df: DataFrame,
+    node_id_df: DataFrame,
+) -> Dict[str, str]:
+    """
+    Map each PyG node type name to the source type URI it was named after.
+
+    A multi-type entity carries several rdf:type triples, so a node type has
+    several candidate URIs and one has to be chosen. Choosing by sort order --
+    which this did, keeping the alphabetically smallest -- picks a URI with no
+    relationship to the node type at all whenever a supertype sorts earlier:
+
+        jolts_HiresRate, jolts_JobOpeningsRate and jolts_QuitsRate every one
+        reported bls_enrichment/RateMeasurement, because ".../enrichment/..."
+        sorts before ".../jolts/...". Three node types, one URI.
+        cpi_SpecialAggregateIndex reported cpi/ExpenditureCategory for the same
+        reason.
+
+    That is not cosmetic. graph_schema.json publishes it as `source_type_uri`,
+    and ontology_schema.json additionally looks up `superclass_chain` and
+    `defined_properties` BY it -- so a wrong URI silently attributes another
+    class's hierarchy and property schema to this node type.
+
+    The URI is instead chosen by inverting the naming rule: keep the candidate
+    whose derived PyG name equals the node type. That is exact by construction
+    (the name came from a URI through this very expression) and needs no
+    priority table.
+
+    A node type whose name came from somewhere other than a type URI -- the
+    canonical-type overrides in _CANONICAL_TYPE_PRIORITY, or the sector
+    override -- has no such candidate. Those fall back to the smallest URI,
+    which is the previous behaviour: still deterministic, still stable across
+    runs, and no worse than before for the cases the inversion cannot reach.
+
+    Returns:
+        Dict[pyg_name -> source type URI].
+    """
+    type_uri_rows = (
+        triples_df
+        .filter(F.col("predicate") == RDF_TYPE)
+        .select(
+            F.col("subject").alias("_subj"),
+            F.col("object").alias("type_uri"),
+        )
+        .join(
+            node_id_df.select(
+                F.col("uri").alias("_subj"),
+                F.col("node_type"),
+            ),
+            "_subj",
+            "inner",
+        )
+        .select("node_type", "type_uri")
+        .distinct()
+        # The same expression NodeMapper named the node types with, so the
+        # comparison below cannot drift from the naming rule.
+        .withColumn("derived_name", _build_uri_to_pyg_name_expr("type_uri"))
+    )
+    # Sorted, NOT a bare collect(): Spark returns rows in task-completion
+    # order, so the fallback below would pick a different URI on different
+    # runs for any node type carrying multiple rdf:type URIs -- a content
+    # non-determinism in the emitted metadata.
+    type_uri_rows = collect_sorted(type_uri_rows)
+
+    exact: Dict[str, str] = {}
+    fallback: Dict[str, str] = {}
+    for row in type_uri_rows:
+        if row.derived_name == row.node_type:
+            # First in sorted order still, so a type URI that somehow appears
+            # twice resolves deterministically.
+            exact.setdefault(row.node_type, row.type_uri)
+        fallback.setdefault(row.node_type, row.type_uri)
+
+    return {
+        node_type: exact.get(node_type, uri)
+        for node_type, uri in fallback.items()
+    }
+
+
 class NodeMapper:
     """
     Maps RDF entities to PyG integer node IDs.
@@ -292,39 +371,7 @@ class NodeMapper:
 
         Called by constructor.py for metadata registration.
         """
-        type_uri_rows = (
-            triples_df
-            .filter(F.col("predicate") == RDF_TYPE)
-            .select(
-                F.col("subject").alias("_subj"),
-                F.col("object").alias("type_uri"),
-            )
-            .join(
-                node_id_df.select(
-                    F.col("uri").alias("_subj"),
-                    F.col("node_type"),
-                ),
-                "_subj",
-                "inner",
-            )
-            .select("node_type", "type_uri")
-            .distinct()
-        )
-        # Sorted, NOT a bare collect(): Spark returns rows in task-completion
-        # order, so "first URI per type" below would pick a different URI on
-        # different runs for any node type carrying multiple rdf:type URIs --
-        # a content non-determinism in the emitted metadata.
-        type_uri_rows = collect_sorted(type_uri_rows)
-
-        # Keep the first URI per type in this deterministic order (picking the
-        # most common would require a count; for metadata purposes the smallest
-        # URI is sufficient, and unlike "first encountered" it is stable).
-        result: Dict[str, str] = {}
-        for row in type_uri_rows:
-            if row.node_type not in result:
-                result[row.node_type] = row.type_uri
-
-        return result
+        return build_type_uri_mapping(triples_df, node_id_df)
 
     def _apply_config_filters(self, type_triples: DataFrame) -> DataFrame:
         """Apply configuration-based filters to type triples."""

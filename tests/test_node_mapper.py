@@ -210,13 +210,18 @@ def test_type_uri_mapping_is_deterministic_for_multi_typed_node(
 
     That choice used to be "whichever row Spark returned first", which is
     task-completion order and therefore varied run-to-run — the same input
-    produced different metadata on different runs. The rows are now sorted
-    before the fold, so the smallest URI wins deterministically.
+    produced different metadata on different runs. Sorting the rows made it
+    deterministic but still arbitrary: the smallest URI won, so cpi_Series
+    reported CPI_INDEX.
 
-    Feeding the same triples in two different orders pins that property: row
-    order must not reach the result. Note the winner (CPI_INDEX) is NOT the
-    node type's own URI (CPI_SERIES) — the pick is arbitrary by design, and
-    this test guards that it is *stably* arbitrary, not that it is meaningful.
+    It is no longer arbitrary. The winner is the candidate whose derived PyG
+    name equals the node type, so cpi_Series reports CPI_SERIES — which is what
+    lets graph_schema.json's source_type_uri be trusted, and what stops
+    ontology_schema.json attributing another class's superclass_chain and
+    defined_properties to this type.
+
+    Feeding the same triples in two orders still pins determinism: row order
+    must not reach the result.
     """
     rows = [
         ("https://ex/e1", RDF_TYPE, CPI_INDEX),
@@ -235,4 +240,137 @@ def test_type_uri_mapping_is_deterministic_for_multi_typed_node(
     reversed_ = resolve(list(reversed(rows)))
 
     assert forward == reversed_, "input row order changed the type URI mapping"
-    assert forward["cpi_Series"] == min(CPI_INDEX, CPI_SERIES)
+    assert forward["cpi_Series"] == CPI_SERIES, (
+        "the node type must report its own class, not the smallest candidate "
+        f"URI (got {forward['cpi_Series']})"
+    )
+
+
+# ======================================================================
+# source_type_uri resolution for multi-type entities
+# ======================================================================
+#
+# Enrichment gives entities a unified supertype alongside their specific type,
+# so a node type has several candidate rdf:type URIs. Keeping the
+# alphabetically smallest -- the previous rule -- picks a URI unrelated to the
+# node type whenever the supertype sorts earlier. On the 2026-07-29 run that
+# made jolts_HiresRate, jolts_JobOpeningsRate and jolts_QuitsRate all report
+# bls_enrichment/RateMeasurement (".../enrichment/..." < ".../jolts/..."), and
+# cpi_SpecialAggregateIndex report cpi/ExpenditureCategory. 43 node types, 40
+# distinct URIs.
+#
+# The URI now comes from inverting the naming rule, so these pin that the
+# reported class is the one the node type is named for.
+
+JOLTS_HIRES_RATE = "https://www.bls.gov/jolts/HiresRate"      # -> jolts_HiresRate
+JOLTS_QUITS_RATE = "https://www.bls.gov/jolts/QuitsRate"      # -> jolts_QuitsRate
+# Sorts BEFORE both of the above: "enrichment" < "jolts".
+BLS_RATE_MEASUREMENT = "https://www.bls.gov/enrichment/RateMeasurement"
+
+
+def _type_uris(spark, rows, make_triples):
+    triples = make_triples(rows)
+    mapper = NodeMapper(spark, {})
+    node_id_df, counts = mapper.build_node_id_table(triples)
+    return mapper.get_type_uri_mapping(triples, node_id_df), counts
+
+
+def _sibling_rows():
+    """Two specific rate types under one shared enrichment supertype.
+
+    The supertype must be the MORE common type: canonical selection keeps the
+    rarest type per entity, so a supertype carried by fewer entities than its
+    subtypes would itself become the node type and there would be nothing to
+    mis-report. Spreading it across both siblings (5 entities vs 2 and 3) is
+    what the real data looks like -- every jolts rate type carries it.
+    """
+    return [
+        ("https://ex/h1", RDF_TYPE, JOLTS_HIRES_RATE),
+        ("https://ex/h1", RDF_TYPE, BLS_RATE_MEASUREMENT),
+        ("https://ex/h2", RDF_TYPE, JOLTS_HIRES_RATE),
+        ("https://ex/h2", RDF_TYPE, BLS_RATE_MEASUREMENT),
+        ("https://ex/q1", RDF_TYPE, JOLTS_QUITS_RATE),
+        ("https://ex/q1", RDF_TYPE, BLS_RATE_MEASUREMENT),
+        ("https://ex/q2", RDF_TYPE, JOLTS_QUITS_RATE),
+        ("https://ex/q2", RDF_TYPE, BLS_RATE_MEASUREMENT),
+        ("https://ex/q3", RDF_TYPE, JOLTS_QUITS_RATE),
+        ("https://ex/q3", RDF_TYPE, BLS_RATE_MEASUREMENT),
+    ]
+
+
+def test_supertype_that_sorts_first_does_not_hijack_source_uri(
+    spark, make_triples,
+):
+    """The regression: a supertype sorting earlier must not become the URI."""
+    type_uris, counts = _type_uris(spark, _sibling_rows(), make_triples)
+
+    assert "jolts_HiresRate" in counts, (
+        f"fixture must produce the specific node type; got {sorted(counts)}"
+    )
+    assert type_uris["jolts_HiresRate"] == JOLTS_HIRES_RATE, (
+        "the node type must report the class it is named after, not whichever "
+        f"rdf:type sorts first (got {type_uris['jolts_HiresRate']})"
+    )
+
+
+def test_sibling_types_sharing_a_supertype_get_distinct_uris(
+    spark, make_triples,
+):
+    """Two node types under one supertype must not collapse onto one URI.
+
+    This is the shape that produced "3 node types -> 1 URI": every jolts rate
+    type carries the same enrichment supertype.
+    """
+    type_uris, counts = _type_uris(spark, _sibling_rows(), make_triples)
+
+    present = {t: type_uris[t] for t in counts}
+    assert present["jolts_HiresRate"] == JOLTS_HIRES_RATE
+    assert present["jolts_QuitsRate"] == JOLTS_QUITS_RATE
+    assert len(set(present.values())) == len(present), (
+        f"node types collapsed onto one source_type_uri: {present}"
+    )
+
+
+def test_every_node_type_round_trips_through_the_naming_rule(
+    spark, make_triples,
+):
+    """The general invariant, independent of these fixtures.
+
+    Whatever the data, deriving a PyG name from a node type's reported
+    source_type_uri must give that node type back. This is what makes
+    graph_schema.json's source_type_uri and ontology_schema.json's
+    uri_to_pyg_name consistent with each other, and it holds for any input --
+    so it keeps working if the naming rule or the namespace table changes.
+    """
+    type_uris, counts = _type_uris(
+        spark,
+        _sibling_rows() + [
+            ("https://ex/i1", RDF_TYPE, CPI_INDEX),
+            ("https://ex/s1", RDF_TYPE, CPI_SERIES),
+        ],
+        make_triples,
+    )
+
+    for node_type in counts:
+        uri = type_uris[node_type]
+        # Derive through the production expression rather than re-deriving the
+        # name here, so the assertion tracks the rule instead of copying it.
+        derived = (
+            spark.createDataFrame([(uri,)], "uri STRING")
+            .select(_build_uri_to_pyg_name_expr("uri").alias("name"))
+            .first()["name"]
+        )
+        assert derived == node_type, (
+            f"{node_type} reports source_type_uri {uri}, which derives to "
+            f"{derived} -- the two artifacts would disagree about this type"
+        )
+
+
+def test_single_typed_entities_are_unaffected(spark, make_triples):
+    """The fix must not change the common case."""
+    type_uris, _ = _type_uris(spark, [
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/b", RDF_TYPE, CPI_SERIES),
+    ], make_triples)
+    assert type_uris["cpi_Index"] == CPI_INDEX
+    assert type_uris["cpi_Series"] == CPI_SERIES
