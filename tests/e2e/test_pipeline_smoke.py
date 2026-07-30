@@ -532,6 +532,7 @@ def _assert_metadata_describes_the_graph(data, found):
 
     _assert_edge_features_are_not_vacuous(data, spec, schema, found)
     _assert_class_identity_is_recoverable(data, found)
+    _assert_source_type_uris_identify_their_node_type(schema, found)
 
     # --- 3. node type inventory ------------------------------------------- #
     declared_nodes = set(schema["node_types"])
@@ -571,6 +572,67 @@ def _assert_metadata_describes_the_graph(data, found):
             f"{declared}, graph has {actual} edges -- the writer saw a "
             f"different version of the graph (deduplication ordering?)"
         )
+
+
+def _assert_source_type_uris_identify_their_node_type(schema, found):
+    """Each node type's source_type_uri must be the class it is named after.
+
+    Enrichment gives entities a unified supertype alongside their specific
+    type, so a node type has several candidate rdf:type URIs and one is picked.
+    Picking by sort order -- the old rule -- reported a URI belonging to another
+    class whenever the supertype sorted earlier: three jolts rate types all
+    claimed bls_enrichment/RateMeasurement, and 43 node types shared 40 URIs.
+
+    Two things go wrong when it is unreliable, neither of which fails anything
+    else: graph_schema.json publishes the wrong class for the type, and
+    ontology_schema.json looks up superclass_chain and defined_properties BY
+    that URI, so it attributes another class's hierarchy and property schema to
+    this node type.
+
+    Asserted through ontology_schema.json's own uri_to_pyg_name rather than by
+    re-deriving names here, so this tracks the production naming rule and keeps
+    holding if the namespace table changes.
+    """
+    ontology = json.loads(Path(found["ontology_schema.json"]).read_bytes())
+    uri_to_name = ontology.get("uri_to_pyg_name") or {}
+    if not uri_to_name:
+        return
+
+    mismatched = {}
+    for node_type, entry in schema["node_types"].items():
+        uri = entry.get("source_type_uri")
+        if not uri:
+            continue
+        # A URI absent from the map cannot be checked -- it is a class no
+        # namespace prefix matched, which the naming rule handles separately.
+        derived = uri_to_name.get(uri)
+        if derived is not None and derived != node_type:
+            mismatched[node_type] = (uri, derived)
+
+    assert not mismatched, (
+        f"{len(mismatched)} node type(s) report a source_type_uri belonging to "
+        f"a different class. graph_schema.json publishes it, and "
+        f"ontology_schema.json keys superclass_chain / defined_properties off "
+        f"it, so both describe the wrong class for these types:\n"
+        + "\n".join(
+            f"  {nt} -> {uri} (which names {derived})"
+            for nt, (uri, derived) in sorted(mismatched.items())[:8]
+        )
+    )
+
+    # And the mapping must not collapse: two node types sharing one URI means
+    # at least one of them is misattributed.
+    by_uri = {}
+    for node_type, entry in schema["node_types"].items():
+        uri = entry.get("source_type_uri")
+        if uri:
+            by_uri.setdefault(uri, []).append(node_type)
+    collapsed = {u: n for u, n in by_uri.items() if len(n) > 1}
+    assert not collapsed, (
+        f"{len(schema['node_types'])} node types share only "
+        f"{len(by_uri)} distinct source_type_uri values; collapsed: "
+        + "; ".join(f"{u} <- {sorted(n)}" for u, n in sorted(collapsed.items()))
+    )
 
 
 def _assert_class_identity_is_recoverable(data, found):
