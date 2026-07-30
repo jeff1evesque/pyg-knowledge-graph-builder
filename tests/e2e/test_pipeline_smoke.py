@@ -531,6 +531,7 @@ def _assert_metadata_describes_the_graph(data, found):
             )
 
     _assert_edge_features_are_not_vacuous(data, spec, schema, found)
+    _assert_class_identity_is_recoverable(data, found)
 
     # --- 3. node type inventory ------------------------------------------- #
     declared_nodes = set(schema["node_types"])
@@ -570,6 +571,50 @@ def _assert_metadata_describes_the_graph(data, found):
             f"{declared}, graph has {actual} edges -- the writer saw a "
             f"different version of the graph (deduplication ordering?)"
         )
+
+
+def _assert_class_identity_is_recoverable(data, found):
+    """The class_identity segment must be able to separate the classes present.
+
+    Layout-agnostic on purpose. It reads the capacity the run itself recorded
+    rather than any fixed width, so re-tuning the segment fractions -- or
+    changing what the node vector carries -- keeps this test meaningful instead
+    of turning it into a stale constant to update.
+
+    The failure it guards is silent in every other signal: past the segment
+    width the codes stay distinct (4-hot into 64 slots has C(64,4) patterns, so
+    a full-source build had 118 distinct codes in 64 dims), the vectors are the
+    declared width, the metadata is self-consistent, and the job exits 0 -- but
+    no readout layer can recover class identity from a rank-limited code.
+    """
+    slot_mapping = json.loads(Path(found["slot_mapping.json"]).read_bytes())
+    ci = slot_mapping.get("collision_report", {}).get("class_identity")
+    if not ci or not ci.get("segment_dim"):
+        # slot mapping < 1.1 could not report capacity.
+        return
+
+    shared = ci.get("classes_sharing_a_code") or []
+    assert not shared, (
+        f"{len(shared)} group(s) of classes share an identical "
+        f"class_identity code and are indistinguishable to any model: "
+        f"{shared[:3]}"
+    )
+    assert ci["linearly_separable"], (
+        f"class_identity cannot separate this graph's classes: "
+        f"{ci['total_classes']} classes into {ci['segment_dim']} dims "
+        f"(headroom {ci['headroom_classes']}). At most segment_dim codes can "
+        f"be linearly independent, so class identity is not recoverable -- "
+        f"even though {ci['distinct_codes']} of the codes are distinct, which "
+        f"is why nothing else here fails.\n"
+        f"  Fix by giving class_identity more dims "
+        f"(_SEG1_CLASS_IDENTITY_FRAC) or raising feature_config.vector_dim."
+    )
+    # The graph's own node types are the ground truth for the class count.
+    assert ci["total_classes"] >= len(data.node_types), (
+        f"slot_mapping reports {ci['total_classes']} classes but the graph "
+        f"has {len(data.node_types)} node types; the capacity check above is "
+        f"then measuring the wrong population"
+    )
 
 
 def _assert_edge_features_are_not_vacuous(data, spec, schema, found):
