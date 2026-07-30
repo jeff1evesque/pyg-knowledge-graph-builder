@@ -98,7 +98,14 @@ SPECS+=("Fast (unit) suite=CPU=$JUNIT_DIR/fast.xml")
 echo "==> End-to-end pipeline smoke (CPU)"
 # "not cluster": the cluster suite is also marked e2e, but it submits to a real
 # cluster and must not run inside the local[*] suites.
+#
+# --basetemp pins the run's artifacts so the report can read the metadata the
+# pipeline actually wrote (encoding capacity, below). Pytest's default basetemp
+# is rotated and would be gone or ambiguous by rendering time.
+E2E_ARTIFACTS="$REPORT_DIR/e2e-artifacts"
+rm -rf "$E2E_ARTIFACTS"
 "$VENV_PYTHON" -m pytest tests/ -m "e2e and not cluster" \
+  --basetemp="$E2E_ARTIFACTS" \
   --junitxml="$JUNIT_DIR/e2e_cpu.xml" -q || status=1
 SPECS+=("End-to-end pipeline smoke=CPU=$JUNIT_DIR/e2e_cpu.xml")
 
@@ -149,6 +156,7 @@ else
 fi
 
 echo "==> Rendering report -> $REPORT_DIR/report.{html,json}"
-"$VENV_PYTHON" bin/generate_test_report.py "$REPORT_DIR" "${SPECS[@]}"
+"$VENV_PYTHON" bin/generate_test_report.py "$REPORT_DIR" "${SPECS[@]}" \
+  --artifacts="$E2E_ARTIFACTS"
 
 exit "$status"
