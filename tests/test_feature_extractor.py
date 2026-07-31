@@ -263,6 +263,78 @@ def test_numeric_literal_is_zscore_normalized(spark):
         )
 
 
+def _numeric_predicates(spark, rows, config=CONFIG):
+    """Run the real per-predicate numeric/categorical classification."""
+    triples = spark.createDataFrame(
+        rows, schema="subject STRING, predicate STRING, object STRING"
+    )
+    node_id_df, _counts = NodeMapper(spark, config).build_node_id_table(triples)
+    fx = FeatureExtractor(spark, config)
+    return fx._classify_literal_predicates(
+        fx._literal_triples(triples, node_id_df)
+    )
+
+
+# A property whose values are mostly labels is a label property, even where
+# some values parse — SEC form "8" is a form type, not the quantity eight.
+DOC_TYPE_ROWS = [
+    ("https://ex/a", RDF_TYPE, CPI_INDEX),
+    ("https://ex/b", RDF_TYPE, CPI_INDEX),
+    ("https://ex/c", RDF_TYPE, CPI_INDEX),
+    ("https://ex/a", SECTOR, "10-K"),
+    ("https://ex/b", SECTOR, "8"),
+    ("https://ex/c", SECTOR, "S-1"),
+]
+
+
+def test_mixed_literals_classify_categorical(spark):
+    # 1 of 3 values parses (33%) — below the 0.5 default, so the whole
+    # property is categorical and nothing about it is z-scored.
+    assert _numeric_predicates(spark, DOC_TYPE_ROWS) == set()
+
+
+def test_majority_numeric_literals_survive_a_sentinel(spark):
+    # 2 of 3 parse (67%) — a stray "N/A" must not demote a real magnitude.
+    assert _numeric_predicates(spark, [
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/b", RDF_TYPE, CPI_INDEX),
+        ("https://ex/c", RDF_TYPE, CPI_INDEX),
+        ("https://ex/a", METRIC, "10"),
+        ("https://ex/b", METRIC, "20"),
+        ("https://ex/c", METRIC, "N/A"),
+    ]) == {METRIC}
+
+
+def test_numeric_share_threshold_is_configurable(spark):
+    # The same mixed literals flip to numeric once the bar drops below 33%.
+    config = {"feature_config": {"vector_dim": VDIM,
+                                 "numeric_predicate_min_share": 0.1}}
+    assert _numeric_predicates(spark, DOC_TYPE_ROWS, config) == {SECTOR}
+
+
+def test_categorical_property_is_not_normalized(spark):
+    # The reported defect: a label property reaching normalization.json.
+    triples = spark.createDataFrame(
+        DOC_TYPE_ROWS, schema="subject STRING, predicate STRING, object STRING"
+    )
+    node_id_df, counts = NodeMapper(spark, CONFIG).build_node_id_table(triples)
+    fx = FeatureExtractor(spark, CONFIG)
+    fx.build_features(triples, node_id_df, counts)
+
+    artifacts = fx.get_metadata_artifacts()
+    normalized = {s["predicate"] for s in
+                  (artifacts["normalization_stats"] or [])}
+    assert SECTOR not in normalized
+
+    # ...and it is claimed by exactly one segment, not both.
+    slots = artifacts["slot_mapping"]
+    numeric = {p["predicate_uri"] for p in slots["numeric_properties"]}
+    categorical = {p["predicate_uri"] for p in slots["categorical_properties"]}
+    assert SECTOR in categorical
+    assert SECTOR not in numeric
+    assert numeric & categorical == set()
+
+
 # ======================================================================
 # Segment 3b — categorical multi-hot
 # ======================================================================

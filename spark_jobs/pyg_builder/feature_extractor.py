@@ -46,7 +46,7 @@ Why this replaces the old per-type variable-width approach:
 """
 import logging
 import gc
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Set, Tuple
 
 import numpy as np
 import torch
@@ -117,6 +117,26 @@ _SEG2_PROPERTY_HIERARCHY_FRAC = 0.21
 
 _SEG3_NUMERIC_FRAC = 0.67
 _SEG3_CATEGORICAL_FRAC = 0.33
+
+# Default for feature_config.numeric_predicate_min_share. A literal property
+# is numeric only if MORE THAN this share of its values parse as a number;
+# otherwise every one of its values is treated as a category label.
+# Classification is per-predicate and mutually exclusive: a property is
+# numeric or categorical, never both.
+#
+# Per-value classification (the previous behaviour) split a single property
+# across both branches whenever some of its labels happened to parse. SEC
+# hasDocumentType is the motivating case: of 2,372 values, 315 (13.3%) are
+# bare-digit form types -- Form 4, 144, 3, 425, 497, 487, 25 -- while the rest
+# are hyphenated (10-K, 8-K, S-1). Those 315 were z-scored into the numeric
+# segment as if a form number were a magnitude (mean 62.24, std 128.64),
+# injecting a spurious continuous ordering over what are labels.
+#
+# A simple majority is deliberate. It is the least presumptuous rule that
+# still fixes the above, and it tolerates a genuinely numeric measurement
+# carrying a minority of unparseable sentinels ("N/A", "unknown") without
+# demoting the whole property out of the numeric segment.
+_NUMERIC_PREDICATE_MIN_SHARE = 0.5
 
 # ============================================
 # URI constants
@@ -435,6 +455,9 @@ class FeatureExtractor:
         self._chunk_threshold = feat_config.get(
             "chunk_node_threshold", _CHUNK_NODE_THRESHOLD
         )
+        self._numeric_min_share = feat_config.get(
+            "numeric_predicate_min_share", _NUMERIC_PREDICATE_MIN_SHARE
+        )
 
         # Compute layout from vector_dim — all segment boundaries
         # scale proportionally
@@ -526,6 +549,10 @@ class FeatureExtractor:
                 "numeric_values": {
                     "dim": layout.seg3_numeric_dim,
                     "seed": 500,
+                    # Which properties reach this segment at all — a
+                    # different threshold routes a mixed property to the
+                    # categorical segment instead.
+                    "predicate_min_numeric_share": self._numeric_min_share,
                 },
                 "categorical_values": {
                     "dim": layout.seg3_categorical_dim,
@@ -621,9 +648,16 @@ class FeatureExtractor:
         # ============================================
         logger.info("  Extracting literal values...")
 
-        numeric_df = self._extract_numeric_literals(triples_df, node_id_df)
+        # Classify each literal predicate once, then route its values to
+        # exactly one segment — the two extractions partition the literals.
+        literal_triples = self._literal_triples(triples_df, node_id_df).cache()
+        numeric_predicates = self._classify_literal_predicates(literal_triples)
+
+        numeric_df = self._extract_numeric_literals(
+            literal_triples, node_id_df, numeric_predicates
+        )
         categorical_df = self._extract_categorical_literals(
-            triples_df, node_id_df
+            literal_triples, node_id_df, numeric_predicates
         )
 
         # ============================================
@@ -742,8 +776,8 @@ class FeatureExtractor:
             combined.unpersist()
 
         # Cleanup cached intermediates
-        for df in [numeric_df, categorical_df, class_hierarchy_df,
-                    property_schema_df]:
+        for df in [literal_triples, numeric_df, categorical_df,
+                    class_hierarchy_df, property_schema_df]:
             if df is not None:
                 try:
                     df.unpersist()
@@ -1025,32 +1059,103 @@ class FeatureExtractor:
     # Literal value extraction (on executors)
     # ================================================================
 
-    def _extract_numeric_literals(
+    def _literal_triples(
         self,
         triples_df: DataFrame,
         node_id_df: DataFrame,
+    ) -> DataFrame:
+        """
+        Triples whose object is a literal, excluding structural predicates.
+
+        The anti-join drops any triple whose object is a known node URI —
+        what remains is the literal-valued tail of the graph.
+        """
+        return (
+            triples_df
+            .join(
+                node_id_df.select(F.col("uri").alias("_obj_uri")),
+                triples_df["object"] == F.col("_obj_uri"),
+                "left_anti",
+            )
+            .filter(~F.col("predicate").isin(list(_NON_FEATURE_PREDICATES)))
+        )
+
+    @staticmethod
+    def _numeric_cast(col: str = "object"):
+        """Lexical form of a literal cast to double — null when unparseable."""
+        return F.split(F.col(col), r"\^\^").getItem(0).cast("double")
+
+    def _classify_literal_predicates(
+        self,
+        literal_triples: DataFrame,
+    ) -> Set[str]:
+        """
+        Decide, per predicate, whether it is numeric or categorical.
+
+        A predicate is numeric when more than ``self._numeric_min_share`` of
+        its literal values parse as a number. The two classes are mutually
+        exclusive, so a property never lands in both the numeric and the
+        categorical segment.
+
+        Returns the set of numeric predicates. Small driver-side collect —
+        one row per distinct literal predicate (typically <200).
+        """
+        shares = (
+            literal_triples
+            .withColumn("_is_numeric", self._numeric_cast().isNotNull())
+            .groupBy("predicate")
+            .agg(
+                F.count("*").alias("total"),
+                F.sum(F.col("_is_numeric").cast("int")).alias("numeric"),
+            )
+            .collect()
+        )
+
+        numeric_predicates = set()
+        for row in shares:
+            share = row["numeric"] / row["total"] if row["total"] else 0.0
+            if share > self._numeric_min_share:
+                numeric_predicates.add(row["predicate"])
+            elif row["numeric"]:
+                # Mixed, but not numeric enough — the parseable minority is
+                # treated as labels rather than magnitudes.
+                logger.info(
+                    f"    {row['predicate']}: {row['numeric']}/{row['total']} "
+                    f"values parse as numeric ({share:.1%}) — "
+                    f"classified categorical"
+                )
+
+        logger.info(
+            f"    Literal predicates: {len(numeric_predicates)} numeric, "
+            f"{len(shares) - len(numeric_predicates)} categorical"
+        )
+        return numeric_predicates
+
+    def _extract_numeric_literals(
+        self,
+        literal_triples: DataFrame,
+        node_id_df: DataFrame,
+        numeric_predicates: Set[str],
     ) -> Optional[DataFrame]:
         """
         Extract numeric literal properties joined with node IDs.
 
+        Values of a numeric predicate that do not parse are dropped rather
+        than re-routed to the categorical segment: a sentinel in a numeric
+        field is missing data, so the node carries no value in that slot —
+        the same way an absent property is already handled.
+
         Returns DataFrame(node_type, node_id, predicate, numeric_value)
         or None if no numeric literals found.
         """
-        excluded_list = list(_NON_FEATURE_PREDICATES)
+        if not numeric_predicates:
+            logger.info("    No numeric literals found")
+            return None
 
-        literal_triples = triples_df.join(
-            node_id_df.select(F.col("uri").alias("_obj_uri")),
-            triples_df["object"] == F.col("_obj_uri"),
-            "left_anti",
-        )
-
-        literal_triples = literal_triples.filter(
-            ~F.col("predicate").isin(excluded_list)
-        )
-
-        candidates = literal_triples.withColumn(
-            "numeric_value",
-            F.split(F.col("object"), r"\^\^").getItem(0).cast("double"),
+        candidates = literal_triples.filter(
+            F.col("predicate").isin(list(numeric_predicates))
+        ).withColumn(
+            "numeric_value", self._numeric_cast(),
         ).filter(F.col("numeric_value").isNotNull())
 
         if not candidates.head(1):
@@ -1085,33 +1190,25 @@ class FeatureExtractor:
 
     def _extract_categorical_literals(
         self,
-        triples_df: DataFrame,
+        literal_triples: DataFrame,
         node_id_df: DataFrame,
+        numeric_predicates: Set[str],
     ) -> Optional[DataFrame]:
         """
-        Extract categorical (non-numeric) literal properties.
+        Extract categorical literal properties.
+
+        Every value of a categorical predicate is a label, including any
+        that happen to parse as a number (SEC form "4" is a form type, not
+        the quantity four).
 
         Returns DataFrame(node_type, node_id, predicate, cat_value)
         or None.
         """
-        excluded_list = list(_NON_FEATURE_PREDICATES)
-
-        literal_triples = triples_df.join(
-            node_id_df.select(F.col("uri").alias("_obj_uri")),
-            triples_df["object"] == F.col("_obj_uri"),
-            "left_anti",
-        )
-
-        literal_triples = literal_triples.filter(
-            ~F.col("predicate").isin(excluded_list)
-        )
-
-        non_numeric = literal_triples.withColumn(
-            "_try_numeric",
-            F.split(F.col("object"), r"\^\^").getItem(0).cast("double"),
-        ).filter(
-            F.col("_try_numeric").isNull()
-        ).drop("_try_numeric")
+        non_numeric = literal_triples
+        if numeric_predicates:
+            non_numeric = non_numeric.filter(
+                ~F.col("predicate").isin(list(numeric_predicates))
+            )
 
         if not non_numeric.head(1):
             logger.info("    No categorical literals found")
