@@ -27,8 +27,15 @@ Triples are built on the shared local SparkSession via `make_triples`. Predicate
 and namespace constants come from the module under test, so the tests track the
 implementation rather than restating IRIs.
 """
+import pytest
+
 from spark_jobs.enrichment.ontology_mapper import (
     CLASS_MAPPINGS,
+    RDF_TYPE,
+    RDFS_SUBCLASS_OF,
+    _assert_is_dag,
+    _split_uri,
+    derive_subclass_edges,
     OWL_EQUIVALENT_CLASS,
     OWL_EQUIVALENT_PROPERTY,
     PROPERTY_MAPPINGS,
@@ -292,3 +299,198 @@ def test_every_unified_target_is_a_fold_fixed_point(spark):
     targets = set(PROPERTY_MAPPINGS.values())
     overlap = targets & set(PROPERTY_MAPPINGS)
     assert not overlap, f"unified predicates that are also folded: {overlap}"
+
+
+# ======================================================================
+# Class hierarchy derivation — the rules, and the guarantees about them
+# ======================================================================
+#
+# These rules INVENT ontology structure that no source asserts, so the tests
+# below are split deliberately: the first group pins what the rules produce,
+# the second pins the properties that must hold for ANY input. A wrong
+# subClassOf is worse than a missing one -- it feeds fabricated structure into
+# the 64-dim class_hierarchy sub-segment, which the GNN cannot distinguish
+# from a declared one.
+
+JOLTS_NS = "https://www.bls.gov/jolts/"
+CPI_NS = "https://www.bls.gov/cpi/"
+
+
+def _names(edges):
+    """Edges as (child_local, parent_local) for readable assertions."""
+    return {(_split_uri(c)[1], _split_uri(p)[1]) for c, p in edges}
+
+
+def test_measurement_class_specialises_its_dataset():
+    edges = derive_subclass_edges([
+        JOLTS_NS + "HiresLevel",
+        JOLTS_NS + "HiresRate",
+        JOLTS_NS + "HiresData",
+    ])
+    assert _names(edges) == {
+        ("HiresLevel", "HiresData"), ("HiresRate", "HiresData"),
+    }
+
+
+def test_no_parent_is_invented_when_the_dataset_class_is_absent():
+    # EstablishmentLevel/Rate are real classes with no EstablishmentData in
+    # the data. The rule must find nothing rather than mint a URI.
+    edges = derive_subclass_edges([
+        JOLTS_NS + "EstablishmentLevel",
+        JOLTS_NS + "EstablishmentRate",
+    ])
+    assert edges == []
+
+
+def test_qualified_name_specialises_the_name_it_qualifies():
+    edges = derive_subclass_edges([
+        CPI_NS + "UnadjustedPercentChange",
+        CPI_NS + "SeasonallyAdjustedPercentChange",
+        CPI_NS + "PercentChange",
+    ])
+    assert _names(edges) == {
+        ("UnadjustedPercentChange", "PercentChange"),
+        ("SeasonallyAdjustedPercentChange", "PercentChange"),
+    }
+
+
+def test_a_class_may_specialise_along_two_axes():
+    # OtherSeparationsLevel is both a kind of OtherSeparationsData (rule 1)
+    # and a kind of SeparationsLevel (rule 2). RDFS allows both.
+    edges = derive_subclass_edges([
+        JOLTS_NS + "OtherSeparationsLevel",
+        JOLTS_NS + "OtherSeparationsData",
+        JOLTS_NS + "SeparationsLevel",
+    ])
+    assert _names(edges) == {
+        ("OtherSeparationsLevel", "OtherSeparationsData"),
+        ("OtherSeparationsLevel", "SeparationsLevel"),
+    }
+
+
+def test_hierarchy_does_not_cross_namespaces():
+    # Identical local names in two vocabularies are unrelated classes.
+    edges = derive_subclass_edges([
+        JOLTS_NS + "UnadjustedPercentChange",
+        CPI_NS + "PercentChange",
+    ])
+    assert edges == []
+
+
+# --- guarantees that must hold for any input ------------------------- #
+
+# The real 2026-07-29 class set, abbreviated to the families that carry
+# structure plus classes that must NOT gain a parent.
+REAL_CLASSES = [
+    JOLTS_NS + n for n in (
+        "HiresData", "HiresLevel", "HiresRate",
+        "QuitsData", "QuitsLevel", "QuitsRate",
+        "SeparationsData", "SeparationsLevel", "SeparationsRate",
+        "OtherSeparationsData", "OtherSeparationsLevel",
+        "EstablishmentLevel", "EstablishmentRate",
+    )
+] + [
+    CPI_NS + n for n in (
+        "PercentChange", "UnadjustedPercentChange", "EffectOnAllItems",
+        "UnadjustedEffectOnAllItems", "StandardError", "ExpenditureCategory",
+    )
+] + ["http://www.sec.gov/filings#SECFiling"]
+
+
+def test_every_derived_parent_is_an_existing_class():
+    # The load-bearing guarantee: the rules may fail to find a parent, but
+    # can never point at a class the data does not contain.
+    known = set(REAL_CLASSES)
+    for child, parent in derive_subclass_edges(REAL_CLASSES):
+        assert parent in known, f"invented superclass {parent}"
+        assert child in known
+
+
+def test_no_class_is_its_own_superclass():
+    for child, parent in derive_subclass_edges(REAL_CLASSES):
+        assert child != parent
+
+
+def test_derivation_is_acyclic_on_the_real_class_set():
+    # Enforced inside derive_subclass_edges; asserted here because the
+    # encoder walks this to a transitive closure that a cycle would hang.
+    _assert_is_dag(derive_subclass_edges(REAL_CLASSES))
+
+
+def test_a_cycle_is_rejected_rather_than_returned():
+    with pytest.raises(ValueError, match="cycle"):
+        _assert_is_dag([("https://ex/A", "https://ex/B"),
+                        ("https://ex/B", "https://ex/A")])
+
+
+def test_derivation_is_deterministic_regardless_of_input_order():
+    forward = derive_subclass_edges(REAL_CLASSES)
+    backward = derive_subclass_edges(list(reversed(REAL_CLASSES)))
+    assert forward == backward
+    assert forward == sorted(forward)
+
+
+def test_classes_with_no_structural_kin_gain_nothing():
+    parented = {c for c, _ in derive_subclass_edges(REAL_CLASSES)}
+    for orphan in ("SECFiling", "StandardError", "ExpenditureCategory",
+                   "EstablishmentLevel", "HiresData"):
+        assert not any(_split_uri(c)[1] == orphan for c in parented), orphan
+
+
+# --- the step, end to end -------------------------------------------- #
+
+def test_enrich_emits_the_derived_hierarchy(spark, make_triples):
+    triples = make_triples([
+        ("https://ex/n1", RDF_TYPE, JOLTS_NS + "HiresRate"),
+        ("https://ex/n2", RDF_TYPE, JOLTS_NS + "HiresData"),
+    ])
+    out = OntologyMapper(spark).enrich(triples)
+    derived = [
+        (r["subject"], r["object"]) for r in out.collect()
+        if r["predicate"] == RDFS_SUBCLASS_OF
+    ]
+    assert derived == [(JOLTS_NS + "HiresRate", JOLTS_NS + "HiresData")]
+
+
+def test_derivation_emits_nothing_without_a_derivable_pair(spark, make_triples):
+    triples = make_triples([
+        ("https://ex/n1", RDF_TYPE, JOLTS_NS + "EstablishmentRate"),
+    ])
+    out = OntologyMapper(spark).enrich(triples)
+    assert not [r for r in out.collect()
+                if r["predicate"] == RDFS_SUBCLASS_OF]
+
+
+# --- negating qualifiers: the rule that meaning, not spelling, decides --- #
+
+CPI_NEGATION_CLASSES = [
+    CPI_NS + n for n in (
+        "Shelter", "AllItemsLessShelter", "AllItemsLessFoodAndShelter",
+        "WhiskeyAtHome", "DistilledSpiritsExcludingWhiskeyAtHome",
+        "Commodities", "MedicalCareCommodities",
+    )
+]
+
+
+def test_a_negating_qualifier_does_not_create_a_subclass():
+    # "All items LESS shelter" ends with "Shelter" but asserts the opposite
+    # of being one. Caught by running the rules over the e2e fixture classes.
+    edges = _names(derive_subclass_edges(CPI_NEGATION_CLASSES))
+    assert ("AllItemsLessShelter", "Shelter") not in edges
+    assert ("AllItemsLessFoodAndShelter", "Shelter") not in edges
+    assert ("DistilledSpiritsExcludingWhiskeyAtHome", "WhiskeyAtHome") \
+        not in edges
+
+
+def test_a_narrowing_qualifier_still_creates_a_subclass():
+    # The negation guard must not swallow ordinary specialisation.
+    edges = _names(derive_subclass_edges(CPI_NEGATION_CLASSES))
+    assert ("MedicalCareCommodities", "Commodities") in edges
+
+
+def test_negation_is_detected_only_in_the_qualifier():
+    # "Less" appearing inside the PARENT's own name is not a negation of it.
+    edges = _names(derive_subclass_edges([
+        CPI_NS + "LessonFees", CPI_NS + "PrivateLessonFees",
+    ]))
+    assert ("PrivateLessonFees", "LessonFees") in edges
