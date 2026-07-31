@@ -433,15 +433,30 @@ def test_categorical_encoding_is_deterministic_across_runs(spark):
 # ontology_schema.json — why an empty hierarchy is empty
 # ======================================================================
 
-def _ontology_schema(spark, rows):
-    """Build the real ontology_schema artifact from a triple set."""
+def _metadata_artifacts(spark, rows):
+    """Run the real build and return every collected metadata artifact."""
     triples = spark.createDataFrame(
         rows, schema="subject STRING, predicate STRING, object STRING"
     )
     node_id_df, counts = NodeMapper(spark, CONFIG).build_node_id_table(triples)
     fx = FeatureExtractor(spark, CONFIG)
     fx.build_features(triples, node_id_df, counts)
-    return fx.get_metadata_artifacts()["ontology_schema"]
+    return fx.get_metadata_artifacts()
+
+
+def _ontology_schema(spark, rows):
+    """Build the real ontology_schema artifact from a triple set."""
+    return _metadata_artifacts(spark, rows)["ontology_schema"]
+
+
+# A triple the OntologyMapper always emits and nothing else does — the marker
+# that says the mapping phase ran. Prepending it to a fixture makes that
+# fixture stand for "mapping ran"; omitting it, for "mapping never ran".
+MAPPED = (
+    "https://www.bls.gov/cpi/hasMonth",
+    "http://www.w3.org/2002/07/owl#equivalentProperty",
+    "https://example.org/unified/hasMonth",
+)
 
 
 def test_empty_hierarchy_records_its_reason(spark):
@@ -449,10 +464,13 @@ def test_empty_hierarchy_records_its_reason(spark):
     # a hierarchy" and "this class is a root" both serialize to []. A zero
     # class_hierarchy sub-segment must be diagnosable from the artifact.
     schema = _ontology_schema(spark, [
+        MAPPED,
         ("https://ex/a", RDF_TYPE, CPI_INDEX),
         ("https://ex/a", SECTOR, "Energy"),
     ])
-    assert schema["hierarchy_source"] == "no rdfs:subClassOf in source data"
+    assert schema["hierarchy_source"] == (
+        "no rdfs:subClassOf after ontology mapping"
+    )
     assert schema["node_types"]["cpi_Index"]["superclass_chain"] == []
 
 
@@ -463,6 +481,97 @@ def test_populated_hierarchy_names_its_source(spark):
     ])
     assert schema["hierarchy_source"] == "rdfs:subClassOf"
     assert schema["node_types"]["cpi_Index"]["superclass_chain"]
+
+
+# ======================================================================
+# ontology_schema.json — "no hierarchy" vs "hierarchy never computed"
+# ======================================================================
+#
+# The 2026-07-29 run wrote a structurally valid ontology_schema.json in which
+# every one of 43 node types had superclass_chain == [] — correct for that
+# build, because ontology mapping never ran, but indistinguishable in the file
+# from sources that genuinely declare no subsumption. The two demand opposite
+# responses: the first is a re-run, the second is data to work with. Nothing
+# in the file said which, and the job manifest could not settle it either —
+# that run was pyg_only, so its enable_ontology_mapping flag described a phase
+# the job never reached, not the Parquet it read.
+#
+# The flag is therefore derived from the triples themselves, which is the only
+# signal that stays truthful across full and pyg_only builds alike.
+
+def test_unmapped_build_says_mapping_never_ran(spark):
+    schema = _ontology_schema(spark, [
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/a", SECTOR, "Energy"),
+    ])
+    # The flag itself — not merely an empty list left to be interpreted.
+    assert schema["ontology_mapping_enabled"] is False
+    # Bumped with the flag, so a consumer can require it rather than probe
+    # for the key: a 1.0 file's empty hierarchy stays ambiguous forever.
+    assert schema["version"] == "1.1"
+    assert "no owl:equivalentProperty" in schema["ontology_mapping_evidence"]
+    # ...and the prose reason names the missing phase, not just missing data.
+    assert schema["hierarchy_source"] == (
+        "no rdfs:subClassOf in source data and ontology mapping did not run"
+    )
+    assert schema["node_types"]["cpi_Index"]["superclass_chain"] == []
+
+
+def test_mapped_build_says_mapping_ran(spark):
+    schema = _ontology_schema(spark, [
+        MAPPED,
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/a", SECTOR, "Energy"),
+    ])
+    assert schema["ontology_mapping_enabled"] is True
+    assert schema["ontology_mapping_evidence"] == (
+        "owl:equivalentProperty/owl:equivalentClass present in build input"
+    )
+
+
+def test_equivalent_class_alone_is_marker_enough(spark):
+    # Either marker suffices: a run whose class map is non-empty but whose
+    # property table is not must still read as mapped.
+    schema = _ontology_schema(spark, [
+        (CPI_INDEX, "http://www.w3.org/2002/07/owl#equivalentClass",
+         BASE_CLASS),
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+    ])
+    assert schema["ontology_mapping_enabled"] is True
+
+
+def test_hierarchy_from_mapping_is_not_reported_as_empty(spark):
+    # When mapping does derive subsumption, nothing about the flag suppresses
+    # the ordinary source attribution.
+    schema = _ontology_schema(spark, [
+        MAPPED,
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        (CPI_INDEX, RDFS_SUBCLASS_OF, BASE_CLASS),
+    ])
+    assert schema["ontology_mapping_enabled"] is True
+    assert schema["hierarchy_source"] == "rdfs:subClassOf"
+
+
+def test_dead_class_hierarchy_segment_blames_the_missing_phase(spark):
+    # feature_spec.json's empty_reason comes from the same distinction, so a
+    # reader of that file is not sent looking for absent source triples when
+    # the real cause is a phase that never ran.
+    unmapped = _metadata_artifacts(spark, [
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/a", SECTOR, "Energy"),
+    ])["sub_segment_status"]
+    assert unmapped["class_hierarchy"] == (
+        "no rdfs:subClassOf in source data and ontology mapping did not run"
+    )
+
+    mapped = _metadata_artifacts(spark, [
+        MAPPED,
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/a", SECTOR, "Energy"),
+    ])["sub_segment_status"]
+    assert mapped["class_hierarchy"] == (
+        "no rdfs:subClassOf after ontology mapping"
+    )
 
 
 def test_empty_property_schema_records_its_reason(spark):

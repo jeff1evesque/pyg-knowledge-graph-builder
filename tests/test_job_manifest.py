@@ -23,10 +23,10 @@ import pytest
 from spark_jobs.build_graph import save_job_manifest
 
 
-def _config(work_dir: str) -> SimpleNamespace:
+def _config(work_dir: str, mode: str = "enrichment_only") -> SimpleNamespace:
     """Minimal stand-in for JobConfig: save_job_manifest only reads these fields."""
     return SimpleNamespace(
-        mode="enrichment_only",
+        mode=mode,
         time_period="2099-01",
         source_paths=["s3a://bucket/raw/sec"],
         source_format="turtle_parquet",
@@ -87,3 +87,37 @@ def test_manifest_plain_local_workdir_still_writes(spark, tmp_path):
 
     manifest = _find_manifest(work)
     assert json.loads(open(manifest, "rb").read())["time_period"] == "2099-01"
+
+
+def test_manifest_records_the_ontology_flag_where_it_applies(spark, tmp_path):
+    """An enriching mode's manifest states the flag it actually honored."""
+    work = tmp_path / "enriching"
+    config = _config(str(work), mode="enrichment_only")
+    config.enable_ontology_mapping = True
+    save_job_manifest(spark, None, config, {"mode": "enrichment_only"}, 0.5)
+
+    payload = json.loads(open(_find_manifest(work), "rb").read())
+    assert payload["config"]["enable_ontology_mapping"] is True
+
+
+def test_manifest_does_not_claim_an_ontology_flag_pyg_only_never_used(
+    spark, tmp_path
+):
+    """pyg_only must not report a flag for a phase it never reaches.
+
+    That job enriches nothing -- it reads a Parquet some earlier job wrote --
+    so its own --enable_ontology_mapping is inert. Written verbatim it reads
+    as a claim about that Parquet, and the 2026-07-29 build's empty class
+    hierarchy was diagnosed off exactly that misreading. null says "not
+    applicable"; ontology_schema.json's ontology_mapping_enabled carries the
+    verdict that is actually derived from the triples.
+    """
+    work = tmp_path / "pyg_only"
+    config = _config(str(work), mode="pyg_only")
+    config.enable_ontology_mapping = False
+    save_job_manifest(spark, None, config, {"mode": "pyg_only"}, 0.5)
+
+    payload = json.loads(open(_find_manifest(work), "rb").read())
+    assert payload["config"]["enable_ontology_mapping"] is None, (
+        "pyg_only manifest states an enrichment flag it never honored"
+    )

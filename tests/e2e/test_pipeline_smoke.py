@@ -534,6 +534,7 @@ def _assert_metadata_describes_the_graph(data, found):
     _assert_node_sub_segments_are_not_vacuous(data, spec)
     _assert_class_identity_is_recoverable(data, found)
     _assert_source_type_uris_identify_their_node_type(schema, found)
+    _assert_ontology_schema_states_whether_mapping_ran(found)
 
     # --- 3. node type inventory ------------------------------------------- #
     declared_nodes = set(schema["node_types"])
@@ -573,6 +574,35 @@ def _assert_metadata_describes_the_graph(data, found):
             f"{declared}, graph has {actual} edges -- the writer saw a "
             f"different version of the graph (deduplication ordering?)"
         )
+
+
+def _assert_ontology_schema_states_whether_mapping_ran(found):
+    """ontology_schema.json must say whether ontology mapping ran.
+
+    An all-empty hierarchy has two causes that demand opposite responses --
+    sources that declare no subsumption (data to work with) and a mapping
+    phase that never ran (a re-run) -- and both serialize to
+    ``superclass_chain: []``. The 2026-07-29 build could not be told apart
+    from either by reading the file.
+
+    The job manifest cannot settle it: the split path below runs pyg_only,
+    whose own enable_ontology_mapping flag describes a phase that job never
+    reaches. So the flag is derived from the enriched triples, and this
+    asserts it survives the Parquet round-trip -- every mode here enriches
+    with mapping on, so anything but True means the detection is broken, not
+    the pipeline.
+    """
+    ontology = json.loads(Path(found["ontology_schema.json"]).read_bytes())
+
+    assert "ontology_mapping_enabled" in ontology, (
+        "ontology_schema.json does not record whether ontology mapping ran, "
+        "so an empty superclass_chain cannot be diagnosed from the file"
+    )
+    assert ontology["ontology_mapping_enabled"] is True, (
+        f"these runs enrich with ontology mapping enabled, but "
+        f"ontology_schema.json reports it did not run "
+        f"({ontology.get('ontology_mapping_evidence')})"
+    )
 
 
 def _assert_source_type_uris_identify_their_node_type(schema, found):
