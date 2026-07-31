@@ -1201,6 +1201,7 @@ The PyG builder accepts an optional configuration dict:
 | `feature_config.normalize` | `true` | Z-score normalize numeric features (single-pass per-predicate) |
 | `feature_config.vector_dim` | `1024` | Node feature vector dimension — all segments scale proportionally. Minimum 32. |
 | `feature_config.chunk_node_threshold` | `500000` | Node count above which chunked collection is used |
+| `--class_mappings` (CLI) | built-in table | JSON object (or path to a JSON file) of `{source_class_uri: target_class_uri}` merged over `ontology_mapper.CLASS_MAPPINGS`. A `null` target drops a built-in entry. Lets a new source declare its class semantics without editing the module. Where two or more sources share a target the relationship is published as `rdfs:subClassOf`, not `owl:equivalentClass`. |
 | `feature_config.numeric_predicate_min_share` | `0.5` | Share of a property's literal values that must parse as numbers for the property to be treated as numeric. At or below it, every value is a category label. Lower it to admit sparsely numeric properties; raise it toward `1.0` to demand near-uniformly numeric ones. |
 | `edge_feature_config.enabled` | `true` | Enable/disable edge feature extraction entirely |
 | `edge_feature_config.edge_vector_dim` | `32` | Edge feature vector dimension — all segments scale proportionally. Minimum 9. |

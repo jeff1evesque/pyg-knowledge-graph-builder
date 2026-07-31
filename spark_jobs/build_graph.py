@@ -68,6 +68,7 @@ import re
 import time
 import io
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, Any, Tuple, List
 
 from pyspark.sql import SparkSession, DataFrame
@@ -229,6 +230,9 @@ class JobConfig:
             "%Y-%m"
         )
         self.pyg_config = self._parse_pyg_config(args.get("pyg_config", ""))
+        self.class_mappings = self._parse_json_arg(
+            args.get("class_mappings", ""), "class_mappings"
+        )
         self.parquet_partitions = int(
             args.get("parquet_partitions", str(DEFAULT_PARQUET_PARTITIONS))
         )
@@ -268,6 +272,23 @@ class JobConfig:
     def archive_to_s3(self) -> bool:
         """Whether final artifacts should also be mirrored to S3."""
         return bool(self.s3_archive_bucket)
+
+    def _parse_json_arg(self, raw: str, name: str) -> Dict[str, Any]:
+        """Parse a JSON CLI argument, or a path to a JSON file."""
+        raw = (raw or "").strip()
+        if not raw:
+            return {}
+        if not raw.startswith("{"):
+            try:
+                raw = Path(raw).read_text()
+            except OSError as e:
+                logger.warning(f"Could not read {name} file: {e}")
+                return {}
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as e:
+            logger.warning(f"Could not parse {name} JSON, ignoring: {e}")
+            return {}
 
     def _parse_pyg_config(self, config_str: str) -> Dict[str, Any]:
         if not config_str or config_str.strip() == "":
@@ -359,6 +380,7 @@ def parse_args() -> JobConfig:
     parser.add_argument("--enable_ontology_mapping", default="true")
     parser.add_argument("--time_period", default="")
     parser.add_argument("--pyg_config", default="")
+    parser.add_argument("--class_mappings", default="")
     parser.add_argument(
         "--parquet_partitions", default=str(DEFAULT_PARQUET_PARTITIONS)
     )
@@ -1037,6 +1059,7 @@ def run_enrichment(
     enable_ontology_mapping: bool = True,
     market_sector_definitions_bucket: str = "",
     market_sector_definitions_key: str = "",
+    class_mappings: Dict[str, Any] = None,
 ) -> tuple:
     """
     Run the enrichment pipeline on a triples DataFrame.
@@ -1047,6 +1070,8 @@ def run_enrichment(
         spark: Active SparkSession
         triples_df: Raw triples DataFrame (subject, predicate, object)
         enable_ontology_mapping: Whether to run ontology mapping
+        class_mappings: Per-run additions/overrides to the built-in
+            CLASS_MAPPINGS table (see ontology_mapper)
 
     Returns:
         Tuple of (enriched_triples_df, enrichment_stats_dict)
@@ -1069,7 +1094,10 @@ def run_enrichment(
         sector_definitions_bucket=market_sector_definitions_bucket,
         sector_definitions_key=market_sector_definitions_key,
     )
-    stats = pipeline.run(enable_ontology_mapping=enable_ontology_mapping)
+    stats = pipeline.run(
+        enable_ontology_mapping=enable_ontology_mapping,
+        class_mappings=class_mappings,
+    )
     enriched_df = pipeline.get_enriched_triples_df()
 
     elapsed = time.time() - start_time
@@ -1322,6 +1350,7 @@ def execute_full_pipeline(
         config.enable_ontology_mapping,
         market_sector_definitions_bucket=config.market_sector_definitions_bucket,
         market_sector_definitions_key=config.market_sector_definitions_key,
+        class_mappings=config.class_mappings,
     )
 
     # Unpersist raw triples — enriched_df is independently cached
@@ -1390,6 +1419,7 @@ def execute_enrichment_only(
         config.enable_ontology_mapping,
         market_sector_definitions_bucket=config.market_sector_definitions_bucket,
         market_sector_definitions_key=config.market_sector_definitions_key,
+        class_mappings=config.class_mappings,
     )
 
     # Unpersist raw triples

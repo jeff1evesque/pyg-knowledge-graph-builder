@@ -16,7 +16,7 @@ All operations run as PySpark DataFrame transformations.
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from functools import reduce
-from typing import List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from spark_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, SEC_ENRICHMENT, MARKET_ENRICHMENT, NOAA_ENRICHMENT,
@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
+RDFS_SUBCLASS_OF = "http://www.w3.org/2000/01/rdf-schema#subClassOf"
 OWL_EQUIVALENT_PROPERTY = "http://www.w3.org/2002/07/owl#equivalentProperty"
 OWL_EQUIVALENT_CLASS = "http://www.w3.org/2002/07/owl#equivalentClass"
 SKOS_PREF_LABEL = "http://www.w3.org/2004/02/skos/core#prefLabel"
@@ -168,6 +169,219 @@ CLASS_MAPPINGS = {
 }
 
 
+# ============================================
+# CURATED HIERARCHY (from CLASS_MAPPINGS)
+# ============================================
+#
+# CLASS_MAPPINGS above is a hand-written statement of what each source class
+# MEANS, and most of it describes subsumption rather than equivalence.
+#
+# When two or more distinct source classes map to one target, equivalence is
+# not merely imprecise, it is false: HiresRate = RateMeasurement and
+# QuitsRate = RateMeasurement together imply HiresRate = QuitsRate. What the
+# table actually says is that each is a KIND of RateMeasurement -- five of
+# them, plus four ChangeMeasurement, four LevelMeasurement, and so on.
+#
+# So those relationships are published as rdfs:subClassOf, and only the
+# genuine one-to-one pairs stay owl:equivalentClass. This is the better
+# source of hierarchy: a person decided each entry, so unlike the naming
+# rules below it cannot invert the meaning of a name it misreads.
+#
+# Unlike the naming rules, a curated parent need NOT appear in the data --
+# RateMeasurement is an enrichment class that may never be instantiated, and
+# RDFS allows a superclass with no direct instances.
+
+
+def partition_class_mappings(
+    mappings: Dict[str, str],
+) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """
+    Split CLASS_MAPPINGS into (subsumptions, equivalences).
+
+    A target claimed by two or more sources cannot be equivalent to any of
+    them, so every one of its sources is a subclass. A target with exactly
+    one source is left as a candidate equivalence.
+
+    Returns two {source: target} dicts, together covering ``mappings``.
+    """
+    sources_per_target: Dict[str, List[str]] = {}
+    for source, target in mappings.items():
+        sources_per_target.setdefault(target, []).append(source)
+
+    subsumptions, equivalences = {}, {}
+    for source, target in mappings.items():
+        if len(sources_per_target[target]) > 1:
+            subsumptions[source] = target
+        else:
+            equivalences[source] = target
+    return subsumptions, equivalences
+
+
+def resolve_class_mappings(
+    overrides: Optional[Dict[str, Optional[str]]] = None,
+) -> Dict[str, str]:
+    """
+    Merge caller-supplied class mappings over the built-in table.
+
+    The built-in table covers the sources this project ships with. Adding a
+    source should not require editing this module, so a run can pass its own:
+
+      * ``{"<source uri>": "<target uri>"}`` adds or overrides one entry;
+      * ``{"<source uri>": None}`` drops a built-in entry.
+
+    Merging rather than replacing is deliberate — the common case is adding a
+    vocabulary, not disowning the existing ones. Pass ``None`` targets to
+    remove what does not apply.
+    """
+    merged = dict(CLASS_MAPPINGS)
+    for source, target in (overrides or {}).items():
+        if target is None:
+            merged.pop(source, None)
+        else:
+            merged[source] = target
+    return merged
+
+
+# The defaults, for callers that want the built-in reading without a mapper.
+CURATED_SUBCLASSES, TRUE_EQUIVALENCES = partition_class_mappings(
+    CLASS_MAPPINGS
+)
+
+
+# ============================================
+# CLASS HIERARCHY DERIVATION
+# ============================================
+#
+# No source declares rdfs:subClassOf -- not the real SEC/BLS/NOAA/market data,
+# not either e2e fixture set. The class_hierarchy sub-segment (64 dims of a
+# 1024-d node vector) was therefore zero in every build. The hierarchy is not
+# absent from the data though, only unasserted: the class names encode it.
+#
+# These rules recover it. Both are deliberately conservative -- a parent is
+# only ever an EXISTING class from the same namespace, never an invented URI,
+# so a rule can fail to find a parent but cannot fabricate one. A wrong
+# subClassOf is worse than a missing one: it feeds fake structure into 64 dims
+# that the GNN will treat as fact.
+#
+# What is recovered is recorded in ontology_schema.json as
+# hierarchy_source="derived from class naming", never as "rdfs:subClassOf", so
+# no consumer mistakes inference for a declaration.
+
+# A measurement class specialises its dataset class: HiresRate is a kind of
+# HiresData. Applied only when the "<prefix>Data" class actually exists.
+_MEASURE_SUFFIXES = ("Level", "Rate")
+_DATASET_SUFFIX = "Data"
+
+# BLS names a series by what it EXCLUDES as readily as by what it contains:
+# AllItemsLessShelter, DistilledSpiritsExcludingWhiskeyAtHome. Rule 2 reads
+# those backwards -- "AllItemsLessShelter ends with Shelter, so it must be a
+# kind of Shelter" -- when the name asserts the exact opposite. Found by
+# running the rules over the e2e fixture classes, where the suffix rule
+# produced AllItemsLessShelter -> Shelter and two more like it.
+#
+# A qualifier containing any of these negates rather than narrows, so the
+# edge is dropped. This is deliberately blunt: it also drops
+# CommoditiesLessFoodAndEnergyCommodities -> Commodities, which happens to be
+# a correct subset relation. A missing superclass costs recall in 64 dims; a
+# wrong one teaches the GNN a relationship that is false.
+_NEGATING_QUALIFIERS = ("Less", "Excluding", "Without", "Except")
+
+
+def _split_uri(uri: str) -> Tuple[str, str]:
+    """Split a URI into (namespace, local name) on the last # or /."""
+    for sep in ("#", "/"):
+        head, found, tail = uri.rpartition(sep)
+        if found and tail:
+            return head + sep, tail
+    return "", uri
+
+
+def derive_subclass_edges(class_uris: Iterable[str]) -> List[Tuple[str, str]]:
+    """
+    Infer (child, parent) rdfs:subClassOf pairs from class naming.
+
+    Two rules, both scoped to a single namespace:
+
+    1. Measurement -> dataset. ``<X>Level`` and ``<X>Rate`` are subclasses of
+       ``<X>Data`` when that class exists (HiresRate -> HiresData).
+    2. Qualifier -> base. A class whose local name ends with another class's
+       full local name specialises it (UnadjustedPercentChange ->
+       PercentChange, OtherSeparationsData -> SeparationsData) -- unless the
+       qualifier negates rather than narrows (AllItemsLessShelter is not a
+       kind of Shelter).
+
+    Multiple parents are allowed -- RDFS permits it, and the two rules
+    legitimately disagree about which axis a class specialises along.
+
+    Returns edges sorted for determinism. Raises ValueError if the result is
+    not a DAG; the encoder walks this to a transitive closure with a depth,
+    which a cycle would not terminate.
+    """
+    classes = sorted(set(class_uris))
+    parts = {c: _split_uri(c) for c in classes}
+    by_ns: Dict[str, Dict[str, str]] = {}
+    for uri, (ns, local) in parts.items():
+        by_ns.setdefault(ns, {})[local] = uri
+
+    edges = set()
+    for child, (ns, local) in parts.items():
+        siblings = by_ns[ns]
+
+        # Rule 1 — measurement specialises its dataset.
+        for suffix in _MEASURE_SUFFIXES:
+            if local.endswith(suffix):
+                parent_local = local[: -len(suffix)] + _DATASET_SUFFIX
+                parent = siblings.get(parent_local)
+                if parent is not None and parent != child:
+                    edges.add((child, parent))
+
+        # Rule 2 — qualified name specialises the name it qualifies, unless
+        # the qualifier negates it (AllItemsLessShelter is NOT a Shelter).
+        for other_local, parent in siblings.items():
+            if other_local == local or not local.endswith(other_local):
+                continue
+            qualifier = local[: -len(other_local)]
+            if any(neg in qualifier for neg in _NEGATING_QUALIFIERS):
+                continue
+            edges.add((child, parent))
+
+    result = sorted(edges)
+    _assert_is_dag(result)
+    return result
+
+
+def _assert_is_dag(edges: List[Tuple[str, str]]) -> None:
+    """Raise if the child->parent edges contain a cycle.
+
+    Enforced rather than merely tested: the rules are string-shaped, so a
+    future suffix could quietly introduce A -> B -> A, and the encoder's
+    transitive closure would not terminate on it.
+    """
+    parents: Dict[str, List[str]] = {}
+    for child, parent in edges:
+        parents.setdefault(child, []).append(parent)
+
+    WHITE, GREY, BLACK = 0, 1, 2
+    colour: Dict[str, int] = {}
+
+    def visit(node: str, trail: List[str]) -> None:
+        colour[node] = GREY
+        for parent in parents.get(node, []):
+            state = colour.get(parent, WHITE)
+            if state == GREY:
+                cycle = " -> ".join(trail + [node, parent])
+                raise ValueError(
+                    f"derived class hierarchy contains a cycle: {cycle}"
+                )
+            if state == WHITE:
+                visit(parent, trail + [node])
+        colour[node] = BLACK
+
+    for node in list(parents):
+        if colour.get(node, WHITE) == WHITE:
+            visit(node, [])
+
+
 class OntologyMapper:
     """
     Creates ontology equivalence mappings and label normalization
@@ -178,8 +392,26 @@ class OntologyMapper:
     triples from the graph.
     """
 
-    def __init__(self, spark: SparkSession):
+    def __init__(
+        self,
+        spark: SparkSession,
+        class_mappings: Optional[Dict[str, Optional[str]]] = None,
+    ):
+        """
+        Args:
+            spark: active session
+            class_mappings: per-run additions/overrides to the built-in
+                CLASS_MAPPINGS table; see resolve_class_mappings(). A value
+                of None for a source drops that built-in entry.
+        """
         self.spark = spark
+        self.class_mappings = resolve_class_mappings(class_mappings)
+        # Re-read per instance: an override can turn a one-to-one pair into a
+        # shared target (or the reverse), which moves it between subsumption
+        # and equivalence.
+        self.curated_subclasses, self.true_equivalences = (
+            partition_class_mappings(self.class_mappings)
+        )
 
     def enrich(
         self,
@@ -206,23 +438,28 @@ class OntologyMapper:
 
         new_dfs: List[DataFrame] = []
 
-        logger.info("[Step 1/4] Creating property equivalences...")
+        logger.info("[Step 1/5] Creating property equivalences...")
         df = self._create_property_equivalences()
         if df is not None:
             new_dfs.append(df)
 
-        logger.info("[Step 2/4] Creating class equivalences...")
+        logger.info("[Step 2/5] Creating class equivalences...")
         df = self._create_class_equivalences()
         if df is not None:
             new_dfs.append(df)
 
-        logger.info("[Step 3/4] Folding predicates to their unified form...")
+        logger.info("[Step 3/5] Folding predicates to their unified form...")
         df = self._fold_predicates_to_unified(triples_df)
         if df is not None:
             new_dfs.append(df)
 
-        logger.info("[Step 4/4] Normalizing labels (skos:prefLabel)...")
+        logger.info("[Step 4/5] Normalizing labels (skos:prefLabel)...")
         df = self._normalize_labels(triples_df)
+        if df is not None:
+            new_dfs.append(df)
+
+        logger.info("[Step 5/5] Deriving class hierarchy (rdfs:subClassOf)...")
+        df = self._derive_class_hierarchy(triples_df)
         if df is not None:
             new_dfs.append(df)
 
@@ -287,12 +524,16 @@ class OntologyMapper:
             nws:WeatherAlert  owl:equivalentClass  noaa_enrichment:EmergencyAlert
             ...
         """
-        if not CLASS_MAPPINGS:
+        if not self.true_equivalences:
             return None
 
+        # Only the one-to-one pairs. Where several sources share a target the
+        # relationship is subsumption, and _derive_class_hierarchy publishes
+        # it as rdfs:subClassOf instead -- asserting both here would state
+        # that those sources are equivalent to each other.
         rows = [
             (source, OWL_EQUIVALENT_CLASS, target)
-            for source, target in CLASS_MAPPINGS.items()
+            for source, target in self.true_equivalences.items()
         ]
 
         df = self.spark.createDataFrame(
@@ -301,6 +542,59 @@ class OntologyMapper:
 
         logger.info(f"  Created {len(rows)} class equivalences")
         return df
+
+    # ================================================================
+    # Step 5: Class Hierarchy Derivation
+    # ================================================================
+
+    def _derive_class_hierarchy(
+        self,
+        triples_df: DataFrame,
+    ) -> Optional[DataFrame]:
+        """
+        Emit rdfs:subClassOf triples inferred from class naming.
+
+        The classes are the distinct objects of rdf:type — a small driver-side
+        collect (44 on the real data, <500 for any plausible source set), so
+        the rules themselves stay pure Python and directly testable.
+        """
+        class_rows = (
+            triples_df
+            .filter(F.col("predicate") == RDF_TYPE)
+            .select("object")
+            .distinct()
+            .collect()
+        )
+        class_uris = [row["object"] for row in class_rows]
+
+        # Curated first — a person wrote these, so they outrank a guess from
+        # spelling. Emitted for every mapped source whether or not the class
+        # appears in this load, matching how the equivalences already behave.
+        curated = sorted(self.curated_subclasses.items())
+        inferred = derive_subclass_edges(class_uris)
+
+        edges = sorted(set(curated) | set(inferred))
+        if not edges:
+            logger.info(
+                f"  No hierarchy derivable from {len(class_uris)} class(es)"
+            )
+            return None
+
+        # The two sources are independent, so neither can rule out a cycle
+        # across the union of them.
+        _assert_is_dag(edges)
+
+        rows = [(child, RDFS_SUBCLASS_OF, parent) for child, parent in edges]
+        logger.info(
+            f"  Hierarchy: {len(curated)} curated + "
+            f"{len(set(inferred) - set(curated))} inferred from naming "
+            f"= {len(rows)} subClassOf edge(s) over {len(class_uris)} "
+            f"class(es); {len({c for c, _ in edges})} class(es) gained a "
+            f"superclass"
+        )
+        return self.spark.createDataFrame(
+            rows, ["subject", "predicate", "object"]
+        )
 
     # ================================================================
     # Step 3: Predicate Folding

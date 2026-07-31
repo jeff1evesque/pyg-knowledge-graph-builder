@@ -531,6 +531,7 @@ def _assert_metadata_describes_the_graph(data, found):
             )
 
     _assert_edge_features_are_not_vacuous(data, spec, schema, found)
+    _assert_node_sub_segments_are_not_vacuous(data, spec)
     _assert_class_identity_is_recoverable(data, found)
     _assert_source_type_uris_identify_their_node_type(schema, found)
 
@@ -677,6 +678,68 @@ def _assert_class_identity_is_recoverable(data, found):
         f"has {len(data.node_types)} node types; the capacity check above is "
         f"then measuring the wrong population"
     )
+
+
+def _assert_node_sub_segments_are_not_vacuous(data, spec):
+    """Every sub-segment that claims features must carry some, somewhere.
+
+    Written over whatever feature_spec.json declares rather than over a named
+    list, so it covers class_hierarchy, property_hierarchy, domain_range and
+    ontology_source alike -- and any sub-segment added later, without an edit
+    here.
+
+    This is the check that was missing. The encoder's unit tests feed
+    synthetic rdfs:subClassOf triples and pass, so they cannot notice that no
+    real source emits any: class_hierarchy was 64 permanently-zero dims of
+    every 1024-d vector, and every consistency assertion in this file still
+    passed. domain_range and property_hierarchy are in the same position on
+    the real data (no rdfs:domain, rdfs:range or rdfs:subPropertyOf anywhere
+    in the 2026-07-29 run), which is why this is written generally.
+
+    A sub-segment is allowed to be empty -- sources genuinely differ in what
+    they declare -- but then the spec must say so and say why, so the dead
+    slice is visible in the artifact instead of only in the encoder.
+    """
+    live = {
+        nt: _store_get(data[nt], "x") for nt in data.node_types
+    }
+    if not any(x is not None for x in live.values()):
+        return  # no node features at all: nothing to be vacuous about
+
+    for segment in spec["node_features"]["segments"]:
+        for sub in segment.get("sub_segments", []):
+            lo, hi = int(sub["start"]), int(sub["end"]) + 1
+            carriers = [
+                str(nt) for nt, x in live.items()
+                if x is not None and bool(x[:, lo:hi].any())
+            ]
+            populated = sub.get("populated", True)
+
+            if populated:
+                assert carriers, (
+                    f"sub-segment {sub['name']!r} claims "
+                    f"{sub['dim']} dims [{sub['start']}-{sub['end']}] but is "
+                    f"zero for EVERY node type. Either the source predicate "
+                    f"it encodes is absent from the data -- in which case "
+                    f"feature_spec.json must declare populated=false with an "
+                    f"empty_reason -- or the encoder stopped filling it. "
+                    f"Nothing else in this file fails when a sub-segment is "
+                    f"dead, which is how it shipped."
+                )
+            else:
+                assert sub.get("empty_reason"), (
+                    f"sub-segment {sub['name']!r} is declared unpopulated "
+                    f"but carries no empty_reason. The reason is the point: "
+                    f"[] alone cannot distinguish 'no source declares this' "
+                    f"from 'the encoder broke'."
+                )
+                assert not carriers, (
+                    f"sub-segment {sub['name']!r} is declared unpopulated "
+                    f"({sub['empty_reason']!r}) but node type(s) {carriers} "
+                    f"carry non-zero values in [{sub['start']}-"
+                    f"{sub['end']}]. The spec understates what the vector "
+                    f"holds, so a consumer would discard real signal."
+                )
 
 
 def _assert_edge_features_are_not_vacuous(data, spec, schema, found):

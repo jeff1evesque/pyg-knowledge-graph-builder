@@ -71,6 +71,7 @@ class EnrichmentPipeline:
         self,
         enable_ontology_mapping: bool = True,
         enable_skos: bool = False,
+        class_mappings: Optional[Dict[str, Optional[str]]] = None,
     ) -> Dict[str, any]:
         logger.info("=" * 80)
         logger.info("STARTING ENRICHMENT PIPELINE")
@@ -172,7 +173,7 @@ class EnrichmentPipeline:
             logger.info("PHASE 4: ONTOLOGY MAPPING")
             logger.info("=" * 80)
 
-            ontology_mapper = OntologyMapper(self.spark)
+            ontology_mapper = OntologyMapper(self.spark, class_mappings)
             ontology_new = ontology_mapper.enrich(
                 self.triples_df, enable_skos=enable_skos
             )

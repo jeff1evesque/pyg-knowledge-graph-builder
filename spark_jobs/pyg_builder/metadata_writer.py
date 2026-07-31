@@ -105,6 +105,7 @@ class MetadataCollector:
         self._encoding_config: Optional[Dict[str, Any]] = None
         self._ontology_schema: Optional[Dict[str, Any]] = None
         self._slot_mapping: Optional[Dict[str, Any]] = None
+        self._sub_segment_status: Dict[str, Optional[str]] = {}
         self._edge_feature_categories: Dict[str, str] = {}
         self._edge_types_with_features: List[str] = []
         self._edge_types_without_features: List[str] = []
@@ -281,6 +282,20 @@ class MetadataCollector:
                 slot assignments with collision report
         """
         self._slot_mapping = slot_mapping
+
+    def register_sub_segment_status(
+        self,
+        status: Dict[str, Optional[str]],
+    ) -> None:
+        """
+        Register why each node sub-segment does or does not carry signal.
+
+        Args:
+            status: Dict[sub_segment_name -> None if populated, else the
+                reason it is empty]. A sub-segment absent from this dict is
+                reported as carrying features.
+        """
+        self._sub_segment_status = status
 
     def register_edge_feature_classification(
         self,
@@ -504,6 +519,18 @@ class MetadataCollector:
                     ],
                 },
             ]
+
+        # Declare, per sub-segment, whether it actually carries signal. A
+        # sub-segment whose source predicate is absent from the triples is
+        # permanently zero, and the spec has to say so — a consumer reading
+        # dims alone cannot tell a dead slice from a live one, and neither
+        # could the e2e vacuity guard.
+        for seg in node_segments:
+            for sub in seg.get("sub_segments", []):
+                reason = self._sub_segment_status.get(sub["name"])
+                sub["populated"] = reason is None
+                if reason is not None:
+                    sub["empty_reason"] = reason
 
         # Edge feature segments
         edge_segments = []
