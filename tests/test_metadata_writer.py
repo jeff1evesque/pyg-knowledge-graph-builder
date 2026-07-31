@@ -302,6 +302,35 @@ def test_feature_spec_node_segments_are_contiguous():
     assert cursor == 1024
 
 
+def test_feature_spec_sub_segments_default_to_claiming_features():
+    # No status registered — every sub-segment claims features, so the e2e
+    # vacuity guard checks them all rather than silently exempting any.
+    spec = _fully_registered_collector()._build_feature_spec()
+    subs = [s for seg in spec["node_features"]["segments"]
+            for s in seg["sub_segments"]]
+    assert subs, "node segments carry no sub-segments"
+    assert all(s["populated"] is True for s in subs)
+    assert all("empty_reason" not in s for s in subs)
+
+
+def test_feature_spec_records_why_a_sub_segment_is_empty():
+    c = _fully_registered_collector()
+    c.register_sub_segment_status(
+        {"class_hierarchy": "no rdfs:subClassOf in source data"}
+    )
+    subs = {s["name"]: s for seg in c._build_feature_spec()[
+        "node_features"]["segments"] for s in seg["sub_segments"]}
+
+    dead = subs["class_hierarchy"]
+    assert dead["populated"] is False
+    assert dead["empty_reason"] == "no rdfs:subClassOf in source data"
+    # Its dims are still declared — the slice exists in the vector, it just
+    # carries nothing. Reclaiming them is a layout change, not a spec edit.
+    assert dead["dim"] > 0
+    # Siblings are unaffected.
+    assert subs["class_identity"]["populated"] is True
+
+
 def test_feature_spec_edge_segments_present_when_enabled():
     spec = _fully_registered_collector()._build_feature_spec()
     edge = spec["edge_features"]
