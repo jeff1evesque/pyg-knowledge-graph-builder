@@ -170,6 +170,85 @@ CLASS_MAPPINGS = {
 
 
 # ============================================
+# CURATED HIERARCHY (from CLASS_MAPPINGS)
+# ============================================
+#
+# CLASS_MAPPINGS above is a hand-written statement of what each source class
+# MEANS, and most of it describes subsumption rather than equivalence.
+#
+# When two or more distinct source classes map to one target, equivalence is
+# not merely imprecise, it is false: HiresRate = RateMeasurement and
+# QuitsRate = RateMeasurement together imply HiresRate = QuitsRate. What the
+# table actually says is that each is a KIND of RateMeasurement -- five of
+# them, plus four ChangeMeasurement, four LevelMeasurement, and so on.
+#
+# So those relationships are published as rdfs:subClassOf, and only the
+# genuine one-to-one pairs stay owl:equivalentClass. This is the better
+# source of hierarchy: a person decided each entry, so unlike the naming
+# rules below it cannot invert the meaning of a name it misreads.
+#
+# Unlike the naming rules, a curated parent need NOT appear in the data --
+# RateMeasurement is an enrichment class that may never be instantiated, and
+# RDFS allows a superclass with no direct instances.
+
+
+def partition_class_mappings(
+    mappings: Dict[str, str],
+) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """
+    Split CLASS_MAPPINGS into (subsumptions, equivalences).
+
+    A target claimed by two or more sources cannot be equivalent to any of
+    them, so every one of its sources is a subclass. A target with exactly
+    one source is left as a candidate equivalence.
+
+    Returns two {source: target} dicts, together covering ``mappings``.
+    """
+    sources_per_target: Dict[str, List[str]] = {}
+    for source, target in mappings.items():
+        sources_per_target.setdefault(target, []).append(source)
+
+    subsumptions, equivalences = {}, {}
+    for source, target in mappings.items():
+        if len(sources_per_target[target]) > 1:
+            subsumptions[source] = target
+        else:
+            equivalences[source] = target
+    return subsumptions, equivalences
+
+
+def resolve_class_mappings(
+    overrides: Optional[Dict[str, Optional[str]]] = None,
+) -> Dict[str, str]:
+    """
+    Merge caller-supplied class mappings over the built-in table.
+
+    The built-in table covers the sources this project ships with. Adding a
+    source should not require editing this module, so a run can pass its own:
+
+      * ``{"<source uri>": "<target uri>"}`` adds or overrides one entry;
+      * ``{"<source uri>": None}`` drops a built-in entry.
+
+    Merging rather than replacing is deliberate — the common case is adding a
+    vocabulary, not disowning the existing ones. Pass ``None`` targets to
+    remove what does not apply.
+    """
+    merged = dict(CLASS_MAPPINGS)
+    for source, target in (overrides or {}).items():
+        if target is None:
+            merged.pop(source, None)
+        else:
+            merged[source] = target
+    return merged
+
+
+# The defaults, for callers that want the built-in reading without a mapper.
+CURATED_SUBCLASSES, TRUE_EQUIVALENCES = partition_class_mappings(
+    CLASS_MAPPINGS
+)
+
+
+# ============================================
 # CLASS HIERARCHY DERIVATION
 # ============================================
 #
@@ -313,8 +392,26 @@ class OntologyMapper:
     triples from the graph.
     """
 
-    def __init__(self, spark: SparkSession):
+    def __init__(
+        self,
+        spark: SparkSession,
+        class_mappings: Optional[Dict[str, Optional[str]]] = None,
+    ):
+        """
+        Args:
+            spark: active session
+            class_mappings: per-run additions/overrides to the built-in
+                CLASS_MAPPINGS table; see resolve_class_mappings(). A value
+                of None for a source drops that built-in entry.
+        """
         self.spark = spark
+        self.class_mappings = resolve_class_mappings(class_mappings)
+        # Re-read per instance: an override can turn a one-to-one pair into a
+        # shared target (or the reverse), which moves it between subsumption
+        # and equivalence.
+        self.curated_subclasses, self.true_equivalences = (
+            partition_class_mappings(self.class_mappings)
+        )
 
     def enrich(
         self,
@@ -427,12 +524,16 @@ class OntologyMapper:
             nws:WeatherAlert  owl:equivalentClass  noaa_enrichment:EmergencyAlert
             ...
         """
-        if not CLASS_MAPPINGS:
+        if not self.true_equivalences:
             return None
 
+        # Only the one-to-one pairs. Where several sources share a target the
+        # relationship is subsumption, and _derive_class_hierarchy publishes
+        # it as rdfs:subClassOf instead -- asserting both here would state
+        # that those sources are equivalent to each other.
         rows = [
             (source, OWL_EQUIVALENT_CLASS, target)
-            for source, target in CLASS_MAPPINGS.items()
+            for source, target in self.true_equivalences.items()
         ]
 
         df = self.spark.createDataFrame(
@@ -466,18 +567,30 @@ class OntologyMapper:
         )
         class_uris = [row["object"] for row in class_rows]
 
-        edges = derive_subclass_edges(class_uris)
+        # Curated first — a person wrote these, so they outrank a guess from
+        # spelling. Emitted for every mapped source whether or not the class
+        # appears in this load, matching how the equivalences already behave.
+        curated = sorted(self.curated_subclasses.items())
+        inferred = derive_subclass_edges(class_uris)
+
+        edges = sorted(set(curated) | set(inferred))
         if not edges:
             logger.info(
                 f"  No hierarchy derivable from {len(class_uris)} class(es)"
             )
             return None
 
+        # The two sources are independent, so neither can rule out a cycle
+        # across the union of them.
+        _assert_is_dag(edges)
+
         rows = [(child, RDFS_SUBCLASS_OF, parent) for child, parent in edges]
         logger.info(
-            f"  Derived {len(rows)} subClassOf edge(s) over "
-            f"{len(class_uris)} class(es); "
-            f"{len({c for c, _ in edges})} class(es) gained a superclass"
+            f"  Hierarchy: {len(curated)} curated + "
+            f"{len(set(inferred) - set(curated))} inferred from naming "
+            f"= {len(rows)} subClassOf edge(s) over {len(class_uris)} "
+            f"class(es); {len({c for c, _ in edges})} class(es) gained a "
+            f"superclass"
         )
         return self.spark.createDataFrame(
             rows, ["subject", "predicate", "object"]
