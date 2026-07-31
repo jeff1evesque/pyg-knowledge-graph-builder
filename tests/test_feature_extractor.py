@@ -430,6 +430,54 @@ def test_categorical_encoding_is_deterministic_across_runs(spark):
 
 
 # ======================================================================
+# ontology_schema.json — why an empty hierarchy is empty
+# ======================================================================
+
+def _ontology_schema(spark, rows):
+    """Build the real ontology_schema artifact from a triple set."""
+    triples = spark.createDataFrame(
+        rows, schema="subject STRING, predicate STRING, object STRING"
+    )
+    node_id_df, counts = NodeMapper(spark, CONFIG).build_node_id_table(triples)
+    fx = FeatureExtractor(spark, CONFIG)
+    fx.build_features(triples, node_id_df, counts)
+    return fx.get_metadata_artifacts()["ontology_schema"]
+
+
+def test_empty_hierarchy_records_its_reason(spark):
+    # An empty superclass_chain is ambiguous on its own: "no source declares
+    # a hierarchy" and "this class is a root" both serialize to []. A zero
+    # class_hierarchy sub-segment must be diagnosable from the artifact.
+    schema = _ontology_schema(spark, [
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/a", SECTOR, "Energy"),
+    ])
+    assert schema["hierarchy_source"] == "no rdfs:subClassOf in source data"
+    assert schema["node_types"]["cpi_Index"]["superclass_chain"] == []
+
+
+def test_populated_hierarchy_names_its_source(spark):
+    schema = _ontology_schema(spark, [
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        (CPI_INDEX, RDFS_SUBCLASS_OF, BASE_CLASS),
+    ])
+    assert schema["hierarchy_source"] == "rdfs:subClassOf"
+    assert schema["node_types"]["cpi_Index"]["superclass_chain"]
+
+
+def test_empty_property_schema_records_its_reason(spark):
+    # Same diagnosis gap for domain_range, which is equally zero on the real
+    # sources — no rdfs:domain or rdfs:range is declared anywhere.
+    schema = _ontology_schema(spark, [
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/a", SECTOR, "Energy"),
+    ])
+    assert schema["property_schema_source"] == (
+        "no rdfs:domain or rdfs:range in source data"
+    )
+
+
+# ======================================================================
 # class_identity capacity — the collision_report metric and its guard
 # ======================================================================
 #
