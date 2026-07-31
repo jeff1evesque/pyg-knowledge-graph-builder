@@ -100,13 +100,15 @@ _SEG3_FRAC = 0.375  # = 1.0 - 0.25 - 0.375
 #
 # The dims come from class_hierarchy rather than from vector_dim, which would
 # have doubled driver memory. class_hierarchy is the cheapest source: it encodes
-# rdfs:subClassOf chains taken straight from the source triples
-# (_extract_class_hierarchy), and none of the sources declare any -- so it is
-# entirely zero in every build so far. Note this does NOT depend on
-# --enable_ontology_mapping: OntologyMapper emits owl:equivalentClass /
-# owl:equivalentProperty / skos:prefLabel and no rdfs:subClassOf, so enabling it
-# would not populate this segment either. At 0.25 there are still 64 dims for 2
-# hashes per superclass if a source ever does ship a hierarchy.
+# rdfs:subClassOf chains taken straight from the input triples
+# (_extract_class_hierarchy), and none of the raw sources declare any -- so it
+# was entirely zero in every build up to that point. That is NO LONGER
+# independent of --enable_ontology_mapping: OntologyMapper now derives
+# rdfs:subClassOf from class naming and from the curated class_mappings table,
+# so the segment is populated when mapping runs and permanently zero when it
+# does not. Which of the two produced a given build is recorded in
+# ontology_schema.json (ontology_mapping_enabled) rather than left to be
+# guessed from an empty list -- see _collect_ontology_schema_metadata.
 _SEG1_CLASS_IDENTITY_FRAC = 0.50
 _SEG1_CLASS_HIERARCHY_FRAC = 0.25
 _SEG1_ONTOLOGY_SOURCE_FRAC = 0.25
@@ -146,6 +148,8 @@ RDFS_SUBCLASS_OF = "http://www.w3.org/2000/01/rdf-schema#subClassOf"
 RDFS_DOMAIN = "http://www.w3.org/2000/01/rdf-schema#domain"
 RDFS_RANGE = "http://www.w3.org/2000/01/rdf-schema#range"
 RDFS_SUB_PROPERTY_OF = "http://www.w3.org/2000/01/rdf-schema#subPropertyOf"
+OWL_EQUIVALENT_CLASS = "http://www.w3.org/2002/07/owl#equivalentClass"
+OWL_EQUIVALENT_PROPERTY = "http://www.w3.org/2002/07/owl#equivalentProperty"
 
 _NON_FEATURE_PREDICATES = {
     RDF_TYPE,
@@ -153,14 +157,46 @@ _NON_FEATURE_PREDICATES = {
     RDFS_DOMAIN,
     RDFS_RANGE,
     RDFS_SUB_PROPERTY_OF,
+    OWL_EQUIVALENT_CLASS,
+    OWL_EQUIVALENT_PROPERTY,
     "http://www.w3.org/2000/01/rdf-schema#label",
     "http://www.w3.org/2000/01/rdf-schema#comment",
     "http://www.w3.org/2000/01/rdf-schema#isDefinedBy",
     "http://www.w3.org/2002/07/owl#sameAs",
     "http://www.w3.org/2002/07/owl#imports",
-    "http://www.w3.org/2002/07/owl#equivalentClass",
-    "http://www.w3.org/2002/07/owl#equivalentProperty",
 }
+
+# Predicates whose presence proves the ontology-mapping phase ran over the
+# triples this build was handed.
+#
+# The builder cannot read --enable_ontology_mapping: in pyg_only mode (how
+# every experiment sweep runs) enrichment happened in a separate job, and this
+# job's own flag says nothing about the Parquet it is reading -- the 2026-07-29
+# manifest recorded enable_ontology_mapping=false for exactly that reason,
+# describing a phase that run never even reached. So detect it from the data
+# instead, which is truthful in every mode.
+#
+# OntologyMapper emits owl:equivalentProperty from a static, non-empty table on
+# every run (_create_property_equivalences), and owl:equivalentClass from the
+# curated class map -- and nothing else in the pipeline emits either. Their
+# absence therefore means the phase did not run, not that it ran and found
+# nothing.
+_ONTOLOGY_MAPPING_MARKERS = (OWL_EQUIVALENT_PROPERTY, OWL_EQUIVALENT_CLASS)
+
+
+def _empty_hierarchy_reason(ontology_mapping_ran: bool) -> str:
+    """Why class_hierarchy is empty — the two causes demand opposite responses.
+
+    "the sources declare no subsumption" is data to work with; "the phase that
+    derives subsumption never ran" is a re-run. Both serialize to an empty
+    superclass_chain, so the distinction has to be stated, not inferred.
+    """
+    if ontology_mapping_ran:
+        return "no rdfs:subClassOf after ontology mapping"
+    return (
+        "no rdfs:subClassOf in source data and ontology mapping did not run"
+    )
+
 
 # ============================================
 # Driver memory safety constants
@@ -470,6 +506,11 @@ class FeatureExtractor:
         self._has_property_schema = True
         self._has_property_hierarchy = True
 
+        # Whether the ontology-mapping phase ran over the triples handed to
+        # build_features(). Detected from the data, not from a config flag —
+        # see _ONTOLOGY_MAPPING_MARKERS.
+        self._ontology_mapping_ran = False
+
         # Metadata artifacts — populated by the _collect_* methods during
         # build_features(). Initialized here (not just inside the conditional
         # collect paths) so get_metadata_artifacts() is safe even when a build
@@ -635,9 +676,25 @@ class FeatureExtractor:
         # ============================================
         logger.info("  Extracting ontology structure from triples...")
 
+        self._ontology_mapping_ran = self._detect_ontology_mapping(triples_df)
         class_hierarchy_df = self._extract_class_hierarchy(triples_df)
         property_schema_df = self._extract_property_schema(triples_df)
         property_hierarchy_df = self._extract_property_hierarchy(triples_df)
+
+        # An unmapped build silently forfeits the class_hierarchy sub-segment
+        # -- 64 of 1024 dims on the production layout. That is a re-run
+        # decision, so say it at build time instead of leaving it to be
+        # noticed later in a file full of empty lists.
+        if not self._ontology_mapping_ran:
+            logger.warning(
+                f"    Ontology mapping did not run on these triples "
+                f"(no {OWL_EQUIVALENT_PROPERTY} / {OWL_EQUIVALENT_CLASS}); "
+                f"the class_hierarchy sub-segment "
+                f"({layout.seg1_class_hierarchy_dim} of "
+                f"{layout.vector_dim} dims) will be entirely zero. "
+                f"Re-run enrichment with --enable_ontology_mapping true to "
+                f"populate it."
+            )
 
         # ============================================
         # Pre-compute per-node property presence (on executors)
@@ -720,7 +777,7 @@ class FeatureExtractor:
         self._collected_sub_segment_status = {
             "class_hierarchy": (
                 None if self._has_class_hierarchy
-                else "no rdfs:subClassOf in source data"
+                else _empty_hierarchy_reason(self._ontology_mapping_ran)
             ),
             "domain_range": (
                 None if self._has_property_schema
@@ -918,6 +975,20 @@ class FeatureExtractor:
     # ================================================================
     # Ontology structure extraction (all on executors)
     # ================================================================
+
+    def _detect_ontology_mapping(self, triples_df: DataFrame) -> bool:
+        """
+        Whether the ontology-mapping phase ran over these triples.
+
+        Short-circuits on the first marker row (see
+        _ONTOLOGY_MAPPING_MARKERS for why these predicates are the signal),
+        so it costs a single scan that stops early rather than a count.
+        """
+        return bool(
+            triples_df
+            .filter(F.col("predicate").isin(list(_ONTOLOGY_MAPPING_MARKERS)))
+            .head(1)
+        )
 
     def _extract_class_hierarchy(
         self, triples_df: DataFrame
@@ -1599,12 +1670,30 @@ class FeatureExtractor:
         # both serialize to []. Record the distinction so a zero
         # class_hierarchy sub-segment is diagnosable from the artifact rather
         # than from the encoder source.
+        #
+        # ontology_mapping_enabled closes the third reading, which the other
+        # two cannot express: the hierarchy was never computed at all. Since
+        # OntologyMapper is what derives rdfs:subClassOf, a build it never
+        # touched has an empty hierarchy no matter what the sources declare,
+        # and the file has to say which of the two it is looking at.
         self._collected_ontology_schema = {
-            "version": "1.0",
+            # 1.1: adds ontology_mapping_enabled / ontology_mapping_evidence.
+            # A 1.0 file with an all-empty hierarchy is genuinely ambiguous
+            # and stays that way -- the version is what lets a consumer
+            # require the flag rather than test for its key.
+            "version": "1.1",
+            "ontology_mapping_enabled": self._ontology_mapping_ran,
+            "ontology_mapping_evidence": (
+                "owl:equivalentProperty/owl:equivalentClass present in "
+                "build input"
+                if self._ontology_mapping_ran
+                else "no owl:equivalentProperty/owl:equivalentClass in "
+                     "build input"
+            ),
             "hierarchy_source": (
                 "rdfs:subClassOf"
                 if hierarchy_map
-                else "no rdfs:subClassOf in source data"
+                else _empty_hierarchy_reason(self._ontology_mapping_ran)
             ),
             "property_schema_source": (
                 "rdfs:domain/rdfs:range"
@@ -1621,7 +1710,9 @@ class FeatureExtractor:
         logger.info(
             f"    Collected ontology schema for "
             f"{len(node_type_schemas)} node types, "
-            f"{len(uri_to_pyg)} URI mappings"
+            f"{len(uri_to_pyg)} URI mappings; ontology mapping "
+            f"{'ran' if self._ontology_mapping_ran else 'did NOT run'} "
+            f"on this input"
         )
 
     def _collect_slot_mapping_metadata(
