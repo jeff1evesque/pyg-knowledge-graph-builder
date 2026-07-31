@@ -478,6 +478,10 @@ class FeatureExtractor:
         self._collected_zero_variance: List[str] = []
         self._collected_ontology_schema: Optional[Dict[str, Any]] = None
         self._collected_slot_mapping: Optional[Dict[str, Any]] = None
+        # Empty until build_features() runs. An unknown sub-segment is treated
+        # as claiming features, so a missing entry fails the vacuity guard
+        # rather than silently exempting the sub-segment from it.
+        self._collected_sub_segment_status: Dict[str, Optional[str]] = {}
 
     def get_layout(self) -> "VectorLayout":
         """Return the VectorLayout instance for metadata registration."""
@@ -586,6 +590,7 @@ class FeatureExtractor:
             "zero_variance_properties": self._collected_zero_variance,
             "ontology_schema": self._collected_ontology_schema,
             "slot_mapping": self._collected_slot_mapping,
+            "sub_segment_status": self._collected_sub_segment_status,
         }
 
     def build_features(
@@ -707,6 +712,33 @@ class FeatureExtractor:
         self._has_class_hierarchy = bool(class_hierarchy_df.head(1))
         self._has_property_schema = bool(property_schema_df.head(1))
         self._has_property_hierarchy = bool(property_hierarchy_df.head(1))
+
+        # Why each sub-segment will or will not carry signal, recorded at the
+        # one place that knows. A sub-segment whose source predicate is absent
+        # from the triples encodes nothing, and feature_spec.json must say so
+        # rather than declaring dims it cannot fill.
+        self._collected_sub_segment_status = {
+            "class_hierarchy": (
+                None if self._has_class_hierarchy
+                else "no rdfs:subClassOf in source data"
+            ),
+            "domain_range": (
+                None if self._has_property_schema
+                else "no rdfs:domain or rdfs:range in source data"
+            ),
+            "property_hierarchy": (
+                None if self._has_property_hierarchy
+                else "no rdfs:subPropertyOf in source data"
+            ),
+            "numeric_values": (
+                None if numeric_df is not None
+                else "no numeric literal properties in source data"
+            ),
+            "categorical_values": (
+                None if categorical_df is not None
+                else "no categorical literal properties in source data"
+            ),
+        }
 
         segment_names = [
             f"ontology_structure[{layout.seg1_start}:{layout.seg2_start}]",
@@ -1562,8 +1594,23 @@ class FeatureExtractor:
                 "defined_properties": defined_properties,
             }
 
+        # Why a chain is empty is not recoverable from an empty list: "no
+        # source declares a hierarchy" and "this class sits at the root of one"
+        # both serialize to []. Record the distinction so a zero
+        # class_hierarchy sub-segment is diagnosable from the artifact rather
+        # than from the encoder source.
         self._collected_ontology_schema = {
             "version": "1.0",
+            "hierarchy_source": (
+                "rdfs:subClassOf"
+                if hierarchy_map
+                else "no rdfs:subClassOf in source data"
+            ),
+            "property_schema_source": (
+                "rdfs:domain/rdfs:range"
+                if prop_schema_map
+                else "no rdfs:domain or rdfs:range in source data"
+            ),
             "node_types": node_type_schemas,
             "uri_to_pyg_name": uri_to_pyg,
             "namespace_prefixes": {
