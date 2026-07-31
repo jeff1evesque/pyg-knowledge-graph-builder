@@ -301,6 +301,7 @@ def build_hetero_data(
         metadata.register_ontology_schema(artifacts["ontology_schema"])
     if artifacts["slot_mapping"] is not None:
         metadata.register_slot_mapping(artifacts["slot_mapping"])
+    metadata.register_sub_segment_status(artifacts["sub_segment_status"])
 
     # Build combined encoding config from node + edge extractors
     encoding_config = feature_extractor.get_encoding_config()
