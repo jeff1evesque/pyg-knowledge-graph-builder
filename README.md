@@ -236,6 +236,14 @@ Segment 3: Literal Values [37.5% of vector_dim]
 - **Numeric Values**: Each numeric property's predicate URI hashes to a fixed slot. The value is z-score normalized (per-predicate stats computed in a single pass on executors) and placed at that slot. Hash collisions sum — rare with 256 dims and ~10 properties per type.
 - **Categorical Values**: Multi-hot hash encoding instead of `dense_rank`. Each `(predicate, value)` pair hashes to 4 slots. No ordinal assumption.
 
+#### Numeric vs. categorical is decided per property, not per value
+
+**A property is numeric or categorical, never both.** A predicate is numeric only when *more than* `feature_config.numeric_predicate_min_share` (default `0.5`) of its literal values parse as a number; otherwise every one of its values — including any that happen to parse — is encoded as a category label.
+
+Classifying each *value* independently splits one property across both sub-segments whenever its labels are not uniformly shaped. SEC `hasDocumentType` is the motivating case: 315 of its 2,372 values (13.3%) are bare-digit form types — Form `4`, `144`, `3`, `425`, `497`, `487`, `25` — while the rest are hyphenated (`10-K`, `8-K`, `S-1`). Those 315 were z-scored into the numeric sub-segment as if a form number were a magnitude (mean 62.24, std 128.64), inventing a continuous ordering over labels, while the other 2,057 were correctly multi-hot encoded.
+
+A simple majority is deliberate: it is the least presumptuous rule that fixes the above, and it lets a genuinely numeric measurement carry a minority of unparseable sentinels (`"N/A"`, `"unknown"`) without demoting the whole property out of the numeric sub-segment — those sentinels are then dropped as missing data rather than re-encoded as labels, exactly as an absent property is. The threshold is recorded in `encoding_config.json` under `numeric_values.predicate_min_numeric_share`, since it determines which sub-segment a property is encoded into.
+
 ### Proportional Dimension Scaling via VectorLayout
 
 All segment and sub-segment boundaries are computed at runtime by the `VectorLayout` class from the configured `vector_dim`. No dim indices are hardcoded in the encoding logic. This means overriding `vector_dim` from a notebook invocation automatically produces a correctly structured vector at the requested resolution:
@@ -664,8 +672,10 @@ triples_df (enriched, on executors)
     │   ├── Extract ontology structure from triples (rdfs:subClassOf chains,
     │   │   rdfs:domain/range, rdfs:subPropertyOf) — all on executors
     │   ├── Compute per-node property presence via join — on executors
-    │   ├── Extract numeric literals via anti-join + cast("double") — on executors
-    │   ├── Extract categorical literals via anti-join + null cast filter — on executors
+    │   ├── Isolate literal triples via anti-join — on executors
+    │   ├── Classify each predicate numeric or categorical by the share of its
+    │   │   values that cast("double") (small collect, one row per predicate)
+    │   ├── Route each predicate's literals to its one sub-segment — on executors
     │   ├── Compute per-predicate z-score stats (single-pass agg) — on executors
     │   ├── Collect normalization stats for metadata (small collect, <200 rows)
     │   ├── Collect ontology schema snapshot for metadata (small collects:
@@ -1191,6 +1201,7 @@ The PyG builder accepts an optional configuration dict:
 | `feature_config.normalize` | `true` | Z-score normalize numeric features (single-pass per-predicate) |
 | `feature_config.vector_dim` | `1024` | Node feature vector dimension — all segments scale proportionally. Minimum 32. |
 | `feature_config.chunk_node_threshold` | `500000` | Node count above which chunked collection is used |
+| `feature_config.numeric_predicate_min_share` | `0.5` | Share of a property's literal values that must parse as numbers for the property to be treated as numeric. At or below it, every value is a category label. Lower it to admit sparsely numeric properties; raise it toward `1.0` to demand near-uniformly numeric ones. |
 | `edge_feature_config.enabled` | `true` | Enable/disable edge feature extraction entirely |
 | `edge_feature_config.edge_vector_dim` | `32` | Edge feature vector dimension — all segments scale proportionally. Minimum 9. |
 | `edge_feature_config.chunk_edge_threshold` | `1000000` | Edge count above which chunked collection is used |
