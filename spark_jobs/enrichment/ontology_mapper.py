@@ -16,7 +16,7 @@ All operations run as PySpark DataFrame transformations.
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from functools import reduce
-from typing import List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from spark_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, SEC_ENRICHMENT, MARKET_ENRICHMENT, NOAA_ENRICHMENT,
@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
+RDFS_SUBCLASS_OF = "http://www.w3.org/2000/01/rdf-schema#subClassOf"
 OWL_EQUIVALENT_PROPERTY = "http://www.w3.org/2002/07/owl#equivalentProperty"
 OWL_EQUIVALENT_CLASS = "http://www.w3.org/2002/07/owl#equivalentClass"
 SKOS_PREF_LABEL = "http://www.w3.org/2004/02/skos/core#prefLabel"
@@ -168,6 +169,140 @@ CLASS_MAPPINGS = {
 }
 
 
+# ============================================
+# CLASS HIERARCHY DERIVATION
+# ============================================
+#
+# No source declares rdfs:subClassOf -- not the real SEC/BLS/NOAA/market data,
+# not either e2e fixture set. The class_hierarchy sub-segment (64 dims of a
+# 1024-d node vector) was therefore zero in every build. The hierarchy is not
+# absent from the data though, only unasserted: the class names encode it.
+#
+# These rules recover it. Both are deliberately conservative -- a parent is
+# only ever an EXISTING class from the same namespace, never an invented URI,
+# so a rule can fail to find a parent but cannot fabricate one. A wrong
+# subClassOf is worse than a missing one: it feeds fake structure into 64 dims
+# that the GNN will treat as fact.
+#
+# What is recovered is recorded in ontology_schema.json as
+# hierarchy_source="derived from class naming", never as "rdfs:subClassOf", so
+# no consumer mistakes inference for a declaration.
+
+# A measurement class specialises its dataset class: HiresRate is a kind of
+# HiresData. Applied only when the "<prefix>Data" class actually exists.
+_MEASURE_SUFFIXES = ("Level", "Rate")
+_DATASET_SUFFIX = "Data"
+
+# BLS names a series by what it EXCLUDES as readily as by what it contains:
+# AllItemsLessShelter, DistilledSpiritsExcludingWhiskeyAtHome. Rule 2 reads
+# those backwards -- "AllItemsLessShelter ends with Shelter, so it must be a
+# kind of Shelter" -- when the name asserts the exact opposite. Found by
+# running the rules over the e2e fixture classes, where the suffix rule
+# produced AllItemsLessShelter -> Shelter and two more like it.
+#
+# A qualifier containing any of these negates rather than narrows, so the
+# edge is dropped. This is deliberately blunt: it also drops
+# CommoditiesLessFoodAndEnergyCommodities -> Commodities, which happens to be
+# a correct subset relation. A missing superclass costs recall in 64 dims; a
+# wrong one teaches the GNN a relationship that is false.
+_NEGATING_QUALIFIERS = ("Less", "Excluding", "Without", "Except")
+
+
+def _split_uri(uri: str) -> Tuple[str, str]:
+    """Split a URI into (namespace, local name) on the last # or /."""
+    for sep in ("#", "/"):
+        head, found, tail = uri.rpartition(sep)
+        if found and tail:
+            return head + sep, tail
+    return "", uri
+
+
+def derive_subclass_edges(class_uris: Iterable[str]) -> List[Tuple[str, str]]:
+    """
+    Infer (child, parent) rdfs:subClassOf pairs from class naming.
+
+    Two rules, both scoped to a single namespace:
+
+    1. Measurement -> dataset. ``<X>Level`` and ``<X>Rate`` are subclasses of
+       ``<X>Data`` when that class exists (HiresRate -> HiresData).
+    2. Qualifier -> base. A class whose local name ends with another class's
+       full local name specialises it (UnadjustedPercentChange ->
+       PercentChange, OtherSeparationsData -> SeparationsData) -- unless the
+       qualifier negates rather than narrows (AllItemsLessShelter is not a
+       kind of Shelter).
+
+    Multiple parents are allowed -- RDFS permits it, and the two rules
+    legitimately disagree about which axis a class specialises along.
+
+    Returns edges sorted for determinism. Raises ValueError if the result is
+    not a DAG; the encoder walks this to a transitive closure with a depth,
+    which a cycle would not terminate.
+    """
+    classes = sorted(set(class_uris))
+    parts = {c: _split_uri(c) for c in classes}
+    by_ns: Dict[str, Dict[str, str]] = {}
+    for uri, (ns, local) in parts.items():
+        by_ns.setdefault(ns, {})[local] = uri
+
+    edges = set()
+    for child, (ns, local) in parts.items():
+        siblings = by_ns[ns]
+
+        # Rule 1 — measurement specialises its dataset.
+        for suffix in _MEASURE_SUFFIXES:
+            if local.endswith(suffix):
+                parent_local = local[: -len(suffix)] + _DATASET_SUFFIX
+                parent = siblings.get(parent_local)
+                if parent is not None and parent != child:
+                    edges.add((child, parent))
+
+        # Rule 2 — qualified name specialises the name it qualifies, unless
+        # the qualifier negates it (AllItemsLessShelter is NOT a Shelter).
+        for other_local, parent in siblings.items():
+            if other_local == local or not local.endswith(other_local):
+                continue
+            qualifier = local[: -len(other_local)]
+            if any(neg in qualifier for neg in _NEGATING_QUALIFIERS):
+                continue
+            edges.add((child, parent))
+
+    result = sorted(edges)
+    _assert_is_dag(result)
+    return result
+
+
+def _assert_is_dag(edges: List[Tuple[str, str]]) -> None:
+    """Raise if the child->parent edges contain a cycle.
+
+    Enforced rather than merely tested: the rules are string-shaped, so a
+    future suffix could quietly introduce A -> B -> A, and the encoder's
+    transitive closure would not terminate on it.
+    """
+    parents: Dict[str, List[str]] = {}
+    for child, parent in edges:
+        parents.setdefault(child, []).append(parent)
+
+    WHITE, GREY, BLACK = 0, 1, 2
+    colour: Dict[str, int] = {}
+
+    def visit(node: str, trail: List[str]) -> None:
+        colour[node] = GREY
+        for parent in parents.get(node, []):
+            state = colour.get(parent, WHITE)
+            if state == GREY:
+                cycle = " -> ".join(trail + [node, parent])
+                raise ValueError(
+                    f"derived class hierarchy contains a cycle: {cycle}"
+                )
+            if state == WHITE:
+                visit(parent, trail + [node])
+        colour[node] = BLACK
+
+    for node in list(parents):
+        if colour.get(node, WHITE) == WHITE:
+            visit(node, [])
+
+
 class OntologyMapper:
     """
     Creates ontology equivalence mappings and label normalization
@@ -206,23 +341,28 @@ class OntologyMapper:
 
         new_dfs: List[DataFrame] = []
 
-        logger.info("[Step 1/4] Creating property equivalences...")
+        logger.info("[Step 1/5] Creating property equivalences...")
         df = self._create_property_equivalences()
         if df is not None:
             new_dfs.append(df)
 
-        logger.info("[Step 2/4] Creating class equivalences...")
+        logger.info("[Step 2/5] Creating class equivalences...")
         df = self._create_class_equivalences()
         if df is not None:
             new_dfs.append(df)
 
-        logger.info("[Step 3/4] Folding predicates to their unified form...")
+        logger.info("[Step 3/5] Folding predicates to their unified form...")
         df = self._fold_predicates_to_unified(triples_df)
         if df is not None:
             new_dfs.append(df)
 
-        logger.info("[Step 4/4] Normalizing labels (skos:prefLabel)...")
+        logger.info("[Step 4/5] Normalizing labels (skos:prefLabel)...")
         df = self._normalize_labels(triples_df)
+        if df is not None:
+            new_dfs.append(df)
+
+        logger.info("[Step 5/5] Deriving class hierarchy (rdfs:subClassOf)...")
+        df = self._derive_class_hierarchy(triples_df)
         if df is not None:
             new_dfs.append(df)
 
@@ -301,6 +441,47 @@ class OntologyMapper:
 
         logger.info(f"  Created {len(rows)} class equivalences")
         return df
+
+    # ================================================================
+    # Step 5: Class Hierarchy Derivation
+    # ================================================================
+
+    def _derive_class_hierarchy(
+        self,
+        triples_df: DataFrame,
+    ) -> Optional[DataFrame]:
+        """
+        Emit rdfs:subClassOf triples inferred from class naming.
+
+        The classes are the distinct objects of rdf:type — a small driver-side
+        collect (44 on the real data, <500 for any plausible source set), so
+        the rules themselves stay pure Python and directly testable.
+        """
+        class_rows = (
+            triples_df
+            .filter(F.col("predicate") == RDF_TYPE)
+            .select("object")
+            .distinct()
+            .collect()
+        )
+        class_uris = [row["object"] for row in class_rows]
+
+        edges = derive_subclass_edges(class_uris)
+        if not edges:
+            logger.info(
+                f"  No hierarchy derivable from {len(class_uris)} class(es)"
+            )
+            return None
+
+        rows = [(child, RDFS_SUBCLASS_OF, parent) for child, parent in edges]
+        logger.info(
+            f"  Derived {len(rows)} subClassOf edge(s) over "
+            f"{len(class_uris)} class(es); "
+            f"{len({c for c, _ in edges})} class(es) gained a superclass"
+        )
+        return self.spark.createDataFrame(
+            rows, ["subject", "predicate", "object"]
+        )
 
     # ================================================================
     # Step 3: Predicate Folding
