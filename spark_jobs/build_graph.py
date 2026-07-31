@@ -1541,7 +1541,18 @@ def save_job_manifest(
             "pyg_output_path": config.pyg_output_path,
             "s3_archive_bucket": config.s3_archive_bucket,
             "s3_pyg_key": config.s3_pyg_key,
-            "enable_ontology_mapping": config.enable_ontology_mapping,
+            # pyg_only never reaches the enrichment phase, so this job's flag
+            # describes something it never ran. Recorded verbatim it reads as
+            # a statement about the enriched Parquet being consumed -- which
+            # it is not, and which is how the 2026-07-29 build's empty class
+            # hierarchy got attributed to a flag that had nothing to do with
+            # it. null means "not applicable to this mode"; the answer that
+            # IS true of the data is in ontology_schema.json
+            # (ontology_mapping_enabled), derived from the triples.
+            "enable_ontology_mapping": (
+                None if config.mode == "pyg_only"
+                else config.enable_ontology_mapping
+            ),
             "pyg_config": config.pyg_config,
             "parquet_partitions": config.parquet_partitions,
         },
