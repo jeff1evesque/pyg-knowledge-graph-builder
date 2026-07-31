@@ -610,11 +610,14 @@ class MetadataCollector:
                 },
             ]
 
-        # Edge type feature derivation methods
+        # Edge type feature derivation methods: no relation is featurized when
+        # edge features are disabled, so the map stays empty alongside the
+        # zeroed total_dim and empty segments.
         edge_type_derivations = {}
-        for rel, cat in self._edge_feature_categories.items():
-            if cat != "skip":
-                edge_type_derivations[rel] = cat
+        if self._edge_features_enabled:
+            for rel, cat in self._edge_feature_categories.items():
+                if cat != "skip":
+                    edge_type_derivations[rel] = cat
 
         return {
             "version": "1.0",

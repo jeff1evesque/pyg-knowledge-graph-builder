@@ -324,6 +324,7 @@ def test_feature_spec_edge_disabled_zeros_dim_and_drops_segments():
     assert edge["enabled"] is False
     assert edge["total_dim"] == 0
     assert edge["segments"] == []
+    assert edge["derivation_methods"] == {}
 
 
 # ======================================================================
