@@ -406,8 +406,14 @@ KNOWN_ORPHANED_NODE_TYPES = {
     "empsit_UnemploymentDurationData",
     "empsit_UnemploymentReasonData",
     "filings_SECFiling",
-    "unknown_EquitySnapshot",
-    "unknown_OptionSnapshot",
+    # These read "unknown_*" until the source namespaces were re-homed. The
+    # prefix was not cosmetic: it meant the market namespace constant pointed
+    # somewhere no scraper emitted, so node_mapper matched nothing and fell
+    # through to the unknown_ fallback. Pinning the unknown_ names asserted
+    # the defect was correct, which is why running this suite would not have
+    # caught it either.
+    "market_quotes_EquitySnapshot",
+    "market_quotes_OptionSnapshot",
 }
 
 
