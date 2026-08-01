@@ -17,11 +17,14 @@ Used by sec_linker.py for:
 - _link_litigation_sequences()
 - _link_trading_suspension_sequences()
 """
-from spark_jobs.utils.rdf_utils import SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP
+from spark_jobs.utils.rdf_utils import (
+    SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP, SEC_COMMON,
+)
 
-# Base namespace for SEC filings (http://www.sec.gov#)
-from rdflib import Namespace
-SEC_BASE = Namespace("http://www.sec.gov#")
+# The shared SEC classes (Date, Company, Person, Address). Re-declared as a
+# literal until this change, which meant it kept naming sec.gov after the
+# vocabulary moved -- matching nothing, silently.
+SEC_BASE = SEC_COMMON
 
 MEASUREMENT_TYPES = {
 

@@ -27,7 +27,8 @@ from typing import Dict, List, Optional, Set
 from rdflib.namespace import RDF, RDFS, OWL
 
 from spark_jobs.utils.rdf_utils import (
-    SEC_ENRICHMENT, SEC_ADMIN, SEC_LIT, SEC_SUSP, SEC_FILINGS, UNIFIED,
+    SEC_ENRICHMENT, SEC_ADMIN, SEC_LIT, SEC_SUSP, SEC_FILINGS, SEC_COMMON,
+    UNIFIED,
 )
 from spark_jobs.enrichment.intra_source.sec.patterns import (
     SEC_SECTOR_PATTERNS, SEC_VIOLATION_PATTERNS, SEC_COMPANY_STATUS_PATTERNS,
@@ -58,7 +59,7 @@ _UNIFIED_NS = str(UNIFIED)
 _SEC_ENRICHMENT_NS = str(SEC_ENRICHMENT)
 
 # SEC Base namespace for date intermediate nodes
-_SEC_BASE_HAS_DATE_VALUE = "http://www.sec.gov#hasDateValue"
+_SEC_BASE_HAS_DATE_VALUE = str(SEC_COMMON.hasDateValue)
 
 # Enrichment predicates
 _BELONGS_TO_SECTOR = str(SEC_ENRICHMENT.belongsToSector)
@@ -292,7 +293,7 @@ class SECIntraSourceLinker:
         for p in sec_prefixes[1:]:
             obj_filter = obj_filter | F.col("object").startswith(p)
         # Include base SEC namespace for date intermediate nodes
-        sec_base = "http://www.sec.gov#"
+        sec_base = str(SEC_COMMON)
         sec_filter = sec_filter | F.col("subject").startswith(sec_base)
         obj_filter = obj_filter | F.col("object").startswith(sec_base)
 
