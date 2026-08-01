@@ -253,15 +253,24 @@ def _route_counts(
     what makes the count trustworthy in both directions: a build with mapping
     turned off has no markers and everything reads as declared, correctly,
     while these builds have a marker for every edge and ``declared`` is 0.
+
+    Returned with sorted keys, and built by walking the axioms in sorted
+    order. ``direct_axioms`` is a SET, so iterating it directly seeds dict
+    insertion order from string hashing -- which differs per process under a
+    randomized PYTHONHASHSEED. The values were always right; the KEY ORDER
+    moved between runs, and metadata is compared in serialized form, so that
+    alone broke byte-reproducibility (caught by test_jolts_features_
+    reproducible, the one guard that compares JSON text rather than parsed
+    objects).
     """
     counts: Dict[str, int] = {}
-    for axiom in direct_axioms:
+    for axiom in sorted(direct_axioms):
         route = routes.get(axiom)
         label = PROV_ROUTE_LABELS.get(route, "declared") if route else (
             "declared"
         )
         counts[label] = counts.get(label, 0) + 1
-    return counts
+    return dict(sorted(counts.items()))
 
 
 def _merge_counts(*counts: Dict[str, int]) -> Dict[str, int]:
@@ -294,7 +303,10 @@ def _route_detail(
 
     return {
         "total": len(direct_axioms),
-        "counts": {"declared": counts.get("declared", 0), **counts},
+        # Sorted, and "declared" present even at zero -- that it IS zero is
+        # the finding. Key order has to be stable for the same reason as in
+        # _route_counts: metadata reproducibility is asserted on JSON text.
+        "counts": dict(sorted({"declared": 0, **counts}.items())),
         "axioms": {
             label: edges[:_PROVENANCE_EDGE_LIMIT]
             for label, edges in sorted(by_route.items())

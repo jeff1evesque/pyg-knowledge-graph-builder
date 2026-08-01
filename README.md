@@ -151,6 +151,32 @@ Enrichment steps read from this DataFrame, produce new triples DataFrames, and u
 
 rdflib Namespace objects are used as **URI string constants** in the enrichment modules for readability — they produce plain strings and don't hold or query graph data. The PyG builder modules use **pure Spark Column expressions** for all URI-to-name conversions (no Python UDFs).
 
+### Namespaces: whose terms are whose
+
+`rdf_utils.py` holds two kinds of namespace, and the distinction is not cosmetic — a URI names the authority for the term.
+
+**Publishers' vocabularies** (`cpi:`, `ppi:`, `jolts:`, `cap:`, `nws:`, `sec.gov/filings#`, …) stay on their own domains. Those really are their terms.
+
+**Terms this project invents** all live under one base we control, sub-pathed by concern:
+
+```
+https://jefflevesque.com/ontology/bls/          RateMeasurement, PriceIndex, coversMonth, …
+https://jefflevesque.com/ontology/sec/
+https://jefflevesque.com/ontology/noaa/         EmergencyAlert, AlertArea, AlertInfo
+https://jefflevesque.com/ontology/market/
+https://jefflevesque.com/ontology/unified/      hasMonth, hasYear, measurementValue, …
+https://jefflevesque.com/ontology/temporal/     SourceMonth, SourceYear, SourceQuarter
+https://jefflevesque.com/ontology/provenance/   derivedBy, route markers (never encoded)
+```
+
+These previously sat under the publishers' domains (`bls.gov/enrichment/`, `sec.gov/enrichment/`, `noaa.gov/enrichment/`, `financial-data.org/enrichment/`) and under `example.org`. Both were wrong, differently: a URI under `bls.gov` asserts BLS defined `RateMeasurement` — nobody there did, and federating this graph with real BLS-published RDF would merge our invention into their vocabulary. `example.org` is reserved by RFC 2606 for documentation, so it cannot misattribute, but it belongs to nobody and reads as an unfinished placeholder.
+
+The base is a single constant, `ONTOLOGY_BASE`, so re-homing the vocabulary is a one-line edit — but not a free one: **these URIs are hashed into feature slots**, so moving them moves every slot and changes `encoding_config.json`'s contract digest. That is the intended signal (graphs built either side of the move are not comparable), not a side effect. `slot_mapping.json` records the URI→slot mapping per build, so older artifacts stay interpretable.
+
+**Prefixes were deliberately left unchanged** (`bls_enrichment`, `unified`, `temporal`, …), so node type names, `graph_schema.json`, `node_index/` and every edge-type triple are identical across the move. Only the URIs — and therefore the slots — differ.
+
+`tests/test_namespaces.py` asserts the invariants that would otherwise fail silently: no minted namespace under a publisher's or a reserved domain; prefixes unique; where one namespace is a string prefix of another the longer is ordered first (`startsWith` matching would otherwise name the node type after the wrong vocabulary); and the literal type names in `_CANONICAL_TYPE_PRIORITY` are still producible by the naming rule from a registered namespace.
+
 ## Ontology-Aware Node Feature Vectors
 
 ### The Problem With Flat Literal Vectors
@@ -815,7 +841,7 @@ Complete inventory of every node type and edge type in the graph. The entry poin
   - Caveat: a type whose literal values all normalize to exactly 0.0 (a constant numeric property under z-score) reads as `false`. That is the honest answer to "does this type carry usable literal signal", but it is not the same question as "were literals present in the source".
 - Every edge type as a full three-part tuple with its count, predicate URI, origin, whether it has edge features, and if so the feature dimension
   - Edge-type `has_features` was always correct — it comes from `edge_feature_flags`, which reflects whether `edge_attr` was actually produced (23 of 499 on the same build).
-  - `origin` is one of **`raw`** (the relationship was stated in the source RDF), **`enrichment`** (this pipeline inferred it), or **`unification`** (a cross-source identity link). Enrichment adds ~91,000 triples on top of the raw data, so some edges are reported facts and others are derived — a distinction a model consumer should weight differently. Classified by `classify_edge_origin()` in `rdf_utils.py` from the predicate namespace **and both endpoint node types**, since the pipeline marks its output in two places: inferred links carry a minted *predicate* (`bls.gov/enrichment/...`), while unification links carry a minted *node* but a standard predicate (`unified:November owl:sameAs cpi:November`). Checking the predicate alone reports every unification edge as `raw`.
+  - `origin` is one of **`raw`** (the relationship was stated in the source RDF), **`enrichment`** (this pipeline inferred it), or **`unification`** (a cross-source identity link). Enrichment adds ~91,000 triples on top of the raw data, so some edges are reported facts and others are derived — a distinction a model consumer should weight differently. Classified by `classify_edge_origin()` in `rdf_utils.py` from the predicate namespace **and both endpoint node types**, since the pipeline marks its output in two places: inferred links carry a minted *predicate* (under `jefflevesque.com/ontology/bls/`, …), while unification links carry a minted *node* but a standard predicate (`unified:November owl:sameAs cpi:November`). Checking the predicate alone reports every unification edge as `raw`.
   - Deliberately three values rather than separating intra- from cross-source enrichment: those share a namespace, so nothing at this layer can tell them apart, and a field promising a distinction it never emits is worse than a narrower honest one. It records *that* an edge was derived, not *why* — per-edge lineage is a much larger change, worth building only once a model's predictions need explaining.
 - Summary statistics: total node types, total edge types, total nodes, total edges, edge types with features
 - Build metadata: time period, build timestamp, pipeline config

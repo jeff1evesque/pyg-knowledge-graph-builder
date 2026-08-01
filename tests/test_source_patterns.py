@@ -215,18 +215,26 @@ def test_unification_is_detected_via_endpoints_not_predicate():
     ) == "unification"
 
 
-def test_enrichment_namespace_is_more_specific_than_its_source():
-    """bls.gov/enrichment/ must not be swallowed by bls.gov/.
+def test_an_inferred_bls_link_is_still_classified_as_enrichment():
+    """The behaviour this used to guard, kept after the namespaces moved.
 
-    The enrichment namespaces are sub-paths of their source domains, so a naive
-    prefix check against the source would classify every inferred BLS link as
-    raw -- silently defeating the whole point.
+    It previously asserted that BLS_ENRICHMENT sits UNDER https://www.bls.gov/
+    and is therefore at risk of being swallowed by the shorter source
+    namespace. That arrangement was the defect: a URI under bls.gov claims BLS
+    defined a term we invented. The minted vocabularies now live under a
+    domain this project controls, which dissolves the shadowing hazard here
+    rather than managing it -- the general ordering invariant is asserted over
+    the whole table in tests/test_namespaces.py.
+
+    What must not change is the verdict: an inferred BLS link is enrichment,
+    not raw.
     """
     from spark_jobs.utils.rdf_utils import (
-        classify_edge_origin, BLS_ENRICHMENT,
+        classify_edge_origin, BLS_ENRICHMENT, ONTOLOGY_BASE,
     )
 
-    assert str(BLS_ENRICHMENT).startswith("https://www.bls.gov/")
+    assert str(BLS_ENRICHMENT).startswith(ONTOLOGY_BASE)
+    assert "bls.gov" not in str(BLS_ENRICHMENT)
     assert classify_edge_origin(
         f"{BLS_ENRICHMENT}apparelSectorCorrelation", "a_X", "b_Y"
     ) == "enrichment"

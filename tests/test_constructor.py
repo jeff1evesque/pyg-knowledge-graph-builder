@@ -36,7 +36,10 @@ from spark_jobs.pyg_builder.feature_extractor import VectorLayout, VECTOR_DIM
 CPI_INDEX = "https://www.bls.gov/cpi/Index"        # -> cpi_Index
 CPI_SERIES = "https://www.bls.gov/cpi/Series"      # -> cpi_Series
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
-PRECEDES = "https://www.bls.gov/enrichment/precedes"  # -> bls_enrichment_precedes
+from spark_jobs.utils.rdf_utils import BLS_ENRICHMENT  # noqa: E402
+
+# From the namespace table, not spelled out — see test_namespaces.py.
+PRECEDES = f"{BLS_ENRICHMENT}precedes"  # -> bls_enrichment_precedes
 RELATION = "bls_enrichment_precedes"
 METRIC = "https://example.org/metric"              # numeric literal predicate
 
