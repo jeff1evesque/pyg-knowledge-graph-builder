@@ -215,8 +215,8 @@ Segment 2: Property Schema [37.5% of vector_dim]
 ```
 
 - **Property Presence**: Each predicate URI the node has is hashed into 3 slots. A CPI Index node with `indexValue`, `percentChange`, `hasMonth` gets different bits than a JOLTS node with `jobOpeningsLevel`, `hasIndustry`.
-- **Domain/Range Signals**: For each property this node has, the `rdfs:domain` and `rdfs:range` types declared in the ontology are hashed. This tells the GNN what types of relationships this node can participate in.
-- **Property Hierarchy**: `rdfs:subPropertyOf` relationships are hashed, connecting specific properties to their abstract parents.
+- **Domain/Range Signals**: For each property this node has, its `rdfs:domain` and `rdfs:range` are hashed. This tells the GNN what types of relationships this node can participate in. No source declares either, so both are **derived** — the domain from the observed `rdf:type` of the property's subjects, the range from its objects' types and from the XSD datatype the source declared on its literals. A property used on more than one class gets neither, because `rdfs:domain` is an intersection; see [`ontology_schema.json`](#ontology_schemajson) for the provenance and coverage this publishes.
+- **Property Hierarchy**: `rdfs:subPropertyOf` relationships are hashed, connecting specific properties to their abstract parents. Also derived — from the `PROPERTY_MAPPINGS` entries whose target several properties share (nine point at `unified:measurementValue`, and a rate is not a price, so they are sub-properties rather than equivalents).
 
 #### Segment 3: Literal Values (37.5% of vector_dim)
 
@@ -891,7 +891,31 @@ Frozen snapshot of the ontology structure at build time. Contains the class hier
 - URI-to-PyG-name mapping for all type URIs encountered
 - Namespace prefix table
 - `ontology_mapping_enabled` / `ontology_mapping_evidence` — whether the ontology-mapping phase ran over the triples this build read, and what that verdict was based on
-- `hierarchy_source` / `property_schema_source` — where the hierarchy and the domain/range declarations came from, or why there are none
+- `hierarchy_source` / `property_schema_source` / `property_hierarchy_source` — where each axiom set came from, or why there is none
+- `provenance` — per axiom set, whether it was **declared by the source**, **curated**, or **observed**
+- `property_schema_coverage` — how many predicates got a domain and a range, and which ones did not
+
+**Provenance: derived is not declared.** No source in this project declares `rdfs:subClassOf`, `rdfs:domain`, `rdfs:range` or `rdfs:subPropertyOf` — verified across the real 130k-triple run and both fixture sets. All four are therefore *derived* by `OntologyMapper`, and once in the graph a derived axiom is shaped exactly like a declared one. They do not license the same reasoning: "this property is used on class C in this month's data" is weaker than "this property's domain is C", and a property seen with one class here could be broader in general. The `provenance` block is the only place that distinction survives:
+
+| Axiom set | Derived from |
+|---|---|
+| `class_hierarchy` | curated `CLASS_MAPPINGS` + class-naming rules |
+| `property_hierarchy` | curated `PROPERTY_MAPPINGS` shared targets |
+| `property_domain` | **observed** `rdf:type` of each predicate's subjects |
+| `property_range` | **observed** object types + the XSD datatype the source **declared** on its literals |
+
+**Why some predicates get no domain or range.** `rdfs:domain` is an axiom with *intersection* semantics: asserting `p rdfs:domain A` and `p rdfs:domain B` says every subject of `p` is both an A and a B. Measured over the fixtures, 77 of 160 predicates are used on more than one class (`market:askPrice` on `EquitySnapshot` and `OptionSnapshot`; `rdfs:label` on 68), so emitting both would state something false. A predicate with more than one candidate therefore gets **no axiom**, and `property_schema_coverage` names it. Range applies the same rule across both routes at once, which also rules out the two predicates used with entities *and* literals (`cpi:hasMonth` is 189 typed URIs and 11 literals).
+
+Skipping costs less than the count suggests: a predicate used on one class carries real signal about that class, while one used on 22 says little that `class_identity` does not already encode about the node itself.
+
+**Measured coverage** over the full committed fixture set (all four sources, both loaders — 169 data predicates after enrichment):
+
+| | Covered | Gap | Why the gap |
+|---|---|---|---|
+| `rdfs:domain` | 83 (49.1%) | 86 | 77 predicates are used on more than one class; the rest carry no typed subject |
+| `rdfs:range` | 135 (79.9%) | 34 | 16 ambiguous (several object classes, or entity *and* literal use); the remainder are CAP predicates whose URI objects are never typed in these fixtures |
+
+Every one of those gaps is listed by URI in `property_schema_coverage.without_domain` / `without_range`, so it is a known set rather than something to be inferred from a thin sub-segment. Resulting occupancy, against 0.00% for all three before this: `class_hierarchy` 1.25%, `domain_range` 2.83% (carried by 77 of 102 node types), `property_hierarchy` 2.31%.
 
 **Reading an empty hierarchy.** When every `superclass_chain` is `[]`, `ontology_mapping_enabled` tells you which of the two causes you are looking at, because they demand opposite responses:
 
@@ -900,7 +924,7 @@ Frozen snapshot of the ontology structure at build time. Contains the class hier
 | `true` | The mapping phase ran and the sources genuinely declare no subsumption | Nothing — that is the data |
 | `false` | The hierarchy was never computed; `class_hierarchy` (64 of 1024 dims, 6.25% of every node vector) is structurally zero | Re-run enrichment with `--enable_ontology_mapping true` |
 
-The flag arrived in schema `version` `1.1`; a `1.0` file predates it and its empty hierarchy stays ambiguous. It is detected from the triples — the presence of `owl:equivalentProperty` / `owl:equivalentClass`, which only `OntologyMapper` emits — rather than read off a config flag. That is the only signal that stays truthful in `pyg_only` mode, where enrichment ran in a separate job and this job's own `--enable_ontology_mapping` describes a phase it never reaches. For the same reason a `pyg_only` job manifest records `"enable_ontology_mapping": null` rather than the inert flag — that field says nothing about the enriched Parquet the run consumed, and this file is what answers the question for it.
+The flag arrived in schema `version` `1.1` and `provenance` / `property_schema_coverage` in `1.2`; a `1.0` file predates both and its empty hierarchy stays ambiguous. It is detected from the triples — the presence of `owl:equivalentProperty` / `owl:equivalentClass`, which only `OntologyMapper` emits — rather than read off a config flag. That is the only signal that stays truthful in `pyg_only` mode, where enrichment ran in a separate job and this job's own `--enable_ontology_mapping` describes a phase it never reaches. For the same reason a `pyg_only` job manifest records `"enable_ontology_mapping": null` rather than the inert flag — that field says nothing about the enriched Parquet the run consumed, and this file is what answers the question for it.
 
 **Generated by:** `feature_extractor._collect_ontology_schema_metadata()` — collects from small distinct/aggregated DataFrames: type URIs (~500 rows), class hierarchy transitive closure (~5000 rows), property schema (~500 rows). All collect calls target aggregated DataFrames, never raw triples.
 
@@ -1486,9 +1510,14 @@ triples_df (raw)
     │   ├── Causal relationships (BLS → Market, NOAA → Market)
     │   └── Measurement type alignment
     │
-    └── Ontology Mapper (optional)
-        ├── owl:equivalentProperty mappings
-        └── owl:equivalentClass mappings
+    └── Ontology Mapper (optional; --enable_ontology_mapping, default true)
+        ├── owl:equivalentProperty / owl:equivalentClass  (one-to-one pairs only)
+        ├── predicate folding to the unified vocabulary
+        ├── skos:prefLabel normalization
+        ├── rdfs:subClassOf      ← curated CLASS_MAPPINGS + class naming
+        ├── rdfs:subPropertyOf   ← curated PROPERTY_MAPPINGS shared targets
+        ├── rdfs:domain/range    ← observed usage + declared XSD datatypes
+        └── prov:derivedBy       ← how each of the above was arrived at
     │
     ▼
 triples_df (enriched) → Parquet (local) + PyG HeteroData (.pt) + Metadata JSON (local + optional S3)
