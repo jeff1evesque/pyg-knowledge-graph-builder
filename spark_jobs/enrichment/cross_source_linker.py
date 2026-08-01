@@ -19,6 +19,7 @@ from spark_jobs.utils.rdf_utils import (
     WKYENG, SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP, CAP, WEATHER,
     MARKET_FEEDS,
     ALERT,
+    identifier_namespace,
 )
 from spark_jobs.enrichment.intra_source.bls.patterns import BLS_SECTOR_PATTERNS
 from spark_jobs.utils.spark_rdf_utils import (
@@ -29,6 +30,32 @@ from typing import Dict, List, Optional, Set
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _entity_prefixes(*namespaces) -> List[str]:
+    """Both halves of the term/individual split, for matching entity URIs.
+
+    Every prefix test in this module asks "is this ENTITY from source X" —
+    against `subject`, or against an `entity` column resolved from one. Those
+    are individuals and live under id/, so the term namespace alone matches
+    nothing. Both are returned because these are candidate-selection gates
+    rather than assertions: a graph carrying term-level triples (rdf:type
+    objects, ontology axioms) should not fall out of source detection, and
+    every downstream step re-filters on specific predicates anyway.
+    """
+    out: List[str] = []
+    for ns in namespaces:
+        term = str(ns)
+        out.append(term)
+        out.append(identifier_namespace(term))
+    return out
+
+
+_BLS_ENTITY_PREFIXES = _entity_prefixes(
+    CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER, WKYENG
+)
+_SEC_ENTITY_PREFIXES = _entity_prefixes(SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP)
+_MARKET_ENTITY_PREFIXES = _entity_prefixes(MARKET_FEEDS)
 
 # URI constants
 _RDF_TYPE = str(RDF.type)
@@ -75,12 +102,14 @@ class CrossSourceLinker:
         """Detect which data sources are present (collects at most ~10 rows)."""
         sources = set()
 
-        bls_prefixes = [str(ns) for ns in [CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER, WKYENG]]
-        sec_prefixes = [str(ns) for ns in [SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP]]
-        market_prefix = str(MARKET_FEEDS)
-        # NOAA alert instances use the ALERT namespace (https://api.weather.gov/alerts/)
-        # Also check CAP namespace for type triples
-        noaa_prefixes = [str(ALERT), str(CAP), str(WEATHER)]
+        bls_prefixes = _BLS_ENTITY_PREFIXES
+        sec_prefixes = _SEC_ENTITY_PREFIXES
+        market_prefixes = _MARKET_ENTITY_PREFIXES
+        # NOAA alert instances use the ALERT namespace
+        # (https://api.weather.gov/alerts/) — a real publisher namespace, so it
+        # has no id/ counterpart and is matched as-is. CAP/WEATHER are checked
+        # too, for type triples.
+        noaa_prefixes = [str(ALERT), *_entity_prefixes(CAP, WEATHER)]
 
         # Sample subjects to detect sources — bounded, fast
         sample = (
@@ -97,7 +126,7 @@ class CrossSourceLinker:
                 sources.add('bls')
             elif any(s.startswith(p) for p in sec_prefixes):
                 sources.add('sec')
-            elif s.startswith(market_prefix):
+            elif any(s.startswith(p) for p in market_prefixes):
                 sources.add('market')
             elif any(s.startswith(p) for p in noaa_prefixes):
                 sources.add('noaa')
@@ -404,12 +433,15 @@ class CrossSourceLinker:
         # Match LAUS entities containing state names
         laus_links = None
         if 'bls' in self.available_sources:
-            laus_prefix = str(LAUS)
+            laus_prefixes = _entity_prefixes(LAUS)
+            laus_match = F.col("subject").startswith(laus_prefixes[0])
+            for p in laus_prefixes[1:]:
+                laus_match = laus_match | F.col("subject").startswith(p)
             laus_entities = (
                 self.triples_df
                 .select("subject")
                 .distinct()
-                .filter(F.col("subject").startswith(laus_prefix))
+                .filter(laus_match)
             )
 
             laus_matched = laus_entities.crossJoin(F.broadcast(states_df)).filter(
@@ -554,8 +586,8 @@ class CrossSourceLinker:
             )
         )
 
-        bls_prefixes = [str(ns) for ns in [CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER, WKYENG]]
-        market_prefix = str(MARKET_FEEDS)
+        bls_prefixes = _BLS_ENTITY_PREFIXES
+        market_prefixes = _MARKET_ENTITY_PREFIXES
 
         # BLS entities in sectors
         bls_filter = F.col("entity").startswith(bls_prefixes[0])
@@ -567,9 +599,11 @@ class CrossSourceLinker:
         )
 
         # Market entities in sectors
-        market_sector = belongs_to_sector.filter(
-            F.col("entity").startswith(market_prefix)
-        ).select(
+        market_filter = F.col("entity").startswith(market_prefixes[0])
+        for p in market_prefixes[1:]:
+            market_filter = market_filter | F.col("entity").startswith(p)
+
+        market_sector = belongs_to_sector.filter(market_filter).select(
             F.col("entity").alias("market_entity"), F.col("sector").alias("market_sector")
         )
 
