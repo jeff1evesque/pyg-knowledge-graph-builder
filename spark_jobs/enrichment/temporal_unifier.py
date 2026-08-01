@@ -45,6 +45,7 @@ from spark_jobs.utils.rdf_utils import (
     SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP,
     MARKET_FEEDS, CAP, WEATHER,
     SYNTHETIC_TEMPORAL_IDS,
+    identifier_namespace,
 )
 
 import logging
@@ -79,10 +80,18 @@ SOURCE_TEMPORAL_TYPE_BY_KIND = {
 
 UNIFIED_BASE = str(UNIFIED)
 
-# BLS monthly dataset namespace prefixes
+# BLS monthly dataset IDENTIFIER prefixes.
+#
+# These match period URIs -- id/cpi/February, id/jolts/2024 -- which are
+# individuals, not terms. Keying them on the term namespaces (ontology/cpi/)
+# matched nothing at all: no BLS period was ever collected, so none was typed
+# temporal:SourceMonth, so node_mapper's _CANONICAL_TYPE_PRIORITY had nothing
+# to prefer and every period sharded across cpi_Month / jolts_Month /
+# empsit_Month / eci_Month. The graph kept its per-source month nodes and lost
+# the cross-source bridge, without anything raising.
 BLS_MONTHLY_PREFIXES = [
-    str(CPI), str(PPI), str(ECI), str(JOLTS), str(EMPSIT),
-    str(XIMPIM), str(LAUS), str(METRO), str(REALER),
+    identifier_namespace(str(ns))
+    for ns in (CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER)
 ]
 
 # BLS quarterly dataset namespace prefix
@@ -289,10 +298,11 @@ class TemporalUnifier:
         Collect month and year URIs from BLS monthly datasets.
 
         BLS datasets use URI-based temporal entities like:
-          cpi:November, ppi:November, cpi:2024, ppi:2024
+          id/cpi/November, id/ppi/November, id/cpi/2024, id/ppi/2024
 
-        We find these by looking for URIs under BLS namespace prefixes
-        whose local name matches a month name or 4-digit year.
+        We find these by looking for URIs under BLS IDENTIFIER prefixes whose
+        local name matches a month name or 4-digit year. Identifier, not term:
+        periods are things, and nothing is ever minted under ontology/cpi/.
         """
         # Build filter: object URI starts with any BLS monthly prefix
         # and is used as an object in any triple (i.e., referenced as a value)
