@@ -48,6 +48,45 @@ def collect_sorted(df: DataFrame) -> List:
     return sorted(df.collect(), key=lambda row: tuple(str(v) for v in row))
 
 
+def literal_datatype_observations(parsed_df: DataFrame) -> DataFrame:
+    """Marker triples recording the XSD datatype each predicate's literals carry.
+
+    ``(predicate, prov:observedLiteralDatatype, datatype_uri)``, deduplicated —
+    so the row count is bounded by distinct (predicate, datatype) pairs (a few
+    hundred), not by the triple count.
+
+    Why marker triples rather than a fourth column: the canonical frame is
+    ``(subject, predicate, object)`` and every enricher builds and unions
+    3-column frames, so widening the schema would break `unionByName` across
+    the whole pipeline. Carrying the observation as data instead means it
+    survives the enriched-Parquet round-trip into `pyg_only` for free, which is
+    where the graph is actually built.
+
+    Deliberately an OBSERVATION, not an ``rdfs:range`` assertion: this function
+    reports what the source declared on the literals it shipped, and
+    OntologyMapper decides whether that supports a range axiom. Emitting
+    rdfs:range here would erase the distinction ontology_schema.json has to
+    publish.
+
+    Args:
+        parsed_df: a frame carrying at least ``predicate`` and
+            ``object_datatype`` (empty string where the literal declared none,
+            which is how ``regexp_extract`` reports no match).
+    """
+    from spark_jobs.utils.rdf_utils import PROV_OBSERVED_LITERAL_DATATYPE
+
+    return (
+        parsed_df
+        .filter(F.length(F.col("object_datatype")) > 0)
+        .select(
+            F.col("predicate").alias("subject"),
+            F.lit(PROV_OBSERVED_LITERAL_DATATYPE).alias("predicate"),
+            F.col("object_datatype").alias("object"),
+        )
+        .distinct()
+    )
+
+
 # ============================================
 # LOADING: S3 → Spark DataFrame (fully distributed)
 # ============================================
@@ -73,9 +112,15 @@ def load_ntriples_to_triples_df(spark: SparkSession, s3_paths: List[str]) -> Dat
         F.regexp_extract("value", r"^<[^>]+>\s+<([^>]+)>", 1).alias("predicate"),
         F.regexp_extract("value", r"^<[^>]+>\s+<[^>]+>\s+<([^>]+)>", 1).alias("object_uri"),
         F.regexp_extract("value", r'^<[^>]+>\s+<[^>]+>\s+"([^"]*)"', 1).alias("object_literal"),
+        # The ^^<datatype> the source declared. Captured, not discarded: it is
+        # the only place rdfs:range is recoverable for a literal-valued
+        # property, and it exists nowhere downstream of this parse.
+        F.regexp_extract(
+            "value", r'^<[^>]+>\s+<[^>]+>\s+"[^"]*"\^\^<([^>]+)>', 1
+        ).alias("object_datatype"),
     )
 
-    triples_df = (
+    parsed = (
         parsed
         .withColumn(
             "object",
@@ -87,7 +132,10 @@ def load_ntriples_to_triples_df(spark: SparkSession, s3_paths: List[str]) -> Dat
             (F.length(F.col("predicate")) > 0) &
             (F.length(F.col("object")) > 0)
         )
-        .select("subject", "predicate", "object")
+    )
+
+    triples_df = parsed.select("subject", "predicate", "object").unionByName(
+        literal_datatype_observations(parsed)
     )
 
     logger.info("N-Triples loaded into distributed DataFrame")
@@ -113,9 +161,12 @@ def load_turtle_to_triples_df(spark: SparkSession, rdflib_graph: Graph) -> DataF
         F.regexp_extract("value", r"^<[^>]+>\s+<([^>]+)>", 1).alias("predicate"),
         F.regexp_extract("value", r"^<[^>]+>\s+<[^>]+>\s+<([^>]+)>", 1).alias("object_uri"),
         F.regexp_extract("value", r'^<[^>]+>\s+<[^>]+>\s+"([^"]*)"', 1).alias("object_literal"),
+        F.regexp_extract(
+            "value", r'^<[^>]+>\s+<[^>]+>\s+"[^"]*"\^\^<([^>]+)>', 1
+        ).alias("object_datatype"),
     )
 
-    triples_df = (
+    parsed = (
         parsed
         .withColumn(
             "object",
@@ -127,7 +178,10 @@ def load_turtle_to_triples_df(spark: SparkSession, rdflib_graph: Graph) -> DataF
             (F.length(F.col("predicate")) > 0) &
             (F.length(F.col("object")) > 0)
         )
-        .select("subject", "predicate", "object")
+    )
+
+    triples_df = parsed.select("subject", "predicate", "object").unionByName(
+        literal_datatype_observations(parsed)
     )
 
     logger.info("Converted rdflib graph to distributed DataFrame")
