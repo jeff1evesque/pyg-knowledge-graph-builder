@@ -102,7 +102,14 @@ SOURCE_TEMPORAL = Namespace("https://example.org/temporal/")
 #     time (``prov:observedLiteralDatatype``);
 #   * how each derived axiom set was arrived at -- declared, curated, or
 #     observed (``prov:derivedBy``), so ontology_schema.json can report
-#     provenance instead of presenting an inference as a declaration.
+#     provenance instead of presenting an inference as a declaration;
+#   * which route produced each INDIVIDUAL axiom, restated edge-for-edge
+#     under a route predicate. A set-level description cannot answer "is
+#     THIS edge one a person wrote or one a spelling rule guessed", and the
+#     two do not deserve the same trust: the naming rules produced
+#     AllItemsLessShelter -> Shelter and three more inversions before the
+#     negating-qualifier guard caught them, while a curated edge cannot
+#     misread a name because a person chose it.
 #
 # Deliberately NOT a *_ENRICHMENT namespace: these are not claims about
 # entities, so classify_edge_origin() must never see them as inferred links.
@@ -121,6 +128,31 @@ PROV_CLASS_HIERARCHY = str(PROVENANCE.classHierarchy)
 PROV_PROPERTY_DOMAIN = str(PROVENANCE.propertyDomain)
 PROV_PROPERTY_RANGE = str(PROVENANCE.propertyRange)
 PROV_PROPERTY_HIERARCHY = str(PROVENANCE.propertyHierarchy)
+
+# Per-axiom route markers: the same (subject, object) pair as the axiom, under
+# a predicate naming how it was arrived at. One extra triple per derived
+# axiom, so the count tracks the derivation rather than the data.
+#
+# An axiom carrying no marker was not ours -- it came out of the source -- and
+# that is how the collector counts declared vs derived. Which is the only way
+# to answer "does any source declare rdfs:subClassOf?" from ENRICHED triples,
+# where the raw count is 34 and the true answer is still no.
+PROV_ROUTE_CURATED_SUBCLASS = str(PROVENANCE.subClassOfCurated)
+PROV_ROUTE_NAMED_SUBCLASS = str(PROVENANCE.subClassOfInferredFromNaming)
+PROV_ROUTE_OBSERVED_DOMAIN = str(PROVENANCE.domainObservedFromSubjectTypes)
+PROV_ROUTE_OBSERVED_RANGE = str(PROVENANCE.rangeObservedFromObjectTypes)
+PROV_ROUTE_DATATYPE_RANGE = str(PROVENANCE.rangeFromDeclaredDatatype)
+PROV_ROUTE_CURATED_SUBPROPERTY = str(PROVENANCE.subPropertyOfCurated)
+
+# route predicate -> the label ontology_schema.json publishes for it.
+PROV_ROUTE_LABELS = {
+    PROV_ROUTE_CURATED_SUBCLASS: "curated class mappings",
+    PROV_ROUTE_NAMED_SUBCLASS: "class naming",
+    PROV_ROUTE_CURATED_SUBPROPERTY: "curated property mappings",
+    PROV_ROUTE_OBSERVED_DOMAIN: "observed subject types",
+    PROV_ROUTE_OBSERVED_RANGE: "observed object types",
+    PROV_ROUTE_DATATYPE_RANGE: "declared literal datatype",
+}
 
 # ============================================
 # CANONICAL NAMESPACE → PREFIX MAPPING
