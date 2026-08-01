@@ -56,6 +56,12 @@ from pyspark.sql import functions as F
 from spark_jobs.utils.rdf_utils import (
     NAMESPACE_PREFIXES,
     ONTOLOGY_NAMESPACE_INDICES,
+    PROV_DERIVED_BY,
+    PROV_OBSERVED_LITERAL_DATATYPE,
+    PROV_CLASS_HIERARCHY,
+    PROV_PROPERTY_DOMAIN,
+    PROV_PROPERTY_RANGE,
+    PROV_PROPERTY_HIERARCHY,
 )
 from spark_jobs.utils.spark_rdf_utils import collect_sorted
 # One resolution of "which class is this node type from", shared with the
@@ -159,6 +165,11 @@ _NON_FEATURE_PREDICATES = {
     RDFS_SUB_PROPERTY_OF,
     OWL_EQUIVALENT_CLASS,
     OWL_EQUIVALENT_PROPERTY,
+    # Statements about the pipeline's own derivations. Their subjects are
+    # predicate URIs and provenance URIs, never entities, so they must not
+    # reach property presence or the literal segments.
+    PROV_DERIVED_BY,
+    PROV_OBSERVED_LITERAL_DATATYPE,
     "http://www.w3.org/2000/01/rdf-schema#label",
     "http://www.w3.org/2000/01/rdf-schema#comment",
     "http://www.w3.org/2000/01/rdf-schema#isDefinedBy",
@@ -198,6 +209,31 @@ def _empty_hierarchy_reason(ontology_mapping_ran: bool) -> str:
     )
 
 
+def _empty_property_schema_reason(ontology_mapping_ran: bool) -> str:
+    """Why domain_range is empty. Same two causes as the class hierarchy."""
+    if ontology_mapping_ran:
+        return "no rdfs:domain or rdfs:range after ontology mapping"
+    return (
+        "no rdfs:domain or rdfs:range in source data and ontology mapping "
+        "did not run"
+    )
+
+
+def _empty_property_hierarchy_reason(ontology_mapping_ran: bool) -> str:
+    """Why property_hierarchy is empty. Same two causes again."""
+    if ontology_mapping_ran:
+        return "no rdfs:subPropertyOf after ontology mapping"
+    return (
+        "no rdfs:subPropertyOf in source data and ontology mapping did not run"
+    )
+
+
+# Provenance fallbacks for an axiom set the mapper left no marker for: either
+# the axioms were in the source to begin with, or there are none.
+_DECLARED = "declared by the source"
+_NOT_DERIVED = "not derived — ontology mapping did not run"
+
+
 # ============================================
 # Driver memory safety constants
 # ============================================
@@ -205,6 +241,11 @@ _CHUNK_NODE_THRESHOLD = 500_000
 
 # Number of hash functions for multi-hot categorical encoding
 _NUM_CATEGORICAL_HASHES = 4
+
+# Cap on the named gaps in property_schema_coverage. The counts are always
+# exact; only the URI lists are clipped, so the file cannot grow without
+# bound on a vocabulary where most predicates are ambiguous.
+_COVERAGE_GAP_LIMIT = 200
 
 # Seed offsets for independent hash functions
 _HASH_SEEDS = [0, 7, 13, 31]
@@ -746,7 +787,7 @@ class FeatureExtractor:
         # ============================================
         self._collect_ontology_schema_metadata(
             triples_df, node_id_df, node_counts,
-            class_hierarchy_df, property_schema_df,
+            class_hierarchy_df, property_schema_df, property_hierarchy_df,
         )
         self._collect_slot_mapping_metadata(
             numeric_df, categorical_df, type_uri_df,
@@ -1551,6 +1592,89 @@ class FeatureExtractor:
             f"({len(zero_variance)} zero-variance)"
         )
 
+    def _collect_derivation_provenance(
+        self, triples_df: DataFrame
+    ) -> Dict[str, str]:
+        """
+        Read the mapper's prov:derivedBy statements back out of the triples.
+
+        Everything OntologyMapper emits -- subClassOf, subPropertyOf, domain,
+        range -- is an inference, and once in the graph it is shaped exactly
+        like an axiom a source declared. That distinction cannot be recovered
+        from the axioms themselves, so the mapper states it explicitly and
+        this reads it. A build whose triples carry no marker (no mapping ran,
+        or a source genuinely declared the axioms) simply gets no entry, and
+        the caller reports "declared by the source" instead.
+
+        Returns {provenance_subject_uri: derivation description}.
+        """
+        rows = collect_sorted(
+            triples_df
+            .filter(F.col("predicate") == PROV_DERIVED_BY)
+            .select("subject", "object")
+            .distinct()
+        )
+        return {row["subject"]: row["object"] for row in rows}
+
+    def _property_schema_coverage(
+        self,
+        triples_df: DataFrame,
+        prop_schema_map: Dict[str, Dict[str, Optional[str]]],
+    ) -> Dict[str, Any]:
+        """
+        How much of the vocabulary actually got a domain and a range.
+
+        Derivation is deliberately conservative -- a predicate used on several
+        classes gets no domain, because rdfs:domain is an intersection and
+        asserting two would say every subject is both. That is the right call
+        but it leaves gaps, and a gap nobody enumerated is indistinguishable
+        from a bug. So the predicates without each axiom are published by
+        name, capped for file size with the full counts kept.
+
+        Counted over the predicates that actually carry data: rdf:type, the
+        axiom predicates and the provenance markers describe the vocabulary
+        rather than use it and were never candidates.
+        """
+        data_predicates = [
+            row["predicate"]
+            for row in collect_sorted(
+                triples_df
+                .filter(~F.col("predicate").isin(list(_NON_FEATURE_PREDICATES)))
+                .select("predicate")
+                .distinct()
+            )
+        ]
+
+        with_domain = sorted(
+            p for p in data_predicates
+            if (prop_schema_map.get(p) or {}).get("domain")
+        )
+        with_range = sorted(
+            p for p in data_predicates
+            if (prop_schema_map.get(p) or {}).get("range")
+        )
+        without_domain = sorted(set(data_predicates) - set(with_domain))
+        without_range = sorted(set(data_predicates) - set(with_range))
+
+        total = len(data_predicates)
+        return {
+            "data_predicates": total,
+            "with_domain": len(with_domain),
+            "with_range": len(with_range),
+            "domain_coverage": round(
+                len(with_domain) / total, 4) if total else 0.0,
+            "range_coverage": round(
+                len(with_range) / total, 4) if total else 0.0,
+            "without_domain": without_domain[:_COVERAGE_GAP_LIMIT],
+            "without_range": without_range[:_COVERAGE_GAP_LIMIT],
+            "without_domain_truncated": (
+                len(without_domain) > _COVERAGE_GAP_LIMIT
+            ),
+            "without_range_truncated": (
+                len(without_range) > _COVERAGE_GAP_LIMIT
+            ),
+        }
+
     def _collect_ontology_schema_metadata(
         self,
         triples_df: DataFrame,
@@ -1558,6 +1682,7 @@ class FeatureExtractor:
         node_counts: Dict[str, int],
         class_hierarchy_df: DataFrame,
         property_schema_df: DataFrame,
+        property_hierarchy_df: Optional[DataFrame] = None,
     ) -> None:
         """
         Collect ontology schema snapshot for metadata.
@@ -1665,6 +1790,13 @@ class FeatureExtractor:
                 "defined_properties": defined_properties,
             }
 
+        provenance = self._collect_derivation_provenance(triples_df)
+        coverage = self._property_schema_coverage(triples_df, prop_schema_map)
+        has_property_hierarchy = bool(
+            property_hierarchy_df is not None
+            and property_hierarchy_df.head(1)
+        )
+
         # Why a chain is empty is not recoverable from an empty list: "no
         # source declares a hierarchy" and "this class sits at the root of one"
         # both serialize to []. Record the distinction so a zero
@@ -1681,7 +1813,12 @@ class FeatureExtractor:
             # A 1.0 file with an all-empty hierarchy is genuinely ambiguous
             # and stays that way -- the version is what lets a consumer
             # require the flag rather than test for its key.
-            "version": "1.1",
+            # 1.2: adds provenance, property_hierarchy_source and
+            # property_schema_coverage, once domain/range/subPropertyOf
+            # started being DERIVED rather than read. Before that every axiom
+            # in the file was declared by a source, so provenance was not a
+            # question a consumer had to ask; now it is.
+            "version": "1.2",
             "ontology_mapping_enabled": self._ontology_mapping_ran,
             "ontology_mapping_evidence": (
                 "owl:equivalentProperty/owl:equivalentClass present in "
@@ -1698,8 +1835,37 @@ class FeatureExtractor:
             "property_schema_source": (
                 "rdfs:domain/rdfs:range"
                 if prop_schema_map
-                else "no rdfs:domain or rdfs:range in source data"
+                else _empty_property_schema_reason(self._ontology_mapping_ran)
             ),
+            "property_hierarchy_source": (
+                "rdfs:subPropertyOf"
+                if has_property_hierarchy
+                else _empty_property_hierarchy_reason(
+                    self._ontology_mapping_ran
+                )
+            ),
+            # Where each axiom set came from. An axiom this pipeline inferred
+            # is shaped exactly like one a source declared, and the two are
+            # not interchangeable -- "used on class C in this data" is weaker
+            # than "its domain is C". Absent a marker the axioms were not
+            # ours, so they are reported as declared rather than guessed at.
+            "provenance": {
+                key: provenance.get(uri, default)
+                for key, uri, default in (
+                    ("class_hierarchy", PROV_CLASS_HIERARCHY,
+                     _DECLARED if hierarchy_map else _NOT_DERIVED),
+                    ("property_hierarchy", PROV_PROPERTY_HIERARCHY,
+                     _DECLARED if has_property_hierarchy else _NOT_DERIVED),
+                    ("property_domain", PROV_PROPERTY_DOMAIN,
+                     _DECLARED if prop_schema_map else _NOT_DERIVED),
+                    ("property_range", PROV_PROPERTY_RANGE,
+                     _DECLARED if prop_schema_map else _NOT_DERIVED),
+                )
+            },
+            # Which predicates got an axiom and which did not, so a gap is a
+            # named set rather than something to be discovered by noticing
+            # that a sub-segment is thinner than expected.
+            "property_schema_coverage": coverage,
             "node_types": node_type_schemas,
             "uri_to_pyg_name": uri_to_pyg,
             "namespace_prefixes": {
