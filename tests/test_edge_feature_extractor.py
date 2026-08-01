@@ -35,7 +35,12 @@ from spark_jobs.pyg_builder.edge_feature_extractor import (
 CPI_INDEX = "https://www.bls.gov/cpi/Index"        # -> cpi_Index
 CPI_SERIES = "https://www.bls.gov/cpi/Series"      # -> cpi_Series
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
-PRECEDES = "https://www.bls.gov/enrichment/precedes"   # temporal
+from spark_jobs.utils.rdf_utils import BLS_ENRICHMENT  # noqa: E402
+
+# From the namespace table, not spelled out: a URI under a namespace nothing
+# registers falls back to its bare last segment and silently renames the
+# relation.
+PRECEDES = f"{BLS_ENRICHMENT}precedes"   # temporal
 PRECEDES_REL = "bls_enrichment_precedes"
 HAS_UNDERLYING = "https://example.org/hasUnderlying"   # option_stock
 HAS_UNDERLYING_REL = "unknown_hasUnderlying"
