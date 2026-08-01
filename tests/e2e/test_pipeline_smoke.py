@@ -663,6 +663,35 @@ def _assert_derived_axioms_declare_their_provenance(found):
             f"saying otherwise overstates what the axioms license"
         )
 
+    # And the question #273 asked ("can any source emit rdfs:subClassOf?")
+    # must stay answerable from the artifact. Counting the triples in an
+    # ENRICHED graph now finds 34 and says yes; the true answer is still no,
+    # and only the per-route counts carry it.
+    derived = ontology.get("derived_axioms") or {}
+    assert derived, "ontology_schema.json carries no per-route axiom counts"
+
+    for name in ("class_hierarchy", "property_hierarchy",
+                 "property_domain", "property_range"):
+        detail = derived.get(name) or {}
+        assert detail.get("total"), f"{name} reports no axioms at all"
+        counts = detail["counts"]
+        assert counts.get("declared") == 0, (
+            f"{name} reports {counts['declared']} axiom(s) as declared by a "
+            f"source, but no source in these fixtures declares any -- every "
+            f"one was derived by OntologyMapper"
+        )
+        # The routes must be named, not lumped: a curated edge and a
+        # spelling-rule guess do not deserve the same trust.
+        routes = {k for k, v in counts.items() if k != "declared" and v}
+        assert routes, f"{name} has axioms but names no route"
+        assert detail["axioms"], f"{name} lists no attributable axioms"
+
+    # hierarchy_source must not read as a declaration.
+    assert not ontology["hierarchy_source"].startswith("rdfs:"), (
+        f"hierarchy_source is {ontology['hierarchy_source']!r}, which reads "
+        f"as a source declaration for a hierarchy this pipeline derived"
+    )
+
     coverage = ontology.get("property_schema_coverage") or {}
     assert coverage.get("data_predicates"), "no coverage reported"
     assert coverage["with_domain"] > 0, (
