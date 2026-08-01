@@ -250,8 +250,8 @@ def test_enrich_is_deterministic(spark, make_triples):
 # Predicate folding — the step that makes the equivalences mean something
 # ======================================================================
 
-CPI_HAS_MONTH = "https://www.bls.gov/cpi/hasMonth"
-JOLTS_HAS_MONTH = "https://www.bls.gov/jolts/hasMonth"
+CPI_HAS_MONTH = "https://jefflevesque.com/ontology/cpi/hasMonth"
+JOLTS_HAS_MONTH = "https://jefflevesque.com/ontology/jolts/hasMonth"
 UNIFIED_HAS_MONTH = PROPERTY_MAPPINGS[CPI_HAS_MONTH]
 
 
@@ -356,8 +356,8 @@ def test_every_unified_target_is_a_fold_fixed_point(spark):
 # the 64-dim class_hierarchy sub-segment, which the GNN cannot distinguish
 # from a declared one.
 
-JOLTS_NS = "https://www.bls.gov/jolts/"
-CPI_NS = "https://www.bls.gov/cpi/"
+JOLTS_NS = "https://jefflevesque.com/ontology/jolts/"
+CPI_NS = "https://jefflevesque.com/ontology/cpi/"
 
 
 def _names(edges):
@@ -438,7 +438,7 @@ REAL_CLASSES = [
         "PercentChange", "UnadjustedPercentChange", "EffectOnAllItems",
         "UnadjustedEffectOnAllItems", "StandardError", "ExpenditureCategory",
     )
-] + ["http://www.sec.gov/filings#SECFiling"]
+] + ["https://jefflevesque.com/ontology/sec-filings/SECFiling"]
 
 
 def test_every_derived_parent_is_an_existing_class():
@@ -655,11 +655,22 @@ def test_overrides_reach_the_emitted_triples(spark, make_triples):
 # Property hierarchy — the same shared-target reading, applied to properties
 # ======================================================================
 #
-# PROPERTY_MAPPINGS had the structure CLASS_MAPPINGS turned out to have: 41 of
-# its 46 entries point at a target two or more sources share. Publishing all 46
-# as owl:equivalentProperty said jolts:rate and market:observedPrice are the
-# same property -- that a rate is a price -- and left property_hierarchy (81
-# dims of every node vector) with nothing to encode.
+# PROPERTY_MAPPINGS had the structure CLASS_MAPPINGS turned out to have: most
+# of its entries point at a target two or more sources share. Publishing them
+# all as owl:equivalentProperty said jolts:rate and market:observedPrice are
+# the same property -- that a rate is a price -- and left property_hierarchy
+# (81 dims of every node vector) with nothing to encode.
+#
+# The counts moved (41/5 -> 45/4) when the single MARKET namespace was split
+# into the two market vocabularies that actually exist: market-quotes for the
+# flat quote snapshots, market-feeds for the HTML feeds. Their local names
+# partly overlap, so lastPrice and symbol each need a row per vocabulary --
+# one row silently covered only one of the two sources.
+#
+# unified:ticker moved from equivalence to subsumption as a result, and that
+# is the correct reading rather than an artefact: it now has two source
+# properties pointing at it, and the two symbol properties are distinct
+# properties that share a target, not one property under two names.
 
 def test_the_property_table_is_mostly_subsumption():
     assert len(CURATED_SUB_PROPERTIES) + len(TRUE_PROPERTY_EQUIVALENCES) == (
@@ -667,8 +678,8 @@ def test_the_property_table_is_mostly_subsumption():
     )
     # Pinned rather than asserted loosely: the ratio is the whole reason this
     # step exists, so a table edit that inverts it should fail here.
-    assert len(CURATED_SUB_PROPERTIES) == 41
-    assert len(TRUE_PROPERTY_EQUIVALENCES) == 5
+    assert len(CURATED_SUB_PROPERTIES) == 45
+    assert len(TRUE_PROPERTY_EQUIVALENCES) == 4
 
 
 def test_a_property_is_never_both_equivalent_and_a_sub_property(
@@ -700,16 +711,16 @@ def test_a_property_is_never_both_equivalent_and_a_sub_property(
 def test_the_nine_measurement_properties_become_sub_properties(spark,
                                                                make_triples):
     unified_value = PROPERTY_MAPPINGS[
-        "https://www.bls.gov/jolts/rate"
+        "https://jefflevesque.com/ontology/jolts/rate"
     ]
     triples = make_triples([("https://ex/n", RDF_TYPE, "https://ex/Nothing")])
     rows = OntologyMapper(spark).enrich(triples).collect()
 
     subsumed = {(r["subject"], r["object"]) for r in rows
                 if r["predicate"] == RDFS_SUB_PROPERTY_OF}
-    assert ("https://www.bls.gov/jolts/rate", unified_value) in subsumed
+    assert ("https://jefflevesque.com/ontology/jolts/rate", unified_value) in subsumed
     assert (
-        "https://financial-data.org/observedPrice", unified_value
+        "https://jefflevesque.com/ontology/market-feeds/observedPrice", unified_value
     ) in subsumed
 
 
@@ -921,7 +932,7 @@ def test_a_name_inferred_edge_is_marked_as_such(spark, make_triples):
     HiresRate -> HiresData is rule 1 (measurement specialises its dataset),
     and nothing curated mentions it.
     """
-    ns = "https://www.bls.gov/jolts/"
+    ns = "https://jefflevesque.com/ontology/jolts/"
     triples = make_triples([
         ("https://ex/a", RDF_TYPE, f"{ns}HiresRate"),
         ("https://ex/b", RDF_TYPE, f"{ns}HiresData"),
