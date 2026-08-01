@@ -27,6 +27,7 @@ from rdflib.namespace import RDF, RDFS
 from spark_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, UNIFIED,
     CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER, WKYENG,
+    identifier_namespace,
 )
 from spark_jobs.enrichment.intra_source.bls.patterns import BLS_SECTOR_PATTERNS
 from spark_jobs.enrichment.intra_source.bls.correlations import KNOWN_CORRELATIONS
@@ -48,21 +49,32 @@ _RDFS_LABEL = str(RDFS.label)
 _BELONGS_TO_SECTOR = str(BLS_ENRICHMENT.belongsToSector)
 _HAS_PARENT = str(BLS_ENRICHMENT.hasParent)
 
-# Namespace prefix strings for dataset detection and filtering
+# IDENTIFIER prefixes for dataset detection and filtering.
+#
+# Every use of this map tests an ENTITY uri -- _detect_datasets samples
+# subjects, _filter_bls_triples filters on subject, and the sector/correlation
+# builders match category entities by namespace + keyword. Entities are
+# individuals, so these must be the id/ namespaces. Keyed on the term
+# namespaces they matched nothing: _detect_datasets returned an empty set and
+# the linker logged "No BLS data detected, skipping enrichment" on input that
+# was entirely BLS.
 DATASET_NS_MAP: Dict[str, str] = {
-    'cpi': str(CPI),
-    'ppi': str(PPI),
-    'eci': str(ECI),
-    'jolts': str(JOLTS),
-    'empsit': str(EMPSIT),
-    'ximpim': str(XIMPIM),
-    'laus': str(LAUS),
-    'metro': str(METRO),
-    'realer': str(REALER),
-    'wkyeng': str(WKYENG),
+    name: identifier_namespace(str(ns))
+    for name, ns in (
+        ('cpi', CPI),
+        ('ppi', PPI),
+        ('eci', ECI),
+        ('jolts', JOLTS),
+        ('empsit', EMPSIT),
+        ('ximpim', XIMPIM),
+        ('laus', LAUS),
+        ('metro', METRO),
+        ('realer', REALER),
+        ('wkyeng', WKYENG),
+    )
 }
 
-# All BLS namespace prefixes for filtering
+# All BLS identifier prefixes for filtering
 _ALL_BLS_PREFIXES = list(DATASET_NS_MAP.values())
 
 

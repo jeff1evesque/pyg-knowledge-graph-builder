@@ -29,6 +29,7 @@ from rdflib.namespace import RDF, RDFS, OWL
 from spark_jobs.utils.rdf_utils import (
     SEC_ENRICHMENT, SEC_ADMIN, SEC_LIT, SEC_SUSP, SEC_FILINGS, SEC_COMMON,
     UNIFIED,
+    identifier_namespace,
 )
 from spark_jobs.enrichment.intra_source.sec.patterns import (
     SEC_SECTOR_PATTERNS, SEC_VIOLATION_PATTERNS, SEC_COMPANY_STATUS_PATTERNS,
@@ -131,12 +132,18 @@ _UNIFIED_PERSON_TYPE = str(SEC_ENRICHMENT.UnifiedPerson)
 _ECONOMIC_SECTOR_TYPE = str(SEC_ENRICHMENT.EconomicSector)
 _VIOLATION_TYPE_TYPE = str(SEC_ENRICHMENT.ViolationType)
 
-# Dataset namespace map for filtering
+# Dataset IDENTIFIER map. Every consumer matches an ENTITY uri -- the sector
+# and correlation builders find entities by namespace + keyword -- so these are
+# the id/ namespaces, not the term ones. See identifier_namespace() in
+# rdf_utils for why the distinction is load-bearing rather than cosmetic.
+#
+# _detect_datasets does NOT use this: it keys on rdf:type objects, which are
+# terms, and is correct as written.
 DATASET_NS_MAP = {
-    'filings': _SEC_FILINGS_NS,
-    'administrative_proceedings': _SEC_ADMIN_NS,
-    'litigation': _SEC_LIT_NS,
-    'trading_suspensions': _SEC_SUSP_NS,
+    'filings': identifier_namespace(_SEC_FILINGS_NS),
+    'administrative_proceedings': identifier_namespace(_SEC_ADMIN_NS),
+    'litigation': identifier_namespace(_SEC_LIT_NS),
+    'trading_suspensions': identifier_namespace(_SEC_SUSP_NS),
 }
 
 
@@ -283,21 +290,31 @@ class SECIntraSourceLinker:
         return datasets
 
     def _filter_sec_triples(self) -> DataFrame:
-        """Filter triples to only SEC-relevant subjects."""
-        sec_prefixes = list(DATASET_NS_MAP.values())
-        sec_filter = F.col("subject").startswith(sec_prefixes[0])
-        for p in sec_prefixes[1:]:
-            sec_filter = sec_filter | F.col("subject").startswith(p)
-        # Also include triples where the object is a SEC URI (for date nodes etc.)
-        obj_filter = F.col("object").startswith(sec_prefixes[0])
-        for p in sec_prefixes[1:]:
-            obj_filter = obj_filter | F.col("object").startswith(p)
-        # Include base SEC namespace for date intermediate nodes
-        sec_base = str(SEC_COMMON)
-        sec_filter = sec_filter | F.col("subject").startswith(sec_base)
-        obj_filter = obj_filter | F.col("object").startswith(sec_base)
+        """Filter triples to only SEC-relevant subjects.
 
-        return self.triples_df.filter(sec_filter | obj_filter)
+        Matches BOTH sides of the term/individual split. This is the broad
+        "keep what SEC enrichment might need" gate, and the two carry different
+        things: entities and the date intermediate nodes they hang off live
+        under id/, while rdf:type objects are terms under ontology/. Dropping
+        either half silently starves a later step of its input.
+        """
+        sec_prefixes = [
+            *DATASET_NS_MAP.values(),
+            _SEC_FILINGS_NS, _SEC_ADMIN_NS, _SEC_LIT_NS, _SEC_SUSP_NS,
+            # Date intermediate nodes -- individuals under id/, and the
+            # predicates that reach them, under ontology/.
+            str(SEC_COMMON), identifier_namespace(str(SEC_COMMON)),
+        ]
+
+        def _any_startswith(col):
+            cond = F.col(col).startswith(sec_prefixes[0])
+            for p in sec_prefixes[1:]:
+                cond = cond | F.col(col).startswith(p)
+            return cond
+
+        return self.triples_df.filter(
+            _any_startswith("subject") | _any_startswith("object")
+        )
 
     @staticmethod
     def _append(lst: list, item: Optional[DataFrame]):
