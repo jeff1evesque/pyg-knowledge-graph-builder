@@ -29,16 +29,32 @@ implementation rather than restating IRIs.
 """
 import pytest
 
-from spark_jobs.utils.rdf_utils import CAP
+from spark_jobs.utils.rdf_utils import (
+    CAP,
+    PROV_DERIVED_BY,
+    PROV_OBSERVED_LITERAL_DATATYPE,
+    PROV_PROPERTY_DOMAIN,
+    PROV_PROPERTY_RANGE,
+)
 
 from spark_jobs.enrichment.ontology_mapper import (
     CLASS_MAPPINGS,
     CURATED_SUBCLASSES,
+    CURATED_SUB_PROPERTIES,
     TRUE_EQUIVALENCES,
+    TRUE_PROPERTY_EQUIVALENCES,
+    ambiguous_domains,
+    ambiguous_ranges,
+    derive_domain_edges,
+    derive_range_edges,
     partition_class_mappings,
+    partition_shared_targets,
     resolve_class_mappings,
     RDF_TYPE,
+    RDFS_DOMAIN,
+    RDFS_RANGE,
     RDFS_SUBCLASS_OF,
+    RDFS_SUB_PROPERTY_OF,
     _assert_is_dag,
     _split_uri,
     derive_subclass_edges,
@@ -66,8 +82,14 @@ def test_property_equivalences_mirror_the_static_table(spark):
     df = OntologyMapper(spark)._create_property_equivalences()
     emitted = _rows(df)
 
-    assert len(emitted) == len(PROPERTY_MAPPINGS)
-    assert {(s, o) for s, _p, o in emitted} == set(PROPERTY_MAPPINGS.items())
+    # Only the genuine one-to-one pairs, exactly as on the class side. A
+    # target claimed by several properties is a subsumption, published as
+    # rdfs:subPropertyOf instead -- nine properties share
+    # unified:measurementValue, and a rate is not a price.
+    assert len(emitted) == len(TRUE_PROPERTY_EQUIVALENCES)
+    assert {(s, o) for s, _p, o in emitted} == set(
+        TRUE_PROPERTY_EQUIVALENCES.items()
+    )
     assert {p for _s, p, _o in emitted} == {OWL_EQUIVALENT_PROPERTY}
 
 
@@ -160,9 +182,17 @@ def test_enrich_unions_every_step(spark, make_triples):
     for _s, p, _o in emitted:
         by_predicate[p] = by_predicate.get(p, 0) + 1
 
-    assert by_predicate[OWL_EQUIVALENT_PROPERTY] == len(PROPERTY_MAPPINGS)
+    # Both equivalence steps emit only their one-to-one pairs; the
+    # shared-target majority is emitted as subsumption by the two hierarchy
+    # steps instead.
+    assert by_predicate[OWL_EQUIVALENT_PROPERTY] == len(
+        TRUE_PROPERTY_EQUIVALENCES
+    )
     assert by_predicate[OWL_EQUIVALENT_CLASS] == len(TRUE_EQUIVALENCES)
+    assert by_predicate[RDFS_SUB_PROPERTY_OF] == len(CURATED_SUB_PROPERTIES)
     assert by_predicate[SKOS_PREF_LABEL] == 1
+    # Every derived axiom set states how it was derived.
+    assert by_predicate[PROV_DERIVED_BY] == 4
 
 
 def test_enrich_emits_well_formed_triples(spark, make_triples):
@@ -613,3 +643,222 @@ def test_overrides_reach_the_emitted_triples(spark, make_triples):
                   if r["predicate"] == RDFS_SUBCLASS_OF}
     assert ("https://ex/A", "https://ex/Shared") in subclassed
     assert ("https://ex/B", "https://ex/Shared") in subclassed
+
+
+# ======================================================================
+# Property hierarchy — the same shared-target reading, applied to properties
+# ======================================================================
+#
+# PROPERTY_MAPPINGS had the structure CLASS_MAPPINGS turned out to have: 41 of
+# its 46 entries point at a target two or more sources share. Publishing all 46
+# as owl:equivalentProperty said jolts:rate and market:observedPrice are the
+# same property -- that a rate is a price -- and left property_hierarchy (81
+# dims of every node vector) with nothing to encode.
+
+def test_the_property_table_is_mostly_subsumption():
+    assert len(CURATED_SUB_PROPERTIES) + len(TRUE_PROPERTY_EQUIVALENCES) == (
+        len(PROPERTY_MAPPINGS)
+    )
+    # Pinned rather than asserted loosely: the ratio is the whole reason this
+    # step exists, so a table edit that inverts it should fail here.
+    assert len(CURATED_SUB_PROPERTIES) == 41
+    assert len(TRUE_PROPERTY_EQUIVALENCES) == 5
+
+
+def test_a_property_is_never_both_equivalent_and_a_sub_property(
+        spark, make_triples):
+    """Mirrors the class-side check: the two readings must not overlap.
+
+    Emitting both would assert P = Q and P < Q of the same pair -- and any
+    consumer resolving the vocabulary would get a different answer depending
+    on which statement it read first.
+    """
+    triples = make_triples([("https://ex/n", RDF_TYPE, "https://ex/Nothing")])
+    rows = OntologyMapper(spark).enrich(triples).collect()
+
+    equivalent = {(r["subject"], r["object"]) for r in rows
+                  if r["predicate"] == OWL_EQUIVALENT_PROPERTY}
+    subsumed = {(r["subject"], r["object"]) for r in rows
+                if r["predicate"] == RDFS_SUB_PROPERTY_OF}
+
+    assert equivalent, "no property equivalences emitted at all"
+    assert subsumed, "no property subsumptions emitted at all"
+    assert not (equivalent & subsumed), (
+        f"{len(equivalent & subsumed)} pair(s) asserted both equivalent and "
+        f"sub-property: {sorted(equivalent & subsumed)[:3]}"
+    )
+    # ...and no source appears on both sides even against a DIFFERENT target.
+    assert not ({s for s, _ in equivalent} & {s for s, _ in subsumed})
+
+
+def test_the_nine_measurement_properties_become_sub_properties(spark,
+                                                               make_triples):
+    unified_value = PROPERTY_MAPPINGS[
+        "https://www.bls.gov/jolts/rate"
+    ]
+    triples = make_triples([("https://ex/n", RDF_TYPE, "https://ex/Nothing")])
+    rows = OntologyMapper(spark).enrich(triples).collect()
+
+    subsumed = {(r["subject"], r["object"]) for r in rows
+                if r["predicate"] == RDFS_SUB_PROPERTY_OF}
+    assert ("https://www.bls.gov/jolts/rate", unified_value) in subsumed
+    assert (
+        "https://financial-data.org/observedPrice", unified_value
+    ) in subsumed
+
+
+def test_the_property_hierarchy_is_acyclic_and_deterministic(spark,
+                                                             make_triples):
+    triples = make_triples([("https://ex/n", RDF_TYPE, "https://ex/Nothing")])
+    mapper = OntologyMapper(spark)
+    first = sorted(_rows(mapper._derive_property_hierarchy()))
+    again = sorted(_rows(mapper._derive_property_hierarchy()))
+    assert first == again
+    # _derive_property_hierarchy runs _assert_is_dag itself, so reaching here
+    # is the acyclicity assertion; this pins that the check is wired in.
+    with pytest.raises(ValueError, match="property hierarchy contains a cycle"):
+        _assert_is_dag(
+            [("https://ex/p", "https://ex/q"), ("https://ex/q", "https://ex/p")],
+            label="property hierarchy",
+        )
+
+
+# ======================================================================
+# Domain / range derivation — observation, not spelling
+# ======================================================================
+
+P = "https://ex/prop"
+Q = "https://ex/other"
+CLS_A = "https://ex/ClassA"
+CLS_B = "https://ex/ClassB"
+XSD_DECIMAL = "http://www.w3.org/2001/XMLSchema#decimal"
+XSD_STRING = "http://www.w3.org/2001/XMLSchema#string"
+
+
+def test_a_property_used_on_one_class_gets_that_domain():
+    assert derive_domain_edges([(P, CLS_A)]) == [(P, CLS_A)]
+
+
+def test_a_property_used_on_two_classes_gets_no_domain():
+    """rdfs:domain is an INTERSECTION, not a hint.
+
+    Emitting both would state that every subject of P is an A *and* a B.
+    Measured over the fixtures, 77 of 160 predicates are used on more than one
+    class -- market:askPrice on EquitySnapshot and OptionSnapshot, rdfs:label
+    on 68 -- so this is the common case, not an edge case.
+    """
+    assert derive_domain_edges([(P, CLS_A), (P, CLS_B)]) == []
+    assert ambiguous_domains([(P, CLS_A), (P, CLS_B)]) == {P: [CLS_A, CLS_B]}
+
+
+def test_an_unambiguous_property_is_not_reported_as_ambiguous():
+    assert ambiguous_domains([(P, CLS_A)]) == {}
+
+
+def test_range_comes_from_a_declared_datatype():
+    assert derive_range_edges([], [(P, XSD_DECIMAL)]) == [(P, XSD_DECIMAL)]
+
+
+def test_range_comes_from_a_typed_object():
+    assert derive_range_edges([(P, CLS_A)], []) == [(P, CLS_A)]
+
+
+def test_a_property_with_two_datatypes_gets_no_range():
+    assert derive_range_edges([], [(P, XSD_DECIMAL), (P, XSD_STRING)]) == []
+    assert ambiguous_ranges([], [(P, XSD_DECIMAL), (P, XSD_STRING)]) == {
+        P: sorted([XSD_DECIMAL, XSD_STRING])
+    }
+
+
+def test_a_property_used_with_both_entities_and_literals_gets_no_range():
+    """The two routes disagree about what kind of thing P even points at.
+
+    cpi:hasMonth is the real case: 189 typed URIs and 11 literals. Taking
+    either route alone would assert a range the other contradicts.
+    """
+    assert derive_range_edges([(P, CLS_A)], [(P, XSD_DECIMAL)]) == []
+    assert P in ambiguous_ranges([(P, CLS_A)], [(P, XSD_DECIMAL)])
+
+
+def test_derivation_is_deterministic_regardless_of_observation_order():
+    obs = [(Q, CLS_B), (P, CLS_A)]
+    assert derive_domain_edges(obs) == derive_domain_edges(list(reversed(obs)))
+    assert derive_domain_edges(obs) == sorted(derive_domain_edges(obs))
+
+    rng = [(Q, CLS_B), (P, CLS_A)]
+    assert derive_range_edges(rng, []) == derive_range_edges(
+        list(reversed(rng)), []
+    )
+
+
+def test_derivation_emits_domain_and_range_from_the_graph(spark, make_triples):
+    """The whole route, over a graph shaped like the real ones."""
+    triples = make_triples([
+        ("https://ex/a", RDF_TYPE, CLS_A),
+        ("https://ex/b", RDF_TYPE, CLS_B),
+        # P: entity-valued, one subject class, one object class.
+        ("https://ex/a", P, "https://ex/b"),
+        # Q: literal-valued, its datatype recovered by the loader.
+        ("https://ex/a", Q, "1.5"),
+        (Q, PROV_OBSERVED_LITERAL_DATATYPE, XSD_DECIMAL),
+    ])
+    emitted, skipped_domains, skipped_ranges = (
+        OntologyMapper(spark)._derive_property_schema(triples)
+    )
+    rows = set(_rows(emitted))
+
+    assert (P, RDFS_DOMAIN, CLS_A) in rows
+    assert (P, RDFS_RANGE, CLS_B) in rows
+    assert (Q, RDFS_DOMAIN, CLS_A) in rows
+    assert (Q, RDFS_RANGE, XSD_DECIMAL) in rows
+    assert skipped_domains == {} and skipped_ranges == {}
+
+
+def test_the_marker_predicate_is_not_itself_given_a_schema(spark,
+                                                           make_triples):
+    """Provenance markers describe the vocabulary; they do not use it.
+
+    Left in, prov:observedLiteralDatatype would acquire a domain and range of
+    its own and occupy encoder slots meant for signal about entities.
+    """
+    triples = make_triples([
+        ("https://ex/a", RDF_TYPE, CLS_A),
+        ("https://ex/a", Q, "1.5"),
+        (Q, PROV_OBSERVED_LITERAL_DATATYPE, XSD_DECIMAL),
+    ])
+    emitted, _, _ = OntologyMapper(spark)._derive_property_schema(triples)
+    subjects = {s for s, _, _ in _rows(emitted)}
+    assert PROV_OBSERVED_LITERAL_DATATYPE not in subjects
+    assert RDF_TYPE not in subjects
+
+
+def test_an_ambiguous_predicate_is_reported_not_silently_dropped(
+        spark, make_triples):
+    triples = make_triples([
+        ("https://ex/a", RDF_TYPE, CLS_A),
+        ("https://ex/b", RDF_TYPE, CLS_B),
+        ("https://ex/a", P, "x"),
+        ("https://ex/b", P, "y"),
+    ])
+    _emitted, skipped_domains, _ = (
+        OntologyMapper(spark)._derive_property_schema(triples)
+    )
+    assert skipped_domains == {P: sorted([CLS_A, CLS_B])}
+
+
+def test_enrich_states_how_every_axiom_set_was_derived(spark, make_triples):
+    """Provenance travels as triples because the graph is built in another job.
+
+    pyg_only reads the enriched Parquet, so anything not in the triples never
+    reaches the metadata writer -- and an inferred rdfs:domain is otherwise
+    indistinguishable from one a source declared.
+    """
+    triples = make_triples([("https://ex/a", RDF_TYPE, CLS_A)])
+    rows = OntologyMapper(spark).enrich(triples).collect()
+    stated = {r["subject"]: r["object"] for r in rows
+              if r["predicate"] == PROV_DERIVED_BY}
+
+    assert PROV_PROPERTY_DOMAIN in stated
+    assert PROV_PROPERTY_RANGE in stated
+    assert "observed" in stated[PROV_PROPERTY_DOMAIN]
+    assert "declared" in stated[PROV_PROPERTY_RANGE]
