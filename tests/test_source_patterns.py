@@ -218,7 +218,7 @@ def test_unification_is_detected_via_endpoints_not_predicate():
 def test_an_inferred_bls_link_is_still_classified_as_enrichment():
     """The behaviour this used to guard, kept after the namespaces moved.
 
-    It previously asserted that BLS_ENRICHMENT sits UNDER https://www.bls.gov/
+    It previously asserted that BLS_ENRICHMENT sits UNDER https://jefflevesque.com/ontology/bls-common/
     and is therefore at risk of being swallowed by the shorter source
     namespace. That arrangement was the defect: a URI under bls.gov claims BLS
     defined a term we invented. The minted vocabularies now live under a

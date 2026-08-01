@@ -21,7 +21,7 @@ from rdflib.namespace import OWL, RDF, RDFS
 
 from spark_jobs.enrichment.cross_source_linker import CrossSourceLinker
 from spark_jobs.utils.rdf_utils import (
-    ALERT, BLS_ENRICHMENT, CAP, CPI, MARKET, NWS, SEC_FILINGS, UNIFIED,
+    ALERT, BLS_ENRICHMENT, CAP, CPI, MARKET_FEEDS, WEATHER, SEC_FILINGS, UNIFIED,
 )
 
 RDF_TYPE = str(RDF.type)
@@ -47,11 +47,11 @@ def _triple_set(result):
 def test_cross_source_company_linking_shares_unified_company(spark, make_triples):
     """A Market ticker and an SEC filing with the same symbol both link to
     the same unified Company entity (the cross-source hub)."""
-    ticker = str(MARKET) + "ticker/AAPL"
+    ticker = str(MARKET_FEEDS) + "ticker/AAPL"
     filing = str(SEC_FILINGS) + "filing-001"
     rows = [
-        (ticker, RDF_TYPE, str(MARKET.StockTicker)),
-        (ticker, str(MARKET.symbol), "AAPL"),
+        (ticker, RDF_TYPE, str(MARKET_FEEDS.StockTicker)),
+        (ticker, str(MARKET_FEEDS.symbol), "AAPL"),
         (filing, RDF_TYPE, str(SEC_FILINGS.Filing)),
         (filing, str(SEC_FILINGS.hasIssuerTicker), "AAPL"),
     ]
@@ -94,7 +94,7 @@ def test_cross_source_does_not_unify_temporal_entities(spark, make_triples):
     exists in real data, which contains only bare month URIs and measurements.
     """
     measurement = str(CPI) + "SeasonallyAdjustedPercentChange_Food_2025_September"
-    snapshot = str(MARKET) + "snapshot/AAPL_1"
+    snapshot = str(MARKET_FEEDS) + "snapshot/AAPL_1"
     rows = [
         (measurement, RDFS_LABEL, "Food, Sep 2025"),
         (snapshot, RDFS_LABEL, "AAPL snapshot"),  # second source, no month
@@ -121,7 +121,7 @@ def test_cross_source_does_not_unify_year_suffixed_uris(spark, make_triples):
     in a year is not the year.
     """
     measurement = str(CPI) + "UnadjustedIndex_Apparel_2024"
-    snapshot = str(MARKET) + "snapshot/AAPL_1"
+    snapshot = str(MARKET_FEEDS) + "snapshot/AAPL_1"
     rows = [
         (measurement, RDFS_LABEL, "Apparel index 2024"),
         (snapshot, RDFS_LABEL, "AAPL snapshot"),  # second source
@@ -141,10 +141,10 @@ def test_cross_source_does_not_unify_year_suffixed_uris(spark, make_triples):
 
 def test_cross_source_single_source_short_circuits(spark, make_triples):
     """Only one source family present -> no cross-source enrichment at all."""
-    ticker = str(MARKET) + "ticker/AAPL"
+    ticker = str(MARKET_FEEDS) + "ticker/AAPL"
     rows = [
-        (ticker, RDF_TYPE, str(MARKET.StockTicker)),
-        (ticker, str(MARKET.symbol), "AAPL"),
+        (ticker, RDF_TYPE, str(MARKET_FEEDS.StockTicker)),
+        (ticker, str(MARKET_FEEDS.symbol), "AAPL"),
     ]
 
     result = CrossSourceLinker(spark, make_triples(rows)).enrich()
@@ -156,7 +156,7 @@ def test_cross_source_unlinkable_sources_produce_no_entity_edges(spark, make_tri
     """Two sources with no shared key (no tickers, months, sectors, regions)
     produce no edges touching the input entities and no linking predicates
     (unified-region scaffolding triples are allowed)."""
-    market_e = str(MARKET) + "zzq-a"
+    market_e = str(MARKET_FEEDS) + "zzq-a"
     sec_e = str(SEC_FILINGS) + "zzq-b"
     rows = [
         (market_e, RDFS_LABEL, "zzq a"),
@@ -196,7 +196,7 @@ def test_cross_source_geography_fips_chain(spark, make_triples, fips, region_key
         (alert, str(CAP.hasInfo), info),
         (info, str(CAP.hasArea), area),
         (area, str(CAP.hasGeocode), geocode),
-        (geocode, str(NWS.hasStateFIPS), fips),
+        (geocode, str(WEATHER.hasStateFIPS), fips),
     ]
 
     linker = CrossSourceLinker(spark, make_triples(rows))
