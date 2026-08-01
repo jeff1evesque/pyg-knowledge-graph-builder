@@ -43,7 +43,7 @@ from spark_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, UNIFIED, SOURCE_TEMPORAL,
     CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER, WKYENG,
     SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP,
-    MARKET, CAP, NWS,
+    MARKET_FEEDS, CAP, WEATHER,
 )
 
 import logging
@@ -90,10 +90,10 @@ WKYENG_HAS_QUARTER = str(WKYENG.hasQuarter)
 WKYENG_HAS_YEAR = str(WKYENG.hasYear)
 
 # Market predicates
-MARKET_OBSERVED_AT = str(MARKET.observedAt)
-MARKET_PRICE_OBS_TYPE = str(MARKET.PriceObservation)
-MARKET_OPTION_CONTRACT_TYPE = str(MARKET.OptionContract)
-MARKET_EXPIRATION_DATE = str(MARKET.expirationDate)
+MARKET_OBSERVED_AT = str(MARKET_FEEDS.observedAt)
+MARKET_PRICE_OBS_TYPE = str(MARKET_FEEDS.PriceObservation)
+MARKET_OPTION_CONTRACT_TYPE = str(MARKET_FEEDS.OptionContract)
+MARKET_EXPIRATION_DATE = str(MARKET_FEEDS.expirationDate)
 
 # SEC types for detection
 SEC_TYPES = [
@@ -119,7 +119,7 @@ SEC_DATE_PREDS = [
 # The temporal unifier's _collect_date_based_temporals() extracts
 # month/year from the literal values regardless of which subject
 # they appear on — it only needs the predicate and object columns.
-NOAA_WEATHER_ALERT_TYPE = str(NWS.WeatherAlert)
+NOAA_WEATHER_ALERT_TYPE = str(WEATHER.WeatherAlert)
 CAP_ALERT_TYPE = str(CAP.Alert)
 
 # All NOAA date predicates that carry temporal information.
@@ -473,13 +473,17 @@ class TemporalUnifier:
         Extract month/year from Market price observation timestamps
         and option expiration dates.
 
-        Price observations use finance:observedAt with dateTime values.
-        Option contracts use options:expirationDate with date values.
+        Price observations use market-feeds:observedAt with dateTime values.
+        Option contracts use market-feeds:expirationDate with date values.
         Both are ISO format, so we reuse the date parsing logic.
+
+        This is the FEEDS vocabulary, not the quote-snapshot one -- quotes
+        have no observedAt and no PriceObservation. The quote snapshots carry
+        captureTime instead and are handled by the intra-source market linker.
         """
         market_date_preds = [MARKET_OBSERVED_AT, MARKET_EXPIRATION_DATE]
         return self._collect_date_based_temporals(
-            triples_df, market_date_preds, "https://financial-data.org/temporal/"
+            triples_df, market_date_preds, f"{SOURCE_TEMPORAL}market-feeds/"
         )
 
     # ================================================================
