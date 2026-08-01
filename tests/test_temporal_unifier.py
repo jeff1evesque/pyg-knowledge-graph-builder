@@ -31,8 +31,25 @@ from spark_jobs.enrichment.temporal_unifier import (
     MARKET_OPTION_CONTRACT_TYPE,
 )
 
-CPI = "https://jefflevesque.com/ontology/cpi/"
-MARKET_TEMPORAL = "https://jefflevesque.com/ontology/temporal/market-feeds/"
+from spark_jobs.utils.rdf_utils import (
+    CPI as _CPI_NS,
+    SYNTHETIC_TEMPORAL_IDS,
+    identifier_namespace,
+)
+
+# Read from the constants rather than restating them. A literal here goes stale
+# silently the moment a namespace moves — which is exactly what happened: this
+# file kept asserting the pre-migration home of the synthetic temporals while
+# the unifier had already moved them, and the four failures read as a code
+# regression rather than a stale test.
+#
+# Split deliberately: CPI names the PREDICATES (hasMonth, hasYear), CPI_ID names
+# the THINGS (the observation, the period). Sharing one constant for both is the
+# conflation that hid the collection bug, since a test whose periods live under
+# ontology/ cannot notice that no real period ever does.
+CPI = str(_CPI_NS)
+CPI_ID = identifier_namespace(CPI)
+MARKET_TEMPORAL = SYNTHETIC_TEMPORAL_IDS["market-feeds"]
 
 
 def _triple_set(result):
@@ -42,9 +59,9 @@ def _triple_set(result):
 def test_same_period_across_sources_unifies_to_one_entity(spark, make_triples):
     """A BLS month URI and a market timestamp in the same month both link
     from the SAME unified month entity via owl:sameAs."""
-    cpi_month = CPI + "November"
+    cpi_month = CPI_ID + "November"
     rows = [
-        (CPI + "obs/1", CPI + "hasMonth", cpi_month),
+        (CPI_ID + "obs/1", CPI + "hasMonth", cpi_month),
         ("https://jefflevesque.com/id/market-feeds/snap/1", MARKET_OBSERVED_AT,
          "2024-11-15T10:00:00"),
     ]
@@ -66,9 +83,9 @@ def test_same_period_across_sources_unifies_to_one_entity(spark, make_triples):
 def test_different_periods_are_not_unified(spark, make_triples):
     """A BLS November and a market March produce two distinct unified
     entities with no cross-period sameAs links."""
-    cpi_month = CPI + "November"
+    cpi_month = CPI_ID + "November"
     rows = [
-        (CPI + "obs/1", CPI + "hasMonth", cpi_month),
+        (CPI_ID + "obs/1", CPI + "hasMonth", cpi_month),
         ("https://jefflevesque.com/id/market-feeds/snap/1", MARKET_OBSERVED_AT,
          "2024-03-10T10:00:00"),
     ]
@@ -120,10 +137,10 @@ def test_source_temporal_uris_are_typed(spark, make_triples):
     no temporal dimension and the Unified* nodes were isolated. Typing them is
     what makes both hops of the cross-source bridge into real edges.
     """
-    cpi_month, cpi_year = CPI + "November", CPI + "2024"
+    cpi_month, cpi_year = CPI_ID + "November", CPI_ID + "2024"
     rows = [
-        (CPI + "obs/1", CPI + "hasMonth", cpi_month),
-        (CPI + "obs/1", CPI + "hasYear", cpi_year),
+        (CPI_ID + "obs/1", CPI + "hasMonth", cpi_month),
+        (CPI_ID + "obs/1", CPI + "hasYear", cpi_year),
         ("https://jefflevesque.com/id/market-feeds/snap/1", MARKET_OBSERVED_AT,
          "2024-11-15T10:00:00"),
     ]
