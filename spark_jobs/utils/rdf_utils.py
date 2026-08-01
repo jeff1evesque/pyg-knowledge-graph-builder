@@ -68,15 +68,38 @@ GEOSPARQL = Namespace("http://www.opengis.net/ont/geosparql#")
 ATOM = Namespace("http://www.w3.org/2005/Atom/")
 
 # ============================================
-# ENRICHMENT NAMESPACES
+# MINTED NAMESPACES — terms this project invents
 # ============================================
-# Created by this pipeline for cross-source linking
+# Everything below is a term WE define, so every one of them lives under a
+# domain we control. The namespaces above are the publishers' own vocabularies
+# and stay exactly where they are: those really are their terms.
+#
+# They used to sit under the publishers' domains (bls.gov/enrichment/,
+# sec.gov/enrichment/, noaa.gov/enrichment/, financial-data.org/enrichment/)
+# and under example.org. Both were wrong, in different ways:
+#
+#   * a URI under bls.gov claims BLS is the authority for that term. Nobody at
+#     BLS defined bls_enrichment:RateMeasurement -- we did. Anyone consuming
+#     this graph, or federating it with real BLS-published RDF, is entitled to
+#     believe the URI and would be wrong. It would also collide outright if
+#     BLS ever published under that path.
+#   * example.org is reserved by RFC 2606 for documentation. It cannot lie
+#     about ownership, but it is nobody's, so another project using it (which
+#     is exactly what it is for) collides with us, and a reviewer cannot tell
+#     a deliberate choice from a leftover placeholder.
+#
+# ONE base, sub-pathed by concern. Changing it is a one-line edit here --
+# nothing downstream hardcodes a namespace string -- but it is not free: these
+# URIs are hashed into feature slots, so moving them moves every slot and
+# changes encoding_config.json's contract digest. That is the intended signal
+# (graphs built either side are not comparable), not a side effect.
+ONTOLOGY_BASE = "https://jefflevesque.com/ontology/"
 
-BLS_ENRICHMENT = Namespace("https://www.bls.gov/enrichment/")
-SEC_ENRICHMENT = Namespace("https://www.sec.gov/enrichment/")
-NOAA_ENRICHMENT = Namespace("https://www.noaa.gov/enrichment/")
-MARKET_ENRICHMENT = Namespace("https://financial-data.org/enrichment/")
-UNIFIED = Namespace("https://example.org/unified/")
+BLS_ENRICHMENT = Namespace(f"{ONTOLOGY_BASE}bls/")
+SEC_ENRICHMENT = Namespace(f"{ONTOLOGY_BASE}sec/")
+NOAA_ENRICHMENT = Namespace(f"{ONTOLOGY_BASE}noaa/")
+MARKET_ENRICHMENT = Namespace(f"{ONTOLOGY_BASE}market/")
+UNIFIED = Namespace(f"{ONTOLOGY_BASE}unified/")
 
 # Types for the SOURCE-side temporal entities (cpi:February, eci:2024, ...).
 # Those URIs are referenced by measurements but carry no rdf:type of their own,
@@ -90,7 +113,12 @@ UNIFIED = Namespace("https://example.org/unified/")
 # deliberately distinct from UNIFIED: collapsing both onto UnifiedMonth would
 # make `unified:February sameAs cpi:February` a link between two nodes of the
 # same type, erasing which one is canonical.
-SOURCE_TEMPORAL = Namespace("https://example.org/temporal/")
+#
+# Under the shared base like the rest, but NOT in ENRICHMENT_NAMESPACES --
+# that list, not the base URI, is what classify_edge_origin() reads. Sharing a
+# base with the enrichment namespaces must not start classifying these edges
+# as pipeline-inferred; see the origin test that pins it.
+SOURCE_TEMPORAL = Namespace(f"{ONTOLOGY_BASE}temporal/")
 
 # Statements ABOUT the pipeline's own derivations rather than about the data.
 #
@@ -117,7 +145,7 @@ SOURCE_TEMPORAL = Namespace("https://example.org/temporal/")
 # namespace is ever an rdf:type, so it can never name a node type, and adding
 # it would move ONTOLOGY_NAMESPACE_INDICES and change the encoding contract
 # digest -- invalidating every trained model to describe URIs no encoder sees.
-PROVENANCE = Namespace("https://example.org/provenance/")
+PROVENANCE = Namespace(f"{ONTOLOGY_BASE}provenance/")
 
 # Subject of the derivedBy statements: the axiom SET being described, not any
 # individual axiom. One statement per set keeps the marker count constant.
@@ -160,10 +188,18 @@ PROV_ROUTE_LABELS = {
 # Single source of truth for all PyG builder modules (node_mapper,
 # edge_mapper, feature_extractor). Each entry is (namespace_uri, prefix).
 #
-# Order matters for node_mapper and edge_mapper: longer/more-specific
-# namespaces must appear before shorter ones so that startsWith matching
-# picks the most specific prefix (e.g., "https://financial-data.org/enrichment/"
-# before "https://financial-data.org/").
+# Order matters for node_mapper and edge_mapper: where one namespace is a
+# string prefix of another, the longer must appear first, or startsWith
+# matching claims the URI for the shorter one and names the node type after
+# the wrong vocabulary. Asserted over every pair in tests/test_namespaces.py
+# rather than maintained by eye.
+#
+# Note what moving the minted terms under one base did NOT do: siblings like
+# .../ontology/bls/ and .../ontology/sec/ are not prefixes of EACH OTHER --
+# sharing a parent path is not the same relation. It actually removed two real
+# prefix pairs that did exist (financial-data.org/ vs its /enrichment/ child,
+# and noaa.gov/ vs its /enrichment/ child), so the ordering hazard here is
+# smaller now, not larger. The invariant test stands either way.
 #
 # The index position in this list is used by feature_extractor for
 # ontology source membership encoding.
