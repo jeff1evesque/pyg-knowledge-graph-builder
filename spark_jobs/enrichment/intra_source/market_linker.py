@@ -25,7 +25,7 @@ from pyspark.sql.window import Window
 from functools import reduce
 from typing import List, Optional
 
-from spark_jobs.utils.rdf_utils import MARKET, MARKET_ENRICHMENT
+from spark_jobs.utils.rdf_utils import MARKET_QUOTES, MARKET_ENRICHMENT
 from spark_jobs.enrichment.intra_source.market.patterns import (
     get_sector_patterns,
     MARKET_OPTION_STRATEGY_PATTERNS,
@@ -42,21 +42,21 @@ logger = logging.getLogger(__name__)
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 
 # Class URIs (flat snapshot model)
-EQUITY_SNAPSHOT_TYPE = str(MARKET.EquitySnapshot)
-OPTION_SNAPSHOT_TYPE = str(MARKET.OptionSnapshot)
-QUOTE_SNAPSHOT_TYPE = str(MARKET.QuoteSnapshot)
+EQUITY_SNAPSHOT_TYPE = str(MARKET_QUOTES.EquitySnapshot)
+OPTION_SNAPSHOT_TYPE = str(MARKET_QUOTES.OptionSnapshot)
+QUOTE_SNAPSHOT_TYPE = str(MARKET_QUOTES.QuoteSnapshot)
 
 # Property URIs
-SYMBOL_PRED = str(MARKET.symbol)
-CAPTURE_TIME_PRED = str(MARKET.captureTime)
-LAST_PRICE_PRED = str(MARKET.lastPrice)
-UNDERLYING_SYMBOL_PRED = str(MARKET.underlyingSymbol)
-UNDERLYING_PRICE_PRED = str(MARKET.underlyingPrice)
-STRIKE_PRICE_PRED = str(MARKET.strikePrice)
-EXPIRATION_DATE_PRED = str(MARKET.expirationDate)
-CONTRACT_TYPE_PRED = str(MARKET.contractType)
-DELTA_PRED = str(MARKET.delta)
-IN_THE_MONEY_PRED = str(MARKET.inTheMoney)
+SYMBOL_PRED = str(MARKET_QUOTES.symbol)
+CAPTURE_TIME_PRED = str(MARKET_QUOTES.captureTime)
+LAST_PRICE_PRED = str(MARKET_QUOTES.lastPrice)
+UNDERLYING_SYMBOL_PRED = str(MARKET_QUOTES.underlyingSymbol)
+UNDERLYING_PRICE_PRED = str(MARKET_QUOTES.underlyingPrice)
+STRIKE_PRICE_PRED = str(MARKET_QUOTES.strikePrice)
+EXPIRATION_DATE_PRED = str(MARKET_QUOTES.expirationDate)
+CONTRACT_TYPE_PRED = str(MARKET_QUOTES.contractType)
+DELTA_PRED = str(MARKET_QUOTES.delta)
+IN_THE_MONEY_PRED = str(MARKET_QUOTES.inTheMoney)
 
 # Enrichment property URIs
 PRECEDES_PRED = str(MARKET_ENRICHMENT.precedes)
