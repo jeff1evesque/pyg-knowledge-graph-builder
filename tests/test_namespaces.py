@@ -28,11 +28,23 @@ from spark_jobs.utils.rdf_utils import (
     MARKET_ENRICHMENT,
     NOAA_ENRICHMENT,
     SEC_ENRICHMENT,
+    SOURCE_VOCABULARIES,
+    PUBLISHER_VOCABULARIES,
 )
 
-# Every namespace whose terms this project invents. Publishers' vocabularies
-# (cpi:, jolts:, cap:, sec.gov/filings#, ...) are deliberately absent: those
-# really are their terms and belong on their domains.
+# Every namespace whose terms this project invents, in either repo.
+#
+# The source vocabularies (cpi:, jolts:, filings:, cap:, ...) used to be
+# excluded here on the grounds that they were the publishers' own terms. That
+# was wrong, and checking it is what corrected it: BLS publishes CSV and the
+# SEC publishes XML, so nobody there defined cpi:Index or filings:Form4. The
+# scrapers did. NWS was the sharpest case -- its live JSON-LD context really
+# does declare https://api.weather.gov/ontology# as @vocab, but it holds
+# wx:Alert and ~30 lowercase properties, and not one of the ~29 terms the
+# scraper emitted was among them.
+#
+# What survived the check is in PUBLISHER_VOCABULARIES: alert: identifiers,
+# GeoSPARQL, Atom.
 MINTED = {
     "BLS_ENRICHMENT": str(BLS_ENRICHMENT),
     "SEC_ENRICHMENT": str(SEC_ENRICHMENT),
@@ -41,6 +53,10 @@ MINTED = {
     "UNIFIED": str(UNIFIED),
     "SOURCE_TEMPORAL": str(SOURCE_TEMPORAL),
     "PROVENANCE": str(PROVENANCE),
+    **{
+        f"SOURCE[{namespace.rsplit('/', 2)[-2]}]": namespace
+        for namespace in SOURCE_VOCABULARIES
+    },
 }
 
 # Domains belonging to the data publishers. A term we mint under any of these
@@ -112,18 +128,52 @@ def test_the_base_is_a_single_point_of_change():
 
 
 def test_publisher_vocabularies_were_left_alone():
-    """Out of scope, and must stay out: those are genuinely their terms."""
-    publisher_namespaces = [
-        ns for ns, _prefix in NAMESPACE_PREFIXES
-        if ns not in set(MINTED.values())
-        and not ns.startswith("http://www.w3.org/")
-    ]
-    assert publisher_namespaces, "no publisher namespaces left in the table"
-    for ns in publisher_namespaces:
-        assert not ns.startswith(ONTOLOGY_BASE), (
-            f"{ns} was moved under our base, but it is a publisher's own "
-            f"vocabulary and we are not its authority either"
+    """The ones that really are theirs must stay where they are.
+
+    Re-homing our own inventions is the fix; re-homing someone else's real
+    vocabulary would be the same mistake pointing the other way, and it would
+    break federation -- the whole reason to reuse a published URI is that it
+    denotes the same thing everywhere.
+    """
+    assert PUBLISHER_VOCABULARIES, "no publisher vocabularies left at all"
+    for namespace in PUBLISHER_VOCABULARIES:
+        assert not namespace.startswith(ONTOLOGY_BASE), (
+            f"{namespace} was moved under our base, but its publisher really "
+            f"did define it and we are not its authority"
         )
+
+
+def test_every_registered_namespace_is_ours_or_a_real_publisher_vocabulary():
+    """No third category. Anything else in the table is unaccounted for.
+
+    A namespace that is neither minted by us nor a vocabulary someone else
+    genuinely published is exactly the state this migration removed, and the
+    only way it comes back is by being added without anyone deciding which
+    kind it is.
+    """
+    accounted = set(MINTED.values()) | set(PUBLISHER_VOCABULARIES)
+    unaccounted = [
+        ns for ns, _prefix in NAMESPACE_PREFIXES
+        if ns not in accounted and not ns.startswith("http://www.w3.org/")
+    ]
+    assert not unaccounted, (
+        f"{unaccounted} are registered but classified as neither ours nor a "
+        f"publisher's; decide which and add them to the matching list"
+    )
+
+
+def test_no_source_vocabulary_sits_on_a_publishers_domain():
+    """The defect this migration fixed, stated over the source terms.
+
+    cpi:Index under bls.gov says BLS defined it. BLS publishes CSV.
+    """
+    for namespace in SOURCE_VOCABULARIES:
+        assert namespace.startswith(ONTOLOGY_BASE), namespace
+        for domain in PUBLISHER_DOMAINS:
+            assert domain not in namespace, (
+                f"{namespace} claims {domain} as the authority for a term the "
+                f"scrapers invented"
+            )
 
 
 # ======================================================================
