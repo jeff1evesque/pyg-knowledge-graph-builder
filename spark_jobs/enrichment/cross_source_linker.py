@@ -16,7 +16,8 @@ from rdflib.namespace import RDF, RDFS, OWL, XSD
 from spark_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, SEC_ENRICHMENT, MARKET_ENRICHMENT, NOAA_ENRICHMENT,
     UNIFIED, CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER,
-    WKYENG, SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP, MARKET, CAP, NWS,
+    WKYENG, SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP, CAP, WEATHER,
+    MARKET_FEEDS,
     ALERT,
 )
 from spark_jobs.enrichment.intra_source.bls.patterns import BLS_SECTOR_PATTERNS
@@ -35,15 +36,15 @@ _OWL_SAME_AS = str(OWL.sameAs)
 _RDFS_LABEL = str(RDFS.label)
 
 # NOAA type URIs — aligned with updated RML mapper
-_NWS_WEATHER_ALERT_TYPE = str(NWS.WeatherAlert)
+_NWS_WEATHER_ALERT_TYPE = str(WEATHER.WeatherAlert)
 _CAP_ALERT_TYPE = str(CAP.Alert)
 
 # NOAA area description — on Area subject (alert:{id}#area)
 _CAP_HAS_AREA_DESC = str(CAP.hasAreaDescription)
 
 # NOAA geocode properties for geographic linking
-_NWS_HAS_STATE_FIPS = str(NWS.hasStateFIPS)
-_NWS_HAS_FIPS_CODE = str(NWS.hasFIPSCode)
+_NWS_HAS_STATE_FIPS = str(WEATHER.hasStateFIPS)
+_NWS_HAS_FIPS_CODE = str(WEATHER.hasFIPSCode)
 
 # NOAA structural properties for traversal
 _CAP_HAS_INFO = str(CAP.hasInfo)
@@ -76,10 +77,10 @@ class CrossSourceLinker:
 
         bls_prefixes = [str(ns) for ns in [CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER, WKYENG]]
         sec_prefixes = [str(ns) for ns in [SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP]]
-        market_prefix = str(MARKET)
+        market_prefix = str(MARKET_FEEDS)
         # NOAA alert instances use the ALERT namespace (https://api.weather.gov/alerts/)
         # Also check CAP namespace for type triples
-        noaa_prefixes = [str(ALERT), str(CAP), str(NWS)]
+        noaa_prefixes = [str(ALERT), str(CAP), str(WEATHER)]
 
         # Sample subjects to detect sources — bounded, fast
         sample = (
@@ -269,9 +270,9 @@ class CrossSourceLinker:
         """
         # Get market ticker symbols
         market_tickers = (
-            extract_entities_by_type(self.triples_df, str(MARKET.StockTicker))
+            extract_entities_by_type(self.triples_df, str(MARKET_FEEDS.StockTicker))
             .join(
-                extract_property(self.triples_df, str(MARKET.symbol), "symbol"),
+                extract_property(self.triples_df, str(MARKET_FEEDS.symbol), "symbol"),
                 on=F.col("entity") == F.col("subject")
             )
             .select(F.col("entity").alias("ticker_uri"), "symbol")
@@ -554,7 +555,7 @@ class CrossSourceLinker:
         )
 
         bls_prefixes = [str(ns) for ns in [CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER, WKYENG]]
-        market_prefix = str(MARKET)
+        market_prefix = str(MARKET_FEEDS)
 
         # BLS entities in sectors
         bls_filter = F.col("entity").startswith(bls_prefixes[0])
