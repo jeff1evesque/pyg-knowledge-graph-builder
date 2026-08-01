@@ -14,7 +14,7 @@ Responsibilities:
    (EdgeFeatureExtractor) to avoid replaying the expensive double-join
 
 Edge type naming:
-    Predicate URI: https://www.bls.gov/enrichment/precedes
+    Predicate URI: https://jefflevesque.com/ontology/bls/precedes
     Relation name: bls_enrichment_precedes
 
     Full PyG edge type: ("cpi_Index", "bls_enrichment_precedes", "cpi_Index")

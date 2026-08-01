@@ -8,11 +8,19 @@ Defines known relationships between:
 - Litigation ↔ Trading Suspensions (civil action accompanies suspension)
 - Filings (ownership) ↔ Litigation (insider trading detection)
 
-Property references match actual ontologies:
-- Filings:    http://www.sec.gov/filings# (filings:hasIssuerCik, filings:hasIssuerTradingSymbol, etc.)
-- Admin:      https://www.sec.gov/ontology/administrative-proceedings# (sec:cikNumber, sec:tickerSymbol, etc.)
-- Litigation: https://www.sec.gov/ontology/litigation# (seclit:filingDate, seclit:caseNumber, etc.)
-- Suspensions: https://www.sec.gov/ontology/trading-suspensions# (secsusp:cikNumber, secsusp:tickerSymbol, etc.)
+Property references come from the rdf_utils constants and are deliberately not
+spelled out here -- a copy in a docstring goes stale exactly the way a copy in
+code does, and this one did:
+
+- Filings:     SEC_FILINGS  (hasIssuerCik, hasIssuerTradingSymbol, ...)
+- Admin:       SEC_ADMIN    (cikNumber, tickerSymbol, ...)
+- Litigation:  SEC_LIT      (filingDate, caseNumber, ...)
+- Suspensions: SEC_SUSP     (cikNumber, tickerSymbol, ...)
+
+These were once described as the SEC's "actual ontologies". They are not: the
+SEC publishes filings as XML and no RDF vocabulary at all, so every term above
+was minted by this project's scrapers and now resolves under a domain we
+control.
 """
 from spark_jobs.utils.rdf_utils import SEC_ENRICHMENT
 
