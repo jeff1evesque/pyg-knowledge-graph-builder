@@ -19,6 +19,7 @@ Vector width is pinned to 128 for speed; every assertion derives its slots from
 VectorLayout(128), so nothing depends on the production 1024 default.
 """
 import itertools
+import json
 
 import numpy as np
 import pytest
@@ -1122,3 +1123,41 @@ def test_an_empty_hierarchy_keeps_its_existing_reason(spark):
     ])
     assert schema["hierarchy_source"].startswith("no rdfs:subClassOf")
     assert schema["derived_axioms"]["class_hierarchy"]["total"] == 0
+
+
+def test_route_counts_have_a_stable_key_order():
+    """Key ORDER, not just values — metadata is compared as JSON text.
+
+    _route_counts walks a set of axioms. Iterating a set seeds dict insertion
+    order from string hashing, which differs per process under a randomized
+    PYTHONHASHSEED, so two runs of the same build produced the same counts in
+    a different order and ontology_schema.json stopped being byte-identical.
+    Only test_jolts_features_reproducible caught it, because it is the one
+    guard that compares serialized metadata rather than parsed objects — and
+    it takes eight minutes. This is the same assertion in a tenth of a second.
+    """
+    from spark_jobs.pyg_builder.feature_extractor import (
+        _route_counts, _route_detail,
+    )
+    from spark_jobs.utils.rdf_utils import (
+        PROV_ROUTE_CURATED_SUBCLASS, PROV_ROUTE_NAMED_SUBCLASS,
+    )
+
+    axioms = {(f"https://ex/c{i}", f"https://ex/p{i}") for i in range(40)}
+    routes = {
+        a: (PROV_ROUTE_CURATED_SUBCLASS if i % 2 else PROV_ROUTE_NAMED_SUBCLASS)
+        for i, a in enumerate(sorted(axioms))
+    }
+
+    counts = _route_counts(axioms, routes)
+    assert list(counts) == sorted(counts), "route counts are not key-sorted"
+
+    # Re-deriving from a set built in a different insertion order must give a
+    # byte-identical dict, not merely an equal one.
+    shuffled = {a for a in sorted(axioms, reverse=True)}
+    assert json.dumps(_route_counts(shuffled, routes)) == json.dumps(counts)
+
+    detail = _route_detail(axioms, routes, counts)
+    assert list(detail["counts"]) == sorted(detail["counts"])
+    assert list(detail["axioms"]) == sorted(detail["axioms"])
+    assert detail["counts"]["declared"] == 0
