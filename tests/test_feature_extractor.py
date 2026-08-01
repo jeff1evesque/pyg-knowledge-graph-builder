@@ -506,9 +506,12 @@ def test_unmapped_build_says_mapping_never_ran(spark):
     ])
     # The flag itself — not merely an empty list left to be interpreted.
     assert schema["ontology_mapping_enabled"] is False
-    # Bumped with the flag, so a consumer can require it rather than probe
-    # for the key: a 1.0 file's empty hierarchy stays ambiguous forever.
-    assert schema["version"] == "1.1"
+    # The flag arrived in 1.1, so a consumer can require it by version rather
+    # than probe for the key: a 1.0 file's empty hierarchy stays ambiguous
+    # forever. Compared as a bound, not pinned — later versions still carry it,
+    # and test_schema_version_tracks_the_provenance_fields owns the exact
+    # number.
+    assert tuple(map(int, schema["version"].split("."))) >= (1, 1)
     assert "no owl:equivalentProperty" in schema["ontology_mapping_evidence"]
     # ...and the prose reason names the missing phase, not just missing data.
     assert schema["hierarchy_source"] == (
@@ -575,14 +578,26 @@ def test_dead_class_hierarchy_segment_blames_the_missing_phase(spark):
 
 
 def test_empty_property_schema_records_its_reason(spark):
-    # Same diagnosis gap for domain_range, which is equally zero on the real
-    # sources — no rdfs:domain or rdfs:range is declared anywhere.
+    # Same diagnosis gap for domain_range: no source declares rdfs:domain or
+    # rdfs:range either, so the sub-segment is zero unless something derives
+    # them. And since OntologyMapper is now what does, the reason has to name
+    # the phase that did not run rather than only the data that is missing.
     schema = _ontology_schema(spark, [
         ("https://ex/a", RDF_TYPE, CPI_INDEX),
         ("https://ex/a", SECTOR, "Energy"),
     ])
     assert schema["property_schema_source"] == (
-        "no rdfs:domain or rdfs:range in source data"
+        "no rdfs:domain or rdfs:range in source data and ontology mapping "
+        "did not run"
+    )
+
+
+def test_property_schema_after_mapping_blames_the_data_not_the_phase(spark):
+    schema = _mapped_schema(spark, [
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+    ])
+    assert schema["property_schema_source"] == (
+        "no rdfs:domain or rdfs:range after ontology mapping"
     )
 
 
@@ -793,3 +808,158 @@ def test_separability_flips_exactly_at_the_segment_width(vector_dim):
             f"{'separable' if separable else 'NOT separable'}"
         )
         assert ci["headroom_classes"] == ci_dim - num_classes
+
+
+# ======================================================================
+# ontology_schema.json — provenance and property-schema coverage
+# ======================================================================
+#
+# domain_range (111 dims) and property_hierarchy (81 dims) were structurally
+# zero in every build: 192 of 1024 dims, 18.75% of every node vector, because
+# no source declares rdfs:domain, rdfs:range or rdfs:subPropertyOf anywhere.
+# They are now DERIVED -- domain and range from how the graph uses each
+# predicate, the property hierarchy from the curated table.
+#
+# Which makes provenance load-bearing rather than decorative. An inferred
+# rdfs:domain is shaped exactly like a declared one, and they are not
+# interchangeable: "used on class C in this month's data" is weaker than "its
+# domain is C", and a consumer that reasons over the second when it only has
+# the first will be wrong in ways nothing here would catch.
+
+PROP_A = "https://example.org/measure"
+XSD_DECIMAL = "http://www.w3.org/2001/XMLSchema#decimal"
+
+
+def _mapped_schema(spark, rows):
+    """ontology_schema for a triple set that carries the mapper's markers."""
+    return _ontology_schema(spark, [MAPPED] + rows)
+
+
+def test_derived_axioms_are_not_reported_as_declared(spark):
+    from spark_jobs.utils.rdf_utils import (
+        PROV_DERIVED_BY, PROV_PROPERTY_DOMAIN, PROV_PROPERTY_RANGE,
+    )
+
+    schema = _mapped_schema(spark, [
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/a", PROP_A, "1.5"),
+        (PROP_A, RDFS_DOMAIN, CPI_INDEX),
+        (PROP_A, RDFS_RANGE, XSD_DECIMAL),
+        (PROV_PROPERTY_DOMAIN, PROV_DERIVED_BY,
+         "observed rdf:type of each predicate's subjects"),
+        (PROV_PROPERTY_RANGE, PROV_DERIVED_BY,
+         "observed object types and declared XSD datatypes"),
+    ])
+
+    assert schema["provenance"]["property_domain"] == (
+        "observed rdf:type of each predicate's subjects"
+    )
+    assert "declared" in schema["provenance"]["property_range"]
+    # The axioms themselves still read as present — provenance qualifies the
+    # source, it does not retract it.
+    assert schema["property_schema_source"] == "rdfs:domain/rdfs:range"
+
+
+def test_undeclared_axioms_are_not_attributed_to_the_pipeline(spark):
+    """No marker means the pipeline did not derive them.
+
+    Reporting an inference here would be the same error in reverse: claiming
+    authorship of an axiom that came out of the source.
+    """
+    schema = _mapped_schema(spark, [
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/a", PROP_A, "1.5"),
+        (PROP_A, RDFS_DOMAIN, CPI_INDEX),
+    ])
+    assert schema["provenance"]["property_domain"] == "declared by the source"
+
+
+def test_provenance_says_nothing_was_derived_when_mapping_never_ran(spark):
+    schema = _ontology_schema(spark, [
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/a", SECTOR, "Energy"),
+    ])
+    assert schema["provenance"]["property_domain"] == (
+        "not derived — ontology mapping did not run"
+    )
+    assert schema["provenance"]["property_hierarchy"] == (
+        "not derived — ontology mapping did not run"
+    )
+
+
+def test_property_hierarchy_source_names_its_predicate(spark):
+    schema = _mapped_schema(spark, [
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/a", PROP_A, "1.5"),
+        (PROP_A, RDFS_SUBPROPERTY_OF, "https://example.org/unified/value"),
+    ])
+    assert schema["property_hierarchy_source"] == "rdfs:subPropertyOf"
+
+
+def test_empty_property_hierarchy_records_its_reason(spark):
+    schema = _ontology_schema(spark, [
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/a", SECTOR, "Energy"),
+    ])
+    assert schema["property_hierarchy_source"] == (
+        "no rdfs:subPropertyOf in source data and ontology mapping did not run"
+    )
+
+
+def test_coverage_names_the_predicates_that_got_no_axiom(spark):
+    """A gap nobody enumerated is indistinguishable from a bug.
+
+    Derivation declines an ambiguous predicate on purpose -- rdfs:domain is an
+    intersection, so a property used on two classes gets none -- and that is
+    only defensible if the skipped set is published rather than inferred from
+    a sub-segment being thinner than expected.
+    """
+    schema = _mapped_schema(spark, [
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/a", PROP_A, "1.5"),
+        ("https://ex/a", SECTOR, "Energy"),
+        # PROP_A gets both; SECTOR gets neither.
+        (PROP_A, RDFS_DOMAIN, CPI_INDEX),
+        (PROP_A, RDFS_RANGE, XSD_DECIMAL),
+    ])
+    cov = schema["property_schema_coverage"]
+
+    assert cov["with_domain"] == 1
+    assert cov["with_range"] == 1
+    assert SECTOR in cov["without_domain"]
+    assert SECTOR in cov["without_range"]
+    assert PROP_A not in cov["without_domain"]
+    # Counts are a fraction of the data predicates, and the marker/axiom
+    # predicates are not counted as vocabulary that could have had a domain.
+    assert cov["data_predicates"] >= 2
+    assert 0.0 < cov["domain_coverage"] <= 1.0
+    assert cov["without_domain_truncated"] is False
+
+
+def test_coverage_excludes_the_axiom_and_provenance_predicates(spark):
+    """rdfs:domain describes the vocabulary; it is not part of it.
+
+    Counted as a data predicate it would show up as a permanent coverage gap
+    that no derivation could ever close.
+    """
+    from spark_jobs.utils.rdf_utils import PROV_OBSERVED_LITERAL_DATATYPE
+
+    schema = _mapped_schema(spark, [
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/a", PROP_A, "1.5"),
+        (PROP_A, RDFS_DOMAIN, CPI_INDEX),
+        (PROP_A, PROV_OBSERVED_LITERAL_DATATYPE, XSD_DECIMAL),
+    ])
+    cov = schema["property_schema_coverage"]
+
+    for meta in (RDF_TYPE, RDFS_DOMAIN, RDFS_RANGE, RDFS_SUBPROPERTY_OF,
+                 PROV_OBSERVED_LITERAL_DATATYPE):
+        assert meta not in cov["without_domain"], meta
+        assert meta not in cov["without_range"], meta
+
+
+def test_schema_version_tracks_the_provenance_fields(spark):
+    schema = _ontology_schema(spark, [
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+    ])
+    assert schema["version"] == "1.2"
