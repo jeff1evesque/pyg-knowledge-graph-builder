@@ -31,8 +31,8 @@ from spark_jobs.enrichment.temporal_unifier import (
     MARKET_OPTION_CONTRACT_TYPE,
 )
 
-CPI = "https://www.bls.gov/cpi/"
-MARKET_TEMPORAL = "https://financial-data.org/temporal/"
+CPI = "https://jefflevesque.com/ontology/cpi/"
+MARKET_TEMPORAL = "https://jefflevesque.com/ontology/temporal/market-feeds/"
 
 
 def _triple_set(result):
@@ -45,7 +45,7 @@ def test_same_period_across_sources_unifies_to_one_entity(spark, make_triples):
     cpi_month = CPI + "November"
     rows = [
         (CPI + "obs/1", CPI + "hasMonth", cpi_month),
-        ("https://financial-data.org/snap/1", MARKET_OBSERVED_AT,
+        ("https://jefflevesque.com/id/market-feeds/snap/1", MARKET_OBSERVED_AT,
          "2024-11-15T10:00:00"),
     ]
 
@@ -69,7 +69,7 @@ def test_different_periods_are_not_unified(spark, make_triples):
     cpi_month = CPI + "November"
     rows = [
         (CPI + "obs/1", CPI + "hasMonth", cpi_month),
-        ("https://financial-data.org/snap/1", MARKET_OBSERVED_AT,
+        ("https://jefflevesque.com/id/market-feeds/snap/1", MARKET_OBSERVED_AT,
          "2024-03-10T10:00:00"),
     ]
 
@@ -94,7 +94,7 @@ def test_market_expiration_date_derives_period(spark, make_triples):
     """Option expiration dates (market:expirationDate) derive month + year
     temporals — the path whose broken symbol reference (Bug B) once took
     down build_graph in all modes."""
-    opt = "https://financial-data.org/opt/1"
+    opt = "https://jefflevesque.com/id/market-feeds/opt/1"
     rows = [
         (opt, RDF_TYPE, MARKET_OPTION_CONTRACT_TYPE),
         (opt, MARKET_EXPIRATION_DATE, "2025-01-17"),
@@ -124,7 +124,7 @@ def test_source_temporal_uris_are_typed(spark, make_triples):
     rows = [
         (CPI + "obs/1", CPI + "hasMonth", cpi_month),
         (CPI + "obs/1", CPI + "hasYear", cpi_year),
-        ("https://financial-data.org/snap/1", MARKET_OBSERVED_AT,
+        ("https://jefflevesque.com/id/market-feeds/snap/1", MARKET_OBSERVED_AT,
          "2024-11-15T10:00:00"),
     ]
 

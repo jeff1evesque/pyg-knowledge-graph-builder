@@ -35,8 +35,8 @@ from spark_jobs.pyg_builder.feature_extractor import (
     _warn_if_class_identity_is_saturated,
 )
 
-CPI_INDEX = "https://www.bls.gov/cpi/Index"        # -> cpi_Index
-CPI_SERIES = "https://www.bls.gov/cpi/Series"      # -> cpi_Series
+CPI_INDEX = "https://jefflevesque.com/ontology/cpi/Index"        # -> cpi_Index
+CPI_SERIES = "https://jefflevesque.com/ontology/cpi/Series"      # -> cpi_Series
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 RDFS_SUBCLASS_OF = "http://www.w3.org/2000/01/rdf-schema#subClassOf"
 RDFS_DOMAIN = "http://www.w3.org/2000/01/rdf-schema#domain"
@@ -454,7 +454,7 @@ def _ontology_schema(spark, rows):
 # that says the mapping phase ran. Prepending it to a fixture makes that
 # fixture stand for "mapping ran"; omitting it, for "mapping never ran".
 MAPPED = (
-    "https://www.bls.gov/cpi/hasMonth",
+    "https://jefflevesque.com/ontology/cpi/hasMonth",
     "http://www.w3.org/2002/07/owl#equivalentProperty",
     "https://example.org/unified/hasMonth",
 )

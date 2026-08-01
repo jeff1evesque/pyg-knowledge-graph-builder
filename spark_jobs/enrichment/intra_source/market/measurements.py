@@ -12,33 +12,33 @@ Key properties for temporal linking:
 
 Temporal sequences are built per-symbol ordered by captureTime.
 """
-from spark_jobs.utils.rdf_utils import MARKET
+from spark_jobs.utils.rdf_utils import MARKET_QUOTES
 
 MEASUREMENT_TYPES = {
     'equity_snapshots': {
         'EquitySnapshot': {
-            'class': MARKET.EquitySnapshot,
-            'symbol_property': MARKET.symbol,
-            'timestamp_property': MARKET.captureTime,
-            'price_property': MARKET.lastPrice,
-            'volume_property': MARKET.totalVolume,
+            'class': MARKET_QUOTES.EquitySnapshot,
+            'symbol_property': MARKET_QUOTES.symbol,
+            'timestamp_property': MARKET_QUOTES.captureTime,
+            'price_property': MARKET_QUOTES.lastPrice,
+            'volume_property': MARKET_QUOTES.totalVolume,
         },
     },
 
     'option_snapshots': {
         'OptionSnapshot': {
-            'class': MARKET.OptionSnapshot,
-            'symbol_property': MARKET.symbol,
-            'timestamp_property': MARKET.captureTime,
-            'underlying_symbol_property': MARKET.underlyingSymbol,
-            'strike_property': MARKET.strikePrice,
-            'expiration_property': MARKET.expirationDate,
-            'contract_type_property': MARKET.contractType,
-            'underlying_price_property': MARKET.underlyingPrice,
-            'delta_property': MARKET.delta,
-            'gamma_property': MARKET.gamma,
-            'theta_property': MARKET.theta,
-            'vega_property': MARKET.vega,
+            'class': MARKET_QUOTES.OptionSnapshot,
+            'symbol_property': MARKET_QUOTES.symbol,
+            'timestamp_property': MARKET_QUOTES.captureTime,
+            'underlying_symbol_property': MARKET_QUOTES.underlyingSymbol,
+            'strike_property': MARKET_QUOTES.strikePrice,
+            'expiration_property': MARKET_QUOTES.expirationDate,
+            'contract_type_property': MARKET_QUOTES.contractType,
+            'underlying_price_property': MARKET_QUOTES.underlyingPrice,
+            'delta_property': MARKET_QUOTES.delta,
+            'gamma_property': MARKET_QUOTES.gamma,
+            'theta_property': MARKET_QUOTES.theta,
+            'vega_property': MARKET_QUOTES.vega,
         },
     },
 }

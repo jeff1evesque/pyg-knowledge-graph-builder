@@ -50,9 +50,9 @@ from spark_jobs.pyg_builder.edge_feature_extractor import EdgeFeatureExtractor
 from spark_jobs.pyg_builder.edge_mapper import EdgeMapper
 from spark_jobs.pyg_builder.node_mapper import NodeMapper
 
-CPI_INDEX = "https://www.bls.gov/cpi/Index"
+CPI_INDEX = "https://jefflevesque.com/ontology/cpi/Index"
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
-PRECEDES = "https://www.bls.gov/enrichment/precedes"
+PRECEDES = "https://jefflevesque.com/ontology/bls-common/enrichment/precedes"
 HAS_MONTH = "https://example.org/hasMonth"
 HAS_YEAR = "https://example.org/hasYear"
 
@@ -72,7 +72,7 @@ def _temporal_rows(n=6):
     """A minimal chain of typed, dated observations linked by a temporal edge."""
     rows = []
     for i in range(n):
-        uri = f"https://www.bls.gov/cpi/obs{i}"
+        uri = f"https://jefflevesque.com/ontology/cpi/obs{i}"
         rows += [
             (uri, RDF_TYPE, CPI_INDEX),
             (uri, HAS_MONTH, str((i % 12) + 1)),
@@ -80,9 +80,9 @@ def _temporal_rows(n=6):
         ]
     for i in range(n - 1):
         rows.append((
-            f"https://www.bls.gov/cpi/obs{i}",
+            f"https://jefflevesque.com/ontology/cpi/obs{i}",
             PRECEDES,
-            f"https://www.bls.gov/cpi/obs{i + 1}",
+            f"https://jefflevesque.com/ontology/cpi/obs{i + 1}",
         ))
     return rows
 

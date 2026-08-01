@@ -24,8 +24,8 @@ from spark_jobs.pyg_builder.node_mapper import (
 )
 
 # Concrete type URIs whose PyG names are fixed by NAMESPACE_PREFIXES.
-CPI_INDEX = "https://www.bls.gov/cpi/Index"        # -> cpi_Index
-CPI_SERIES = "https://www.bls.gov/cpi/Series"      # -> cpi_Series
+CPI_INDEX = "https://jefflevesque.com/ontology/cpi/Index"        # -> cpi_Index
+CPI_SERIES = "https://jefflevesque.com/ontology/cpi/Series"      # -> cpi_Series
 UNIFIED_MONTH = "https://example.org/unified/UnifiedMonth"  # -> unified_UnifiedMonth
 UNIFIED_SECTOR = "https://example.org/unified/EconomicSector"  # -> unified_EconomicSector
 OWL_THING = "http://www.w3.org/2002/07/owl#Thing"  # excluded (meta-ontology)
@@ -262,10 +262,10 @@ def test_type_uri_mapping_is_deterministic_for_multi_typed_node(
 # The URI now comes from inverting the naming rule, so these pin that the
 # reported class is the one the node type is named for.
 
-JOLTS_HIRES_RATE = "https://www.bls.gov/jolts/HiresRate"      # -> jolts_HiresRate
-JOLTS_QUITS_RATE = "https://www.bls.gov/jolts/QuitsRate"      # -> jolts_QuitsRate
+JOLTS_HIRES_RATE = "https://jefflevesque.com/ontology/jolts/HiresRate"      # -> jolts_HiresRate
+JOLTS_QUITS_RATE = "https://jefflevesque.com/ontology/jolts/QuitsRate"      # -> jolts_QuitsRate
 # Sorts BEFORE both of the above: "enrichment" < "jolts".
-BLS_RATE_MEASUREMENT = "https://www.bls.gov/enrichment/RateMeasurement"
+BLS_RATE_MEASUREMENT = "https://jefflevesque.com/ontology/bls-common/enrichment/RateMeasurement"
 
 
 def _type_uris(spark, rows, make_triples):

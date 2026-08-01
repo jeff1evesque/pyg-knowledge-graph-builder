@@ -21,7 +21,8 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 from spark_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, SEC_ENRICHMENT, MARKET_ENRICHMENT, NOAA_ENRICHMENT,
     UNIFIED, CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER,
-    SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP, MARKET, CAP, NWS,
+    SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP, CAP, WEATHER,
+    MARKET_FEEDS, MARKET_QUOTES,
     PROV_DERIVED_BY, PROV_OBSERVED_LITERAL_DATATYPE,
     PROV_CLASS_HIERARCHY, PROV_PROPERTY_DOMAIN, PROV_PROPERTY_RANGE,
     PROV_PROPERTY_HIERARCHY,
@@ -103,8 +104,14 @@ PROPERTY_MAPPINGS = {
     str(JOLTS.rate): str(UNIFIED.measurementValue),
     str(EMPSIT.value): str(UNIFIED.measurementValue),
     str(ECI.indexValue): str(UNIFIED.measurementValue),
-    str(MARKET.observedPrice): str(UNIFIED.measurementValue),
-    str(MARKET.lastPrice): str(UNIFIED.measurementValue),
+    # Both market vocabularies map onto the same unified predicate. They are
+    # separate namespaces whose local names partly overlap (lastPrice and
+    # symbol exist in both), so each must be listed explicitly -- a single
+    # entry would silently cover only one of the two sources.
+    str(MARKET_FEEDS.observedPrice): str(UNIFIED.measurementValue),
+    str(MARKET_FEEDS.lastPrice): str(UNIFIED.measurementValue),
+    str(MARKET_QUOTES.lastPrice): str(UNIFIED.measurementValue),
+    str(MARKET_QUOTES.mark): str(UNIFIED.measurementValue),
 
     # Category properties → unified:hasCategory
     str(CPI.hasCategory): str(UNIFIED.hasCategory),
@@ -115,7 +122,8 @@ PROPERTY_MAPPINGS = {
     str(EMPSIT.hasCategory): str(UNIFIED.hasCategory),
 
     # Company/ticker
-    str(MARKET.symbol): str(UNIFIED.ticker),
+    str(MARKET_FEEDS.symbol): str(UNIFIED.ticker),
+    str(MARKET_QUOTES.symbol): str(UNIFIED.ticker),
 
     # Geographic
     str(LAUS.hasState): str(UNIFIED.hasRegion),
@@ -185,7 +193,7 @@ CLASS_MAPPINGS = {
     # NOAA alert classes → unified emergency alert type
     # nws:WeatherAlert is the primary type from the RML mapper
     # (subClassOf cap:Alert in the ontology)
-    str(NWS.WeatherAlert): str(NOAA_ENRICHMENT.EmergencyAlert),
+    str(WEATHER.WeatherAlert): str(NOAA_ENRICHMENT.EmergencyAlert),
     str(CAP.Alert): str(NOAA_ENRICHMENT.EmergencyAlert),
 
     # NOAA sub-structures
@@ -1170,8 +1178,8 @@ class OntologyMapper:
              "Occupational group classifications in ECI and EMPSIT"),
             (str(NOAA_ENRICHMENT.EventTypeConceptScheme),
              "NOAA Weather Event Types",
-             "Weather event type classifications from NWS alerts, "
-             "aligned with the NWS SKOS EventTypeScheme vocabulary"),
+             "Weather event type classifications from WEATHER alerts, "
+             "aligned with the WEATHER SKOS EventTypeScheme vocabulary"),
         ]
 
         rows = []

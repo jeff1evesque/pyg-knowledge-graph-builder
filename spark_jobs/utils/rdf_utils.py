@@ -11,61 +11,135 @@ import logging
 logger = logging.getLogger(__name__)
 
 # ============================================
-# BLS DATA SOURCE NAMESPACES
+# SOURCE VOCABULARIES — terms the SCRAPERS mint
 # ============================================
-# Based on actual RML mapper outputs
+# These used to sit on the upstream providers' own domains. None of those
+# organizations defined these terms: the upstreams publish tabular and
+# document formats, not RDF, and every class and property below was invented
+# by the upstream scrapers.
+#
+# They now resolve to a domain we control, split so that a reader can tell a
+# term from a thing by looking at the URI:
+#
+#   https://jefflevesque.com/ontology/{source}/   classes and properties
+#   https://jefflevesque.com/id/{source}/         individuals
+#
+# This module only needs the TERM namespaces: node types come from rdf:type
+# objects and edges from predicates, both of which are terms. The id/
+# namespaces appear only as subjects and objects.
+SOURCE_BASE = "https://jefflevesque.com/ontology/"
 
-CPI = Namespace("https://www.bls.gov/cpi/")
-PPI = Namespace("https://www.bls.gov/ppi/")
-ECI = Namespace("https://www.bls.gov/eci/")
-EMPSIT = Namespace("https://www.bls.gov/empsit/")
-JOLTS = Namespace("https://www.bls.gov/jolts/")
-LAUS = Namespace("https://www.bls.gov/laus/")
-METRO = Namespace("https://www.bls.gov/metro/")
-REALER = Namespace("https://www.bls.gov/realer/")
-WKYENG = Namespace("https://www.bls.gov/wkyeng/")
-XIMPIM = Namespace("https://www.bls.gov/ximpim/")
+CPI = Namespace(f"{SOURCE_BASE}cpi/")
+PPI = Namespace(f"{SOURCE_BASE}ppi/")
+ECI = Namespace(f"{SOURCE_BASE}eci/")
+EMPSIT = Namespace(f"{SOURCE_BASE}empsit/")
+JOLTS = Namespace(f"{SOURCE_BASE}jolts/")
+LAUS = Namespace(f"{SOURCE_BASE}laus/")
+METRO = Namespace(f"{SOURCE_BASE}metro/")
+REALER = Namespace(f"{SOURCE_BASE}realer/")
+WKYENG = Namespace(f"{SOURCE_BASE}wkyeng/")
+XIMPIM = Namespace(f"{SOURCE_BASE}ximpim/")
+
+# Shared BLS classes (Month, Year, Industry, Region, ...) that the hand-
+# authored table schemas declare once for every category. 'bls-common' rather
+# than 'bls' because BLS_ENRICHMENT below already owns .../ontology/bls/ —
+# merging the two would make observed BLS facts read as pipeline-inferred.
+BLS_COMMON = Namespace(f"{SOURCE_BASE}bls-common/")
 
 # ============================================
-# SEC data namespace
+# SEC data namespaces
 # ============================================
+# 'sec-*' rather than 'sec' for the same reason: SEC_ENRICHMENT owns
+# .../ontology/sec/.
 
-SEC_ADMIN = Namespace("https://www.sec.gov/ontology/administrative-proceedings#")
-SEC_LIT = Namespace("https://www.sec.gov/ontology/litigation#")
-SEC_SUSP = Namespace("https://www.sec.gov/ontology/trading-suspensions#")
-SEC_FILINGS = Namespace("http://www.sec.gov/filings#")
+SEC_COMMON = Namespace(f"{SOURCE_BASE}sec-common/")
+SEC_ADMIN = Namespace(f"{SOURCE_BASE}sec-administrative-proceedings/")
+SEC_LIT = Namespace(f"{SOURCE_BASE}sec-litigation/")
+SEC_SUSP = Namespace(f"{SOURCE_BASE}sec-trading-suspensions/")
+SEC_FILINGS = Namespace(f"{SOURCE_BASE}sec-filings/")
 
 # ============================================
-# Market data namespace
+# Market data namespaces
 # ============================================
-# Source-agnostic namespace for equity/option quote snapshots.
-# The upstream scraper writes flat snapshot rows;
-# this namespace models them generically so switching data sources
-# only requires changing the scraper, not the enrichment pipeline.
-
-MARKET = Namespace("https://financial-data.org/")
+# There are TWO market vocabularies, and one constant was previously asked to
+# name both — which is why market enrichment silently produced nothing:
+#
+#   MARKET_QUOTES  the quote-snapshot API scraper (upstream). Flat
+#                  snapshots: EquitySnapshot / OptionSnapshot, with
+#                  captureTime, askPrice, delta.
+#
+#   MARKET_FEEDS   the HTML feed scrapers (upstream). A
+#                  different model: PriceObservation / OptionContract, with
+#                  observedAt and expirationDate.
+#
+# MARKET used to point at the feeds namespace while measurements.py keyed on
+# the quotes local names, so it matched nothing on real data and nothing
+# raised. temporal_unifier.py, which keys on observedAt / PriceObservation,
+# was correct all along — for the feeds vocabulary.
+#
+# They are deliberately NOT unified here. Aligning EquitySnapshot with
+# PriceObservation is an ontology decision, not a rename, and pretending one
+# name covers both is what produced the original defect.
+MARKET_QUOTES = Namespace(f"{SOURCE_BASE}market-quotes/")
+MARKET_FEEDS = Namespace(f"{SOURCE_BASE}market-feeds/")
+MARKET_FEEDS_OPTIONS = Namespace(f"{SOURCE_BASE}market-feeds-options/")
 
 # ============================================
 # NOAA WEATHER DATA NAMESPACES
 # ============================================
+# Verified against 275 live alerts from api.weather.gov: NWS publishes
+# wx:Alert plus ~30 lowercase properties (affectedZones, areaDesc, geocode).
+# Not one of the ~29 terms the scraper emits is among them, and their live
+# JSON-LD context declares api.weather.gov/ontology# as @vocab — so minting
+# our terms there put our inventions inside a live publisher's vocabulary.
+#
+# Likewise CAP: OASIS registered urn:oasis:names:tc:emergency:cap:1.2 as an
+# XML namespace naming lowercase ELEMENTS. There is no OASIS CAP RDF
+# vocabulary, so cap:hasAreaDescription and cap:AlertMessage are our model OF
+# CAP rather than CAP itself.
 
-# NOAA base namespace
-NOAA = Namespace("https://www.noaa.gov/")
+WEATHER = Namespace(f"{SOURCE_BASE}weather/")
+CAP = Namespace(f"{SOURCE_BASE}cap-model/")
 
-# CAP (Common Alerting Protocol) namespace
-CAP = Namespace("http://www.oasis-open.org/committees/emergency/cap/1.2/")
-
-# NWS (National Weather Service) extensions
-NWS = Namespace("https://api.weather.gov/ontology#")
-
-# Alert instances
+# Alert instances — real identifiers for real NWS alerts. Genuinely theirs,
+# unlike the vocabulary that used to sit alongside them, so left alone.
 ALERT = Namespace("https://api.weather.gov/alerts/")
 
-# GeoSPARQL namespace (used by CAP Area alignment)
+# GeoSPARQL namespace (used by CAP Area alignment). Really OGC's.
 GEOSPARQL = Namespace("http://www.opengis.net/ont/geosparql#")
 
 # Atom feed namespace
 ATOM = Namespace("http://www.w3.org/2005/Atom/")
+
+# Every source vocabulary above, for the invariant tests. These are minted by
+# the SCRAPERS rather than by this pipeline, which is why they are not in
+# ENRICHMENT_NAMESPACES -- an edge using one of them is an observed source
+# fact, not something the pipeline inferred -- but they are still ours, so
+# they are held to the same rule about which domain they may live on.
+SOURCE_VOCABULARIES: Tuple[str, ...] = (
+    str(CPI), str(PPI), str(ECI), str(EMPSIT), str(JOLTS),
+    str(LAUS), str(METRO), str(REALER), str(WKYENG), str(XIMPIM),
+    str(BLS_COMMON),
+    str(SEC_COMMON), str(SEC_ADMIN), str(SEC_LIT), str(SEC_SUSP),
+    str(SEC_FILINGS),
+    str(MARKET_QUOTES), str(MARKET_FEEDS), str(MARKET_FEEDS_OPTIONS),
+    str(WEATHER), str(CAP),
+)
+
+# Vocabularies their publishers really did define, and which we therefore
+# reuse at their real URIs. Reusing a real term is correct RDF and is what
+# makes federation work; minting a NEW term into one is the defect the
+# namespace tests exist to catch.
+#
+# This list is short, and deliberately so. It was checked rather than assumed:
+# api.weather.gov/ontology# looked like it belonged here, but NWS publishes
+# wx:Alert plus ~30 lowercase properties there and not one of the ~29 terms
+# the scraper emitted was among them.
+PUBLISHER_VOCABULARIES: Tuple[str, ...] = (
+    str(ALERT),
+    str(GEOSPARQL),
+    str(ATOM),
+)
 
 # ============================================
 # MINTED NAMESPACES — terms this project invents
@@ -215,19 +289,27 @@ NAMESPACE_PREFIXES: List[Tuple[str, str]] = [
     (str(REALER), "realer"),
     (str(WKYENG), "wkyeng"),
     (str(XIMPIM), "ximpim"),
+    (str(BLS_COMMON), "bls_common"),
     (str(BLS_ENRICHMENT), "bls_enrichment"),
     (str(SEC_FILINGS), "filings"),
     (str(SEC_ADMIN), "sec_admin"),
     (str(SEC_LIT), "sec_lit"),
     (str(SEC_SUSP), "sec_susp"),
+    (str(SEC_COMMON), "sec_common"),
     (str(SEC_ENRICHMENT), "sec_enrichment"),
     (str(MARKET_ENRICHMENT), "market_enrichment"),
-    (str(MARKET), "market"),
+    # market-feeds-options/ before market-feeds/: the latter is a string
+    # prefix of the former, and node_mapper matches by startswith down this
+    # list, so the shorter one would claim every options URI and name the
+    # node type after the wrong vocabulary. Pinned by
+    # test_longer_namespaces_precede_the_shorter_ones_they_extend.
+    (str(MARKET_FEEDS_OPTIONS), "market_feeds_options"),
+    (str(MARKET_FEEDS), "market_feeds"),
+    (str(MARKET_QUOTES), "market_quotes"),
     (str(CAP), "cap"),
-    (str(NWS), "nws"),
+    (str(WEATHER), "weather"),
     (str(ALERT), "alert"),
     (str(NOAA_ENRICHMENT), "noaa_enrichment"),
-    (str(NOAA), "noaa"),
     (str(GEOSPARQL), "geosparql"),
     (str(UNIFIED), "unified"),
     (str(SOURCE_TEMPORAL), "temporal"),
