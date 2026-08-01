@@ -25,7 +25,12 @@ from spark_jobs.pyg_builder.edge_mapper import (
     _build_predicate_to_relation_expr,
 )
 
-PRECEDES = "https://www.bls.gov/enrichment/precedes"  # -> bls_enrichment_precedes
+# Built from the namespace table rather than spelled out, so re-homing the
+# minted vocabulary cannot leave this pointing at a namespace nothing matches
+# -- which silently renames the relation to its bare last segment.
+from spark_jobs.utils.rdf_utils import BLS_ENRICHMENT  # noqa: E402
+
+PRECEDES = f"{BLS_ENRICHMENT}precedes"  # -> bls_enrichment_precedes
 RELATION = "bls_enrichment_precedes"
 RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"  # excluded predicate
 
