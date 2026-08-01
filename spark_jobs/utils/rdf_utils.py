@@ -24,9 +24,10 @@ logger = logging.getLogger(__name__)
 #   https://jefflevesque.com/ontology/{source}/   classes and properties
 #   https://jefflevesque.com/id/{source}/         individuals
 #
-# This module only needs the TERM namespaces: node types come from rdf:type
-# objects and edges from predicates, both of which are terms. The id/
-# namespaces appear only as subjects and objects.
+# Node types come from rdf:type objects and edges from predicates, both of
+# which are terms, so the constants below are what the mappers need. Code that
+# asks which source an ENTITY belongs to needs the id/ side instead — see
+# SOURCE_IDENTIFIERS and identifier_namespace() further down.
 SOURCE_BASE = "https://jefflevesque.com/ontology/"
 
 CPI = Namespace(f"{SOURCE_BASE}cpi/")
@@ -142,6 +143,51 @@ PUBLISHER_VOCABULARIES: Tuple[str, ...] = (
 )
 
 # ============================================
+# SOURCE IDENTIFIERS — individuals the SCRAPERS mint
+# ============================================
+# The namespaces above name classes and properties. These name the things
+# themselves: id/cpi/February is the month, ontology/cpi/Month is its class.
+#
+# The header of this module used to say only the TERM namespaces were needed
+# here, because "the id/ namespaces appear only as subjects and objects". That
+# is true of node typing and edge naming, and false of everything that asks
+# "which source is this ENTITY from" — intra-source detection, per-source
+# filtering, temporal collection. Those must match an entity URI against the
+# id/ namespace; matching the ontology/ one silently matches nothing, since no
+# individual lives there. Before the term/individual split a single namespace
+# covered both and the distinction did not exist, so every such call site was
+# written against the term namespace and kept working. They do not any more.
+#
+# Derived from the term namespace rather than written out, so the two cannot
+# drift apart: a new source vocabulary gets its identifier namespace for free.
+IDENTIFIER_BASE = "https://jefflevesque.com/id/"
+
+
+def identifier_namespace(term_namespace: str) -> str:
+    """The id/ namespace matching a term namespace.
+
+    ``https://jefflevesque.com/ontology/cpi/`` -> ``https://jefflevesque.com/id/cpi/``
+
+    Raises rather than guessing for anything outside SOURCE_BASE: a publisher
+    vocabulary (api.weather.gov/alerts/) has no id/ counterpart, and quietly
+    returning something plausible would reintroduce the silent-no-match bug
+    this function exists to prevent.
+    """
+    if not term_namespace.startswith(SOURCE_BASE):
+        raise ValueError(
+            f"{term_namespace!r} is not a source vocabulary under {SOURCE_BASE!r}; "
+            "it has no identifier namespace"
+        )
+    return f"{IDENTIFIER_BASE}{term_namespace[len(SOURCE_BASE):]}"
+
+
+# Every source vocabulary's identifier counterpart, same order as
+# SOURCE_VOCABULARIES. Pinned by test_namespaces.py.
+SOURCE_IDENTIFIERS: Tuple[str, ...] = tuple(
+    identifier_namespace(ns) for ns in SOURCE_VOCABULARIES
+)
+
+# ============================================
 # MINTED NAMESPACES — terms this project invents
 # ============================================
 # Everything below is a term WE define, so every one of them lives under a
@@ -209,8 +255,9 @@ SOURCE_TEMPORAL = Namespace(f"{ONTOLOGY_BASE}temporal/")
 # Keyed by source so two sources naming the same period stay distinct until
 # the unifier deliberately links them -- collapsing them here would pre-empt
 # the sameAs step and hide which source observed what.
-IDENTIFIER_BASE = "https://jefflevesque.com/id/"
-
+#
+# IDENTIFIER_BASE is defined with the source identifiers above -- these are
+# individuals like any other, minted by this pipeline rather than a scraper.
 SYNTHETIC_TEMPORAL_IDS: Dict[str, str] = {
     "sec": f"{IDENTIFIER_BASE}temporal/sec/",
     "noaa": f"{IDENTIFIER_BASE}temporal/noaa/",
