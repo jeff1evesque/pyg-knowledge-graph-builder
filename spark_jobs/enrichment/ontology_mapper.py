@@ -25,6 +25,10 @@ from spark_jobs.utils.rdf_utils import (
     PROV_DERIVED_BY, PROV_OBSERVED_LITERAL_DATATYPE,
     PROV_CLASS_HIERARCHY, PROV_PROPERTY_DOMAIN, PROV_PROPERTY_RANGE,
     PROV_PROPERTY_HIERARCHY,
+    PROV_ROUTE_CURATED_SUBCLASS, PROV_ROUTE_NAMED_SUBCLASS,
+    PROV_ROUTE_CURATED_SUBPROPERTY, PROV_ROUTE_OBSERVED_DOMAIN,
+    PROV_ROUTE_OBSERVED_RANGE, PROV_ROUTE_DATATYPE_RANGE,
+    PROV_ROUTE_LABELS,
 )
 from spark_jobs.utils.spark_rdf_utils import collect_sorted
 
@@ -57,6 +61,7 @@ _NOT_A_DATA_PREDICATE = [
     PROV_DERIVED_BY,
     "http://www.w3.org/2002/07/owl#equivalentClass",
     "http://www.w3.org/2002/07/owl#equivalentProperty",
+    *PROV_ROUTE_LABELS,
 ]
 SKOS_CONCEPT_SCHEME = "http://www.w3.org/2004/02/skos/core#ConceptScheme"
 DCTERMS_DESCRIPTION = "http://purl.org/dc/terms/description"
@@ -789,6 +794,10 @@ class OntologyMapper:
         _assert_is_dag(edges, label="property hierarchy")
 
         rows = [(child, RDFS_SUB_PROPERTY_OF, parent) for child, parent in edges]
+        rows += [
+            (child, PROV_ROUTE_CURATED_SUBPROPERTY, parent)
+            for child, parent in edges
+        ]
         logger.info(
             f"  Property hierarchy: {len(rows)} subPropertyOf edge(s) over "
             f"{len({p for _, p in edges})} shared target(s); "
@@ -891,6 +900,26 @@ class OntologyMapper:
             [(prop, RDFS_DOMAIN, cls) for prop, cls in domain_edges]
             + [(prop, RDFS_RANGE, target) for prop, target in range_edges]
         )
+
+        # Route markers. Range has two, and the difference matters: an object
+        # type is something this pipeline OBSERVED, while an XSD datatype was
+        # DECLARED by the source and merely carried through the parse. They
+        # are not the same evidence, so they are not reported as one.
+        datatypes = {target for _prop, target in literal_pairs}
+        rows += [
+            (prop, PROV_ROUTE_OBSERVED_DOMAIN, cls)
+            for prop, cls in domain_edges
+        ]
+        rows += [
+            (
+                prop,
+                PROV_ROUTE_DATATYPE_RANGE if target in datatypes
+                else PROV_ROUTE_OBSERVED_RANGE,
+                target,
+            )
+            for prop, target in range_edges
+        ]
+
         if not rows:
             return None, skipped_domains, skipped_ranges
 
@@ -976,10 +1005,30 @@ class OntologyMapper:
         _assert_is_dag(edges)
 
         rows = [(child, RDFS_SUBCLASS_OF, parent) for child, parent in edges]
+
+        # Restate each edge under the route that produced it. Once in the
+        # graph a curated edge and a name-inferred one are byte-identical, and
+        # they are not equally trustworthy: a person chose the curated ones,
+        # while the naming rules read AllItemsLessShelter as a kind of Shelter
+        # until the negating-qualifier guard was added. Whoever debugs the
+        # next inversion needs to know which rule to go and look at.
+        #
+        # Curated wins where both routes found the same edge -- same priority
+        # the union above already gives it, made explicit here.
+        curated_set = set(curated)
+        rows += [
+            (child, PROV_ROUTE_CURATED_SUBCLASS, parent)
+            for child, parent in sorted(curated_set)
+        ]
+        rows += [
+            (child, PROV_ROUTE_NAMED_SUBCLASS, parent)
+            for child, parent in sorted(set(inferred) - curated_set)
+        ]
+
         logger.info(
             f"  Hierarchy: {len(curated)} curated + "
-            f"{len(set(inferred) - set(curated))} inferred from naming "
-            f"= {len(rows)} subClassOf edge(s) over {len(class_uris)} "
+            f"{len(set(inferred) - curated_set)} inferred from naming "
+            f"= {len(edges)} subClassOf edge(s) over {len(class_uris)} "
             f"class(es); {len({c for c, _ in edges})} class(es) gained a "
             f"superclass"
         )

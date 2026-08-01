@@ -62,6 +62,13 @@ from spark_jobs.utils.rdf_utils import (
     PROV_PROPERTY_DOMAIN,
     PROV_PROPERTY_RANGE,
     PROV_PROPERTY_HIERARCHY,
+    PROV_ROUTE_LABELS,
+    PROV_ROUTE_CURATED_SUBCLASS,
+    PROV_ROUTE_NAMED_SUBCLASS,
+    PROV_ROUTE_CURATED_SUBPROPERTY,
+    PROV_ROUTE_OBSERVED_DOMAIN,
+    PROV_ROUTE_OBSERVED_RANGE,
+    PROV_ROUTE_DATATYPE_RANGE,
 )
 from spark_jobs.utils.spark_rdf_utils import collect_sorted
 # One resolution of "which class is this node type from", shared with the
@@ -170,6 +177,7 @@ _NON_FEATURE_PREDICATES = {
     # reach property presence or the literal segments.
     PROV_DERIVED_BY,
     PROV_OBSERVED_LITERAL_DATATYPE,
+    *PROV_ROUTE_LABELS,
     "http://www.w3.org/2000/01/rdf-schema#label",
     "http://www.w3.org/2000/01/rdf-schema#comment",
     "http://www.w3.org/2000/01/rdf-schema#isDefinedBy",
@@ -234,6 +242,102 @@ _DECLARED = "declared by the source"
 _NOT_DERIVED = "not derived — ontology mapping did not run"
 
 
+def _route_counts(
+    direct_axioms: Set[Tuple[str, str]],
+    routes: Dict[Tuple[str, str], str],
+) -> Dict[str, int]:
+    """Split a set of axioms by the route that produced it.
+
+    An axiom with no route marker was not derived by this pipeline, so it
+    came out of the source and is counted as ``"declared"``. That fallback is
+    what makes the count trustworthy in both directions: a build with mapping
+    turned off has no markers and everything reads as declared, correctly,
+    while these builds have a marker for every edge and ``declared`` is 0.
+    """
+    counts: Dict[str, int] = {}
+    for axiom in direct_axioms:
+        route = routes.get(axiom)
+        label = PROV_ROUTE_LABELS.get(route, "declared") if route else (
+            "declared"
+        )
+        counts[label] = counts.get(label, 0) + 1
+    return counts
+
+
+def _merge_counts(*counts: Dict[str, int]) -> Dict[str, int]:
+    """Sum per-route counts across axiom sets that share one _source field."""
+    merged: Dict[str, int] = {}
+    for group in counts:
+        for label, n in group.items():
+            merged[label] = merged.get(label, 0) + n
+    return merged
+
+
+def _route_detail(
+    direct_axioms: Set[Tuple[str, str]],
+    routes: Dict[Tuple[str, str], str],
+    counts: Dict[str, int],
+) -> Dict[str, Any]:
+    """Counts per route plus the axioms each one produced.
+
+    Edge lists are capped: the counts stay exact, and a set big enough to hit
+    the cap is one nobody was going to read edge-by-edge anyway. ``declared``
+    is always reported even at zero -- that it IS zero is the finding.
+    """
+    by_route: Dict[str, List[List[str]]] = {}
+    for subject, obj in sorted(direct_axioms):
+        route = routes.get((subject, obj))
+        label = PROV_ROUTE_LABELS.get(route, "declared") if route else (
+            "declared"
+        )
+        by_route.setdefault(label, []).append([subject, obj])
+
+    return {
+        "total": len(direct_axioms),
+        "counts": {"declared": counts.get("declared", 0), **counts},
+        "axioms": {
+            label: edges[:_PROVENANCE_EDGE_LIMIT]
+            for label, edges in sorted(by_route.items())
+        },
+        "truncated": any(
+            len(edges) > _PROVENANCE_EDGE_LIMIT for edges in by_route.values()
+        ),
+    }
+
+
+def _axiom_source(predicate_name: str, route_counts: Dict[str, int]) -> str:
+    """Name where a populated axiom set actually came from.
+
+    ``"rdfs:subClassOf"`` is true of the predicate the encoder consumed and
+    false as an answer to "did a source declare this hierarchy". Since #273 no
+    source does: the mapper derives every edge, and by the time the collector
+    sees them a derived triple and a declared one are identical. Only the
+    route markers tell them apart, and this turns them into the one string a
+    reader looks at first.
+
+    ``route_counts`` maps a route label (or ``"declared"``) to how many
+    DIRECT axioms came in by it. Mixed sets report every route with its count,
+    because "mostly curated with four guesses in it" is a different artifact
+    from "all curated" and the difference is exactly what a debugging session
+    needs.
+    """
+    live = {label: n for label, n in sorted(route_counts.items()) if n}
+    if not live:
+        return predicate_name
+
+    if set(live) == {"declared"}:
+        return predicate_name
+
+    parts = ", ".join(
+        f"{label} ({n})" for label, n in sorted(
+            live.items(), key=lambda kv: (-kv[1], kv[0])
+        )
+    )
+    if "declared" in live:
+        return f"mixed: {parts}"
+    return f"derived: {parts}"
+
+
 # ============================================
 # Driver memory safety constants
 # ============================================
@@ -246,6 +350,9 @@ _NUM_CATEGORICAL_HASHES = 4
 # exact; only the URI lists are clipped, so the file cannot grow without
 # bound on a vocabulary where most predicates are ambiguous.
 _COVERAGE_GAP_LIMIT = 200
+
+# Cap on the per-route axiom lists in derived_axioms. Counts stay exact.
+_PROVENANCE_EDGE_LIMIT = 500
 
 # Seed offsets for independent hash functions
 _HASH_SEEDS = [0, 7, 13, 31]
@@ -1616,6 +1723,26 @@ class FeatureExtractor:
         )
         return {row["subject"]: row["object"] for row in rows}
 
+    def _collect_route_markers(
+        self, triples_df: DataFrame, routes: Tuple[str, ...]
+    ) -> Dict[Tuple[str, str], str]:
+        """
+        Read back which route produced each individual derived axiom.
+
+        Returns {(subject, object): route_predicate} over the given routes.
+        Bounded by the number of derived axioms (tens to low hundreds), not by
+        the triple count -- one marker per axiom, emitted by the mapper.
+        """
+        rows = collect_sorted(
+            triples_df
+            .filter(F.col("predicate").isin(list(routes)))
+            .select("subject", "predicate", "object")
+            .distinct()
+        )
+        return {
+            (row["subject"], row["object"]): row["predicate"] for row in rows
+        }
+
     def _property_schema_coverage(
         self,
         triples_df: DataFrame,
@@ -1755,6 +1882,60 @@ class FeatureExtractor:
                 ),
             }
 
+        # The DIRECT axioms of each set — what a route marker can attach to.
+        # The class hierarchy is stored as a transitive closure, so only
+        # depth 1 is an asserted edge; the deeper entries are this pipeline's
+        # own closure over those and have no independent provenance.
+        direct_superclasses = {
+            (cls, sup)
+            for cls, supers in hierarchy_map.items()
+            for sup, depth in supers
+            if depth == 1
+        }
+        direct_super_properties = set()
+        if property_hierarchy_df is not None:
+            direct_super_properties = {
+                (row["property_uri"], row["super_property_uri"])
+                for row in collect_sorted(property_hierarchy_df)
+            }
+        declared_domains = {
+            (prop, schema["domain"])
+            for prop, schema in prop_schema_map.items()
+            if schema.get("domain")
+        }
+        declared_ranges = {
+            (prop, schema["range"])
+            for prop, schema in prop_schema_map.items()
+            if schema.get("range")
+        }
+
+        # Which route produced each individual axiom, and therefore how many
+        # of each set the sources actually declared. A derived rdfs:subClassOf
+        # is byte-identical to a declared one here, so without the markers the
+        # only honest count is "34 subClassOf triples exist" -- which reads as
+        # "the sources declare 34" and is wrong for every one of them.
+        hierarchy_routes = self._collect_route_markers(
+            triples_df,
+            (PROV_ROUTE_CURATED_SUBCLASS, PROV_ROUTE_NAMED_SUBCLASS),
+        )
+        property_hierarchy_routes = self._collect_route_markers(
+            triples_df, (PROV_ROUTE_CURATED_SUBPROPERTY,)
+        )
+        domain_routes = self._collect_route_markers(
+            triples_df, (PROV_ROUTE_OBSERVED_DOMAIN,)
+        )
+        range_routes = self._collect_route_markers(
+            triples_df,
+            (PROV_ROUTE_OBSERVED_RANGE, PROV_ROUTE_DATATYPE_RANGE),
+        )
+
+        hierarchy_counts = _route_counts(direct_superclasses, hierarchy_routes)
+        property_hierarchy_counts = _route_counts(
+            direct_super_properties, property_hierarchy_routes
+        )
+        domain_counts = _route_counts(declared_domains, domain_routes)
+        range_counts = _route_counts(declared_ranges, range_routes)
+
         # Build per-node-type schema entries
         node_type_schemas: Dict[str, Dict[str, Any]] = {}
         for pyg_name in node_counts:
@@ -1770,8 +1951,25 @@ class FeatureExtractor:
                 sorted_supers = sorted(
                     hierarchy_map[source_uri], key=lambda x: x[1]
                 )
+                # Provenance per link, not just per set. Reading this file is
+                # how someone chasing a wrong superclass finds out whether to
+                # go and edit CLASS_MAPPINGS or go and fix a naming rule.
+                # Depth > 1 has no route of its own: it is this pipeline's
+                # transitive closure over the direct edges, so it inherits
+                # their trust rather than claiming any.
                 superclass_chain = [
-                    {"uri": uri, "depth": depth}
+                    {
+                        "uri": uri,
+                        "depth": depth,
+                        "provenance": (
+                            PROV_ROUTE_LABELS.get(
+                                hierarchy_routes.get((source_uri, uri)),
+                                "declared",
+                            )
+                            if depth == 1
+                            else "transitive closure of the direct edges"
+                        ),
+                    }
                     for uri, depth in sorted_supers
                 ]
 
@@ -1818,7 +2016,13 @@ class FeatureExtractor:
             # started being DERIVED rather than read. Before that every axiom
             # in the file was declared by a source, so provenance was not a
             # question a consumer had to ask; now it is.
-            "version": "1.2",
+            # 1.3: *_source now names the derivation route with its count
+            # instead of the predicate, and derived_axioms lists the edges of
+            # each route. "rdfs:subClassOf" was true of the predicate the
+            # encoder read and false as an answer to "did a source declare
+            # this", which is the question anyone reading the field is
+            # actually asking.
+            "version": "1.3",
             "ontology_mapping_enabled": self._ontology_mapping_ran,
             "ontology_mapping_evidence": (
                 "owl:equivalentProperty/owl:equivalentClass present in "
@@ -1827,23 +2031,52 @@ class FeatureExtractor:
                 else "no owl:equivalentProperty/owl:equivalentClass in "
                      "build input"
             ),
+            # The empty forms are untouched -- #273's "no rdfs:subClassOf in
+            # source data" reasoning is about data that is absent, which no
+            # amount of provenance changes.
             "hierarchy_source": (
-                "rdfs:subClassOf"
+                _axiom_source("rdfs:subClassOf", hierarchy_counts)
                 if hierarchy_map
                 else _empty_hierarchy_reason(self._ontology_mapping_ran)
             ),
             "property_schema_source": (
-                "rdfs:domain/rdfs:range"
+                _axiom_source(
+                    "rdfs:domain/rdfs:range",
+                    _merge_counts(domain_counts, range_counts),
+                )
                 if prop_schema_map
                 else _empty_property_schema_reason(self._ontology_mapping_ran)
             ),
             "property_hierarchy_source": (
-                "rdfs:subPropertyOf"
+                _axiom_source(
+                    "rdfs:subPropertyOf", property_hierarchy_counts
+                )
                 if has_property_hierarchy
                 else _empty_property_hierarchy_reason(
                     self._ontology_mapping_ran
                 )
             ),
+            # Per route: how many axioms it produced and which ones. Counts
+            # alone answer "did a source declare any of this" (declared: 0 on
+            # every build since #273); the edge lists answer "is THIS edge a
+            # person's judgement or a spelling rule's guess", which is what a
+            # reader chasing AllItemsLessShelter -> Shelter needs and cannot
+            # get from a count.
+            "derived_axioms": {
+                "class_hierarchy": _route_detail(
+                    direct_superclasses, hierarchy_routes, hierarchy_counts
+                ),
+                "property_hierarchy": _route_detail(
+                    direct_super_properties, property_hierarchy_routes,
+                    property_hierarchy_counts,
+                ),
+                "property_domain": _route_detail(
+                    declared_domains, domain_routes, domain_counts
+                ),
+                "property_range": _route_detail(
+                    declared_ranges, range_routes, range_counts
+                ),
+            },
             # Where each axiom set came from. An axiom this pipeline inferred
             # is shaped exactly like one a source declared, and the two are
             # not interchangeable -- "used on class C in this data" is weaker

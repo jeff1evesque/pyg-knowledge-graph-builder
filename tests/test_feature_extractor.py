@@ -959,7 +959,166 @@ def test_coverage_excludes_the_axiom_and_provenance_predicates(spark):
 
 
 def test_schema_version_tracks_the_provenance_fields(spark):
+    """One pin for the current shape; the field history is in the builder.
+
+    1.1 added the ontology_mapping_enabled flag, 1.2 the provenance block and
+    coverage, 1.3 the per-route *_source strings and derived_axioms.
+    """
     schema = _ontology_schema(spark, [
         ("https://ex/a", RDF_TYPE, CPI_INDEX),
     ])
-    assert schema["version"] == "1.2"
+    assert schema["version"] == "1.3"
+
+
+# ======================================================================
+# hierarchy_source — a derived hierarchy must never read as a declared one
+# ======================================================================
+#
+# Since #273 the mapper emits rdfs:subClassOf that no source declared: 24
+# curated from CLASS_MAPPINGS plus naming-inferred edges. The collector read
+# them back and reported "rdfs:subClassOf" — true of the predicate the encoder
+# consumed, false as an answer to the question anyone reading the field is
+# asking. Two concrete costs:
+#
+#   * #273's own AC1 ("can any source emit rdfs:subClassOf?") became
+#     unrepeatable — re-running it against ENRICHED triples finds 34 and
+#     concludes yes, when the true answer is still no;
+#   * it flattened two very different levels of trust. Curated edges were
+#     chosen by a person. Naming-inferred edges come from spelling, and that
+#     rule produced AllItemsLessShelter -> Shelter and three more inversions
+#     before the negating-qualifier guard.
+
+from spark_jobs.utils.rdf_utils import (          # noqa: E402
+    PROV_ROUTE_CURATED_SUBCLASS,
+    PROV_ROUTE_NAMED_SUBCLASS,
+)
+
+SUB_A = "https://example.org/SubA"
+SUB_B = "https://example.org/SubB"
+
+
+def _hierarchy_schema(spark, extra):
+    """A build whose class hierarchy is whatever `extra` declares."""
+    return _ontology_schema(spark, [
+        MAPPED,
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        (CPI_INDEX, RDFS_SUBCLASS_OF, BASE_CLASS),
+    ] + extra)
+
+
+def test_a_declared_hierarchy_still_reports_the_predicate(spark):
+    """No route marker means the source really did declare it."""
+    schema = _hierarchy_schema(spark, [])
+    assert schema["hierarchy_source"] == "rdfs:subClassOf"
+    assert schema["derived_axioms"]["class_hierarchy"]["counts"][
+        "declared"] == 1
+
+
+def test_a_curated_hierarchy_says_curated(spark):
+    schema = _hierarchy_schema(spark, [
+        (CPI_INDEX, PROV_ROUTE_CURATED_SUBCLASS, BASE_CLASS),
+    ])
+    assert schema["hierarchy_source"] == (
+        "derived: curated class mappings (1)"
+    )
+    # ...and the count that answers #273's AC1 directly.
+    assert schema["derived_axioms"]["class_hierarchy"]["counts"][
+        "declared"] == 0
+
+
+def test_a_name_inferred_hierarchy_says_class_naming(spark):
+    schema = _hierarchy_schema(spark, [
+        (CPI_INDEX, PROV_ROUTE_NAMED_SUBCLASS, BASE_CLASS),
+    ])
+    assert schema["hierarchy_source"] == "derived: class naming (1)"
+
+
+def test_two_derivation_routes_are_reported_with_their_counts(spark):
+    """The mixed-derivation case, which is what the real builds produce."""
+    schema = _ontology_schema(spark, [
+        MAPPED,
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/b", RDF_TYPE, CPI_SERIES),
+        (CPI_INDEX, RDFS_SUBCLASS_OF, BASE_CLASS),
+        (CPI_SERIES, RDFS_SUBCLASS_OF, SUB_A),
+        (CPI_INDEX, PROV_ROUTE_CURATED_SUBCLASS, BASE_CLASS),
+        (CPI_SERIES, PROV_ROUTE_NAMED_SUBCLASS, SUB_A),
+    ])
+    assert schema["hierarchy_source"] == (
+        "derived: class naming (1), curated class mappings (1)"
+    )
+
+
+def test_derived_and_declared_together_read_as_mixed(spark):
+    """A source that DOES declare a hierarchy must not be hidden by ours.
+
+    "derived" would understate the artifact; "rdfs:subClassOf" would overstate
+    it. Both counts are reported.
+    """
+    schema = _ontology_schema(spark, [
+        MAPPED,
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/b", RDF_TYPE, CPI_SERIES),
+        (CPI_INDEX, RDFS_SUBCLASS_OF, BASE_CLASS),
+        (CPI_SERIES, RDFS_SUBCLASS_OF, SUB_A),
+        # Only the first is ours.
+        (CPI_INDEX, PROV_ROUTE_CURATED_SUBCLASS, BASE_CLASS),
+    ])
+    source = schema["hierarchy_source"]
+    assert source.startswith("mixed: "), source
+    assert "curated class mappings (1)" in source
+    assert "declared (1)" in source
+
+
+def test_each_edge_is_attributable_without_reading_the_code(spark):
+    """Counts cannot answer "is THIS edge a person's call or a guess?"."""
+    schema = _ontology_schema(spark, [
+        MAPPED,
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/b", RDF_TYPE, CPI_SERIES),
+        (CPI_INDEX, RDFS_SUBCLASS_OF, BASE_CLASS),
+        (CPI_SERIES, RDFS_SUBCLASS_OF, SUB_A),
+        (CPI_INDEX, PROV_ROUTE_CURATED_SUBCLASS, BASE_CLASS),
+        (CPI_SERIES, PROV_ROUTE_NAMED_SUBCLASS, SUB_A),
+    ])
+    axioms = schema["derived_axioms"]["class_hierarchy"]["axioms"]
+
+    assert [CPI_INDEX, BASE_CLASS] in axioms["curated class mappings"]
+    assert [CPI_SERIES, SUB_A] in axioms["class naming"]
+    # ...and the same distinction on the chain a consumer actually reads.
+    chain = schema["node_types"]["cpi_Index"]["superclass_chain"]
+    assert chain[0]["provenance"] == "curated class mappings"
+    assert schema["node_types"]["cpi_Series"]["superclass_chain"][0][
+        "provenance"] == "class naming"
+
+
+def test_a_transitive_link_claims_no_route_of_its_own(spark):
+    """Depth > 1 is our closure, not an asserted edge.
+
+    Attributing it to the route that produced the direct edge would double-
+    count that rule's reach; calling it declared would be worse.
+    """
+    schema = _ontology_schema(spark, [
+        MAPPED,
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        (CPI_INDEX, RDFS_SUBCLASS_OF, BASE_CLASS),
+        (BASE_CLASS, RDFS_SUBCLASS_OF, ROOT_CLASS),
+        (CPI_INDEX, PROV_ROUTE_CURATED_SUBCLASS, BASE_CLASS),
+    ])
+    chain = {
+        e["depth"]: e["provenance"]
+        for e in schema["node_types"]["cpi_Index"]["superclass_chain"]
+    }
+    assert chain[1] == "curated class mappings"
+    assert chain[2] == "transitive closure of the direct edges"
+
+
+def test_an_empty_hierarchy_keeps_its_existing_reason(spark):
+    """#273's AC4/AC5 wording is about absent DATA, which provenance cannot
+    change — an empty set has no routes to report."""
+    schema = _ontology_schema(spark, [
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/a", SECTOR, "Energy"),
+    ])
+    assert schema["hierarchy_source"].startswith("no rdfs:subClassOf")
+    assert schema["derived_axioms"]["class_hierarchy"]["total"] == 0

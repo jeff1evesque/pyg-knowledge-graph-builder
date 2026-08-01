@@ -894,15 +894,22 @@ Frozen snapshot of the ontology structure at build time. Contains the class hier
 - `hierarchy_source` / `property_schema_source` / `property_hierarchy_source` — where each axiom set came from, or why there is none
 - `provenance` — per axiom set, whether it was **declared by the source**, **curated**, or **observed**
 - `property_schema_coverage` — how many predicates got a domain and a range, and which ones did not
+- `derived_axioms` — per axiom set: how many axioms each derivation route produced (including `declared`), and which axioms those were
 
-**Provenance: derived is not declared.** No source in this project declares `rdfs:subClassOf`, `rdfs:domain`, `rdfs:range` or `rdfs:subPropertyOf` — verified across the real 130k-triple run and both fixture sets. All four are therefore *derived* by `OntologyMapper`, and once in the graph a derived axiom is shaped exactly like a declared one. They do not license the same reasoning: "this property is used on class C in this month's data" is weaker than "this property's domain is C", and a property seen with one class here could be broader in general. The `provenance` block is the only place that distinction survives:
+**Provenance: derived is not declared.** No source in this project declares `rdfs:subClassOf`, `rdfs:domain`, `rdfs:range` or `rdfs:subPropertyOf` — verified across the real 130k-triple run and both fixture sets. All four are therefore *derived* by `OntologyMapper`, and once in the graph a derived axiom is shaped exactly like a declared one. They do not license the same reasoning: "this property is used on class C in this month's data" is weaker than "this property's domain is C", and a property seen with one class here could be broader in general.
 
-| Axiom set | Derived from |
+| Axiom set | Derivation routes |
 |---|---|
-| `class_hierarchy` | curated `CLASS_MAPPINGS` + class-naming rules |
-| `property_hierarchy` | curated `PROPERTY_MAPPINGS` shared targets |
-| `property_domain` | **observed** `rdf:type` of each predicate's subjects |
-| `property_range` | **observed** object types + the XSD datatype the source **declared** on its literals |
+| `class_hierarchy` | `curated class mappings` + `class naming` |
+| `property_hierarchy` | `curated property mappings` (shared `PROPERTY_MAPPINGS` targets) |
+| `property_domain` | `observed subject types` |
+| `property_range` | `observed object types` + `declared literal datatype` |
+
+**The `*_source` fields name the route, not the predicate.** `hierarchy_source` used to read `"rdfs:subClassOf"` — true of the predicate the encoder consumed, and false as an answer to "did a source declare this hierarchy". It now reads like `derived: curated class mappings (24), class naming (10)`, or `mixed: …` when a source genuinely declares some. Only a set with no derivation markers at all still reports the bare predicate name. Empty sets keep their existing "no rdfs:subClassOf in source data…" reason — that is about *absent data*, which provenance does not change.
+
+**Counting axioms in an enriched graph does not answer "does any source declare them."** Since the mapper emits them, an enriched build contains 34 `rdfs:subClassOf` triples and zero of them came from a source. `derived_axioms.<set>.counts.declared` is the field that answers it, and it is `0` on every build since the derivations landed.
+
+**Curated and guessed edges are separated.** The two are not equally trustworthy: a person chose each curated edge, while the naming rules produced `AllItemsLessShelter -> Shelter` and three more inversions before the negating-qualifier guard caught them. `derived_axioms.class_hierarchy.axioms` lists the edges of each route, and every entry in a node type's `superclass_chain` carries its own `provenance` — so chasing a wrong superclass tells you whether to edit `CLASS_MAPPINGS` or fix a naming rule, without reading the code. Links at `depth > 1` report `"transitive closure of the direct edges"`, since they are this pipeline's closure rather than asserted edges with a route of their own.
 
 **Why some predicates get no domain or range.** `rdfs:domain` is an axiom with *intersection* semantics: asserting `p rdfs:domain A` and `p rdfs:domain B` says every subject of `p` is both an A and a B. Measured over the fixtures, 77 of 160 predicates are used on more than one class (`market:askPrice` on `EquitySnapshot` and `OptionSnapshot`; `rdfs:label` on 68), so emitting both would state something false. A predicate with more than one candidate therefore gets **no axiom**, and `property_schema_coverage` names it. Range applies the same rule across both routes at once, which also rules out the two predicates used with entities *and* literals (`cpi:hasMonth` is 189 typed URIs and 11 literals).
 
@@ -924,7 +931,7 @@ Every one of those gaps is listed by URI in `property_schema_coverage.without_do
 | `true` | The mapping phase ran and the sources genuinely declare no subsumption | Nothing — that is the data |
 | `false` | The hierarchy was never computed; `class_hierarchy` (64 of 1024 dims, 6.25% of every node vector) is structurally zero | Re-run enrichment with `--enable_ontology_mapping true` |
 
-The flag arrived in schema `version` `1.1` and `provenance` / `property_schema_coverage` in `1.2`; a `1.0` file predates both and its empty hierarchy stays ambiguous. It is detected from the triples — the presence of `owl:equivalentProperty` / `owl:equivalentClass`, which only `OntologyMapper` emits — rather than read off a config flag. That is the only signal that stays truthful in `pyg_only` mode, where enrichment ran in a separate job and this job's own `--enable_ontology_mapping` describes a phase it never reaches. For the same reason a `pyg_only` job manifest records `"enable_ontology_mapping": null` rather than the inert flag — that field says nothing about the enriched Parquet the run consumed, and this file is what answers the question for it.
+The flag arrived in schema `version` `1.1`, `provenance` / `property_schema_coverage` in `1.2`, and the route-aware `*_source` strings plus `derived_axioms` in `1.3`; a `1.0` file predates all of them and its empty hierarchy stays ambiguous. It is detected from the triples — the presence of `owl:equivalentProperty` / `owl:equivalentClass`, which only `OntologyMapper` emits — rather than read off a config flag. That is the only signal that stays truthful in `pyg_only` mode, where enrichment ran in a separate job and this job's own `--enable_ontology_mapping` describes a phase it never reaches. For the same reason a `pyg_only` job manifest records `"enable_ontology_mapping": null` rather than the inert flag — that field says nothing about the enriched Parquet the run consumed, and this file is what answers the question for it.
 
 **Generated by:** `feature_extractor._collect_ontology_schema_metadata()` — collects from small distinct/aggregated DataFrames: type URIs (~500 rows), class hierarchy transitive closure (~5000 rows), property schema (~500 rows). All collect calls target aggregated DataFrames, never raw triples.
 

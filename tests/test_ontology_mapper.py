@@ -35,6 +35,12 @@ from spark_jobs.utils.rdf_utils import (
     PROV_OBSERVED_LITERAL_DATATYPE,
     PROV_PROPERTY_DOMAIN,
     PROV_PROPERTY_RANGE,
+    PROV_ROUTE_CURATED_SUBCLASS,
+    PROV_ROUTE_NAMED_SUBCLASS,
+    PROV_ROUTE_CURATED_SUBPROPERTY,
+    PROV_ROUTE_OBSERVED_DOMAIN,
+    PROV_ROUTE_OBSERVED_RANGE,
+    PROV_ROUTE_DATATYPE_RANGE,
 )
 
 from spark_jobs.enrichment.ontology_mapper import (
@@ -862,3 +868,129 @@ def test_enrich_states_how_every_axiom_set_was_derived(spark, make_triples):
     assert PROV_PROPERTY_RANGE in stated
     assert "observed" in stated[PROV_PROPERTY_DOMAIN]
     assert "declared" in stated[PROV_PROPERTY_RANGE]
+
+
+# ======================================================================
+# Route markers — which rule produced each individual axiom
+# ======================================================================
+#
+# A curated edge and a name-inferred one are byte-identical once in the graph,
+# and they do not deserve equal trust: a person chose the curated ones, while
+# the naming rules read AllItemsLessShelter as a kind of Shelter until the
+# negating-qualifier guard was added. The mapper is the only place that still
+# knows which is which, so it restates each edge under a route predicate.
+
+def test_every_derived_subclass_edge_carries_a_route(spark, make_triples):
+    triples = make_triples([("https://ex/n", RDF_TYPE, "https://ex/Nothing")])
+    rows = OntologyMapper(spark).enrich(triples).collect()
+
+    edges = {(r["subject"], r["object"]) for r in rows
+             if r["predicate"] == RDFS_SUBCLASS_OF}
+    routed = {(r["subject"], r["object"]) for r in rows
+              if r["predicate"] in (PROV_ROUTE_CURATED_SUBCLASS,
+                                    PROV_ROUTE_NAMED_SUBCLASS)}
+
+    assert edges, "no hierarchy emitted at all"
+    assert edges == routed, (
+        f"{len(edges - routed)} derived edge(s) carry no route marker, so "
+        f"the artifact cannot tell them from a source's own declaration"
+    )
+
+
+def test_curated_and_named_routes_do_not_overlap(spark, make_triples):
+    """One edge, one route. Curated wins where both rules find the same pair.
+
+    Two markers on one edge would double-count it and leave the reader no
+    answer to "which rule do I go and fix".
+    """
+    triples = make_triples([("https://ex/n", RDF_TYPE, "https://ex/Nothing")])
+    rows = OntologyMapper(spark).enrich(triples).collect()
+
+    curated = {(r["subject"], r["object"]) for r in rows
+               if r["predicate"] == PROV_ROUTE_CURATED_SUBCLASS}
+    named = {(r["subject"], r["object"]) for r in rows
+             if r["predicate"] == PROV_ROUTE_NAMED_SUBCLASS}
+
+    assert not (curated & named), sorted(curated & named)[:3]
+    assert curated == set(CURATED_SUBCLASSES.items())
+
+
+def test_a_name_inferred_edge_is_marked_as_such(spark, make_triples):
+    """The naming rules fire on classes present in the load, and get labelled.
+
+    HiresRate -> HiresData is rule 1 (measurement specialises its dataset),
+    and nothing curated mentions it.
+    """
+    ns = "https://www.bls.gov/jolts/"
+    triples = make_triples([
+        ("https://ex/a", RDF_TYPE, f"{ns}HiresRate"),
+        ("https://ex/b", RDF_TYPE, f"{ns}HiresData"),
+    ])
+    rows = OntologyMapper(spark).enrich(triples).collect()
+
+    named = {(r["subject"], r["object"]) for r in rows
+             if r["predicate"] == PROV_ROUTE_NAMED_SUBCLASS}
+    assert (f"{ns}HiresRate", f"{ns}HiresData") in named
+
+
+def test_every_derived_property_axiom_carries_a_route(spark, make_triples):
+    triples = make_triples([
+        ("https://ex/a", RDF_TYPE, CLS_A),
+        ("https://ex/a", P, "1.5"),
+        (P, PROV_OBSERVED_LITERAL_DATATYPE, XSD_DECIMAL),
+    ])
+    rows = OntologyMapper(spark).enrich(triples).collect()
+
+    for axiom_pred, route_preds in (
+        (RDFS_DOMAIN, (PROV_ROUTE_OBSERVED_DOMAIN,)),
+        (RDFS_RANGE, (PROV_ROUTE_OBSERVED_RANGE, PROV_ROUTE_DATATYPE_RANGE)),
+        (RDFS_SUB_PROPERTY_OF, (PROV_ROUTE_CURATED_SUBPROPERTY,)),
+    ):
+        axioms = {(r["subject"], r["object"]) for r in rows
+                  if r["predicate"] == axiom_pred}
+        routed = {(r["subject"], r["object"]) for r in rows
+                  if r["predicate"] in route_preds}
+        assert axioms, f"no {axiom_pred} emitted"
+        assert axioms == routed, f"{axiom_pred} has unrouted axioms"
+
+
+def test_a_datatype_range_is_distinguished_from_an_observed_one(spark,
+                                                                make_triples):
+    """Two routes, two levels of evidence.
+
+    An object's rdf:type is something this pipeline observed. An XSD datatype
+    was DECLARED by the source and merely carried through the parse. Reporting
+    both as "observed" would understate the second.
+    """
+    triples = make_triples([
+        ("https://ex/a", RDF_TYPE, CLS_A),
+        ("https://ex/b", RDF_TYPE, CLS_B),
+        ("https://ex/a", P, "https://ex/b"),      # entity-valued
+        ("https://ex/a", Q, "1.5"),               # literal-valued
+        (Q, PROV_OBSERVED_LITERAL_DATATYPE, XSD_DECIMAL),
+    ])
+    rows = OntologyMapper(spark).enrich(triples).collect()
+
+    observed = {(r["subject"], r["object"]) for r in rows
+                if r["predicate"] == PROV_ROUTE_OBSERVED_RANGE}
+    from_datatype = {(r["subject"], r["object"]) for r in rows
+                     if r["predicate"] == PROV_ROUTE_DATATYPE_RANGE}
+
+    assert (P, CLS_B) in observed
+    assert (Q, XSD_DECIMAL) in from_datatype
+    assert not (observed & from_datatype)
+
+
+def test_route_markers_never_become_features(spark, make_triples):
+    """They describe the vocabulary; they must not be encoded as data.
+
+    Their subjects are class and predicate URIs, so left in they would collect
+    a domain and a range of their own.
+    """
+    from spark_jobs.pyg_builder.feature_extractor import (
+        _NON_FEATURE_PREDICATES,
+    )
+    for route in (PROV_ROUTE_CURATED_SUBCLASS, PROV_ROUTE_NAMED_SUBCLASS,
+                  PROV_ROUTE_CURATED_SUBPROPERTY, PROV_ROUTE_OBSERVED_DOMAIN,
+                  PROV_ROUTE_OBSERVED_RANGE, PROV_ROUTE_DATATYPE_RANGE):
+        assert route in _NON_FEATURE_PREDICATES, route
