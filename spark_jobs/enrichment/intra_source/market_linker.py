@@ -75,6 +75,31 @@ BELONGS_TO_SECTOR_PRED = str(MARKET_ENRICHMENT.belongsToSector)
 MAX_STRANGLE_PAIRS_PER_CHAIN = 10
 
 
+def _canonical_contract_type(col: F.Column) -> F.Column:
+    """Normalize a contractType literal to CALL / PUT.
+
+    The quote-snapshot vocabulary encodes this as a single letter -- "C" / "P"
+    -- which is what the API returns and what the captured fixtures contain.
+    Every comparison in this module was written against the spelled-out words,
+    so `F.upper(contract_type) == "CALL"` was false for every option ever
+    ingested. All three option steps (underlying linking, strategy detection,
+    moneyness) silently produced nothing.
+
+    Both encodings are accepted rather than swapping one literal for the other:
+    the feeds vocabulary is a different model from the quotes one, and pinning
+    this to whichever spelling the current fixture happens to use is what
+    created the bug in the first place. An unrecognized value is passed through
+    uppercased, so it fails to match a branch rather than being silently
+    coerced into the wrong one.
+    """
+    upper = F.upper(F.trim(col))
+    return (
+        F.when(upper.isin("C", "CALL"), F.lit("CALL"))
+        .when(upper.isin("P", "PUT"), F.lit("PUT"))
+        .otherwise(upper)
+    )
+
+
 class MarketIntraSourceLinker:
     """
     Market intra-source enrichment using PySpark DataFrames.
@@ -385,7 +410,7 @@ class MarketIntraSourceLinker:
             F.col("predicate") == CONTRACT_TYPE_PRED
         ).select(
             F.col("subject").alias("option"),
-            F.col("object").alias("contract_type"),
+            _canonical_contract_type(F.col("object")).alias("contract_type"),
         )
 
         capture_times = triples_df.filter(
@@ -696,7 +721,7 @@ class MarketIntraSourceLinker:
             F.col("predicate") == CONTRACT_TYPE_PRED
         ).select(
             F.col("subject").alias("option"),
-            F.col("object").alias("contract_type"),
+            _canonical_contract_type(F.col("object")).alias("contract_type"),
         )
 
         options_df = (
@@ -741,6 +766,15 @@ class MarketIntraSourceLinker:
         ).filter(F.col("moneyness").isNotNull())
 
         if moneyness_df.head(1) == []:
+            # Reached only when options WERE found but none classified, i.e.
+            # every contract_type fell through the branches above. Silence here
+            # is what hid the C/CALL mismatch: the step logged that it started,
+            # returned nothing, and looked identical to having no options.
+            logger.info(
+                "  No option classified: %d option(s) had strike + "
+                "underlyingPrice but no recognized contractType",
+                options_df.count(),
+            )
             return None
 
         result = moneyness_df.select(
