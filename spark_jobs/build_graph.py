@@ -81,6 +81,8 @@ import boto3
 # ============================================
 from spark_jobs.enrichment.pipeline import EnrichmentPipeline
 
+from spark_jobs.utils.spark_rdf_utils import literal_datatype_observations
+
 from spark_jobs.pyg_builder.metadata_writer import (
     write_metadata_to_s3,
     write_metadata_to_local,
@@ -705,6 +707,11 @@ def load_turtle_parquet_to_dataframe(
             StructField("subject", StringType(), nullable=False),
             StructField("predicate", StringType(), nullable=False),
             StructField("object", StringType(), nullable=False),
+            # The literal's declared ^^<datatype>, "" for URIs/bnodes/plain
+            # literals. Internal to this UDF and dropped below once the
+            # observation markers are built -- the frame this loader returns
+            # is the canonical 3-column one.
+            StructField("object_datatype", StringType(), nullable=False),
         ])
     )
 
@@ -744,6 +751,7 @@ def load_turtle_parquet_to_dataframe(
                 pred = str(p)
 
                 # Object — normalize to pipeline convention
+                datatype = ""
                 if isinstance(o, URIRef):
                     obj = str(o)
                 elif isinstance(o, BNode):
@@ -756,6 +764,12 @@ def load_turtle_parquet_to_dataframe(
                     # lexical form without ^^datatype or @lang.
                     py_val = o.toPython()
                     obj = str(py_val)
+                    # ...which is exactly why the datatype has to be taken
+                    # off the Literal here: toPython() is where the source's
+                    # ^^<xsd:...> declaration stops existing, and it is the
+                    # only evidence of a literal property's rdfs:range.
+                    if o.datatype is not None:
+                        datatype = str(o.datatype)
                 else:
                     obj = str(o)
 
@@ -763,6 +777,7 @@ def load_turtle_parquet_to_dataframe(
                     "subject": subj,
                     "predicate": pred,
                     "object": obj,
+                    "object_datatype": datatype,
                 })
 
             return triples
@@ -784,14 +799,19 @@ def load_turtle_parquet_to_dataframe(
         F.explode(F.col("_triples")).alias("_triple")
     )
 
-    triples_df = exploded_df.select(
+    parsed_df = exploded_df.select(
         F.col("_triple.subject").alias("subject"),
         F.col("_triple.predicate").alias("predicate"),
         F.col("_triple.object").alias("object"),
+        F.col("_triple.object_datatype").alias("object_datatype"),
     ).filter(
         (F.col("subject") != "")
         & (F.col("predicate") != "")
     )
+
+    triples_df = parsed_df.select(
+        "subject", "predicate", "object"
+    ).unionByName(literal_datatype_observations(parsed_df))
 
     return triples_df
 

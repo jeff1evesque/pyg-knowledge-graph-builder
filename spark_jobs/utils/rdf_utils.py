@@ -92,6 +92,36 @@ UNIFIED = Namespace("https://example.org/unified/")
 # same type, erasing which one is canonical.
 SOURCE_TEMPORAL = Namespace("https://example.org/temporal/")
 
+# Statements ABOUT the pipeline's own derivations rather than about the data.
+#
+# Two kinds live here, both consumed by the metadata collector and ignored by
+# every encoder:
+#
+#   * observations the loader can make but the mapper cannot -- the XSD
+#     datatype a source declared on a literal, which survives only at parse
+#     time (``prov:observedLiteralDatatype``);
+#   * how each derived axiom set was arrived at -- declared, curated, or
+#     observed (``prov:derivedBy``), so ontology_schema.json can report
+#     provenance instead of presenting an inference as a declaration.
+#
+# Deliberately NOT a *_ENRICHMENT namespace: these are not claims about
+# entities, so classify_edge_origin() must never see them as inferred links.
+# Also deliberately absent from NAMESPACE_PREFIXES below: nothing in this
+# namespace is ever an rdf:type, so it can never name a node type, and adding
+# it would move ONTOLOGY_NAMESPACE_INDICES and change the encoding contract
+# digest -- invalidating every trained model to describe URIs no encoder sees.
+PROVENANCE = Namespace("https://example.org/provenance/")
+
+# Subject of the derivedBy statements: the axiom SET being described, not any
+# individual axiom. One statement per set keeps the marker count constant.
+PROV_DERIVED_BY = str(PROVENANCE.derivedBy)
+PROV_OBSERVED_LITERAL_DATATYPE = str(PROVENANCE.observedLiteralDatatype)
+
+PROV_CLASS_HIERARCHY = str(PROVENANCE.classHierarchy)
+PROV_PROPERTY_DOMAIN = str(PROVENANCE.propertyDomain)
+PROV_PROPERTY_RANGE = str(PROVENANCE.propertyRange)
+PROV_PROPERTY_HIERARCHY = str(PROVENANCE.propertyHierarchy)
+
 # ============================================
 # CANONICAL NAMESPACE → PREFIX MAPPING
 # ============================================

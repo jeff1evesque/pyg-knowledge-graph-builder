@@ -16,13 +16,17 @@ All operations run as PySpark DataFrame transformations.
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from functools import reduce
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from spark_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, SEC_ENRICHMENT, MARKET_ENRICHMENT, NOAA_ENRICHMENT,
     UNIFIED, CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER,
-    SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP, MARKET, CAP, NWS
+    SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP, MARKET, CAP, NWS,
+    PROV_DERIVED_BY, PROV_OBSERVED_LITERAL_DATATYPE,
+    PROV_CLASS_HIERARCHY, PROV_PROPERTY_DOMAIN, PROV_PROPERTY_RANGE,
+    PROV_PROPERTY_HIERARCHY,
 )
+from spark_jobs.utils.spark_rdf_utils import collect_sorted
 
 import logging
 
@@ -35,9 +39,25 @@ logger = logging.getLogger(__name__)
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
 RDFS_SUBCLASS_OF = "http://www.w3.org/2000/01/rdf-schema#subClassOf"
+RDFS_SUB_PROPERTY_OF = "http://www.w3.org/2000/01/rdf-schema#subPropertyOf"
+RDFS_DOMAIN = "http://www.w3.org/2000/01/rdf-schema#domain"
+RDFS_RANGE = "http://www.w3.org/2000/01/rdf-schema#range"
 OWL_EQUIVALENT_PROPERTY = "http://www.w3.org/2002/07/owl#equivalentProperty"
 OWL_EQUIVALENT_CLASS = "http://www.w3.org/2002/07/owl#equivalentClass"
 SKOS_PREF_LABEL = "http://www.w3.org/2004/02/skos/core#prefLabel"
+# Predicates that describe the vocabulary rather than use it, so no domain or
+# range is derived from them (see _derive_property_schema).
+_NOT_A_DATA_PREDICATE = [
+    RDF_TYPE,
+    RDFS_SUBCLASS_OF,
+    RDFS_SUB_PROPERTY_OF,
+    RDFS_DOMAIN,
+    RDFS_RANGE,
+    PROV_OBSERVED_LITERAL_DATATYPE,
+    PROV_DERIVED_BY,
+    "http://www.w3.org/2002/07/owl#equivalentClass",
+    "http://www.w3.org/2002/07/owl#equivalentProperty",
+]
 SKOS_CONCEPT_SCHEME = "http://www.w3.org/2004/02/skos/core#ConceptScheme"
 DCTERMS_DESCRIPTION = "http://purl.org/dc/terms/description"
 
@@ -192,17 +212,26 @@ CLASS_MAPPINGS = {
 # RDFS allows a superclass with no direct instances.
 
 
-def partition_class_mappings(
+def partition_shared_targets(
     mappings: Dict[str, str],
 ) -> Tuple[Dict[str, str], Dict[str, str]]:
     """
-    Split CLASS_MAPPINGS into (subsumptions, equivalences).
+    Split a {source: target} table into (subsumptions, equivalences).
 
     A target claimed by two or more sources cannot be equivalent to any of
-    them, so every one of its sources is a subclass. A target with exactly
+    them, so every one of its sources is subsumed by it. A target with exactly
     one source is left as a candidate equivalence.
 
-    Returns two {source: target} dicts, together covering ``mappings``.
+    Applies to classes and properties alike -- the argument is identical.
+    PROPERTY_MAPPINGS sends nine properties to unified:measurementValue, and
+    jolts:rate is no more equivalent to market:observedPrice (a rate is not a
+    price) than cpi:Index is to ppi:IndexValue. Both tables are one relation
+    each: sub-thing-of where the target is shared, equivalent-to where it is
+    not.
+
+    Returns two {source: target} dicts that PARTITION ``mappings`` -- every
+    source appears in exactly one, which is what keeps a source from being
+    asserted both equivalent to and subsumed by the same target.
     """
     sources_per_target: Dict[str, List[str]] = {}
     for source, target in mappings.items():
@@ -215,6 +244,10 @@ def partition_class_mappings(
         else:
             equivalences[source] = target
     return subsumptions, equivalences
+
+
+# Kept as the name the class-side callers already use.
+partition_class_mappings = partition_shared_targets
 
 
 def resolve_class_mappings(
@@ -243,8 +276,13 @@ def resolve_class_mappings(
 
 
 # The defaults, for callers that want the built-in reading without a mapper.
-CURATED_SUBCLASSES, TRUE_EQUIVALENCES = partition_class_mappings(
+CURATED_SUBCLASSES, TRUE_EQUIVALENCES = partition_shared_targets(
     CLASS_MAPPINGS
+)
+# The property table admits no per-run override, so unlike the class split
+# this one is the whole story rather than a default.
+CURATED_SUB_PROPERTIES, TRUE_PROPERTY_EQUIVALENCES = partition_shared_targets(
+    PROPERTY_MAPPINGS
 )
 
 
@@ -350,12 +388,143 @@ def derive_subclass_edges(class_uris: Iterable[str]) -> List[Tuple[str, str]]:
     return result
 
 
-def _assert_is_dag(edges: List[Tuple[str, str]]) -> None:
+# ============================================
+# DOMAIN / RANGE DERIVATION
+# ============================================
+#
+# No source declares rdfs:domain, rdfs:range or rdfs:subPropertyOf either --
+# same finding as the class hierarchy, verified over the real 130k-triple run
+# and both fixture sets. That left domain_range (111 dims) and
+# property_hierarchy (81 dims) structurally zero: 192 of 1024 dims, 18.75% of
+# every node vector, costing memory in every stored vector and weights in the
+# first GNN layer that can only ever learn from a constant.
+#
+# None of the routes below use spelling. Domain and range are read off how the
+# graph actually uses each predicate; the property hierarchy comes from the
+# curated PROPERTY_MAPPINGS table.
+#
+# THE MULTI-VALUE TRAP. rdfs:domain is not a hint, it is an axiom with
+# INTERSECTION semantics: asserting `p rdfs:domain A` and `p rdfs:domain B`
+# says every subject of p is BOTH an A and a B. Measured over the fixtures,
+# 77 of 160 predicates are used on more than one class -- market:askPrice on
+# EquitySnapshot and OptionSnapshot, rdfs:label on 68 classes. Emitting both
+# would state that every equity snapshot is also an option snapshot. So an
+# ambiguous predicate gets NO axiom, and is reported as a known gap rather
+# than resolved by a guess.
+#
+# Skipping costs less than it looks. A predicate used on one class carries
+# real signal ("this node has a property specific to class X"); a predicate
+# used on 22 classes says little that segment 1's class_identity does not
+# already encode about the node itself.
+
+
+def derive_domain_edges(
+    observations: Iterable[Tuple[str, str]],
+) -> List[Tuple[str, str]]:
+    """
+    Infer (property, domain_class) rdfs:domain pairs from observed usage.
+
+    ``observations`` are distinct (property_uri, subject_class_uri) pairs read
+    off the graph: for every triple, the rdf:type of its subject.
+
+    A property observed on exactly ONE class gets that class as its domain.
+    A property observed on several gets nothing -- see THE MULTI-VALUE TRAP
+    above; the intersection those axioms would assert is false.
+
+    Returns edges sorted for determinism.
+    """
+    classes_per_property: Dict[str, Set[str]] = {}
+    for prop, cls in observations:
+        classes_per_property.setdefault(prop, set()).add(cls)
+
+    return sorted(
+        (prop, next(iter(classes)))
+        for prop, classes in classes_per_property.items()
+        if len(classes) == 1
+    )
+
+
+def ambiguous_domains(
+    observations: Iterable[Tuple[str, str]],
+) -> Dict[str, List[str]]:
+    """
+    The properties ``derive_domain_edges`` declined, and what it saw for them.
+
+    Published in ontology_schema.json so every skipped property is a named
+    set with its candidate classes rather than a silent gap.
+    """
+    classes_per_property: Dict[str, Set[str]] = {}
+    for prop, cls in observations:
+        classes_per_property.setdefault(prop, set()).add(cls)
+
+    return {
+        prop: sorted(classes)
+        for prop, classes in sorted(classes_per_property.items())
+        if len(classes) > 1
+    }
+
+
+def derive_range_edges(
+    entity_observations: Iterable[Tuple[str, str]],
+    literal_observations: Iterable[Tuple[str, str]],
+) -> List[Tuple[str, str]]:
+    """
+    Infer (property, range) rdfs:range pairs from two complementary routes.
+
+    ``entity_observations``: distinct (property_uri, object_class_uri) --
+    the rdf:type of the property's objects, for entity-valued properties.
+    ``literal_observations``: distinct (property_uri, xsd_datatype_uri) --
+    the datatype the SOURCE declared on the property's literals, recovered by
+    the loaders (see literal_datatype_observations) rather than inferred.
+
+    rdfs:range carries the same intersection semantics as rdfs:domain, so the
+    same rule applies twice over: a property gets a range only when the two
+    routes together leave exactly one candidate. That rules out
+    * several object classes (cpi:hasExpenditureCategory sees 22),
+    * several datatypes,
+    * and a property used with BOTH entities and literals (cpi:hasMonth is
+      189 typed URIs and 11 literals), where the two routes disagree about
+      what kind of thing the property even points at.
+
+    Returns edges sorted for determinism.
+    """
+    candidates: Dict[str, Set[str]] = {}
+    for prop, target in list(entity_observations) + list(literal_observations):
+        candidates.setdefault(prop, set()).add(target)
+
+    return sorted(
+        (prop, next(iter(targets)))
+        for prop, targets in candidates.items()
+        if len(targets) == 1
+    )
+
+
+def ambiguous_ranges(
+    entity_observations: Iterable[Tuple[str, str]],
+    literal_observations: Iterable[Tuple[str, str]],
+) -> Dict[str, List[str]]:
+    """The properties ``derive_range_edges`` declined, and what it saw."""
+    candidates: Dict[str, Set[str]] = {}
+    for prop, target in list(entity_observations) + list(literal_observations):
+        candidates.setdefault(prop, set()).add(target)
+
+    return {
+        prop: sorted(targets)
+        for prop, targets in sorted(candidates.items())
+        if len(targets) > 1
+    }
+
+
+def _assert_is_dag(
+    edges: List[Tuple[str, str]], label: str = "class hierarchy"
+) -> None:
     """Raise if the child->parent edges contain a cycle.
 
-    Enforced rather than merely tested: the rules are string-shaped, so a
-    future suffix could quietly introduce A -> B -> A, and the encoder's
-    transitive closure would not terminate on it.
+    Enforced rather than merely tested: the class rules are string-shaped, so
+    a future suffix could quietly introduce A -> B -> A, and the encoder's
+    transitive closure would not terminate on it. The property hierarchy runs
+    the same check for the same reason -- a curated table that ever mapped
+    two properties onto each other would hang the same closure.
     """
     parents: Dict[str, List[str]] = {}
     for child, parent in edges:
@@ -371,7 +540,7 @@ def _assert_is_dag(edges: List[Tuple[str, str]]) -> None:
             if state == GREY:
                 cycle = " -> ".join(trail + [node, parent])
                 raise ValueError(
-                    f"derived class hierarchy contains a cycle: {cycle}"
+                    f"derived {label} contains a cycle: {cycle}"
                 )
             if state == WHITE:
                 visit(parent, trail + [node])
@@ -410,7 +579,14 @@ class OntologyMapper:
         # shared target (or the reverse), which moves it between subsumption
         # and equivalence.
         self.curated_subclasses, self.true_equivalences = (
-            partition_class_mappings(self.class_mappings)
+            partition_shared_targets(self.class_mappings)
+        )
+        # Same split on the property table. 41 of its 46 entries point at a
+        # target two or more sources share, so they are sub-properties; the
+        # remaining 5 stay equivalences. Both dicts are computed from one
+        # partition, so no property can land in both.
+        self.curated_sub_properties, self.true_property_equivalences = (
+            partition_shared_targets(PROPERTY_MAPPINGS)
         )
 
     def enrich(
@@ -438,30 +614,54 @@ class OntologyMapper:
 
         new_dfs: List[DataFrame] = []
 
-        logger.info("[Step 1/5] Creating property equivalences...")
+        logger.info("[Step 1/7] Creating property equivalences...")
         df = self._create_property_equivalences()
         if df is not None:
             new_dfs.append(df)
 
-        logger.info("[Step 2/5] Creating class equivalences...")
+        logger.info("[Step 2/7] Creating class equivalences...")
         df = self._create_class_equivalences()
         if df is not None:
             new_dfs.append(df)
 
-        logger.info("[Step 3/5] Folding predicates to their unified form...")
+        logger.info("[Step 3/7] Folding predicates to their unified form...")
         df = self._fold_predicates_to_unified(triples_df)
         if df is not None:
             new_dfs.append(df)
 
-        logger.info("[Step 4/5] Normalizing labels (skos:prefLabel)...")
+        logger.info("[Step 4/7] Normalizing labels (skos:prefLabel)...")
         df = self._normalize_labels(triples_df)
         if df is not None:
             new_dfs.append(df)
 
-        logger.info("[Step 5/5] Deriving class hierarchy (rdfs:subClassOf)...")
+        logger.info("[Step 5/7] Deriving class hierarchy (rdfs:subClassOf)...")
         df = self._derive_class_hierarchy(triples_df)
         if df is not None:
             new_dfs.append(df)
+
+        logger.info(
+            "[Step 6/7] Deriving property hierarchy (rdfs:subPropertyOf)..."
+        )
+        df = self._derive_property_hierarchy()
+        if df is not None:
+            new_dfs.append(df)
+
+        logger.info(
+            "[Step 7/7] Deriving property schema (rdfs:domain / rdfs:range)..."
+        )
+        df, skipped_domains, skipped_ranges = self._derive_property_schema(
+            triples_df
+        )
+        if df is not None:
+            new_dfs.append(df)
+
+        # Which predicates got no axiom, and what was seen for them. Kept on
+        # the instance so the caller can publish a known set instead of a
+        # silent gap; see ambiguous_domains / ambiguous_ranges.
+        self.ambiguous_domains = skipped_domains
+        self.ambiguous_ranges = skipped_ranges
+
+        new_dfs.append(self._provenance_markers())
 
         if enable_skos:
             logger.info("[Optional] Creating SKOS concept schemes...")
@@ -490,18 +690,24 @@ class OntologyMapper:
         """
         Create owl:equivalentProperty triples from the static mapping table.
 
+        Only the one-to-one pairs, exactly as _create_class_equivalences does.
+        Where several properties share a target the relationship is
+        subsumption, and _derive_property_hierarchy publishes it as
+        rdfs:subPropertyOf instead -- asserting both here would state that
+        jolts:rate and market:observedPrice are equivalent to each other,
+        which is to say that a rate is a price.
+
         Produces:
-            cpi:Index  owl:equivalentClass  bls:PriceIndex
-            ppi:IndexValue  owl:equivalentClass  bls:PriceIndex
-            nws:WeatherAlert  owl:equivalentClass  noaa_enrichment:EmergencyAlert
+            cap:hasEvent  owl:equivalentProperty  unified:hasEventName
+            market:symbol  owl:equivalentProperty  unified:ticker
             ...
         """
-        if not PROPERTY_MAPPINGS:
+        if not self.true_property_equivalences:
             return None
 
         rows = [
             (source, OWL_EQUIVALENT_PROPERTY, target)
-            for source, target in PROPERTY_MAPPINGS.items()
+            for source, target in self.true_property_equivalences.items()
         ]
 
         df = self.spark.createDataFrame(
@@ -510,6 +716,191 @@ class OntologyMapper:
 
         logger.info(f"  Created {len(rows)} property equivalences")
         return df
+
+    # ================================================================
+    # Provenance
+    # ================================================================
+
+    def _provenance_markers(self) -> DataFrame:
+        """
+        State how each derived axiom set was arrived at.
+
+        Everything this mapper emits is an INFERENCE. rdfs:subClassOf,
+        rdfs:domain and rdfs:range are indistinguishable, once in the graph,
+        from axioms a source actually declared -- and they are not the same
+        thing. "This property is used on class C in this month's data" is
+        weaker than "this property's domain is C": a property seen with one
+        class here could be broader in general.
+
+        Carried as triples rather than returned alongside them because the
+        graph is built in a separate job from the one that enriches it
+        (pyg_only reads the enriched Parquet), so anything not in the triples
+        does not reach the metadata writer. feature_extractor reads these into
+        ontology_schema.json; no encoder sees them.
+        """
+        rows = [
+            (
+                PROV_CLASS_HIERARCHY,
+                PROV_DERIVED_BY,
+                "curated class_mappings and class naming rules",
+            ),
+            (
+                PROV_PROPERTY_HIERARCHY,
+                PROV_DERIVED_BY,
+                "curated PROPERTY_MAPPINGS shared targets",
+            ),
+            (
+                PROV_PROPERTY_DOMAIN,
+                PROV_DERIVED_BY,
+                "observed rdf:type of each predicate's subjects",
+            ),
+            (
+                PROV_PROPERTY_RANGE,
+                PROV_DERIVED_BY,
+                "observed rdf:type of each predicate's objects and the XSD "
+                "datatype declared by the source on its literals",
+            ),
+        ]
+        return self.spark.createDataFrame(
+            rows, ["subject", "predicate", "object"]
+        )
+
+    # ================================================================
+    # Step 6: Property Hierarchy Derivation
+    # ================================================================
+
+    def _derive_property_hierarchy(self) -> Optional[DataFrame]:
+        """
+        Emit rdfs:subPropertyOf for every shared-target PROPERTY_MAPPINGS entry.
+
+        Carries no semantic risk even where the grouping happens to be a true
+        equivalence: P = Q entails P subPropertyOf Q, so the weaker statement
+        is never false. The ten month properties are genuinely interchangeable
+        and still correctly typed as sub-properties of unified:hasMonth.
+
+        Purely curated -- no data is read, so (like the curated subclasses) an
+        entry is emitted whether or not the property appears in this load.
+        """
+        edges = sorted(self.curated_sub_properties.items())
+        if not edges:
+            logger.info("  No property hierarchy derivable")
+            return None
+
+        _assert_is_dag(edges, label="property hierarchy")
+
+        rows = [(child, RDFS_SUB_PROPERTY_OF, parent) for child, parent in edges]
+        logger.info(
+            f"  Property hierarchy: {len(rows)} subPropertyOf edge(s) over "
+            f"{len({p for _, p in edges})} shared target(s); "
+            f"{len(self.true_property_equivalences)} entr(ies) stay "
+            f"owl:equivalentProperty"
+        )
+        return self.spark.createDataFrame(
+            rows, ["subject", "predicate", "object"]
+        )
+
+    # ================================================================
+    # Step 7: Domain / Range Derivation
+    # ================================================================
+
+    def _derive_property_schema(
+        self,
+        triples_df: DataFrame,
+    ) -> Tuple[Optional[DataFrame], Dict[str, List[str]], Dict[str, List[str]]]:
+        """
+        Emit rdfs:domain / rdfs:range inferred from how the graph uses each
+        predicate.
+
+        Three observations, all computed on executors and collected only after
+        aggregation to distinct pairs (a few hundred rows, bounded by
+        predicates x classes, never by triple count):
+
+        1. domain  -- the rdf:type of each predicate's subjects;
+        2. range   -- the rdf:type of each predicate's objects, where the
+                      object is an entity that carries one;
+        3. range   -- the XSD datatype the source declared on each predicate's
+                      literals, recovered at parse time by the loaders.
+
+        Returns (triples_df_or_None, ambiguous_domains, ambiguous_ranges) --
+        the two dicts being the predicates no axiom could be derived for, so
+        the caller can publish them as a known set.
+        """
+        types = (
+            triples_df
+            .filter(F.col("predicate") == RDF_TYPE)
+            .select(
+                F.col("subject").alias("_uri"),
+                F.col("object").alias("_class"),
+            )
+            .distinct()
+        )
+
+        # Axioms are statements about the vocabulary, not uses of it. Left in,
+        # they would hand rdfs:subClassOf a domain of owl:Class -- true and
+        # useless, and it would occupy a slot the encoder means for signal
+        # about actual entities.
+        data_triples = triples_df.filter(
+            ~F.col("predicate").isin(_NOT_A_DATA_PREDICATE)
+        )
+
+        domain_obs = collect_sorted(
+            data_triples
+            .join(types, data_triples["subject"] == types["_uri"], "inner")
+            .select(F.col("predicate"), F.col("_class"))
+            .distinct()
+        )
+
+        entity_range_obs = collect_sorted(
+            data_triples
+            .join(types, data_triples["object"] == types["_uri"], "inner")
+            .select(F.col("predicate"), F.col("_class"))
+            .distinct()
+        )
+
+        literal_range_obs = collect_sorted(
+            triples_df
+            .filter(F.col("predicate") == PROV_OBSERVED_LITERAL_DATATYPE)
+            .select(
+                F.col("subject").alias("predicate"),
+                F.col("object").alias("_class"),
+            )
+            .distinct()
+        )
+
+        domain_pairs = [(r["predicate"], r["_class"]) for r in domain_obs]
+        entity_pairs = [(r["predicate"], r["_class"]) for r in entity_range_obs]
+        literal_pairs = [
+            (r["predicate"], r["_class"]) for r in literal_range_obs
+        ]
+
+        domain_edges = derive_domain_edges(domain_pairs)
+        range_edges = derive_range_edges(entity_pairs, literal_pairs)
+        skipped_domains = ambiguous_domains(domain_pairs)
+        skipped_ranges = ambiguous_ranges(entity_pairs, literal_pairs)
+
+        logger.info(
+            f"  Property schema: {len(domain_edges)} rdfs:domain "
+            f"({len(skipped_domains)} predicate(s) used on several classes, "
+            f"skipped), {len(range_edges)} rdfs:range from "
+            f"{len(literal_pairs)} declared datatype(s) + "
+            f"{len(entity_pairs)} typed-object observation(s) "
+            f"({len(skipped_ranges)} ambiguous, skipped)"
+        )
+
+        rows = (
+            [(prop, RDFS_DOMAIN, cls) for prop, cls in domain_edges]
+            + [(prop, RDFS_RANGE, target) for prop, target in range_edges]
+        )
+        if not rows:
+            return None, skipped_domains, skipped_ranges
+
+        return (
+            self.spark.createDataFrame(
+                rows, ["subject", "predicate", "object"]
+            ),
+            skipped_domains,
+            skipped_ranges,
+        )
 
     # ================================================================
     # Step 2: Class Equivalences

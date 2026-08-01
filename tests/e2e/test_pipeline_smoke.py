@@ -535,6 +535,8 @@ def _assert_metadata_describes_the_graph(data, found):
     _assert_class_identity_is_recoverable(data, found)
     _assert_source_type_uris_identify_their_node_type(schema, found)
     _assert_ontology_schema_states_whether_mapping_ran(found)
+    _assert_ontology_sub_segments_are_populated(spec)
+    _assert_derived_axioms_declare_their_provenance(found)
 
     # --- 3. node type inventory ------------------------------------------- #
     declared_nodes = set(schema["node_types"])
@@ -602,6 +604,72 @@ def _assert_ontology_schema_states_whether_mapping_ran(found):
         f"these runs enrich with ontology mapping enabled, but "
         f"ontology_schema.json reports it did not run "
         f"({ontology.get('ontology_mapping_evidence')})"
+    )
+
+
+def _assert_ontology_sub_segments_are_populated(spec):
+    """The three ontology sub-segments must carry signal, not just be legal.
+
+    class_hierarchy (64 dims), domain_range (111) and property_hierarchy (81)
+    were all structurally zero -- 256 of 1024, a quarter of every node vector
+    -- because no source declares rdfs:subClassOf, rdfs:domain, rdfs:range or
+    rdfs:subPropertyOf anywhere. All three are now derived.
+
+    _assert_node_sub_segments_are_not_vacuous already proves that a
+    sub-segment claiming features has some. What it CANNOT catch is a
+    regression that stops deriving and honestly re-declares
+    populated=false with an empty_reason: that is a legal spec, so the
+    vacuity guard passes and a quarter of the vector silently goes dead
+    again. This names the three and requires the populated path.
+    """
+    subs = {
+        s["name"]: s
+        for seg in spec["node_features"]["segments"]
+        for s in seg.get("sub_segments", [])
+    }
+
+    for name in ("class_hierarchy", "domain_range", "property_hierarchy"):
+        sub = subs.get(name)
+        assert sub is not None, f"feature_spec.json has no {name} sub-segment"
+        assert sub.get("populated", True) is True, (
+            f"sub-segment {name!r} ({sub['dim']} dims) is declared "
+            f"unpopulated: {sub.get('empty_reason')!r}. These are derived by "
+            f"OntologyMapper, so an honest empty_reason here means the "
+            f"derivation stopped working, not that the data changed."
+        )
+
+
+def _assert_derived_axioms_declare_their_provenance(found):
+    """An inferred axiom must never be published as a declared one.
+
+    rdfs:domain derived from observed usage is shaped exactly like one a
+    source asserted, and they license different reasoning: "used on class C
+    in this data" is weaker than "its domain is C". ontology_schema.json is
+    the only place that distinction survives.
+    """
+    ontology = json.loads(Path(found["ontology_schema.json"]).read_bytes())
+    provenance = ontology.get("provenance")
+
+    assert provenance, (
+        "ontology_schema.json carries no provenance block, so a derived "
+        "rdfs:domain is indistinguishable from a declared one"
+    )
+    for key in ("class_hierarchy", "property_hierarchy",
+                "property_domain", "property_range"):
+        assert provenance.get(key), f"no provenance recorded for {key}"
+        assert provenance[key] != "declared by the source", (
+            f"{key} is reported as declared by the source, but no source in "
+            f"these fixtures declares it -- the pipeline derived it, and "
+            f"saying otherwise overstates what the axioms license"
+        )
+
+    coverage = ontology.get("property_schema_coverage") or {}
+    assert coverage.get("data_predicates"), "no coverage reported"
+    assert coverage["with_domain"] > 0, (
+        f"no predicate got an rdfs:domain: {coverage}"
+    )
+    assert coverage["with_range"] > 0, (
+        f"no predicate got an rdfs:range: {coverage}"
     )
 
 

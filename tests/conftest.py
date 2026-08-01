@@ -39,10 +39,18 @@ def spark(tmp_path_factory):
     so it goes through PYSPARK_SUBMIT_ARGS.
     """
     import os
+    import sys
 
     os.environ.setdefault(
         "PYSPARK_SUBMIT_ARGS", "--driver-memory 2g pyspark-shell"
     )
+    # Executors are separate Python processes and default to whatever `python3`
+    # PATH resolves to -- not this venv. Any test whose query carries a Python
+    # UDF (the rdflib Turtle parser) then dies with ModuleNotFoundError on the
+    # executor while the driver imports the module fine, which reads as a code
+    # failure rather than an environment one. tests/e2e/conftest.py has always
+    # pinned this; the fast suite needs it for the same reason.
+    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
 
     from pyspark.sql import SparkSession
 
