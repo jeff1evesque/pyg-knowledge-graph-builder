@@ -1,10 +1,10 @@
 """
 NOAA Intra-Source Enrichment Orchestrator (PySpark)
 
-Coordinates enrichment for NOAA weather alerts (CAP 1.2 / NWS format).
+Coordinates enrichment for NOAA weather alerts (CAP 1.2 / WEATHER format).
 All enrichment runs as distributed PySpark DataFrame operations.
 
-Aligned with CAP 1.2 ontology v3.0 and the NWS RML mapper which produces:
+Aligned with CAP 1.2 ontology v3.0 and the WEATHER RML mapper which produces:
   - Alert subjects:  alert:{alert_id}         typed as nws:WeatherAlert
   - Info subjects:   alert:{alert_id}#info     typed as cap:Info
   - Area subjects:   alert:{alert_id}#area     typed as cap:Area
@@ -40,7 +40,7 @@ from functools import reduce
 from typing import List, Optional
 
 from spark_jobs.utils.rdf_utils import (
-    CAP, NWS, NOAA_ENRICHMENT, ALERT
+    CAP, WEATHER, NOAA_ENRICHMENT, ALERT
 )
 from spark_jobs.enrichment.intra_source.noaa.patterns import (
     NOAA_EVENT_PATTERNS,
@@ -61,7 +61,7 @@ RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
 
 # Class URIs — aligned with RML mapper output
 # The mapper types alerts as nws:WeatherAlert (subClassOf cap:Alert)
-WEATHER_ALERT_TYPE = str(NWS.WeatherAlert)
+WEATHER_ALERT_TYPE = str(WEATHER.WeatherAlert)
 ALERT_TYPE = str(CAP.Alert)
 INFO_TYPE = str(CAP.Info)
 AREA_TYPE = str(CAP.Area)
@@ -95,11 +95,11 @@ HAS_ENDS_TIME = str(CAP.hasEndsTime)
 HAS_GEOCODE = str(CAP.hasGeocode)
 
 # Geocode property URIs — aligned with RML mapper
-HAS_SAME_CODE = str(NWS.hasSAMECode)
-HAS_FIPS_CODE = str(NWS.hasFIPSCode)
-HAS_STATE_FIPS = str(NWS.hasStateFIPS)
-HAS_COUNTY_FIPS = str(NWS.hasCountyFIPS)
-HAS_UGC_CODE = str(NWS.hasUGCCode)
+HAS_SAME_CODE = str(WEATHER.hasSAMECode)
+HAS_FIPS_CODE = str(WEATHER.hasFIPSCode)
+HAS_STATE_FIPS = str(WEATHER.hasStateFIPS)
+HAS_COUNTY_FIPS = str(WEATHER.hasCountyFIPS)
+HAS_UGC_CODE = str(WEATHER.hasUGCCode)
 
 # Status/MessageType named individuals for filtering
 STATUS_ACTUAL = str(CAP.Actual)
@@ -235,7 +235,7 @@ class NOAAIntraSourceLinker:
     def _build_alert_info(self, triples_df: DataFrame) -> Optional[DataFrame]:
         """
         Build a denormalized table of alert metadata by joining through
-        the CAP/NWS structure produced by the RML mapper:
+        the CAP/WEATHER structure produced by the RML mapper:
 
             Alert (nws:WeatherAlert)
               → cap:hasInfo → Info (cap:Info)
