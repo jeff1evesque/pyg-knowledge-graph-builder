@@ -20,12 +20,12 @@ Example output triples:
     unified:November  rdfs:label    "November"
     unified:November  owl:sameAs    cpi:November
     unified:November  owl:sameAs    ppi:November
-    unified:November  owl:sameAs    https://financial-data.org/temporal/November
+    unified:November  owl:sameAs    https://jefflevesque.com/id/temporal/market-feeds/November
 
     unified:Year2024  rdf:type      bls:UnifiedYear
     unified:Year2024  rdfs:label    "2024"
     unified:Year2024  owl:sameAs    cpi:2024
-    unified:Year2024  owl:sameAs    https://www.sec.gov/temporal/2024
+    unified:Year2024  owl:sameAs    https://jefflevesque.com/id/temporal/sec/2024
 
     unified:Q1        rdf:type      bls:UnifiedQuarter
     unified:Q1        rdfs:label    "Q1"
@@ -44,6 +44,7 @@ from spark_jobs.utils.rdf_utils import (
     CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER, WKYENG,
     SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP,
     MARKET_FEEDS, CAP, WEATHER,
+    SYNTHETIC_TEMPORAL_IDS,
 )
 
 import logging
@@ -104,12 +105,19 @@ SEC_TYPES = [
 ]
 
 # SEC date predicates
+#
+# These carried hasattr()/else-literal guards, which were dead code: rdflib's
+# Namespace.__getattr__ resolves any non-dunder name, so hasattr was always
+# True and no fallback could run. Worse than redundant -- every fallback still
+# spelled a pre-migration sec.gov URI, so had one ever fired it would have
+# reintroduced the exact namespace this work removed. NOAA_DATE_PREDS below
+# was always written this way.
 SEC_DATE_PREDS = [
-    str(SEC_FILINGS.hasPeriodOfReport) if hasattr(SEC_FILINGS, 'hasPeriodOfReport') else "http://www.sec.gov/filings#hasPeriodOfReport",
-    str(SEC_FILINGS.hasReportDate) if hasattr(SEC_FILINGS, 'hasReportDate') else "http://www.sec.gov/filings#hasReportDate",
-    str(SEC_ADMIN.initiationDate) if hasattr(SEC_ADMIN, 'initiationDate') else "https://www.sec.gov/ontology/administrative-proceedings#initiationDate",
-    str(SEC_LIT.filingDate) if hasattr(SEC_LIT, 'filingDate') else "https://www.sec.gov/ontology/litigation#filingDate",
-    str(SEC_SUSP.startDate) if hasattr(SEC_SUSP, 'startDate') else "https://www.sec.gov/ontology/trading-suspensions#startDate",
+    str(SEC_FILINGS.hasPeriodOfReport),
+    str(SEC_FILINGS.hasReportDate),
+    str(SEC_ADMIN.initiationDate),
+    str(SEC_LIT.filingDate),
+    str(SEC_SUSP.startDate),
 ]
 
 # NOAA — aligned with updated RML mapper
@@ -206,7 +214,7 @@ class TemporalUnifier:
 
         logger.info("  Collecting SEC temporal entities...")
         df = self._collect_date_based_temporals(
-            triples_df, SEC_DATE_PREDS, "https://www.sec.gov/temporal/"
+            triples_df, SEC_DATE_PREDS, SYNTHETIC_TEMPORAL_IDS["sec"]
         )
         if df is not None:
             temporal_dfs.append(df)
@@ -218,7 +226,7 @@ class TemporalUnifier:
 
         logger.info("  Collecting NOAA temporal entities...")
         df = self._collect_date_based_temporals(
-            triples_df, NOAA_DATE_PREDS, "https://www.noaa.gov/temporal/"
+            triples_df, NOAA_DATE_PREDS, SYNTHETIC_TEMPORAL_IDS["noaa"]
         )
         if df is not None:
             temporal_dfs.append(df)
@@ -408,11 +416,11 @@ class TemporalUnifier:
             triples_df: The triples DataFrame
             date_predicates: List of predicate URIs that hold date values
             synthetic_prefix: URI prefix for synthetic temporal entities
-                              e.g., "https://www.sec.gov/temporal/"
+                              e.g., "https://jefflevesque.com/id/temporal/sec/"
 
         Produces (temporal_uri, normalized_name, kind) rows like:
-            ("https://www.sec.gov/temporal/November", "November", "month")
-            ("https://www.sec.gov/temporal/2024", "2024", "year")
+            ("https://jefflevesque.com/id/temporal/sec/November", "November", "month")
+            ("https://jefflevesque.com/id/temporal/sec/2024", "2024", "year")
         """
         # Filter to triples with the relevant date predicates
         date_triples = triples_df.filter(
@@ -483,7 +491,7 @@ class TemporalUnifier:
         """
         market_date_preds = [MARKET_OBSERVED_AT, MARKET_EXPIRATION_DATE]
         return self._collect_date_based_temporals(
-            triples_df, market_date_preds, f"{SOURCE_TEMPORAL}market-feeds/"
+            triples_df, market_date_preds, SYNTHETIC_TEMPORAL_IDS["market-feeds"]
         )
 
     # ================================================================

@@ -5,7 +5,7 @@ Foundation for CPI data processing
 
 from rdflib import Graph, Namespace, URIRef, Literal
 from rdflib.namespace import RDF, RDFS, OWL, XSD
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
@@ -193,6 +193,29 @@ UNIFIED = Namespace(f"{ONTOLOGY_BASE}unified/")
 # base with the enrichment namespaces must not start classifying these edges
 # as pipeline-inferred; see the origin test that pins it.
 SOURCE_TEMPORAL = Namespace(f"{ONTOLOGY_BASE}temporal/")
+
+# Where the synthetic temporal INDIVIDUALS live.
+#
+# SOURCE_TEMPORAL above holds the TYPES (SourceMonth, SourceYear,
+# SourceQuarter). temporal_unifier mints one individual per period per source
+# -- November, 2024 -- and those are things, not terms, so they belong under
+# the identifier base rather than alongside their own types.
+#
+# They were minted at https://www.sec.gov/temporal/ and
+# https://www.noaa.gov/temporal/, which is the same false-provenance defect as
+# every source vocabulary: nobody at those organizations minted
+# sec.gov/temporal/November. This pipeline did, on every build.
+#
+# Keyed by source so two sources naming the same period stay distinct until
+# the unifier deliberately links them -- collapsing them here would pre-empt
+# the sameAs step and hide which source observed what.
+IDENTIFIER_BASE = "https://jefflevesque.com/id/"
+
+SYNTHETIC_TEMPORAL_IDS: Dict[str, str] = {
+    "sec": f"{IDENTIFIER_BASE}temporal/sec/",
+    "noaa": f"{IDENTIFIER_BASE}temporal/noaa/",
+    "market-feeds": f"{IDENTIFIER_BASE}temporal/market-feeds/",
+}
 
 # Statements ABOUT the pipeline's own derivations rather than about the data.
 #
