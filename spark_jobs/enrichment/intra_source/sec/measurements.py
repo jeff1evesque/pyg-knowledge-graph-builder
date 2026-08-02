@@ -4,11 +4,19 @@ SEC Measurement Types - Temporal linking configurations for SEC datasets
 Defines which RDF classes, date properties, and grouping properties
 are needed to build temporal sequences within each SEC dataset.
 
-Property references match actual ontologies:
-- Filings:     http://www.sec.gov/filings#  and  http://www.sec.gov#
-- Admin:       https://www.sec.gov/ontology/administrative-proceedings#
-- Litigation:  https://www.sec.gov/ontology/litigation#
-- Suspensions: https://www.sec.gov/ontology/trading-suspensions#
+Property references come from the rdf_utils constants and are deliberately not
+spelled out here -- a copy in a docstring goes stale exactly the way a copy in
+code does, and this one did:
+
+- Filings:     SEC_FILINGS, plus SEC_COMMON for the shared classes
+- Admin:       SEC_ADMIN
+- Litigation:  SEC_LIT
+- Suspensions: SEC_SUSP
+
+These were once described as the SEC's "actual ontologies". They are not: the
+SEC publishes filings as XML and no RDF vocabulary at all, so every term above
+was minted by this project's scrapers and now resolves under a domain we
+control.
 
 Used by sec_linker.py for:
 - _link_ownership_filing_sequences()
@@ -17,11 +25,14 @@ Used by sec_linker.py for:
 - _link_litigation_sequences()
 - _link_trading_suspension_sequences()
 """
-from spark_jobs.utils.rdf_utils import SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP
+from spark_jobs.utils.rdf_utils import (
+    SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP, SEC_COMMON,
+)
 
-# Base namespace for SEC filings (http://www.sec.gov#)
-from rdflib import Namespace
-SEC_BASE = Namespace("http://www.sec.gov#")
+# The shared SEC classes (Date, Company, Person, Address). Re-declared as a
+# literal until this change, which meant it kept naming sec.gov after the
+# vocabulary moved -- matching nothing, silently.
+SEC_BASE = SEC_COMMON
 
 MEASUREMENT_TYPES = {
 

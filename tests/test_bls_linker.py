@@ -15,7 +15,9 @@ Covered:
 """
 from rdflib.namespace import RDF, RDFS
 
-from spark_jobs.utils.rdf_utils import CPI, MARKET_FEEDS, BLS_ENRICHMENT
+from spark_jobs.utils.rdf_utils import (
+    CPI, MARKET_FEEDS, BLS_ENRICHMENT, identifier_namespace,
+)
 from spark_jobs.enrichment.intra_source.bls_linker import (
     BLSIntraSourceLinker,
     normalize_keyword_for_uri_matching,
@@ -37,9 +39,23 @@ FOOD_SECTOR = str(BLS_ENRICHMENT.FoodSector)
 HAS_PARENT = str(BLS_ENRICHMENT.hasParent)
 
 
+CPI_ID = identifier_namespace(str(CPI))
+
+
 def _cpi(local):
-    """Build a CPI-namespaced URI string."""
-    return str(CPI[local])
+    """Build a CPI INDIVIDUAL uri string.
+
+    Individuals, not terms: every caller builds a thing -- an index entity, a
+    category entity, a month, a year -- and the RML mappers put all of those
+    under id/cpi/. The predicates stay on the term namespace via CPI.hasMonth
+    and friends above.
+
+    This used to return str(CPI[local]), i.e. ontology/cpi/Food_Nov2024_Index,
+    which no mapper emits. It passed only because the linker's own dataset
+    detection had the same conflation, so the test agreed with the bug instead
+    of with the data.
+    """
+    return f"{CPI_ID}{local}"
 
 
 def _index_entity(rows, entity_local, category_uri, month, year):

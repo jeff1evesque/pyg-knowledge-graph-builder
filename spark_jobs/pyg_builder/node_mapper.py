@@ -11,11 +11,11 @@ Responsibilities:
 4. Return a cached DataFrame on executors + a small counts dict
 
 Node type naming:
-    Full URI: https://www.bls.gov/cpi/Index
+    Full URI: https://jefflevesque.com/ontology/cpi/Index
     PyG name: cpi_Index
 
-    Full URI: https://financial-data.org/PriceObservation
-    PyG name: market_PriceObservation
+    Full URI: https://jefflevesque.com/ontology/market-feeds/PriceObservation
+    PyG name: market_feeds_PriceObservation
 
 Multi-type entities:
     An entity may have multiple rdf:type triples. We assign each entity

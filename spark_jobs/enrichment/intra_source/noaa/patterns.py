@@ -8,7 +8,7 @@ cap:hasEvent property (on Info subjects).
 Categories align with the CAP enumeration classes (cap:Category)
 and the NWS SKOS event type vocabulary (nws:EventTypeScheme).
 """
-from spark_jobs.utils.rdf_utils import NOAA_ENRICHMENT
+from spark_jobs.utils.rdf_utils import NOAA_ENRICHMENT, CAP
 
 # ============================================
 # EVENT TYPE PATTERNS
@@ -119,10 +119,10 @@ NOAA_EVENT_PATTERNS = {
 #   Extreme → cap:Extreme, Severe → cap:Severe, etc.
 
 SEVERITY_HIERARCHY = {
-    "http://www.oasis-open.org/committees/emergency/cap/1.2/Minor": 1,
-    "http://www.oasis-open.org/committees/emergency/cap/1.2/Moderate": 2,
-    "http://www.oasis-open.org/committees/emergency/cap/1.2/Severe": 3,
-    "http://www.oasis-open.org/committees/emergency/cap/1.2/Extreme": 4,
+    str(CAP.Minor): 1,
+    str(CAP.Moderate): 2,
+    str(CAP.Severe): 3,
+    str(CAP.Extreme): 4,
 }
 
 # ============================================
@@ -132,10 +132,10 @@ SEVERITY_HIERARCHY = {
 # Higher number = more urgent. Used by urgency escalation detection.
 
 URGENCY_HIERARCHY = {
-    "http://www.oasis-open.org/committees/emergency/cap/1.2/Past": 1,
-    "http://www.oasis-open.org/committees/emergency/cap/1.2/Future": 2,
-    "http://www.oasis-open.org/committees/emergency/cap/1.2/Expected": 3,
-    "http://www.oasis-open.org/committees/emergency/cap/1.2/Immediate": 4,
+    str(CAP.Past): 1,
+    str(CAP.Future): 2,
+    str(CAP.Expected): 3,
+    str(CAP.Immediate): 4,
 }
 
 # ============================================
@@ -144,10 +144,10 @@ URGENCY_HIERARCHY = {
 # Maps CAP certainty named individual URIs to numeric levels.
 
 CERTAINTY_HIERARCHY = {
-    "http://www.oasis-open.org/committees/emergency/cap/1.2/Unlikely": 1,
-    "http://www.oasis-open.org/committees/emergency/cap/1.2/Possible": 2,
-    "http://www.oasis-open.org/committees/emergency/cap/1.2/Likely": 3,
-    "http://www.oasis-open.org/committees/emergency/cap/1.2/Observed": 4,
+    str(CAP.Unlikely): 1,
+    str(CAP.Possible): 2,
+    str(CAP.Likely): 3,
+    str(CAP.Observed): 4,
 }
 
 # ============================================
@@ -157,13 +157,13 @@ CERTAINTY_HIERARCHY = {
 # Used to augment severity escalation detection.
 
 RESPONSE_TYPE_SEVERITY = {
-    "http://www.oasis-open.org/committees/emergency/cap/1.2/None": 0,
-    "http://www.oasis-open.org/committees/emergency/cap/1.2/AllClear": 0,
-    "http://www.oasis-open.org/committees/emergency/cap/1.2/Monitor": 1,
-    "http://www.oasis-open.org/committees/emergency/cap/1.2/Assess": 1,
-    "http://www.oasis-open.org/committees/emergency/cap/1.2/Prepare": 2,
-    "http://www.oasis-open.org/committees/emergency/cap/1.2/Avoid": 3,
-    "http://www.oasis-open.org/committees/emergency/cap/1.2/Execute": 3,
-    "http://www.oasis-open.org/committees/emergency/cap/1.2/Shelter": 4,
-    "http://www.oasis-open.org/committees/emergency/cap/1.2/Evacuate": 5,
+    str(CAP["None"]): 0,
+    str(CAP.AllClear): 0,
+    str(CAP.Monitor): 1,
+    str(CAP.Assess): 1,
+    str(CAP.Prepare): 2,
+    str(CAP.Avoid): 3,
+    str(CAP.Execute): 3,
+    str(CAP.Shelter): 4,
+    str(CAP.Evacuate): 5,
 }

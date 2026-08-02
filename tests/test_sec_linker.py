@@ -32,6 +32,18 @@ from spark_jobs.enrichment.intra_source.sec_linker import (
     _HAS_CIK,
     _UNIFIED_COMPANY_TYPE,
 )
+from spark_jobs.utils.rdf_utils import identifier_namespace
+
+# The imported _SEC_*_NS constants are the TERM namespaces -- they name the
+# classes and properties. Filings and proceedings are things, and the mappers
+# put them under id/sec-filings/ and id/sec-administrative-proceedings/, so
+# entity URIs are built from these instead.
+#
+# Building entities on the term namespace passed only while the linker's own
+# filtering shared that conflation; against real data the URIs it produced
+# (ontology/sec-filings/Form4_001) do not occur.
+_SEC_ADMIN_ID = identifier_namespace(_SEC_ADMIN_NS)
+_SEC_FILINGS_ID = identifier_namespace(_SEC_FILINGS_NS)
 
 
 def _triple_set(result):
@@ -44,7 +56,7 @@ def _triple_set(result):
 
 def test_sec_enrich_tags_violation_type_by_uri_keyword(spark, make_triples):
     """Admin-proceeding URI containing "SecuritiesFraud" -> hasViolationType."""
-    entity = f"{_SEC_ADMIN_NS}SecuritiesFraud_Proceeding_001"
+    entity = f"{_SEC_ADMIN_ID}SecuritiesFraud_Proceeding_001"
     rows = [(entity, _RDF_TYPE, _ADMIN_PROCEEDING_TYPE)]
 
     triples = _triple_set(SECIntraSourceLinker(spark).enrich(make_triples(rows)))
@@ -69,8 +81,8 @@ def test_cik_unification_links_same_cik_across_datasets(spark, make_triples):
     with a UnifiedCompany type, hasCik, and an owl:sameAs to each source entity.
     """
     cik = "0000320193"
-    filing = f"{_SEC_FILINGS_NS}Form4_001"
-    proceeding = f"{_SEC_ADMIN_NS}Proceeding_001"
+    filing = f"{_SEC_FILINGS_ID}Form4_001"
+    proceeding = f"{_SEC_ADMIN_ID}Proceeding_001"
     rows = [
         (filing, _RDF_TYPE, _FORM4_TYPE),
         (filing, _FILINGS_HAS_ISSUER_CIK, cik),
@@ -90,7 +102,7 @@ def test_cik_unification_links_same_cik_across_datasets(spark, make_triples):
 def test_cik_in_single_dataset_is_not_unified(spark, make_triples):
     """A CIK seen in only one dataset must NOT create a unified company."""
     cik = "0000320193"
-    filing = f"{_SEC_FILINGS_NS}Form4_001"
+    filing = f"{_SEC_FILINGS_ID}Form4_001"
     rows = [
         (filing, _RDF_TYPE, _FORM4_TYPE),
         (filing, _FILINGS_HAS_ISSUER_CIK, cik),

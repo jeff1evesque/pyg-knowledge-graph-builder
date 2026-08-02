@@ -30,6 +30,8 @@ from spark_jobs.utils.rdf_utils import (
     SEC_ENRICHMENT,
     SOURCE_VOCABULARIES,
     PUBLISHER_VOCABULARIES,
+    SYNTHETIC_TEMPORAL_IDS,
+    IDENTIFIER_BASE,
 )
 
 # Every namespace whose terms this project invents, in either repo.
@@ -159,6 +161,105 @@ def test_every_registered_namespace_is_ours_or_a_real_publisher_vocabulary():
     assert not unaccounted, (
         f"{unaccounted} are registered but classified as neither ours nor a "
         f"publisher's; decide which and add them to the matching list"
+    )
+
+
+@pytest.mark.parametrize("source,namespace", sorted(SYNTHETIC_TEMPORAL_IDS.items()))
+def test_synthetic_temporal_individuals_are_not_minted_on_a_publishers_domain(
+        source, namespace):
+    """The defect that survived the first pass, pinned so it cannot return.
+
+    temporal_unifier mints one individual per period per source -- November,
+    2024 -- on every build. Two of the three were still being minted at
+    https://www.sec.gov/temporal/ and https://www.noaa.gov/temporal/ after the
+    source vocabularies had moved: nobody at those organizations minted
+    sec.gov/temporal/November, this pipeline did.
+
+    They are easy to miss because they are string literals passed as an
+    argument rather than namespace constants, so nothing that scans the
+    namespace table sees them. Hence this test reads the mapping the unifier
+    actually uses.
+    """
+    for domain in PUBLISHER_DOMAINS:
+        assert domain not in namespace, (
+            f"the {source} synthetic temporal individuals are minted at "
+            f"{namespace!r}, which claims {domain} as the authority for a URI "
+            f"this pipeline invents on every build"
+        )
+
+
+@pytest.mark.parametrize("source,namespace", sorted(SYNTHETIC_TEMPORAL_IDS.items()))
+def test_synthetic_temporal_individuals_live_under_the_identifier_base(
+        source, namespace):
+    """They are things, not terms.
+
+    Their TYPES (SourceMonth, SourceYear, SourceQuarter) stay under
+    SOURCE_TEMPORAL. Putting the individuals alongside their own types would
+    re-conflate exactly what the /ontology/ and /id/ split exists to separate.
+    """
+    assert namespace.startswith(IDENTIFIER_BASE), namespace
+    assert namespace.endswith("/"), namespace
+    assert not namespace.startswith(str(SOURCE_TEMPORAL)), (
+        f"{namespace} sits under the TYPE namespace; individuals belong under "
+        f"{IDENTIFIER_BASE}"
+    )
+
+
+def test_every_synthetic_temporal_source_is_distinct():
+    """Two sources naming the same period must not pre-emptively collapse.
+
+    Merging them here would do the unifier's job before it runs and erase
+    which source observed which period.
+    """
+    assert len(set(SYNTHETIC_TEMPORAL_IDS.values())) == len(SYNTHETIC_TEMPORAL_IDS)
+
+
+def test_no_module_hardcodes_a_publisher_namespace():
+    """No URI literal anywhere in spark_jobs/ may name a publisher's domain.
+
+    Every namespace this project uses has a constant in rdf_utils. A literal
+    spelled out at the point of use is a copy that does not move when the
+    constant does -- and because a stale namespace matches nothing rather than
+    raising, the failure is silent: enrichment produces zero triples and the
+    suite stays green.
+
+    Four separate places were found this way, all of them already broken by
+    the migration before this test existed:
+
+      * temporal_unifier minted synthetic temporal individuals at
+        sec.gov/temporal/ and noaa.gov/temporal/ on every build;
+      * its SEC_DATE_PREDS carried hasattr()/else fallbacks spelling the old
+        sec.gov predicates -- dead code that would have reintroduced them;
+      * sec_linker and sec/measurements re-declared the shared SEC namespace
+        as "http://www.sec.gov#";
+      * noaa/patterns keyed its severity, urgency and certainty ordinals on 21
+        CAP value URIs, so escalation detection silently stopped ranking.
+
+    Publishers' real vocabularies are exempt: reusing those at their real URIs
+    is correct, and they are listed in PUBLISHER_VOCABULARIES.
+    """
+    import re
+    from pathlib import Path
+
+    import spark_jobs
+
+    allowed = set(PUBLISHER_VOCABULARIES)
+    package = Path(spark_jobs.__file__).parent
+
+    offenders = {}
+    for module in sorted(package.rglob("*.py")):
+        literals = re.findall(r'"(https?://[^"]+)"', module.read_text())
+        bad = [
+            literal for literal in literals
+            if any(domain in literal for domain in PUBLISHER_DOMAINS)
+            and not any(literal.startswith(ok) for ok in allowed)
+        ]
+        if bad:
+            offenders[str(module.relative_to(package))] = sorted(set(bad))
+
+    assert not offenders, (
+        "hardcoded publisher-domain URIs found; use the rdf_utils constant so "
+        f"they move with the vocabulary:\n{offenders}"
     )
 
 

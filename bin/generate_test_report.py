@@ -98,6 +98,34 @@ def _parse_suite(path: str) -> dict:
     }
 
 
+def _build_name(artifact_dir: Path, path: Path) -> str:
+    """Identify the run a slot_mapping.json came from.
+
+    Artifacts are laid out as ``<run>/pyg/year=/month=/metadata/<file>``, so
+    everything ABOVE the ``pyg/`` output tree is the run's identity. That is
+    one component for the per-test runs (``test_full_ntriples0``) and two for
+    the reproducibility twins (``reproducibility0/run1``).
+
+    Previously this searched the ancestors for a ``test_``-prefixed directory
+    and fell back to the parent directory name. The twin runs have no such
+    ancestor -- their basetemp is ``reproducibility0``, named by
+    tmp_path_factory rather than by a test function -- so both fell back to
+    ``metadata``, the directory every slot mapping happens to sit in. The
+    report showed two identically-labelled rows and lost which twin was which.
+    Their NUMBERS matching is correct and is the point of
+    test_output_is_reproducible; only the label was wrong.
+    """
+    try:
+        parts = path.relative_to(artifact_dir).parts
+    except ValueError:
+        return path.parent.name
+    if "pyg" in parts:
+        head = parts[:parts.index("pyg")]
+        if head:
+            return "/".join(head)
+    return path.parent.name
+
+
 def _encoding_capacity(artifact_dir: str) -> list[dict]:
     """class_identity capacity from every slot_mapping.json a run produced.
 
@@ -121,12 +149,7 @@ def _encoding_capacity(artifact_dir: str) -> list[dict]:
         if not dim:
             continue   # slot mapping < 1.1 cannot report capacity
         rows.append({
-            # The fixture set is the run's identity here; basetemp names it
-            # (e.g. test_full_turtle_parquet0).
-            "build": next(
-                (p.name for p in path.parents if p.name.startswith("test_")),
-                path.parent.name,
-            ),
+            "build": _build_name(Path(artifact_dir), path),
             "total_classes": total,
             "segment_dim": dim,
             "headroom_classes": ci.get("headroom_classes"),
