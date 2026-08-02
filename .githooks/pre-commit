@@ -1,0 +1,12 @@
+#!/bin/sh
+#
+# Reject staged changes containing invisible or homoglyph-prone Unicode.
+#
+# Enable once per clone:
+#     git config core.hooksPath .githooks
+#
+# This mirrors the `unicode` GitHub Actions workflow so the same rules apply
+# locally and in CI. CI is the enforcement -- this hook only fails faster, and
+# can be bypassed with `git commit --no-verify`.
+#
+exec python3 scripts/check_unicode.py --staged
