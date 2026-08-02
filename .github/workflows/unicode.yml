@@ -1,0 +1,23 @@
+name: unicode
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    name: reject invisible and confusable characters
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # No dependencies: the checker is stdlib-only by design, so this job
+      # stays fast and cannot break when a requirements pin moves.
+      - name: Check tracked files for disallowed Unicode
+        run: python scripts/check_unicode.py
