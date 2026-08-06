@@ -1,0 +1,20 @@
+# Findings reviewed and accepted. Each line is a gitleaks fingerprint
+# (commit:path:rule:line) for a match that is NOT a real bucket.
+#
+# All eight are in deployment/cdk/README.md, which no longer exists in the
+# tree, and neither value names anything real: 's3://artifacts/...' is a
+# generic path used in an example, and
+# 'pyg-knowledge-graph-builder-dev-artifacts-123456789' ends in a placeholder
+# account suffix.
+#
+# Recorded rather than allowlisted by shape: 'artifacts' is a plausible name
+# for a REAL bucket, so teaching the rule to accept it would blind the check
+# that keeps this project deployment-agnostic. The current tree is clean.
+a46e1ebcf9427135b876c7c38130bc2cdc3b9c18:deployment/cdk/README.md:hardcoded-s3-bucket:13
+a46e1ebcf9427135b876c7c38130bc2cdc3b9c18:deployment/cdk/README.md:hardcoded-s3-bucket:14
+a46e1ebcf9427135b876c7c38130bc2cdc3b9c18:deployment/cdk/README.md:hardcoded-s3-bucket:15
+a46e1ebcf9427135b876c7c38130bc2cdc3b9c18:deployment/cdk/README.md:hardcoded-s3-bucket:16
+a46e1ebcf9427135b876c7c38130bc2cdc3b9c18:deployment/cdk/README.md:hardcoded-s3-bucket:17
+a46e1ebcf9427135b876c7c38130bc2cdc3b9c18:deployment/cdk/README.md:hardcoded-s3-bucket:18
+a46e1ebcf9427135b876c7c38130bc2cdc3b9c18:deployment/cdk/README.md:hardcoded-s3-bucket:56
+ae7c576f5b9e1fc738d45ee047daaad2a461ca12:deployment/cdk/README.md:hardcoded-s3-bucket:250

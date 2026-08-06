@@ -1,0 +1,41 @@
+name: gitleaks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  scan:
+    name: reject committed secrets
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Secrets are not removed by deleting them in a later commit -- the
+          # value stays reachable in history and remains valid until rotated.
+          # A shallow clone would report a repository clean that is not.
+          fetch-depth: 0
+
+      # The released binary rather than a marketplace action: this repo's CI
+      # convention is jobs that cannot break when somebody else's pin moves,
+      # and gitleaks-action additionally wants a licence key for organisation
+      # accounts. One pinned download has neither problem.
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: "8.28.0"
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Scan history for secrets
+        run: |
+          gitleaks detect \
+            --config .gitleaks.toml \
+            --redact \
+            --verbose \
+            --exit-code 1
