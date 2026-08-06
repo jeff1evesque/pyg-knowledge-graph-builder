@@ -1,0 +1,183 @@
+# Shared secret-scanning rules.
+#
+# Deliberately free of any real account id, bucket name or address: a config
+# that names the secret it defends is itself the leak, replicated into every
+# repository that adopts it. Every rule below matches a SHAPE in a context
+# where that shape can only be the real thing.
+
+title = "jefflevesque shared rules"
+
+# Paths that are not authored source. Generated bundles, compiled artifacts and
+# vendored trees restate their inputs in forms no reviewer reads, so a finding
+# in one is a finding about the file it came from -- reported twice and fixed
+# in neither. The source itself is still scanned.
+[[allowlists]]
+description = "generated, compiled and vendored files"
+paths = [
+  '''(?i)(^|/)(node_modules|vendor|__pycache__|\.venv|venv|\.mypy_cache|\.pytest_cache)/''',
+  # vendored third-party packages: their example data is not our secret
+  '''(?i)(^|/)(site-packages|botocore|boto3|s3transfer|jmespath|dateutil|urllib3|pip|setuptools|pkg_resources)/''',
+  '''(?i)(^|/)(dist|build|out)/''',
+  '''(?i)\.(min\.js|min\.css|map|pyc|lock)$''',
+  '''(?i)(^|/)(package-lock\.json|yarn\.lock|poetry\.lock|Cargo\.lock)$''',
+]
+
+[extend]
+# AWS keys, private keys, cloud provider tokens, github/slack/stripe tokens and
+# ~150 other providers. Maintained upstream; the rules below are the ones this
+# stack needs that upstream does not cover.
+useDefault = true
+
+# --------------------------------------------------------------------------- #
+# AWS account identity
+# --------------------------------------------------------------------------- #
+
+[[rules]]
+id = "aws-account-id"
+description = "AWS account id in an ARN, console URL or CDK environment"
+# Anchored on an AWS context. A bare 12-digit number is a timestamp, an order
+# id or a phone number far more often than it is an account, and a rule that
+# cannot tell the difference gets disabled within a week.
+regex = '''(?i)(?:arn:aws[a-z-]*:[a-z0-9-]*:[a-z0-9-]*:|aws://|(?:account[_-]?id|awsaccountid)["'\s:=]{1,4})(\d{12})'''
+secretGroup = 1
+tags = ["aws", "account-id"]
+
+[rules.allowlist]
+# The placeholder every AWS document uses, and obvious dummies.
+# The account ids AWS publishes in its own documentation and SDK examples.
+# The vendored botocore tree in one repository restates them 1,826 times.
+regexes = ['''(?:123456789012|012345678901|012345678910|111122223333|999999999999|000000000000|111111111111|222222222222|333333333333|444455556666|123456789011|098765432109|01234567\d{4})''']
+
+# --------------------------------------------------------------------------- #
+# Long-lived OAuth material
+# --------------------------------------------------------------------------- #
+
+[[rules]]
+id = "oauth-refresh-token"
+description = "OAuth refresh or access token assigned to a variable"
+# Refresh tokens are the highest-value secret in this stack: they are long
+# lived, they are not rotated on deploy, and they buy an attacker the account
+# rather than one request.
+regex = '''(?i)\b(?:refresh|access|bearer|id)[_-]?token["'\s:=]{1,4}["']([A-Za-z0-9._\-+/]{24,})["']'''
+secretGroup = 1
+tags = ["oauth", "token"]
+
+[rules.allowlist]
+# A dotted module path is a HANDLER, not a token: this stack maps step names to
+# lambda handlers in dicts keyed 'refresh_token', and the value is
+# 'handlers.market_refresh_token.handler'. Matching the key name alone made the
+# rule cry wolf on the first file it saw, which is how a scanner gets turned off.
+regexes = [
+  '''(?i)(?:REPLACE|EXAMPLE|PLACEHOLDER|DUMMY|FAKE|TEST|YOUR[_-]?|<[^>]+>|\$\{|os\.environ|getenv)''',
+  '''^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$''',
+  '''(?i)handler''',
+]
+regexTarget = "match"
+
+# --------------------------------------------------------------------------- #
+# Credentials embedded in URLs
+# --------------------------------------------------------------------------- #
+
+[[rules]]
+id = "url-basic-auth"
+description = "username:password embedded in a URL"
+# Proxy endpoints are the usual source: a rotating-proxy provider hands out
+# http://user:pass@host:port and it goes straight into a config.
+regex = '''(?i)\b(?:https?|socks5|ftp|mongodb|postgres(?:ql)?|redis|amqp)://[^\s:/@]{2,}:([^\s:/@]{4,})@'''
+secretGroup = 1
+tags = ["credentials", "url"]
+
+[rules.allowlist]
+# '{proxy_user}:{proxy_user_password}@' is an f-string TEMPLATE -- the secret is
+# in a variable, which is the pattern we want people using. Flagging it would
+# punish the correct code and teach everyone to ignore the scanner.
+regexes = [
+  '''(?i)(?:REPLACE|EXAMPLE|PLACEHOLDER|DUMMY|FAKE|REDACTED|\*\*\*|user:pass|username:pass|<[^>]+>|\$\{|%s)''',
+  '''\{[A-Za-z_][A-Za-z0-9_]*\}''',
+]
+
+# --------------------------------------------------------------------------- #
+# AWS long-lived credentials
+# --------------------------------------------------------------------------- #
+
+[[rules]]
+id = "aws-access-key-id"
+description = "AWS access key id"
+# Explicit, despite `useDefault`. The bundled aws rules want the key ALONGSIDE
+# a recognised assignment or its matching secret, so a bare
+# `AKIA...` on its own line passes -- verified against 8.30. That is the single
+# most damaging string that can enter these repositories, so it is matched on
+# its own unmistakable shape: AKIA/ASIA/ABIA/ACCA plus 16 upper-case
+# alphanumerics is not a value anything else produces.
+regex = '''\b((?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16})\b'''
+secretGroup = 1
+keywords = ["AKIA", "ASIA", "ABIA", "ACCA"]
+tags = ["aws", "access-key"]
+
+[rules.allowlist]
+# The key AWS itself prints in every code sample.
+regexes = ['''AKIAIOSFODNN7EXAMPLE''']
+
+# Shapes that cannot be a secret, whatever rule matched them. Kept as SHAPES
+# rather than as a list of waived findings: waiving one file at a time is how an
+# allowlist quietly becomes an inventory of real leaks nobody rechecks.
+[[allowlists]]
+description = "concatenation, interpolation and attribute access"
+regexTarget = "line"
+regexes = [
+  # the value is assembled at runtime, so it is not in the file
+  '''(?:\+\s*["'a-zA-Z_]|\$\{|\{\{|f["']|%s|%\(|\.format\(|\.join\()''',
+  # an attribute, a module path or an environment read
+  '''(?:this\.|self\.|os\.environ|getenv|process\.env|import\.meta\.env)''',
+]
+
+[[allowlists]]
+description = "documentation and placeholders"
+regexTarget = "line"
+regexes = [
+  '''(?i)(?:REPLACE|EXAMPLE|PLACEHOLDER|DUMMY|FAKE|REDACTED|SAMPLE|YOUR[_-]?|<[^>]{1,40}>)''',
+]
+
+[[allowlists]]
+description = "values that are not secrets by construction"
+# Narrow on purpose. Exempting COMMENTS wholesale would be easier and wrong: a
+# key pasted into a comment is still a published key. These exempt the value's
+# own shape instead.
+regexTarget = "secret"
+regexes = [
+  # a filename -- documentation naming a file, not quoting a credential
+  '''(?i)^[\w.-]+\.(xml|json|htm|html|csv|parquet|py|js|ts|md|ya?ml|txt|pdf|jpg|png|gz|zip|pt)$''',
+  # the dummy passwords every documentation example uses
+  '''(?i)^(?:password|passwd|pass|secret|changeme|hunter2|letmein|topsecret|s3cret)$''',
+]
+
+# --------------------------------------------------------------------------- #
+# Repository-specific: this project must stay deployment-agnostic
+# --------------------------------------------------------------------------- #
+
+[[rules]]
+id = "hardcoded-s3-bucket"
+description = "Real S3 bucket name in code or documentation"
+# Scoped to this repository on purpose. Naming a bucket is unavoidable in
+# infrastructure code -- cloudformation names eight of them and has to -- but a
+# graph builder that hard-codes one cannot be run against another dataset, and a
+# README that names one publishes the deployment's storage layout to anybody who
+# reads it.
+#
+# Matched only in a BUCKET context. The bare domain is not the pattern: it is
+# also the RDF namespace authority for this whole ecosystem
+# (https://<domain>/ontology/...), so a rule keyed on the domain flags every
+# ontology term, including inside binary parquet fixtures.
+regex = '''(?i)(?:s3://|s3a://|arn:aws:s3:::|Bucket\s*=\s*["']|bucket_name\s*=\s*["']|https?://[a-z0-9.-]+\.s3[.-])([a-z0-9][a-z0-9.-]{2,62})'''
+path = '''(?i)\.(py|md|ipynb|ya?ml|json|tf|sh|cfg|toml)$'''
+secretGroup = 1
+tags = ["aws", "s3", "portability"]
+
+[rules.allowlist]
+# Documentation placeholders. A README SHOULD show 's3://bucket/path' -- that is
+# the correct way to document a path, and blocking it teaches people to write
+# worse docs.
+regexes = [
+  '''(?i)(?://|:::|["'])(?:bucket|my-bucket|my-archive|my-data|my-data-lake|example|example-bucket|test|test-bucket|placeholder|your-bucket|some-bucket|sample|demo)(?:[/"'`\s]|$)''',
+]
+regexTarget = "match"
