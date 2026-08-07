@@ -11,11 +11,10 @@ All methods:
 """
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
-from rdflib.namespace import RDF, RDFS, OWL, XSD
+from rdflib.namespace import RDF, RDFS, OWL
 
 from spark_jobs.utils.rdf_utils import (
-    BLS_ENRICHMENT, SEC_ENRICHMENT, MARKET_ENRICHMENT, NOAA_ENRICHMENT,
-    UNIFIED, CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER,
+    BLS_ENRICHMENT, UNIFIED, CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER,
     WKYENG, SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP, CAP, WEATHER,
     MARKET_FEEDS,
     ALERT,
@@ -23,10 +22,9 @@ from spark_jobs.utils.rdf_utils import (
 )
 from spark_jobs.enrichment.intra_source.bls.patterns import BLS_SECTOR_PATTERNS
 from spark_jobs.utils.spark_rdf_utils import (
-    extract_entities_by_type, extract_property, build_entity_properties,
-    deduplicate_against_existing,
+    extract_entities_by_type, extract_property, deduplicate_against_existing,
 )
-from typing import Dict, List, Optional, Set
+from typing import List, Optional, Set
 import logging
 
 logger = logging.getLogger(__name__)

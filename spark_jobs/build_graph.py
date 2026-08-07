@@ -1707,7 +1707,7 @@ def main():
     s3_client = boto3.client("s3") if needs_s3 else None
 
     logger.info(
-        f"Initialized SparkSession"
+        "Initialized SparkSession"
         + (" and S3 client" if s3_client is not None else "")
     )
     logger.info("")

@@ -54,7 +54,6 @@ from spark_jobs.enrichment.ontology_mapper import (
     derive_domain_edges,
     derive_range_edges,
     partition_class_mappings,
-    partition_shared_targets,
     resolve_class_mappings,
     RDF_TYPE,
     RDFS_DOMAIN,
@@ -726,7 +725,7 @@ def test_the_nine_measurement_properties_become_sub_properties(spark,
 
 def test_the_property_hierarchy_is_acyclic_and_deterministic(spark,
                                                              make_triples):
-    triples = make_triples([("https://ex/n", RDF_TYPE, "https://ex/Nothing")])
+    make_triples([("https://ex/n", RDF_TYPE, "https://ex/Nothing")])
     mapper = OntologyMapper(spark)
     first = sorted(_rows(mapper._derive_property_hierarchy()))
     again = sorted(_rows(mapper._derive_property_hierarchy()))

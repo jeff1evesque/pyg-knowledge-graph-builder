@@ -23,7 +23,6 @@ import json
 
 import numpy as np
 import pytest
-import torch
 from pyspark.sql import functions as F
 
 from spark_jobs.pyg_builder.node_mapper import NodeMapper
@@ -727,8 +726,6 @@ def test_saturation_warning_fires_only_when_identity_is_at_risk(
 ):
     import logging
 
-    codes = [(i % dim, (i * 7 + 1) % dim, (i * 13 + 2) % dim, (i * 29 + 3) % dim)
-             for i in range(num_classes)]
     report = {"class_identity": {
         "total_classes": num_classes,
         "segment_dim": dim,

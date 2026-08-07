@@ -1311,7 +1311,7 @@ def _assert_sameas_links_only_temporal(config):
         return bool(
             re.fullmatch(months, local)
             or re.fullmatch(r"\d{4}", local)
-            or re.fullmatch(rf"Year\d{{4}}", local)
+            or re.fullmatch(r"Year\d{4}", local)
             or re.fullmatch(r"Q[1-4]", local)
         )
 

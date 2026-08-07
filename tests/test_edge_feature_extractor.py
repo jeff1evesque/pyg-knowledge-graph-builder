@@ -23,7 +23,6 @@ import math
 
 import pytest
 import torch
-from pyspark.sql import functions as F
 
 from spark_jobs.pyg_builder.node_mapper import NodeMapper
 from spark_jobs.pyg_builder.edge_mapper import EdgeMapper

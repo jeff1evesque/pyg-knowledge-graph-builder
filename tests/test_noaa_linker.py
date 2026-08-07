@@ -12,7 +12,6 @@ Two tiers, mirroring test_bls_linker.py:
 Drives enrich() over tiny in-memory triples on the shared local SparkSession
 (`spark` / `make_triples` fixtures from conftest.py).
 """
-import pytest
 
 from spark_jobs.utils.rdf_utils import NOAA_ENRICHMENT
 

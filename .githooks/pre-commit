@@ -19,3 +19,26 @@ set -e
 
 python3 scripts/check_unicode.py --staged
 python3 scripts/check_secrets.py --staged
+
+#
+# Lint the staged Python files. Mirrors the `lint` GitHub Actions workflow,
+# which reads the same .ruff.toml, so the hook and CI cannot disagree about
+# which rules apply.
+#
+# Unlike the two checks above, this one is NOT stdlib-only -- it needs ruff on
+# PATH. A fresh clone may not have it, so a missing ruff is a skip with a
+# notice rather than a hard failure; CI remains the enforcement, which is the
+# same division of labour described at the top of this file.
+#
+staged_python=$(git diff --cached --name-only --diff-filter=ACMR | grep '\.py$' || true)
+
+if [ -n "${staged_python}" ]; then
+    if command -v ruff >/dev/null 2>&1; then
+        # --force-exclude makes ruff honour the exclusions in .ruff.toml even
+        # though the paths are being named explicitly here.
+        echo "${staged_python}" | xargs ruff check --force-exclude --
+    else
+        echo 'Notice (pre-commit): ruff is not installed -- skipping the Python lint.'
+        echo '                     CI still enforces it. Install: pip install ruff==0.16.1'
+    fi
+fi

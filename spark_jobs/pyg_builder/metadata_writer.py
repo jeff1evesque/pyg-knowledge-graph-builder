@@ -879,13 +879,6 @@ def derive_metadata_prefix(pyg_output_key: str) -> str:
     "{stem}_metadata/" to support multiple experiments in the same
     time period directory.
     """
-    if "/" in pyg_output_key:
-        parent = pyg_output_key.rsplit("/", 1)[0]
-        filename = pyg_output_key.rsplit("/", 1)[1]
-    else:
-        parent = ""
-        filename = pyg_output_key
-
     return _derive_sibling_prefix(pyg_output_key, "metadata")
 
 

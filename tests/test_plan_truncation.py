@@ -42,7 +42,6 @@ that has already cost three incidents, so they must run on every push, not only
 in the manual e2e job.
 """
 
-import pytest
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 

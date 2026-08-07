@@ -2077,3 +2077,32 @@ CLUSTER_SMOKE_OUTPUT_PATH=s3a://<bucket>/<prefix> \
 ```
 
 This is **local-only and not committed** — `reports/tests/` is gitignored. The e2e suite is too heavy for the GitHub Actions runners, so the report can't be produced in CI; instead each developer runs `bin/generate_report.sh` on their own branch to verify locally (the **tests** badge covers the fast suite in CI). The report always includes the fast unit suite and the CPU e2e run; it adds the GPU (RAPIDS) e2e run when the hardware is available, and the [cluster smoke test](#cluster-smoke-test-a-real-cluster-not-local) when `SPARK_MASTER_URL` and `CLUSTER_SMOKE_OUTPUT_PATH` are set (source data auto-stages, so `CLUSTER_SMOKE_SOURCE_PATH` is optional). [`bin/generate_test_report.py`](bin/generate_test_report.py) is the underlying renderer (reads pytest JUnit XML).
+
+---
+
+## Lint
+
+`lint.yml` runs on every push and pull request, and [`.githooks/pre-commit`](.githooks/pre-commit) runs the same checks locally so the two cannot disagree.
+
+| Workflow | What it checks |
+|---|---|
+| [`lint.yml`](.github/workflows/lint.yml) | `ruff check .` — rules in [`.ruff.toml`](.ruff.toml) |
+
+The rule set is deliberately **correctness-only** (`E4`, `E7`, `E9`, `F`, `W6`): syntax errors, undefined names, unused imports and variables, bare `except`, invalid escape sequences. No formatting, import-ordering, or type-annotation rules are enabled, so a red build always means a real defect rather than a style preference. Notebooks are excluded — several carry pasted tabular output inside code cells and are not parseable Python.
+
+The `ruff` version is pinned in the workflow so a new upstream release cannot redden an untouched branch; bump it deliberately.
+
+### Running it by hand
+
+```bash
+pip install ruff==0.16.1
+ruff check .
+```
+
+### Enabling the hook
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The hook checks only **staged** files, and skips with a notice (rather than failing) when the linter is not installed — a fresh clone stays committable, and CI remains the enforcement. Bypass with `git commit --no-verify`.

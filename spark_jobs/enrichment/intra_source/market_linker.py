@@ -28,7 +28,6 @@ from typing import List, Optional
 from spark_jobs.utils.rdf_utils import MARKET_QUOTES, MARKET_ENRICHMENT
 from spark_jobs.enrichment.intra_source.market.patterns import (
     get_sector_patterns,
-    MARKET_OPTION_STRATEGY_PATTERNS,
 )
 
 import logging

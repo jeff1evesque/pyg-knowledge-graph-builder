@@ -1,0 +1,26 @@
+# Bug-focused rule set: syntax errors, undefined names, unused imports and
+# variables, bare excepts, invalid escape sequences.
+#
+# Stylistic rules are deliberately NOT enabled -- no line-length, import
+# ordering, quote style, or type-annotation modernization. The linter should
+# only ever fire on something that is arguably wrong, never on something that
+# is merely different, so that a red build always means a real defect.
+#
+# Mirrored by the `lint` GitHub Actions workflow and by .githooks/pre-commit,
+# so local and CI results always agree.
+
+target-version = "py312"
+
+# Notebooks are exploratory and some carry pasted tabular output inside code
+# cells, which is not parseable Python. They are not part of the deployed
+# artifact, so linting them yields noise rather than signal.
+extend-exclude = ["*.ipynb"]
+
+[lint]
+select = [
+    "E4",  # import placement -- multiple imports on one line, imports not at top
+    "E7",  # statement errors -- bare except, `== None`, ambiguous names
+    "E9",  # syntax and IO errors
+    "F",   # pyflakes -- undefined names, unused imports and variables
+    "W6",  # deprecated constructs, notably invalid escape sequences
+]

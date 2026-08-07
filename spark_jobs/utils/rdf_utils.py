@@ -3,8 +3,8 @@ Utilities for loading and manipulating RDF graphs
 Foundation for CPI data processing
 """
 
-from rdflib import Graph, Namespace, URIRef, Literal
-from rdflib.namespace import RDF, RDFS, OWL, XSD
+from rdflib import Namespace, URIRef
+from rdflib.namespace import RDFS, OWL
 from typing import Dict, List, Tuple
 import logging
 
