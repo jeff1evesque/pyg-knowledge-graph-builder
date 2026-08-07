@@ -25,8 +25,7 @@ from typing import Dict, List, Optional, Set
 from rdflib.namespace import RDF, RDFS
 
 from spark_jobs.utils.rdf_utils import (
-    BLS_ENRICHMENT, UNIFIED,
-    CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER, WKYENG,
+    BLS_ENRICHMENT, CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER, WKYENG,
     identifier_namespace,
 )
 from spark_jobs.enrichment.intra_source.bls.patterns import BLS_SECTOR_PATTERNS

@@ -87,7 +87,6 @@ from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
-from spark_jobs.utils.rdf_utils import NAMESPACE_PREFIXES
 
 logger = logging.getLogger(__name__)
 

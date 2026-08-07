@@ -32,11 +32,11 @@ from spark_jobs.utils.rdf_utils import (
     identifier_namespace,
 )
 from spark_jobs.enrichment.intra_source.sec.patterns import (
-    SEC_SECTOR_PATTERNS, SEC_VIOLATION_PATTERNS, SEC_COMPANY_STATUS_PATTERNS,
+    SEC_SECTOR_PATTERNS, SEC_VIOLATION_PATTERNS,
 )
 from spark_jobs.enrichment.intra_source.sec.correlations import KNOWN_CORRELATIONS
 from spark_jobs.utils.spark_rdf_utils import (
-    extract_entities_by_type, extract_property, deduplicate_against_existing,
+    extract_entities_by_type, deduplicate_against_existing,
 )
 
 import logging

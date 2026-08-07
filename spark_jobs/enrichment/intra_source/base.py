@@ -2,7 +2,7 @@
 Base classes for intra-source enrichment
 """
 from abc import ABC, abstractmethod
-from rdflib import Graph, URIRef, Namespace
+from rdflib import Graph, Namespace
 from typing import Dict, Set, List
 
 

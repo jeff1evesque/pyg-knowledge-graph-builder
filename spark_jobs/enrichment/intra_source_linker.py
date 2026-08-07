@@ -11,7 +11,7 @@ from spark_jobs.enrichment.intra_source.bls_linker import BLSIntraSourceLinker
 from spark_jobs.enrichment.intra_source.sec_linker import SECIntraSourceLinker
 from spark_jobs.enrichment.intra_source.market_linker import MarketIntraSourceLinker
 from spark_jobs.enrichment.intra_source.noaa_linker import NOAAIntraSourceLinker
-from typing import Dict, Optional, List
+from typing import Dict, List
 import logging
 
 logger = logging.getLogger(__name__)

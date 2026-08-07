@@ -40,7 +40,7 @@ from functools import reduce
 from typing import List, Optional
 
 from spark_jobs.utils.rdf_utils import (
-    CAP, WEATHER, NOAA_ENRICHMENT, ALERT
+    CAP, WEATHER, NOAA_ENRICHMENT
 )
 from spark_jobs.enrichment.intra_source.noaa.patterns import (
     NOAA_EVENT_PATTERNS,
