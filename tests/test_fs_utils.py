@@ -14,7 +14,6 @@ loud failure instead of a quiet local write — is exactly what regressed twice.
 """
 
 import json
-import os
 
 import pytest
 
