@@ -1,0 +1,65 @@
+name: trivy
+
+##
+## Known-vulnerability gate. Deliberately NOT a bare `push:` alongside
+## `pull_request:` -- with both unfiltered, every push to a PR branch fires the
+## job twice, and each run pulls a vulnerability database. Restricting push to
+## the default branch keeps the direct-to-master case covered without paying
+## twice for every commit.
+##
+## The schedule matters because a new advisory lands without anyone pushing, so
+## the gate has to be able to fire on its own. The hour is staggered across
+## repositories so they neither contend for the database nor deliver their
+## failures as one indistinguishable burst.
+##
+on:
+  pull_request:
+  push:
+    branches: [master]
+  schedule:
+    - cron: "0 14 * * 1"
+
+##
+## Without an explicit block the job inherits the repository-default
+## GITHUB_TOKEN scope, which is broader than a read-only scan needs.
+##
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: reject known vulnerabilities
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      ##
+      ## The released binary rather than a marketplace action, matching the
+      ## convention the `gitleaks` workflow already sets: a pinned download
+      ## cannot break when somebody else's tag moves. Pinned for the same
+      ## reason the linter is -- an unpinned scanner turns an untouched branch
+      ## red on somebody else's release day.
+      ##
+      - name: Install trivy
+        env:
+          TRIVY_VERSION: "0.73.0"
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          tar -xzf /tmp/trivy.tar.gz -C /tmp trivy
+          sudo install -m 0755 /tmp/trivy /usr/local/bin/trivy
+          trivy --version
+
+      ##
+      ## Walks the checkout and picks up every dependency manifest it finds, at
+      ## any depth, so this step needs no per-repository path list.
+      ##
+      - name: Scan dependencies
+        run: |
+          trivy fs \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            .
