@@ -1,0 +1,16 @@
+# Normalize every text file to LF, both in the repository and on checkout.
+#
+# Git already stores LF internally; `eol=lf` additionally forces LF in the
+# working tree, so a Windows clone cannot reintroduce CRLF. No tracked file in
+# this repository currently contains CRLF, so this is a no-op on existing
+# content -- it only pins the behaviour going forward.
+#
+# `text=auto` still lets Git detect binary content and leave it untouched; the
+# explicit `binary` entries below are belt-and-braces for types Git would
+# otherwise have to sniff.
+* text=auto eol=lf
+
+# Executed directly, so a stray CR breaks the shebang with the notoriously
+# opaque "bad interpreter: /bin/sh^M".
+*.sh        text eol=lf
+.githooks/* text eol=lf
