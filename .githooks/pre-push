@@ -1,0 +1,91 @@
+#!/bin/sh
+#
+# Reject a push whose target is the default branch.
+#
+# Enable once per clone (the same setting the pre-commit hook needs):
+#     git config core.hooksPath .githooks
+#
+# This is the LOCAL half of a two-part guard. The authoritative half is the
+# branch protection rule on GitHub, which is what actually stops a push nobody
+# ran this hook for -- another clone, a codespace, the web editor. Configure both
+# and neither has to be trusted alone:
+#
+#     gh api -X PUT repos/OWNER/REPO/branches/master/protection ...
+#
+# See scripts/protect_default_branch.sh, which sets it across every repository.
+#
+# Note: GitHub's "Require a pull request before merging" does NOT apply to
+#       repository admins unless "Do not allow bypassing the above settings" is
+#       also ticked -- that box is OFF by default. An owner pushing a plain
+#       fast-forward to master therefore succeeds while force pushes stay
+#       blocked, which is a confusing combination to debug after the fact. This
+#       hook refuses regardless of who is pushing.
+#
+# Note: advisory, not a control. 'git push --no-verify' skips it, and it cannot
+#       see a push made from anywhere but this working copy. That is the reason
+#       the server-side rule is the one that matters, and this only fails faster
+#       -- the same division of labour the pre-commit hook describes.
+#
+set -e
+
+#
+# The set of refs treated as protected.
+#
+# 'master' and 'main' are ALWAYS included rather than only consulting
+# refs/remotes/origin/HEAD, because that ref is not trustworthy for this: it is a
+# local cache, it is unset in some clones, it keeps pointing at the old name after
+# a default branch is renamed, and 'git clone <local-path>' sets it to whatever
+# branch the source repository happened to have checked out. Trusting it alone
+# means a clone can silently decide that 'master' is not the default branch and
+# wave a direct push straight through -- which is exactly the failure this hook
+# exists to prevent.
+#
+# origin/HEAD is still read and added, so a repository whose default branch is
+# named something else is covered too.
+#
+protected_branches='master main'
+
+remote_head=$(
+    git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null |
+        sed 's#^origin/##'
+)
+
+case " ${protected_branches} " in
+    *" ${remote_head} "*) ;;
+    *) [ -n "${remote_head}" ] && protected_branches="${protected_branches} ${remote_head}" ;;
+esac
+
+#
+# stdin carries one line per ref being pushed:
+#     <local ref> <local sha> <remote ref> <remote sha>
+#
+# only the remote ref matters here: pushing a local branch named 'master' to a
+# feature branch is fine, and pushing a feature branch to the default branch is
+# not.
+#
+rejected=''
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    for branch in ${protected_branches}; do
+        if [ "${remote_ref}" = "refs/heads/${branch}" ]; then
+            rejected="${branch}"
+        fi
+    done
+done
+
+if [ -n "${rejected}" ]; then
+    echo "Error (pre-push): refusing to push directly to '${rejected}'."
+    echo
+    echo "  Every merge in this repository's history came through a pull"
+    echo "  request. Push a feature branch and open one instead:"
+    echo
+    echo "      git switch -c feature-<issue>"
+    echo "      git push -u origin feature-<issue>"
+    echo
+    echo "  If you genuinely need to bypass this, it is 'git push --no-verify'"
+    echo "  -- but note that the branch protection rule on GitHub will refuse"
+    echo "  the push anyway once it is configured to include administrators."
+    exit 1
+fi
+
+exit 0
