@@ -6,8 +6,17 @@ name: tests
 #
 # Runs against a local SparkSession (no cluster, no RAPIDS), so a stock
 # ubuntu-latest runner (Java 17 + Python 3.12) reproduces a local run exactly.
+##
+## Push is scoped to the default branch. With a bare `push:` beside
+## `pull_request:`, every commit on a branch with an open pull request fires
+## this workflow twice and bills twice for the same answer -- see trivy.yml for
+## the longer note. Branch work stays covered by `pull_request`, and the
+## direct-to-master case by `push`.
+##
+
 on:
   push:
+    branches: [master]
   pull_request:
 
 # A newer push to the same branch/PR cancels an in-progress run.
