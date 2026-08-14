@@ -34,11 +34,26 @@ useDefault = true
 
 [[rules]]
 id = "aws-account-id"
-description = "AWS account id in an ARN, console URL or CDK environment"
+description = "AWS account id in an ARN, console URL or an account assignment"
 # Anchored on an AWS context. A bare 12-digit number is a timestamp, an order
 # id or a phone number far more often than it is an account, and a rule that
 # cannot tell the difference gets disabled within a week.
-regex = '''(?i)(?:arn:aws[a-z-]*:[a-z0-9-]*:[a-z0-9-]*:|aws://|(?:account[_-]?id|awsaccountid)["'\s:=]{1,4})(\d{12})'''
+#
+# The assignment anchor is 'account' with an OPTIONAL '_id' suffix. Anchoring on
+# 'account_id' alone missed every one of these:
+#
+#     ACCOUNT=123456789012                              # a shell deploy script
+#     env=cdk.Environment(account="123456789012", ...)  # cdk, python and ts
+#     CDK_DEFAULT_ACCOUNT=123456789012                  # cdk, environment
+#     "account=123456789012:region=us-east-1"           # cdk.context.json keys
+#
+# (the ids above are the documentation placeholder, so this file does not trip
+#  its own rule)
+#
+# The '\b' that would normally precede 'account' is omitted on purpose: without
+# it the alternation still matches inside CDK_DEFAULT_ACCOUNT, where the
+# preceding '_' is a word character and a boundary therefore does not exist.
+regex = '''(?i)(?:arn:aws[a-z-]*:[a-z0-9-]*:[a-z0-9-]*:|aws://|(?:aws[_-]?)?account(?:[_-]?id)?["'\s:=]{1,4})(\d{12})'''
 secretGroup = 1
 tags = ["aws", "account-id"]
 
@@ -47,6 +62,105 @@ tags = ["aws", "account-id"]
 # The account ids AWS publishes in its own documentation and SDK examples.
 # The vendored botocore tree in one repository restates them 1,826 times.
 regexes = ['''(?:123456789012|012345678901|012345678910|111122223333|999999999999|000000000000|111111111111|222222222222|333333333333|444455556666|123456789011|098765432109|01234567\d{4})''']
+
+# --------------------------------------------------------------------------- #
+# AWS account identity, embedded in a hostname
+# --------------------------------------------------------------------------- #
+
+[[rules]]
+id = "aws-account-id-host"
+description = "AWS account id in an ECR registry or console sign-in hostname"
+# A separate rule rather than another alternative in the one above, because the
+# account sits BEFORE its anchor here rather than after it, and one rule cannot
+# hold both orders while still reporting group 1 as the secret.
+#
+# These reach a repository through paths that have nothing to do with an SDK:
+# an ECR image reference in a Dockerfile, a compose file, a k8s manifest or a
+# workflow's `image:` key, and a console URL pasted into a runbook or a README.
+regex = '''(?i)\b(\d{12})\.(?:dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com|signin\.aws\.amazon\.com)'''
+secretGroup = 1
+keywords = ["amazonaws.com", "aws.amazon.com"]
+tags = ["aws", "account-id"]
+
+[rules.allowlist]
+# The same dummies the rule above allows; kept in step with it by hand, since
+# gitleaks has no way to share one allowlist between two rules.
+regexes = ['''(?:123456789012|012345678901|012345678910|111122223333|999999999999|000000000000|111111111111|222222222222|333333333333|444455556666|123456789011|098765432109|01234567\d{4})''']
+
+# --------------------------------------------------------------------------- #
+# AWS account identity, with no anchor at all
+# --------------------------------------------------------------------------- #
+
+[[rules]]
+id = "aws-account-id-bare"
+description = "12-digit number that could be an AWS account id, in any context"
+# The two rules above need an AWS word beside the number. This one needs
+# nothing, because the anchor is exactly what a careless paste drops: an
+# account id copied into a test fixture arrives under whatever name the fixture
+# already used, and generated test code is where this actually happens.
+#
+#     SECRET = '123456789012'               # the variable name says nothing
+#     x = ['123456789012']                  # a json, yaml or csv value
+#     my-artifacts-123456789012-us-east-1   # a bucket name
+#     /var/log/123456789012/app.log         # a path
+#     123456789012                          # alone on a line, in pasted output
+#
+# (the ids above are the documentation placeholder, so this file does not trip
+#  its own rule)
+#
+# Deliberately OVERLAPS the anchored rules rather than replacing them. A line
+# holding 'account=<id>' now reports twice, and that is the intended trade: the
+# anchored id says WHY the number looked like an account, which is worth more
+# at review time than one merged finding.
+#
+# What it costs: a phone number with a country code, a ledger or invoice id, a
+# fixture emitting random digits. Measured at zero occurrences across this
+# repository and its full history; '.gitleaksignore' is the release valve.
+#
+# No 'keywords' on purpose. Keywords are a PREFILTER -- gitleaks only runs the
+# regex on content already containing one -- so any keyword here would restrict
+# this rule to lines mentioning AWS, which is the exact anchor it exists to do
+# without.
+#
+# '\b' both sides holds it to runs of EXACTLY 12, so a 13-digit millisecond
+# timestamp does not match; unix seconds are 10 digits and fall outside too.
+regex = '''\b(\d{12})\b'''
+secretGroup = 1
+tags = ["aws", "account-id"]
+
+[rules.allowlist]
+# Anchored with ^$, unlike the two copies above. With no AWS word required, the
+# secret has to BE a dummy rather than merely contain one -- otherwise a real
+# id holding '111111111111' inside it would be waived by the substring.
+regexes = ['''^(?:123456789012|012345678901|012345678910|111122223333|999999999999|000000000000|111111111111|222222222222|333333333333|444455556666|123456789011|098765432109|01234567\d{4})$''']
+
+# --------------------------------------------------------------------------- #
+# AWS long-lived credentials, the secret half
+# --------------------------------------------------------------------------- #
+
+[[rules]]
+id = "aws-secret-access-key"
+description = "AWS secret access key or session token"
+# 'aws-access-key-id' below matches the AKIA... identifier. This matches the
+# 40-character secret that pairs with it, and the session token that arrives
+# with temporary ASIA credentials.
+#
+# Both were missed entirely by the hook that reads this file, which implements
+# the custom rules here plus private keys and had neither. In CI they were
+# caught only incidentally by the bundled 'generic-api-key' -- the fuzziest
+# rule gitleaks ships, and the first one anybody tunes when it gets noisy.
+# Losing AWS secret coverage as a side effect of that tuning is not a risk
+# worth carrying, so the coverage is explicit here.
+#
+# 'session' is spelled out because the 'oauth-refresh-token' rule below
+# alternates on refresh|access|bearer|id and does not include it.
+#
+# No 'keywords': the prefilter matches literal substrings, and the spellings
+# this accepts ('secret-access-key' as well as 'secret_access_key') have no
+# single substring in common, so a keyword list would silently drop variants.
+regex = '''(?i)\b(?:aws[_-]?)?(?:secret[_-]?access[_-]?key|session[_-]?token)["'\s:=]{1,6}["']?([A-Za-z0-9/+=]{40,})'''
+secretGroup = 1
+tags = ["aws", "secret-key"]
 
 # --------------------------------------------------------------------------- #
 # Long-lived OAuth material
