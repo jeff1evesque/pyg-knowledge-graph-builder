@@ -20,7 +20,9 @@ from spark_jobs.utils.rdf_utils import (
     ALERT,
     identifier_namespace,
 )
-from spark_jobs.enrichment.intra_source.bls.patterns import BLS_SECTOR_PATTERNS
+from spark_jobs.enrichment.intra_source.bls.patterns import (
+    BLS_SECTOR_CORRELATION, BLS_SECTOR_PATTERNS,
+)
 from spark_jobs.utils.spark_rdf_utils import (
     extract_entities_by_type, extract_property, deduplicate_against_existing,
 )
@@ -59,6 +61,7 @@ _MARKET_ENTITY_PREFIXES = _entity_prefixes(MARKET_FEEDS)
 _RDF_TYPE = str(RDF.type)
 _OWL_SAME_AS = str(OWL.sameAs)
 _RDFS_LABEL = str(RDFS.label)
+_SECTOR_CORRELATION = str(BLS_SECTOR_CORRELATION)
 
 # NOAA type URIs — aligned with updated RML mapper
 _NWS_WEATHER_ALERT_TYPE = str(WEATHER.WeatherAlert)
@@ -218,22 +221,21 @@ class CrossSourceLinker:
         Builds a keyword lookup from BLS_SECTOR_PATTERNS, broadcasts it,
         and joins against entity URIs to find sector matches.
         """
-        # Build sector keyword lookup: (keyword_normalized, sector_uri, relationship)
+        # Build sector keyword lookup: (keyword_normalized, sector_uri)
         sector_rows = []
         for sector_name, pattern in BLS_SECTOR_PATTERNS.items():
             sector_uri = str(pattern['sector_uri'])
-            relationship = str(pattern['relationship'])
             for dataset_name, keywords in pattern['keywords'].items():
                 for keyword in keywords:
                     normalized = keyword.replace(' ', '_').replace("'", '').replace(',', '').replace('-', '_')
-                    sector_rows.append((normalized.lower(), sector_uri, relationship))
+                    sector_rows.append((normalized.lower(), sector_uri))
 
         if not sector_rows:
             return None
 
         sector_df = self.spark.createDataFrame(
             sector_rows,
-            schema=["keyword", "sector_uri", "relationship"]
+            schema=["keyword", "sector_uri"]
         ).dropDuplicates(["keyword", "sector_uri"])
 
         # Extract the local name from each subject URI for keyword matching
@@ -273,10 +275,11 @@ class CrossSourceLinker:
             F.col("sector_uri").alias("object")
         )
 
-        # Sector correlation triples
+        # Sector correlation triples — one predicate for every sector, the
+        # sector itself carried by the object (see BLS_SECTOR_CORRELATION).
         correlation_triples = matched.select(
             F.col("subject").alias("subject"),
-            F.col("relationship").alias("predicate"),
+            F.lit(_SECTOR_CORRELATION).alias("predicate"),
             F.col("sector_uri").alias("object")
         )
 

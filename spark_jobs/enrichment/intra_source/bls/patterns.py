@@ -3,6 +3,24 @@ BLS Sector Patterns - Economic sector definitions and keywords
 """
 from spark_jobs.utils.rdf_utils import BLS_ENRICHMENT
 
+# The ONE predicate every sector match emits. Deliberately not a per-entry
+# field: each pattern used to carry its own `relationship`
+# (foodSectorCorrelation, energySectorCorrelation, ... — 26 of them), which put
+# the sector's identity in the PREDICATE while the object was already the
+# sector node. That is the same fact twice, and the duplicate is expensive.
+#
+# A PyG edge type is (src_type, relation, dst_type), so a relation minted per
+# sector multiplies out against every measurement class that matches it: on the
+# e2e fixtures those 26 predicates produced 232 of the graph's 770 edge types
+# for 1,382 edges, and a heterogeneous GNN allocates one weight matrix per edge
+# type. Nothing is lost by collapsing them — which sector a link points at is
+# read off the object, exactly as it is for the belongsToSector link emitted
+# beside it.
+#
+# A single constant rather than 26 identical values, so the per-sector split
+# cannot creep back one pattern at a time.
+BLS_SECTOR_CORRELATION = BLS_ENRICHMENT.hasSectorCorrelation
+
 BLS_SECTOR_PATTERNS = {
     'food_sector': {
         'description': 'Food production, distribution, and consumption chain',
@@ -289,7 +307,6 @@ BLS_SECTOR_PATTERNS = {
             'realer': [],
             'wkyeng': [],
         },
-        'relationship': BLS_ENRICHMENT.foodSectorCorrelation
     },
 
     'energy_sector': {
@@ -393,7 +410,6 @@ BLS_SECTOR_PATTERNS = {
             'realer': [],
             'wkyeng': [],
         },
-        'relationship': BLS_ENRICHMENT.energySectorCorrelation
     },
 
     'housing_sector': {
@@ -565,7 +581,6 @@ BLS_SECTOR_PATTERNS = {
             'realer': [],
             'wkyeng': [],
         },
-        'relationship': BLS_ENRICHMENT.housingSectorCorrelation
     },
 
     'transportation_sector': {
@@ -730,7 +745,6 @@ BLS_SECTOR_PATTERNS = {
             'realer': [],
             'wkyeng': ['Transportation and material moving occupations'],
         },
-        'relationship': BLS_ENRICHMENT.transportationSectorCorrelation
     },
 
     'goods_services': {
@@ -834,7 +848,6 @@ BLS_SECTOR_PATTERNS = {
             'realer': [],
             'wkyeng': []
         },
-        'relationship': BLS_ENRICHMENT.goodsServicesRelation
     },
 
     'manufacturing_sector': {
@@ -1121,7 +1134,6 @@ BLS_SECTOR_PATTERNS = {
                 'Production, transportation, and material moving occupations',
             ],
         },
-        'relationship': BLS_ENRICHMENT.manufacturingSectorCorrelation
     },
 
     'retail_sector': {
@@ -1206,7 +1218,6 @@ BLS_SECTOR_PATTERNS = {
                 'Office and administrative support occupations',
             ],
         },
-        'relationship': BLS_ENRICHMENT.retailSectorCorrelation
     },
 
     'healthcare_sector': {
@@ -1296,7 +1307,6 @@ BLS_SECTOR_PATTERNS = {
             'realer': [],
             'wkyeng': [],
         },
-        'relationship': BLS_ENRICHMENT.healthcareSectorCorrelation
     },
 
     'recreation_sector': {
@@ -1375,7 +1385,6 @@ BLS_SECTOR_PATTERNS = {
             'realer': [],
             'wkyeng': [],
         },
-        'relationship': BLS_ENRICHMENT.recreationSectorCorrelation
     },
 
     'education_communication_sector': {
@@ -1471,7 +1480,6 @@ BLS_SECTOR_PATTERNS = {
             'realer': [],
             'wkyeng': [],
         },
-        'relationship': BLS_ENRICHMENT.educationCommunicationSectorCorrelation
     },
 
     'personal_care_sector': {
@@ -1505,7 +1513,6 @@ BLS_SECTOR_PATTERNS = {
             'realer': [],
             'wkyeng': [],
         },
-        'relationship': BLS_ENRICHMENT.personalCareSectorCorrelation
     },
 
     'tobacco_sector': {
@@ -1527,7 +1534,6 @@ BLS_SECTOR_PATTERNS = {
             'realer': [],
             'wkyeng': [],
         },
-        'relationship': BLS_ENRICHMENT.tobaccoSectorCorrelation
     },
 
     'miscellaneous_goods_sector': {
@@ -1608,7 +1614,6 @@ BLS_SECTOR_PATTERNS = {
             'realer': [],
             'wkyeng': [],
         },
-        'relationship': BLS_ENRICHMENT.miscellaneousGoodsSectorCorrelation
     },
 
     'professional_services_sector': {
@@ -1675,7 +1680,6 @@ BLS_SECTOR_PATTERNS = {
                 'Professional and related occupations',
             ],
         },
-        'relationship': BLS_ENRICHMENT.professionalServicesSectorCorrelation
     },
 
     'leisure_hospitality_sector': {
@@ -1701,7 +1705,6 @@ BLS_SECTOR_PATTERNS = {
             'realer': [],
             'wkyeng': [],
         },
-        'relationship': BLS_ENRICHMENT.leisureHospitalitySectorCorrelation
     },
 
     'government_sector': {
@@ -1759,7 +1762,6 @@ BLS_SECTOR_PATTERNS = {
             'realer': [],
             'wkyeng': [],
         },
-        'relationship': BLS_ENRICHMENT.governmentSectorCorrelation
     },
 
     'information_sector': {
@@ -1797,7 +1799,6 @@ BLS_SECTOR_PATTERNS = {
             'realer': [],
             'wkyeng': [],
         },
-        'relationship': BLS_ENRICHMENT.informationSectorCorrelation
     },
 
     'financial_sector': {
@@ -1838,7 +1839,6 @@ BLS_SECTOR_PATTERNS = {
             'realer': [],
             'wkyeng': [],
         },
-        'relationship': BLS_ENRICHMENT.financialSectorCorrelation
     },
 
     'natural_resources_sector': {
@@ -1889,7 +1889,6 @@ BLS_SECTOR_PATTERNS = {
                 'Farming, fishing, and forestry occupations',
             ],
         },
-        'relationship': BLS_ENRICHMENT.naturalResourcesSectorCorrelation
     },
 
     'construction_trades_sector': {
@@ -1917,7 +1916,6 @@ BLS_SECTOR_PATTERNS = {
                 'Natural resources, construction, and maintenance occupations',
             ],
         },
-        'relationship': BLS_ENRICHMENT.constructionTradesSectorCorrelation
     },
 
     'apparel_sector': {
@@ -1964,7 +1962,6 @@ BLS_SECTOR_PATTERNS = {
             'realer': [],
             'wkyeng': [],
         },
-        'relationship': BLS_ENRICHMENT.apparelSectorCorrelation
     },
 
     'capital_investment_sector': {
@@ -2009,7 +2006,6 @@ BLS_SECTOR_PATTERNS = {
             'realer': [],
             'wkyeng': [],
         },
-        'relationship': BLS_ENRICHMENT.capitalInvestmentSectorCorrelation
     },
 
     'exports_sector': {
@@ -2050,7 +2046,6 @@ BLS_SECTOR_PATTERNS = {
             'realer': [],
             'wkyeng': [],
         },
-        'relationship': BLS_ENRICHMENT.exportsSectorCorrelation
     },
 
     'personal_consumption_sector': {
@@ -2081,7 +2076,6 @@ BLS_SECTOR_PATTERNS = {
             'metro': [],
             'realer': [],
         },
-        'relationship': BLS_ENRICHMENT.personalConsumptionSectorCorrelation
     },
 
     'geographic_regions_sector': {
@@ -2168,7 +2162,6 @@ BLS_SECTOR_PATTERNS = {
             'realer': [],
             'wkyeng': [],
         },
-        'relationship': BLS_ENRICHMENT.geographicRegionsSectorCorrelation
     },
 
     'employment_size_sector': {
@@ -2254,6 +2247,5 @@ BLS_SECTOR_PATTERNS = {
             'realer': [],
             'wkyeng': [],
         },
-        'relationship': BLS_ENRICHMENT.employmentSizeSectorCorrelation
     },
 }

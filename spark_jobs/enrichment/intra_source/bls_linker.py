@@ -28,7 +28,9 @@ from spark_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER, WKYENG,
     identifier_namespace,
 )
-from spark_jobs.enrichment.intra_source.bls.patterns import BLS_SECTOR_PATTERNS
+from spark_jobs.enrichment.intra_source.bls.patterns import (
+    BLS_SECTOR_CORRELATION, BLS_SECTOR_PATTERNS,
+)
 from spark_jobs.enrichment.intra_source.bls.correlations import KNOWN_CORRELATIONS
 from spark_jobs.enrichment.intra_source.bls.base_enricher import (
     BLSDatasetEnricher, DATASET_ENRICHERS,
@@ -46,6 +48,7 @@ logger = logging.getLogger(__name__)
 _RDF_TYPE = str(RDF.type)
 _RDFS_LABEL = str(RDFS.label)
 _BELONGS_TO_SECTOR = str(BLS_ENRICHMENT.belongsToSector)
+_SECTOR_CORRELATION = str(BLS_SECTOR_CORRELATION)
 _HAS_PARENT = str(BLS_ENRICHMENT.hasParent)
 
 # IDENTIFIER prefixes for dataset detection and filtering.
@@ -287,11 +290,10 @@ class BLSIntraSourceLinker:
         Example:
             cpi:All_items_Food_Food_at_home_Entity → belongsToSector → bls:FoodSector
         """
-        # Build keyword lookup: (keyword_normalized, sector_uri, relationship, namespace)
+        # Build keyword lookup: (keyword_normalized, sector_uri, namespace)
         sector_rows = []
         for sector_name, pattern in BLS_SECTOR_PATTERNS.items():
             sector_uri = str(pattern['sector_uri'])
-            relationship = str(pattern['relationship'])
             for dataset_name in self.available_datasets:
                 keywords = pattern['keywords'].get(dataset_name, [])
                 ns = DATASET_NS_MAP.get(dataset_name, '')
@@ -299,14 +301,14 @@ class BLSIntraSourceLinker:
                     continue
                 for keyword in keywords:
                     normalized = normalize_keyword_for_uri_matching(keyword)
-                    sector_rows.append((normalized, sector_uri, relationship, ns))
+                    sector_rows.append((normalized, sector_uri, ns))
 
         if not sector_rows:
             return None
 
         sector_df = self.spark.createDataFrame(
             sector_rows,
-            schema=["keyword_normalized", "sector_uri", "relationship", "namespace"],
+            schema=["keyword_normalized", "sector_uri", "namespace"],
         ).dropDuplicates(["keyword_normalized", "sector_uri", "namespace"])
 
         # Find all category entities (URIs ending with _Entity)
@@ -369,10 +371,11 @@ class BLSIntraSourceLinker:
             F.col("sector_uri").alias("object"),
         )
 
-        # Sector correlation relationship triples
+        # Sector correlation triples — one predicate for every sector, the
+        # sector itself carried by the object (see BLS_SECTOR_CORRELATION).
         rel_triples = matched.select(
             F.col("subject"),
-            F.col("relationship").alias("predicate"),
+            F.lit(_SECTOR_CORRELATION).alias("predicate"),
             F.col("sector_uri").alias("object"),
         )
 

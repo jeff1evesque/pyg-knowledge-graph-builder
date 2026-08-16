@@ -7,6 +7,9 @@
 #               but must be installed locally to run the enrichment / PyG code
 #               against a local SparkSession without a cluster.
 #   - pytest  : the test runner itself.
+#   - ruff    : the linter. Not optional -- .githooks/pre-commit refuses to
+#               commit staged Python without it, so a clone that skips this
+#               file cannot commit Python at all.
 #
 # Everything else the tests import (rdflib, torch, torch-geometric, boto3, and
 # numpy via torch) comes from requirements.txt. Note: torch-geometric is only
@@ -26,6 +29,12 @@
 # pyspark is cluster-provided in production; pin to the cluster's 3.5.x line.
 pyspark>=3.5.0,<3.6.0
 pytest>=8.0.0
+
+# Pinned to the exact version .github/workflows/lint.yml installs, so the
+# pre-commit hook and CI cannot disagree about which findings exist. An
+# unpinned linter means a new upstream release can turn an untouched branch
+# red overnight -- bump this and the workflow together, on purpose.
+ruff==0.16.1
 
 # Optional parallelism for the fast unit suite. NOT enabled by default: each
 # xdist worker is a separate process and so builds its OWN SparkSession (the

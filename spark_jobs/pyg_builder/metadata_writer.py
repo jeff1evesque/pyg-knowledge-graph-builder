@@ -190,6 +190,12 @@ class MetadataCollector:
                 "origin": (edge_origins or {}).get(rel, "unknown"),
                 "has_features": (edge_feature_flags or {}).get(rel, False),
                 "feature_dim": (edge_feature_dims or {}).get(rel, 0),
+                # Schema 1.2. The group a consumer should share weights over —
+                # see _build_relation_groups. Same value as `relation`, named
+                # separately because it answers a different question ("what may
+                # be tied?") and a later change could widen it beyond the
+                # relation name without repurposing an existing field.
+                "relation_group": rel,
             }
 
     def register_node_feature_layout(
@@ -370,10 +376,16 @@ class MetadataCollector:
         """
         with_literals = self._node_types_with_literal_features
 
-        # Node types
+        # Node types. `index` is assigned by sorted name so it is stable across
+        # runs on the same data and reproducible from the file alone; the edge
+        # entries below refer to it, and a consumer embedding endpoint types
+        # indexes a table with it.
         node_types = {}
-        for pyg_name, count in sorted(self._node_counts.items()):
+        for index, (pyg_name, count) in enumerate(
+            sorted(self._node_counts.items())
+        ):
             node_types[pyg_name] = {
+                "index": index,
                 "count": count,
                 "source_type_uri": self._node_type_uris.get(pyg_name, ""),
                 "category": self._node_type_categories.get(
@@ -389,10 +401,19 @@ class MetadataCollector:
                 ),
             }
 
-        # Edge types
+        # Edge types, each carrying the endpoint indices assigned above so a
+        # consumer can condition a shared relation weight on endpoint type
+        # without re-deriving the vocabulary.
         edge_types = {}
         for key, details in sorted(self._edge_type_details.items()):
-            edge_types[key] = details
+            entry = dict(details)
+            src = entry.get("src_type", "")
+            dst = entry.get("dst_type", "")
+            entry["src_type_index"] = node_types.get(src, {}).get("index", -1)
+            entry["dst_type_index"] = node_types.get(dst, {}).get("index", -1)
+            edge_types[key] = entry
+
+        relation_groups = self._build_relation_groups(edge_types)
 
         # Summary statistics
         total_nodes = sum(self._node_counts.values())
@@ -403,11 +424,15 @@ class MetadataCollector:
         edge_types_with_features = len(self._edge_types_with_features)
 
         return {
+            # 1.2: adds `relation_groups`, per-edge `relation_group` /
+            # `src_type_index` / `dst_type_index`, and per-node `index`.
+            # Additive only -- every 1.1 field keeps its name and meaning.
+            #
             # 1.1: node-type `has_features` now means "carries literal-value
             # features". Through 1.0 it was `count > 0` -- the node count --
             # which made it, and summary.node_types_with_literal_features,
             # true/total for every build. See _build_graph_schema's docstring.
-            "version": "1.1",
+            "version": "1.2",
             "build_metadata": {
                 "time_period": self._time_period,
                 "build_timestamp": self._build_timestamp,
@@ -415,9 +440,11 @@ class MetadataCollector:
             },
             "node_types": node_types,
             "edge_types": edge_types,
+            "relation_groups": relation_groups,
             "summary": {
                 "total_node_types": len(self._node_counts),
                 "total_edge_types": len(self._edge_type_details),
+                "total_relation_groups": len(relation_groups),
                 "total_nodes": total_nodes,
                 "total_edges": total_edges,
                 "node_types_with_literal_features": node_types_with_features,
@@ -427,6 +454,67 @@ class MetadataCollector:
                 ),
             },
         }
+
+    @staticmethod
+    def _build_relation_groups(
+        edge_types: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Which edge types are the same relation, and may share GNN weights.
+
+        A PyG edge type is (src_type, relation, dst_type), and a heterogeneous
+        conv allocates one weight matrix per edge type. That key is not a free
+        choice -- edge_index values are node IDs LOCAL to their node type, so
+        (cpi_Category, r, X) and (eci_Industry, r, X) cannot share a key without
+        their two ID spaces colliding. The .pt therefore has to keep every
+        triple, and the multiplicity lands on the model:
+
+            on the e2e fixtures, 69 relations produce 770 edge types. A single
+            HeteroConv 1024->128 over that is ~101M parameters for ~10k edges,
+            most of it in matrices that see a handful of edges each -- 67 edge
+            types hold exactly one.
+
+        What the pipeline can do is say which of those keys are the SAME
+        relation, so a consumer builds one weight matrix per group and reuses it
+        across the group's edge types. Nothing is lost by tying them: the
+        endpoint types the key encodes are published as src_type_index /
+        dst_type_index, so a shared weight can still condition on them through a
+        node-type embedding -- one table of N types rather than N x M matrices.
+
+        Emitted here rather than left to the trainer because graph_schema.json
+        is the contract: a trainer that re-derived groups by string-splitting
+        edge-type keys would be guessing at a fact the builder knows.
+
+        Grouping is by relation name, which is the predicate URI's local name
+        under its namespace prefix -- so two genuinely different predicates
+        never collide, and `predicate_uri` is carried on the group to make that
+        checkable.
+
+        Returns:
+            Dict[relation_name -> {edge_types, count, ...}], sorted by name.
+        """
+        groups: Dict[str, Dict[str, Any]] = {}
+        for key, entry in sorted(edge_types.items()):
+            group = entry.get("relation_group") or entry.get("relation", "")
+            bucket = groups.setdefault(
+                group,
+                {
+                    "predicate_uri": entry.get("predicate_uri", ""),
+                    "origin": entry.get("origin", "unknown"),
+                    "edge_types": [],
+                    "edge_type_count": 0,
+                    "count": 0,
+                    "has_features": False,
+                    "feature_dim": 0,
+                },
+            )
+            bucket["edge_types"].append(key)
+            bucket["edge_type_count"] += 1
+            bucket["count"] += int(entry.get("count", 0))
+            if entry.get("has_features"):
+                bucket["has_features"] = True
+                bucket["feature_dim"] = int(entry.get("feature_dim", 0))
+
+        return groups
 
     def _build_feature_spec(self) -> Dict[str, Any]:
         """Build feature_spec.json content."""

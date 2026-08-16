@@ -15,6 +15,9 @@
 # check is a SUBSET of what CI runs: CI additionally scans full history with
 # gitleaks and its ~150 provider rules.
 #
+# The Python lint below is the one exception: it requires ruff, and refuses to
+# commit staged Python without it. See the note above that block.
+#
 set -e
 
 python3 scripts/check_unicode.py --staged
@@ -25,20 +28,37 @@ python3 scripts/check_secrets.py --staged
 # which reads the same .ruff.toml, so the hook and CI cannot disagree about
 # which rules apply.
 #
-# Unlike the two checks above, this one is NOT stdlib-only -- it needs ruff on
-# PATH. A fresh clone may not have it, so a missing ruff is a skip with a
-# notice rather than a hard failure; CI remains the enforcement, which is the
-# same division of labour described at the top of this file.
+# Unlike the two checks above, this one is NOT stdlib-only -- it needs ruff.
+# A missing ruff is a HARD FAILURE, not a skip. A lint that silently opts out
+# on the machines lacking the tool is not a lint: it passes locally, then fails
+# in CI on a commit already pushed and branched from. To bypass it, bypass the
+# whole hook explicitly with `git commit --no-verify` -- an opt-out visible in
+# the command that used it, rather than one buried in the environment.
+#
+# ruff is looked for in the project venv BEFORE PATH, because the usual case is
+# a venv that exists but is not activated in the committing shell -- VS Code's
+# git UI and any plain terminal both hit that, and `command -v` alone would
+# miss .venv/bin/ruff and take the skip.
 #
 staged_python=$(git diff --cached --name-only --diff-filter=ACMR | grep '\.py$' || true)
 
 if [ -n "${staged_python}" ]; then
-    if command -v ruff >/dev/null 2>&1; then
-        # --force-exclude makes ruff honour the exclusions in .ruff.toml even
-        # though the paths are being named explicitly here.
-        echo "${staged_python}" | xargs ruff check --force-exclude --
+    repo_root=$(git rev-parse --show-toplevel)
+
+    if [ -x "${repo_root}/.venv/bin/ruff" ]; then
+        ruff_bin="${repo_root}/.venv/bin/ruff"
+    elif command -v ruff >/dev/null 2>&1; then
+        ruff_bin=ruff
     else
-        echo 'Notice (pre-commit): ruff is not installed -- skipping the Python lint.'
-        echo '                     CI still enforces it. Install: pip install ruff==0.16.1'
+        echo 'pre-commit: ruff is not installed, and the Python lint is required.' >&2
+        echo '            Install it into the project venv:' >&2
+        echo '                .venv/bin/pip install -r requirements-test.txt' >&2
+        echo '            or globally, at the version CI pins:' >&2
+        echo '                pip install ruff==0.16.1' >&2
+        exit 1
     fi
+
+    # --force-exclude makes ruff honour the exclusions in .ruff.toml even
+    # though the paths are being named explicitly here.
+    echo "${staged_python}" | xargs "${ruff_bin}" check --force-exclude --
 fi

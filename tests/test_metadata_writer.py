@@ -149,11 +149,14 @@ def test_graph_schema_node_types():
     nodes = schema["node_types"]
     assert set(nodes) == {"Observation", "Company"}
     assert nodes["Observation"] == {
+        # Assigned by sorted name: Company, then Observation.
+        "index": 1,
         "count": 12,
         "source_type_uri": "http://ex/Observation",
         "category": "measurement",
         "has_features": True,
     }
+    assert nodes["Company"]["index"] == 0
     assert nodes["Company"]["category"] == "entity"
     # Company registered no literal features, so the flag distinguishes it.
     assert nodes["Company"]["has_features"] is False
@@ -176,6 +179,11 @@ def test_graph_schema_edge_types_keyed_and_detailed():
         "origin": "raw",
         "has_features": True,
         "feature_dim": 64,
+        "relation_group": "reports",
+        # Endpoint indices point into node_types, so a consumer embedding
+        # endpoint type does not have to re-derive the vocabulary.
+        "src_type_index": 0,
+        "dst_type_index": 1,
     }
 
 
@@ -261,8 +269,93 @@ def test_graph_schema_version_is_bumped_for_the_new_semantics():
 
     A consumer reading 1.0 and 1.1 gets different values from the same field,
     so the version is the only way to tell the two apart.
+
+    1.2 adds relation_groups and the index fields. Additive, but a consumer
+    that ties weights needs to know whether the grouping is there at all --
+    absent it must fall back to one weight matrix per edge type.
     """
-    assert _fully_registered_collector()._build_graph_schema()["version"] == "1.1"
+    assert _fully_registered_collector()._build_graph_schema()["version"] == "1.2"
+
+
+# ======================================================================
+# graph_schema.json — relation groups (weight tying)
+# ======================================================================
+
+def test_relation_groups_collapse_edge_types_sharing_a_relation():
+    """The grouping a consumer builds one weight matrix per.
+
+    A PyG edge type is (src, relation, dst) and a heterogeneous conv allocates
+    one weight matrix per edge type, so a relation spanning many endpoint pairs
+    multiplies out -- 69 relations became 770 edge types on the e2e fixtures.
+    The .pt cannot collapse them (edge_index values are node IDs local to their
+    node type), so the pipeline publishes which keys are the same relation
+    instead.
+    """
+    c = _fully_registered_collector()
+    c.register_edge_types(
+        edge_counts={
+            ("Company", "reports", "Observation"): 30,
+            # Same relation, different source type -- the shape that explodes.
+            ("Observation", "reports", "Observation"): 5,
+            ("Company", "sameAs", "Company"): 3,
+        },
+        edge_predicate_uris={
+            "reports": "http://ex/reports",
+            "sameAs": "http://ex/sameAs",
+        },
+        edge_origins={"reports": "raw", "sameAs": "unification"},
+        edge_feature_flags={"reports": True, "sameAs": False},
+        edge_feature_dims={"reports": 64, "sameAs": 0},
+    )
+    schema = c._build_graph_schema()
+    groups = schema["relation_groups"]
+
+    assert set(groups) == {"reports", "sameAs"}
+    assert groups["reports"]["edge_types"] == [
+        "(Company, reports, Observation)",
+        "(Observation, reports, Observation)",
+    ]
+    assert groups["reports"]["edge_type_count"] == 2
+    # Edge counts sum across the group.
+    assert groups["reports"]["count"] == 35
+    assert groups["reports"]["predicate_uri"] == "http://ex/reports"
+    assert groups["reports"]["has_features"] is True
+    assert groups["reports"]["feature_dim"] == 64
+    assert groups["sameAs"]["has_features"] is False
+
+    assert schema["summary"]["total_relation_groups"] == 2
+    assert schema["summary"]["total_edge_types"] == 3
+
+
+def test_every_edge_type_belongs_to_exactly_one_relation_group():
+    """The grouping must partition the edge types, or a consumer drops some.
+
+    A trainer iterates the groups to build its weight matrices, then looks each
+    edge type up. An edge type in no group gets no weights; one in two groups
+    gets its messages counted twice.
+    """
+    schema = _fully_registered_collector()._build_graph_schema()
+    grouped = [
+        key
+        for group in schema["relation_groups"].values()
+        for key in group["edge_types"]
+    ]
+
+    assert sorted(grouped) == sorted(schema["edge_types"])
+    assert len(grouped) == len(set(grouped)), "an edge type is in two groups"
+
+
+def test_endpoint_indices_resolve_against_the_node_type_table():
+    """src/dst_type_index must address a real node type entry."""
+    schema = _fully_registered_collector()._build_graph_schema()
+    by_index = {
+        entry["index"]: name
+        for name, entry in schema["node_types"].items()
+    }
+
+    for key, entry in schema["edge_types"].items():
+        assert by_index[entry["src_type_index"]] == entry["src_type"], key
+        assert by_index[entry["dst_type_index"]] == entry["dst_type"], key
 
 
 # ======================================================================
