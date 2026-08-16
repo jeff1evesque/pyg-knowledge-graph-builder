@@ -546,6 +546,7 @@ def _assert_metadata_describes_the_graph(data, found):
     _assert_ontology_schema_states_whether_mapping_ran(found)
     _assert_ontology_sub_segments_are_populated(spec)
     _assert_derived_axioms_declare_their_provenance(found)
+    _assert_relation_groups_partition_the_edge_types(schema)
 
     # --- 3. node type inventory ------------------------------------------- #
     declared_nodes = set(schema["node_types"])
@@ -770,6 +771,54 @@ def _assert_source_type_uris_identify_their_node_type(schema, found):
         f"{len(by_uri)} distinct source_type_uri values; collapsed: "
         + "; ".join(f"{u} <- {sorted(n)}" for u, n in sorted(collapsed.items()))
     )
+
+
+def _assert_relation_groups_partition_the_edge_types(schema):
+    """Weight tying must cover every edge type exactly once.
+
+    A PyG edge type is (src, relation, dst) and a heterogeneous conv allocates
+    one weight matrix per edge type, so a relation spanning many endpoint pairs
+    multiplies out -- 69 relations produced 770 edge types on these fixtures,
+    ~101M parameters at 1024->128 for ~10k edges. The .pt cannot collapse them
+    (edge_index values are node IDs local to their node type), so
+    graph_schema.json publishes which keys are the same relation and a consumer
+    builds one weight matrix per group.
+
+    That only works if the grouping partitions: an edge type in no group gets
+    no weights, one in two groups has its messages counted twice. Asserted over
+    the artifact rather than the builder, because the trainer reads the file.
+    """
+    groups = schema.get("relation_groups")
+    assert groups, "graph_schema.json declares no relation_groups"
+
+    grouped = [key for g in groups.values() for key in g["edge_types"]]
+    assert len(grouped) == len(set(grouped)), (
+        "an edge type appears in more than one relation group"
+    )
+    assert sorted(grouped) == sorted(schema["edge_types"]), (
+        "relation_groups does not cover the edge types exactly:\n"
+        f"  grouped not declared: {sorted(set(grouped) - set(schema['edge_types']))}\n"
+        f"  declared not grouped: {sorted(set(schema['edge_types']) - set(grouped))}"
+    )
+
+    # Each edge type's own relation_group must be the group holding it, or a
+    # consumer looking up either way round gets different answers.
+    holder = {
+        key: name for name, g in groups.items() for key in g["edge_types"]
+    }
+    for key, entry in schema["edge_types"].items():
+        assert entry["relation_group"] == holder[key], (
+            f"{key} declares relation_group={entry['relation_group']!r} but is "
+            f"listed under {holder[key]!r}"
+        )
+
+    # Endpoint indices must address the node-type table.
+    by_index = {e["index"]: n for n, e in schema["node_types"].items()}
+    for key, entry in schema["edge_types"].items():
+        assert by_index[entry["src_type_index"]] == entry["src_type"], key
+        assert by_index[entry["dst_type_index"]] == entry["dst_type"], key
+
+    assert int(schema["summary"]["total_relation_groups"]) == len(groups)
 
 
 def _assert_class_identity_is_recoverable(data, found):
