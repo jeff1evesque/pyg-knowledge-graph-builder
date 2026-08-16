@@ -21,7 +21,8 @@ from rdflib.namespace import OWL, RDF, RDFS
 
 from spark_jobs.enrichment.cross_source_linker import CrossSourceLinker
 from spark_jobs.utils.rdf_utils import (
-    ALERT, BLS_ENRICHMENT, CAP, CPI, MARKET_FEEDS, WEATHER, SEC_FILINGS, UNIFIED,
+    ALERT, BLS_ENRICHMENT, CAP, CPI, MARKET_FEEDS, MARKET_QUOTES, WEATHER,
+    SEC_FILINGS, UNIFIED,
 )
 
 RDF_TYPE = str(RDF.type)
@@ -45,15 +46,29 @@ def _triple_set(result):
 # ======================================================================
 
 def test_cross_source_company_linking_shares_unified_company(spark, make_triples):
-    """A Market ticker and an SEC filing with the same symbol both link to
-    the same unified Company entity (the cross-source hub)."""
-    ticker = str(MARKET_FEEDS) + "ticker/AAPL"
-    filing = str(SEC_FILINGS) + "filing-001"
+    """A market quote and an SEC issuer with the same symbol both link to
+    the same unified Company entity (the cross-source hub).
+
+    Both sides of this join were dead. The market side asked for
+    market-feeds:StockTicker, a class NEITHER market vocabulary declares (feeds
+    models PriceObservation / OptionContract, quotes models EquitySnapshot /
+    OptionSnapshot), so it matched nothing whichever namespace it named. The SEC
+    side asked for hasIssuerTicker, which upstream renamed to
+    hasIssuerTradingSymbol and moved off the filing onto the filings:Issuer
+    node. The previous version of this test asserted the dead shape was correct,
+    using a fixture built to match it — which is why the suite stayed green
+    while SEC and market built as disconnected islands.
+
+    The SEC subject here is the ISSUER, not the filing: a ticker identifies a
+    company, and a filing reaches that company through its hasIssuer edge.
+    """
+    snapshot = str(MARKET_QUOTES) + "snapshot/AAPL/2026-07-02"
+    issuer = str(SEC_FILINGS) + "Issuer_0000320193"
     rows = [
-        (ticker, RDF_TYPE, str(MARKET_FEEDS.StockTicker)),
-        (ticker, str(MARKET_FEEDS.symbol), "AAPL"),
-        (filing, RDF_TYPE, str(SEC_FILINGS.Filing)),
-        (filing, str(SEC_FILINGS.hasIssuerTicker), "AAPL"),
+        (snapshot, RDF_TYPE, str(MARKET_QUOTES.EquitySnapshot)),
+        (snapshot, str(MARKET_QUOTES.symbol), "AAPL"),
+        (issuer, RDF_TYPE, str(SEC_FILINGS.Issuer)),
+        (issuer, str(SEC_FILINGS.hasIssuerTradingSymbol), "AAPL"),
     ]
 
     triples = _triple_set(
@@ -61,10 +76,89 @@ def test_cross_source_company_linking_shares_unified_company(spark, make_triples
     )
 
     company = str(UNIFIED) + "Company_AAPL"
-    assert (ticker, REFERS_TO_COMPANY, company) in triples
-    assert (filing, REFERS_TO_COMPANY, company) in triples
+    assert (snapshot, REFERS_TO_COMPANY, company) in triples
+    assert (issuer, REFERS_TO_COMPANY, company) in triples
     assert (company, RDF_TYPE, UNIFIED_COMPANY_TYPE) in triples
     assert (company, TICKER_PRED, "AAPL") in triples
+
+
+def test_cross_source_company_linking_reads_the_feeds_vocabulary_too(
+    spark, make_triples
+):
+    """The other market vocabulary bridges as well.
+
+    The two are deliberately not unified (see the MARKET_QUOTES / MARKET_FEEDS
+    note in rdf_utils), so the join reads each on its own terms rather than
+    assuming one name covers both — which is the mistake that produced the
+    original silent-nothing defect.
+    """
+    observation = str(MARKET_FEEDS) + "observation/AAPL_1"
+    issuer = str(SEC_FILINGS) + "Issuer_0000320193"
+    rows = [
+        (observation, RDF_TYPE, str(MARKET_FEEDS.PriceObservation)),
+        (observation, str(MARKET_FEEDS.symbol), "AAPL"),
+        (issuer, RDF_TYPE, str(SEC_FILINGS.Issuer)),
+        (issuer, str(SEC_FILINGS.hasIssuerTradingSymbol), "AAPL"),
+    ]
+
+    triples = _triple_set(
+        CrossSourceLinker(spark, make_triples(rows)).enrich()
+    )
+
+    company = str(UNIFIED) + "Company_AAPL"
+    assert (observation, REFERS_TO_COMPANY, company) in triples
+    assert (issuer, REFERS_TO_COMPANY, company) in triples
+
+
+def test_cross_source_company_linking_resolves_occ_option_symbols(
+    spark, make_triples
+):
+    """An option snapshot joins on the equity its contract is written against.
+
+    The quote API writes option symbols in OCC form — the ticker left-justified
+    in a six-character field, then YYMMDD, then C/P, then the strike. Matched
+    literally, "A     260717C00065000" equals no issuer's ticker and every
+    OptionSnapshot stays isolated, which is what the fixtures showed: two option
+    nodes with zero incident edges.
+    """
+    option = str(MARKET_QUOTES) + "snapshot/A_260717C00065000/2026-07-02"
+    issuer = str(SEC_FILINGS) + "Issuer_0001090872"
+    rows = [
+        (option, RDF_TYPE, str(MARKET_QUOTES.OptionSnapshot)),
+        (option, str(MARKET_QUOTES.symbol), "A     260717C00065000"),
+        (issuer, RDF_TYPE, str(SEC_FILINGS.Issuer)),
+        (issuer, str(SEC_FILINGS.hasIssuerTradingSymbol), "A"),
+    ]
+
+    triples = _triple_set(
+        CrossSourceLinker(spark, make_triples(rows)).enrich()
+    )
+
+    company = str(UNIFIED) + "Company_A"
+    assert (option, REFERS_TO_COMPANY, company) in triples, (
+        "the option did not resolve to its underlying equity's company"
+    )
+    assert (issuer, REFERS_TO_COMPANY, company) in triples
+
+
+def test_cross_source_detects_market_from_the_quotes_namespace(spark, make_triples):
+    """Quote snapshots must register as a market source.
+
+    _detect_sources gates the company/ticker step behind 'market' being in
+    available_sources, and it tested subjects against the FEEDS namespace alone.
+    Every market node in the e2e fixtures is a quote snapshot, so the gate was
+    always shut and the bridge never ran — fixing the join itself would have
+    changed nothing while this held.
+    """
+    snapshot = str(MARKET_QUOTES) + "snapshot/AAPL/2026-07-02"
+    rows = [
+        (snapshot, RDF_TYPE, str(MARKET_QUOTES.EquitySnapshot)),
+        (snapshot, str(MARKET_QUOTES.symbol), "AAPL"),
+    ]
+
+    linker = CrossSourceLinker(spark, make_triples(rows))
+
+    assert 'market' in linker.available_sources
 
 
 def test_cross_source_does_not_unify_temporal_entities(spark, make_triples):
@@ -141,10 +235,10 @@ def test_cross_source_does_not_unify_year_suffixed_uris(spark, make_triples):
 
 def test_cross_source_single_source_short_circuits(spark, make_triples):
     """Only one source family present -> no cross-source enrichment at all."""
-    ticker = str(MARKET_FEEDS) + "ticker/AAPL"
+    snapshot = str(MARKET_QUOTES) + "snapshot/AAPL/2026-07-02"
     rows = [
-        (ticker, RDF_TYPE, str(MARKET_FEEDS.StockTicker)),
-        (ticker, str(MARKET_FEEDS.symbol), "AAPL"),
+        (snapshot, RDF_TYPE, str(MARKET_QUOTES.EquitySnapshot)),
+        (snapshot, str(MARKET_QUOTES.symbol), "AAPL"),
     ]
 
     result = CrossSourceLinker(spark, make_triples(rows)).enrich()
