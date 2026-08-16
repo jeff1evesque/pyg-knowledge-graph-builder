@@ -1,9 +1,140 @@
-<https://jefflevesque.com/id/sec-filings/1782986746256_SECFiling_unknown> <https://jefflevesque.com/ontology/sec-filings/hasTextContent> "h1: Filing Detail\nli: Company Search »\nli: Current Page\ndiv: Filing Date\ndiv: 2026-07-02 06:00:10\ndiv: Period of Report\np: Document Format Files\nth: Description\ntd: f6k_070226.htm\ntd: PRESS RELEASE"^^<http://www.w3.org/2001/XMLSchema#string> .
-<https://jefflevesque.com/id/sec-filings/1782986746256_SECFiling_unknown> <https://jefflevesque.com/ontology/sec-filings/hasDocumentType> "unknown"^^<http://www.w3.org/2001/XMLSchema#string> .
-<https://jefflevesque.com/id/sec-filings/1782987057900_SECFiling_unknown> <https://jefflevesque.com/ontology/sec-filings/hasDocumentType> "unknown"^^<http://www.w3.org/2001/XMLSchema#string> .
-<https://jefflevesque.com/id/sec-filings/1782987057900_SECFiling_unknown> <https://jefflevesque.com/ontology/sec-filings/hasTextContent> "h1: Filing Detail\nli: Company Search »\nli: Current Page\ndiv: Filing Date\ndiv: 2026-07-02 06:05:07\ndiv: Period of Report\np: Document Format Files\nth: Description\ntd: form6-k.htm\ntd: Complete submission text file"^^<http://www.w3.org/2001/XMLSchema#string> .
-<https://jefflevesque.com/id/sec-filings/1782987057900_SECFiling_unknown> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-filings/SECFiling> .
-<https://jefflevesque.com/id/sec-filings/1782987057832_SECFiling_unknown> <https://jefflevesque.com/ontology/sec-filings/hasTextContent> "h1: Filing Detail\nli: Company Search »\nli: Current Page\ndiv: Filing Date\ndiv: 2026-07-02 06:05:04\np: Document Format Files\nth: Description\ntd: formfwp.htm\ntd: image_001.jpg\ntd: image_002.jpg"^^<http://www.w3.org/2001/XMLSchema#string> .
-<https://jefflevesque.com/id/sec-filings/1782987057832_SECFiling_unknown> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-filings/SECFiling> .
-<https://jefflevesque.com/id/sec-filings/1782986746256_SECFiling_unknown> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-filings/SECFiling> .
-<https://jefflevesque.com/id/sec-filings/1782987057832_SECFiling_unknown> <https://jefflevesque.com/ontology/sec-filings/hasDocumentType> "unknown"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0000842657-26-000011_Filing> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-filings/SECFiling> .
+<https://jefflevesque.com/id/sec-filings/0000842657-26-000011_Filing> <https://jefflevesque.com/ontology/sec-filings/hasAccessionNumber> "0000842657-26-000011"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0000842657-26-000011_Filing> <https://jefflevesque.com/ontology/sec-filings/hasBusinessLocation> "Chicago, IL"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0000842657-26-000011_Filing> <https://jefflevesque.com/ontology/sec-filings/hasBusinessState> "IL"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0000842657-26-000011_Filing> <https://jefflevesque.com/ontology/sec-filings/hasDocumentType> "TA-1/A"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0000842657-26-000011_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFileName> "0000842657-26-000011:primary_doc.xml"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0000842657-26-000011_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFileType> "TA-1/A"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0000842657-26-000011_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFilingDate> <https://jefflevesque.com/id/sec-filings/Date_2026-08-14> .
+<https://jefflevesque.com/id/sec-filings/0000842657-26-000011_Filing> <https://jefflevesque.com/ontology/sec-filings/hasIssuer> <https://jefflevesque.com/id/sec-filings/Issuer_0000842657> .
+<https://jefflevesque.com/id/sec-filings/0000842657-26-000011_Filing> <https://jefflevesque.com/ontology/sec-filings/hasSequence> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<https://jefflevesque.com/id/sec-filings/0000842657-26-000011_Filing> <https://jefflevesque.com/ontology/sec-filings/hasSubmissionType> "TA-1"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352356_Filing> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-filings/SECFiling> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352356_Filing> <https://jefflevesque.com/ontology/sec-filings/hasAccessionNumber> "0001193125-26-352356"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352356_Filing> <https://jefflevesque.com/ontology/sec-filings/hasDocumentType> "13F-HR"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352356_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFileName> "0001193125-26-352356:primary_doc.xml"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352356_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFileType> "13F-HR"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352356_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFilingDate> <https://jefflevesque.com/id/sec-filings/Date_2026-08-14> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352356_Filing> <https://jefflevesque.com/ontology/sec-filings/hasIssuer> <https://jefflevesque.com/id/sec-filings/Issuer_0001668029> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352356_Filing> <https://jefflevesque.com/ontology/sec-filings/hasPeriodOfReport> <https://jefflevesque.com/id/sec-filings/ReportingDate_2026-06-30> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352356_Filing> <https://jefflevesque.com/ontology/sec-filings/hasSequence> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352356_Filing> <https://jefflevesque.com/ontology/sec-filings/hasSubmissionType> "13F-HR"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352365_Filing> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-filings/Form8K> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352365_Filing> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-filings/SECFiling> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352365_Filing> <https://jefflevesque.com/ontology/sec-filings/hasAccessionNumber> "0001193125-26-352365"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352365_Filing> <https://jefflevesque.com/ontology/sec-filings/hasBusinessLocation> "Tampa, FL"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352365_Filing> <https://jefflevesque.com/ontology/sec-filings/hasBusinessState> "FL"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352365_Filing> <https://jefflevesque.com/ontology/sec-filings/hasDocumentType> "8-K"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352365_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFileName> "0001193125-26-352365:d178370d8k.htm"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352365_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFileType> "8-K"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352365_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFilingDate> <https://jefflevesque.com/id/sec-filings/Date_2026-08-14> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352365_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFormDescription> "8-K"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352365_Filing> <https://jefflevesque.com/ontology/sec-filings/hasIssuer> <https://jefflevesque.com/id/sec-filings/Issuer_0001285785> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352365_Filing> <https://jefflevesque.com/ontology/sec-filings/hasPeriodOfReport> <https://jefflevesque.com/id/sec-filings/ReportingDate_2026-08-14> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352365_Filing> <https://jefflevesque.com/ontology/sec-filings/hasSequence> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352365_Filing> <https://jefflevesque.com/ontology/sec-filings/hasSic> "2870"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001193125-26-352365_Filing> <https://jefflevesque.com/ontology/sec-filings/hasSubmissionType> "8-K"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-089498_Filing> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-filings/Form4> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-089498_Filing> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-filings/SECFiling> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-089498_Filing> <https://jefflevesque.com/ontology/sec-filings/hasAccessionNumber> "0001213900-26-089498"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-089498_Filing> <https://jefflevesque.com/ontology/sec-filings/hasDocumentType> "4"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-089498_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFileName> "0001213900-26-089498:ownership.xml"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-089498_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFileType> "4"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-089498_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFilingDate> <https://jefflevesque.com/id/sec-filings/Date_2026-08-14> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-089498_Filing> <https://jefflevesque.com/ontology/sec-filings/hasIssuer> <https://jefflevesque.com/id/sec-filings/Issuer_0001828102> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-089498_Filing> <https://jefflevesque.com/ontology/sec-filings/hasPeriodOfReport> <https://jefflevesque.com/id/sec-filings/ReportingDate_2026-08-12> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-089498_Filing> <https://jefflevesque.com/ontology/sec-filings/hasSequence> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-089498_Filing> <https://jefflevesque.com/ontology/sec-filings/hasSic> "7372"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-089498_Filing> <https://jefflevesque.com/ontology/sec-filings/hasSubmissionType> "4"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-090304_Filing> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-filings/Form10Q> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-090304_Filing> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-filings/SECFiling> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-090304_Filing> <https://jefflevesque.com/ontology/sec-filings/hasAccessionNumber> "0001213900-26-090304"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-090304_Filing> <https://jefflevesque.com/ontology/sec-filings/hasDocumentType> "10-Q"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-090304_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFileName> "0001213900-26-090304:ea0298936-10q_vpr.htm"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-090304_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFileType> "10-Q"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-090304_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFilingDate> <https://jefflevesque.com/id/sec-filings/Date_2026-08-14> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-090304_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFormDescription> "QUARTERLY REPORT"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-090304_Filing> <https://jefflevesque.com/ontology/sec-filings/hasIssuer> <https://jefflevesque.com/id/sec-filings/Issuer_0001376231> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-090304_Filing> <https://jefflevesque.com/ontology/sec-filings/hasPeriodOfReport> <https://jefflevesque.com/id/sec-filings/ReportingDate_2026-06-30> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-090304_Filing> <https://jefflevesque.com/ontology/sec-filings/hasSequence> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-090304_Filing> <https://jefflevesque.com/ontology/sec-filings/hasSic> "7372"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001213900-26-090304_Filing> <https://jefflevesque.com/ontology/sec-filings/hasSubmissionType> "10-Q"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001650372-26-000036_Filing> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-filings/Form10K> .
+<https://jefflevesque.com/id/sec-filings/0001650372-26-000036_Filing> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-filings/SECFiling> .
+<https://jefflevesque.com/id/sec-filings/0001650372-26-000036_Filing> <https://jefflevesque.com/ontology/sec-filings/hasAccessionNumber> "0001650372-26-000036"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001650372-26-000036_Filing> <https://jefflevesque.com/ontology/sec-filings/hasBusinessLocation> "San Francisco, CA"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001650372-26-000036_Filing> <https://jefflevesque.com/ontology/sec-filings/hasBusinessState> "CA"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001650372-26-000036_Filing> <https://jefflevesque.com/ontology/sec-filings/hasDocumentType> "10-K"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001650372-26-000036_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFileName> "0001650372-26-000036:team-20260630.htm"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001650372-26-000036_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFileType> "10-K"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001650372-26-000036_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFilingDate> <https://jefflevesque.com/id/sec-filings/Date_2026-08-14> .
+<https://jefflevesque.com/id/sec-filings/0001650372-26-000036_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFormDescription> "10-K"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001650372-26-000036_Filing> <https://jefflevesque.com/ontology/sec-filings/hasIssuer> <https://jefflevesque.com/id/sec-filings/Issuer_0001650372> .
+<https://jefflevesque.com/id/sec-filings/0001650372-26-000036_Filing> <https://jefflevesque.com/ontology/sec-filings/hasPeriodOfReport> <https://jefflevesque.com/id/sec-filings/ReportingDate_2026-06-30> .
+<https://jefflevesque.com/id/sec-filings/0001650372-26-000036_Filing> <https://jefflevesque.com/ontology/sec-filings/hasSequence> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<https://jefflevesque.com/id/sec-filings/0001650372-26-000036_Filing> <https://jefflevesque.com/ontology/sec-filings/hasSic> "7372"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001650372-26-000036_Filing> <https://jefflevesque.com/ontology/sec-filings/hasSubmissionType> "10-K"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001999671-26-000032_Filing> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-filings/SECFiling> .
+<https://jefflevesque.com/id/sec-filings/0001999671-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasAccessionNumber> "0001999671-26-000032"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001999671-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasBusinessLocation> "Wilmington, DE"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001999671-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasBusinessState> "DE"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001999671-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasDocumentType> "ABS-EE"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001999671-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasEntityIncorporationState> "DE"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001999671-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFileName> "0001999671-26-000032:abs-eexcrvna2024xp2july202.htm"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001999671-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFileType> "ABS-EE"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001999671-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFilingDate> <https://jefflevesque.com/id/sec-filings/Date_2026-08-14> .
+<https://jefflevesque.com/id/sec-filings/0001999671-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFormDescription> "ABS-EE"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001999671-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasIssuer> <https://jefflevesque.com/id/sec-filings/Issuer_0001999671> .
+<https://jefflevesque.com/id/sec-filings/0001999671-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasPeriodOfReport> <https://jefflevesque.com/id/sec-filings/ReportingDate_2026-07-31> .
+<https://jefflevesque.com/id/sec-filings/0001999671-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasSequence> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<https://jefflevesque.com/id/sec-filings/0001999671-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasSic> "6189"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001999671-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasSubmissionType> "ABS-EE"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001999854-26-000032_Filing> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-filings/SECFiling> .
+<https://jefflevesque.com/id/sec-filings/0001999854-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasAccessionNumber> "0001999854-26-000032"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001999854-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasBusinessLocation> "Wilmington, DE"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001999854-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasBusinessState> "DE"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001999854-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasDocumentType> "ABS-EE"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001999854-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasEntityIncorporationState> "DE"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001999854-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFileName> "0001999854-26-000032:abs-eexcrvna2024xp4july202.htm"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001999854-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFileType> "ABS-EE"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001999854-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFilingDate> <https://jefflevesque.com/id/sec-filings/Date_2026-08-14> .
+<https://jefflevesque.com/id/sec-filings/0001999854-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasFormDescription> "ABS-EE"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001999854-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasIssuer> <https://jefflevesque.com/id/sec-filings/Issuer_0001999854> .
+<https://jefflevesque.com/id/sec-filings/0001999854-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasPeriodOfReport> <https://jefflevesque.com/id/sec-filings/ReportingDate_2026-07-31> .
+<https://jefflevesque.com/id/sec-filings/0001999854-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasSequence> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<https://jefflevesque.com/id/sec-filings/0001999854-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasSic> "6189"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/0001999854-26-000032_Filing> <https://jefflevesque.com/ontology/sec-filings/hasSubmissionType> "ABS-EE"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/Date_2026-08-14> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-common/Date> .
+<https://jefflevesque.com/id/sec-filings/Date_2026-08-14> <https://jefflevesque.com/ontology/sec-common/hasDateValue> "2026-08-14"^^<http://www.w3.org/2001/XMLSchema#date> .
+<https://jefflevesque.com/id/sec-filings/Issuer_0000842657> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-filings/Issuer> .
+<https://jefflevesque.com/id/sec-filings/Issuer_0000842657> <https://jefflevesque.com/ontology/sec-filings/hasIssuerCik> "0000842657"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/Issuer_0000842657> <https://jefflevesque.com/ontology/sec-filings/hasIssuerName> "DWS Service Co  (CIK 0000842657)"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/Issuer_0001285785> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-filings/Issuer> .
+<https://jefflevesque.com/id/sec-filings/Issuer_0001285785> <https://jefflevesque.com/ontology/sec-filings/hasIssuerCik> "0001285785"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/Issuer_0001285785> <https://jefflevesque.com/ontology/sec-filings/hasIssuerName> "MOSAIC CO  (MOS)  (CIK 0001285785)"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/Issuer_0001376231> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-filings/Issuer> .
+<https://jefflevesque.com/id/sec-filings/Issuer_0001376231> <https://jefflevesque.com/ontology/sec-filings/hasIssuerCik> "0001376231"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/Issuer_0001376231> <https://jefflevesque.com/ontology/sec-filings/hasIssuerName> "VPR Brands, LP.  (VPRB)  (CIK 0001376231)"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/Issuer_0001650372> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-filings/Issuer> .
+<https://jefflevesque.com/id/sec-filings/Issuer_0001650372> <https://jefflevesque.com/ontology/sec-filings/hasIssuerCik> "0001650372"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/Issuer_0001650372> <https://jefflevesque.com/ontology/sec-filings/hasIssuerName> "Atlassian Corp  (TEAM)  (CIK 0001650372)"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/Issuer_0001668029> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-filings/Issuer> .
+<https://jefflevesque.com/id/sec-filings/Issuer_0001668029> <https://jefflevesque.com/ontology/sec-filings/hasIssuerCik> "0001668029"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/Issuer_0001668029> <https://jefflevesque.com/ontology/sec-filings/hasIssuerName> "Yu Fan  (CIK 0001668029)"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/Issuer_0001828102> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-filings/Issuer> .
+<https://jefflevesque.com/id/sec-filings/Issuer_0001828102> <https://jefflevesque.com/ontology/sec-filings/hasIssuerCik> "0001828102"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/Issuer_0001828102> <https://jefflevesque.com/ontology/sec-filings/hasIssuerName> "Karooooo Ltd.  (CIK 0001828102)"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/Issuer_0001999671> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-filings/Issuer> .
+<https://jefflevesque.com/id/sec-filings/Issuer_0001999671> <https://jefflevesque.com/ontology/sec-filings/hasIssuerCik> "0001999671"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/Issuer_0001999671> <https://jefflevesque.com/ontology/sec-filings/hasIssuerName> "Carvana Auto Receivables Trust 2024-P2  (CIK 0001999671)"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/Issuer_0001999854> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-filings/Issuer> .
+<https://jefflevesque.com/id/sec-filings/Issuer_0001999854> <https://jefflevesque.com/ontology/sec-filings/hasIssuerCik> "0001999854"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/Issuer_0001999854> <https://jefflevesque.com/ontology/sec-filings/hasIssuerName> "Carvana Auto Receivables Trust 2024-P4  (CIK 0001999854)"^^<http://www.w3.org/2001/XMLSchema#string> .
+<https://jefflevesque.com/id/sec-filings/ReportingDate_2026-06-30> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-common/ReportingDate> .
+<https://jefflevesque.com/id/sec-filings/ReportingDate_2026-06-30> <https://jefflevesque.com/ontology/sec-common/hasDateValue> "2026-06-30"^^<http://www.w3.org/2001/XMLSchema#date> .
+<https://jefflevesque.com/id/sec-filings/ReportingDate_2026-07-31> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-common/ReportingDate> .
+<https://jefflevesque.com/id/sec-filings/ReportingDate_2026-07-31> <https://jefflevesque.com/ontology/sec-common/hasDateValue> "2026-07-31"^^<http://www.w3.org/2001/XMLSchema#date> .
+<https://jefflevesque.com/id/sec-filings/ReportingDate_2026-08-12> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-common/ReportingDate> .
+<https://jefflevesque.com/id/sec-filings/ReportingDate_2026-08-12> <https://jefflevesque.com/ontology/sec-common/hasDateValue> "2026-08-12"^^<http://www.w3.org/2001/XMLSchema#date> .
+<https://jefflevesque.com/id/sec-filings/ReportingDate_2026-08-14> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://jefflevesque.com/ontology/sec-common/ReportingDate> .
+<https://jefflevesque.com/id/sec-filings/ReportingDate_2026-08-14> <https://jefflevesque.com/ontology/sec-common/hasDateValue> "2026-08-14"^^<http://www.w3.org/2001/XMLSchema#date> .
