@@ -214,6 +214,9 @@ def _assert_valid_graph_and_metadata(config, work_dir):
 
     _assert_no_node_type_is_orphaned(data)
 
+    # --- and no whole SOURCE is connected only to itself ---
+    _assert_no_source_builds_as_an_island(data)
+
 
 # --------------------------------------------------------------------------- #
 # full mode — both loaders
@@ -405,18 +408,21 @@ def _incident_edge_counts(data):
 # filings_SECFiling, which was orphaned because the SEC fixture was three
 # scraped-HTML stubs pointing at nothing; a real filing states hasIssuer,
 # hasFilingDate and hasPeriodOfReport, and all three resolve.
+#
+# The two market_quotes_* entries are gone as of the cross-source join fixes.
+# They read "unknown_*" until the source namespaces were re-homed, then sat here
+# with zero edges: cross_source_linker detected market data by the FEEDS
+# namespace only, so a graph of quote snapshots reported no market source at
+# all and the SEC↔market bridge was skipped without running. Both snapshot types
+# now reach unified companies through their ticker.
 KNOWN_ORPHANED_NODE_TYPES = {
     # Pipeline-minted rather than sampled, so unlike the entries above this one
     # cannot be settled by reading the fixtures — only by running this suite.
+    # cross_source_linker mints all 50 states unconditionally and links them
+    # only to LAUS entities whose names match; the fixtures contain no LAUS
+    # feed, so there is nothing for them to attach to. Fixture coverage, not a
+    # pipeline defect — but left asserted so it fails the day it becomes one.
     "bls_enrichment_GeographicRegion",
-    # These read "unknown_*" until the source namespaces were re-homed. The
-    # prefix was not cosmetic: it meant the market namespace constant pointed
-    # somewhere no scraper emitted, so node_mapper matched nothing and fell
-    # through to the unknown_ fallback. Pinning the unknown_ names asserted
-    # the defect was correct, which is why running this suite would not have
-    # caught it either.
-    "market_quotes_EquitySnapshot",
-    "market_quotes_OptionSnapshot",
 }
 
 
@@ -1171,6 +1177,59 @@ def _assert_temporal_types_are_not_sharded(data):
         f"the unified temporal_Source* types: {dict(sharded)} — the owl:sameAs "
         "edges from Unified* cannot reach them all. Check "
         "node_mapper._CANONICAL_TYPE_PRIORITY."
+    )
+
+
+# Namespace prefixes that exist only to be pointed at from other namespaces, so
+# "does it reach outside itself" is not a meaningful question for them. Every
+# edge a unified/temporal hub has is by construction cross-namespace, and their
+# connectivity is already asserted directly by
+# _assert_cross_source_temporal_bridge and _assert_temporal_edges_present.
+_HUB_PREFIXES = frozenset({"unified", "temporal"})
+
+
+def _assert_no_source_builds_as_an_island(data):
+    """Every source namespace must have at least one edge leaving it.
+
+    This is the check whose absence let four dead vocabulary constants ship
+    green. The suite was thorough about internal consistency — the graph builds,
+    every index is in range, the metadata describes the tensors truthfully — and
+    a graph of perfectly well-formed disconnected islands satisfies all of it.
+    Measured on the fixtures at the time: 12 edge types touched filings_*, of
+    which 2 left the filings_ namespace and both landed on SEC's own date nodes;
+    market_quotes_* had zero edges of any kind. SEC and market contributed node
+    features and participated in no message passing with the rest of the graph,
+    so no cross-source signal — filings against economic indicators, quotes
+    against filings — was learnable, because the edges did not exist.
+
+    Asserted per NAMESPACE rather than per node type because that is the level
+    the defect lives at. Four separate joins each keyed on a term the upstream
+    data no longer emits; each matched nothing, emitted nothing and raised
+    nothing, and the shared symptom was a whole source sitting alone.
+    _assert_no_node_type_is_orphaned already covers the finer-grained "this one
+    type got dropped" case, and would be satisfied by a source whose types are
+    all busily connected to each other and to nobody else.
+
+    A namespace with no nodes at all is not an island — it is absent, which is a
+    fixture-coverage question and not this assertion's business.
+    """
+    reaches_out = set()
+    present = {_source_prefix(nt) for nt in map(str, data.node_types)}
+
+    for src, _rel, dst in data.edge_types:
+        src_prefix, dst_prefix = _source_prefix(str(src)), _source_prefix(str(dst))
+        if src_prefix != dst_prefix:
+            reaches_out.add(src_prefix)
+            reaches_out.add(dst_prefix)
+
+    islands = present - reaches_out - _HUB_PREFIXES
+    assert not islands, (
+        f"namespaces that build as islands: {sorted(islands)} — every edge "
+        "type touching them has both endpoints inside the same namespace, so "
+        "they contribute node features and participate in no cross-source "
+        "message passing. Check that the joins bridging them key on terms the "
+        "data actually emits: a join matching nothing emits nothing and "
+        "raises nothing."
     )
 
 
