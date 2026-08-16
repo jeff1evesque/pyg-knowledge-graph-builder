@@ -217,7 +217,7 @@ Segment 1: Ontology Structure [25% of vector_dim]
 │  of rdf:type URIs) │  chain, depth-     │  namespace, multi- │
 │                    │  weighted hashing) │  hot encoding)     │
 │ 25% of segment     │ 50% of segment     │ 25% of segment     │
-│ (64 dims @ 1024)   │ (128 dims @ 1024)  │ (64 dims @ 1024)   │
+│ (160 dims @ 1024)  │ (48 dims @ 1024)   │ (48 dims @ 1024)   │
 └────────────────────┴────────────────────┴────────────────────┘
 ```
 
@@ -278,22 +278,22 @@ All segment and sub-segment boundaries are computed at runtime by the `VectorLay
 ```
 VectorLayout(1024) — default, production:
   Segment 1: Ontology Structure [0–255]     (256 dims)
-    Class Identity:     [0–63]              (64 dims)
-    Class Hierarchy:    [64–191]            (128 dims)
-    Ontology Source:    [192–255]           (64 dims)
+    Class Identity:     [0–159]             (160 dims)
+    Class Hierarchy:    [160–207]           (48 dims)
+    Ontology Source:    [208–255]           (48 dims)
   Segment 2: Property Schema    [256–639]   (384 dims)
     Property Presence:  [256–447]           (192 dims)
-    Domain/Range:       [448–559]           (112 dims)
-    Property Hierarchy: [560–639]           (80 dims)
+    Domain/Range:       [448–558]           (111 dims)
+    Property Hierarchy: [559–639]           (81 dims)
   Segment 3: Literal Values     [640–1023]  (384 dims)
-    Numeric Values:     [640–895]           (256 dims)
-    Categorical Values: [896–1023]          (128 dims)
+    Numeric Values:     [640–896]           (257 dims)
+    Categorical Values: [897–1023]          (127 dims)
 
 VectorLayout(512) — half resolution, faster experiments:
   Segment 1: Ontology Structure [0–127]     (128 dims)
-    Class Identity:     [0–31]              (32 dims)
-    Class Hierarchy:    [32–95]             (64 dims)
-    Ontology Source:    [96–127]            (32 dims)
+    Class Identity:     [0–79]              (80 dims)
+    Class Hierarchy:    [80–103]            (24 dims)
+    Ontology Source:    [104–127]           (24 dims)
   Segment 2: Property Schema    [128–319]   (192 dims)
     Property Presence:  [128–223]           (96 dims)
     Domain/Range:       [224–279]           (56 dims)
@@ -304,9 +304,9 @@ VectorLayout(512) — half resolution, faster experiments:
 
 VectorLayout(256) — quarter resolution, rapid prototyping:
   Segment 1: Ontology Structure [0–63]      (64 dims)
-    Class Identity:     [0–15]              (16 dims)
-    Class Hierarchy:    [16–47]             (32 dims)
-    Ontology Source:    [48–63]             (16 dims)
+    Class Identity:     [0–39]              (40 dims)
+    Class Hierarchy:    [40–51]             (12 dims)
+    Ontology Source:    [52–63]             (12 dims)
   Segment 2: Property Schema    [64–159]    (96 dims)
     Property Presence:  [64–111]            (48 dims)
     Domain/Range:       [112–139]           (28 dims)
@@ -317,30 +317,43 @@ VectorLayout(256) — quarter resolution, rapid prototyping:
 
 VectorLayout(2048) — double resolution, maximum fidelity:
   Segment 1: Ontology Structure [0–511]     (512 dims)
-    Class Identity:     [0–127]             (128 dims)
-    Class Hierarchy:    [128–383]           (256 dims)
-    Ontology Source:    [384–511]           (128 dims)
+    Class Identity:     [0–319]             (320 dims)
+    Class Hierarchy:    [320–415]           (96 dims)
+    Ontology Source:    [416–511]           (96 dims)
   Segment 2: Property Schema    [512–1279]  (768 dims)
     Property Presence:  [512–895]           (384 dims)
-    Domain/Range:       [896–1119]          (224 dims)
-    Property Hierarchy: [1120–1279]         (160 dims)
+    Domain/Range:       [896–1118]          (223 dims)
+    Property Hierarchy: [1119–1279]         (161 dims)
   Segment 3: Literal Values     [1280–2047] (768 dims)
-    Numeric Values:     [1280–1793]         (514 dims)
-    Categorical Values: [1794–2047]         (254 dims)
+    Numeric Values:     [1280–1794]         (515 dims)
+    Categorical Values: [1795–2047]         (253 dims)
 ```
 
 `VectorLayout` validates at construction time that all sub-segments are contiguous, non-overlapping, each has at least 1 dimension, and they sum exactly to `vector_dim`. If `vector_dim` is too small (< 32), it raises immediately with a clear error rather than silently producing a degenerate vector.
 
 **Tradeoffs when reducing `vector_dim`:**
 
-| vector_dim | Hash collision risk | Max classes (class_identity dim) | Driver memory per 1M nodes | Use case |
+| vector_dim | Hash collision risk | Class ceiling (class_identity dim) | Driver memory per 1M nodes | Use case |
 |-----------|-------------------|---------------------------------|--------------------------|----------|
-| 2048 | Very low | 128 | ~8 GB | Maximum fidelity, large cluster |
-| 1024 | Low (~10 properties/type vs 256 numeric slots) | 64 | ~4 GB | Production default |
-| 512 | Moderate (128 numeric slots) | 32 | ~2 GB | Fast experiments |
-| 256 | Higher (64 numeric slots) | 16 | ~1 GB | Rapid prototyping, small datasets |
+| 2048 | Very low | 320 | ~8 GB | Maximum fidelity, large cluster |
+| 1024 | Low (~10 properties/type vs 256 numeric slots) | 160 | ~4 GB | Production default |
+| 512 | Moderate (128 numeric slots) | 80 | ~2 GB | Fast experiments |
+| 256 | Higher (64 numeric slots) | 40 | ~1 GB | Rapid prototyping, small datasets |
 
-`class_identity` gets 6.25% of `vector_dim` (25% of segment 1), and it holds at most that many linearly independent class codes — so **the class count, not the property count, is what `vector_dim` has to clear** for class identity to stay recoverable. A 44-class ontology fits the 1024-d default (64 dims, 20 classes of headroom) but overflows 512-d. The build warns when the class count passes 85% of the segment.
+`class_identity` gets 15.625% of `vector_dim` (62.5% of segment 1), and it holds **at most** that many linearly independent class codes — so **the class count, not the property count, is what `vector_dim` has to clear** for class identity to stay recoverable. A full-source fixture build produces 96 classes, which fits the 1024-d default with 64 classes of nominal headroom.
+
+Treat that ceiling as an upper bound, not a target. It is what pigeonhole forbids exceeding, not what the hashing achieves: measured, `d` 4-hot codes drawn into `d` dims come out rank `d−2`, so separability has to be **measured** below the ceiling rather than assumed. The build does exactly that — see `code_matrix_rank` in the slot-mapping collision report.
+
+Two levers when the class count grows past what the default carries:
+
+- **`feature_config.class_identity_dim`** — sets the sub-segment width directly, taken from the rest of segment 1, so `vector_dim` and driver memory do not move. Rejected (not clamped) if it does not fit, since the point of the override is to guarantee a budget.
+- **`feature_config.vector_dim`** — scales every segment, at proportional memory cost.
+
+Segment 1 is a quarter of the vector, so no split of it exceeds ~192 classes at the 1024-d default; past that, `vector_dim` is the only lever.
+
+A build whose classes are **not separable** now **fails** with `ClassIdentityCapacityError` rather than logging a warning — over-subscribed, sharing an identical code, or linearly dependent. Set `feature_config.allow_class_identity_oversubscription=true` to build anyway. The build still only *warns* when the class count passes 85% of the segment, which is a nudge rather than a fault.
+
+> **Changing `class_identity_dim` or `vector_dim` invalidates trained models.** Slots are `hash % dim`, so a different width re-maps every class. This is why the width is a published tuning constant in `encoding_config.json` and not derived per build from the observed class count — a width that moved whenever a new class appeared would silently re-map every existing one.
 
 **Invocation example:**
 
@@ -832,7 +845,7 @@ The metadata and node-index directories are derived automatically from the `.pt`
 
 Complete inventory of every node type and edge type in the graph. The entry point for any consumer of the graph.
 
-**Schema version: `1.1`.** Node-type `has_features` changed meaning in 1.1 — see below. Check the `version` field before relying on it.
+**Schema version: `1.2`.** 1.2 adds `relation_groups` and the `index` / `relation_group` / `src_type_index` / `dst_type_index` fields — additive, every 1.1 field keeps its name and meaning. Node-type `has_features` changed meaning in 1.1 — see below. Check the `version` field before relying on it.
 
 **Contents:**
 - Every node type with its count, source ontology URI, category tag, and `has_features`
@@ -844,7 +857,11 @@ Complete inventory of every node type and edge type in the graph. The entry poin
   - Edge-type `has_features` was always correct — it comes from `edge_feature_flags`, which reflects whether `edge_attr` was actually produced (23 of 499 on the same build).
   - `origin` is one of **`raw`** (the relationship was stated in the source RDF), **`enrichment`** (this pipeline inferred it), or **`unification`** (a cross-source identity link). Enrichment adds ~91,000 triples on top of the raw data, so some edges are reported facts and others are derived — a distinction a model consumer should weight differently. Classified by `classify_edge_origin()` in `rdf_utils.py` from the predicate namespace **and both endpoint node types**, since the pipeline marks its output in two places: inferred links carry a minted *predicate* (under `jefflevesque.com/ontology/bls/`, …), while unification links carry a minted *node* but a standard predicate (`unified:November owl:sameAs cpi:November`). Checking the predicate alone reports every unification edge as `raw`.
   - Deliberately three values rather than separating intra- from cross-source enrichment: those share a namespace, so nothing at this layer can tell them apart, and a field promising a distinction it never emits is worse than a narrower honest one. It records *that* an edge was derived, not *why* — per-edge lineage is a much larger change, worth building only once a model's predictions need explaining.
-- Summary statistics: total node types, total edge types, total nodes, total edges, edge types with features
+- **`relation_groups`** (1.2): which edge types are the same relation and may **share GNN weights**. A PyG edge type is `(src_type, relation, dst_type)` and a heterogeneous conv allocates one weight matrix per edge type, so a relation spanning many endpoint pairs multiplies out — on the e2e fixtures **69 relations produce 770 edge types**, and a single `HeteroConv` 1024→128 over that is ~101M parameters for ~10k edges, with 67 edge types holding exactly one edge.
+  - The `.pt` cannot collapse them: `edge_index` values are node IDs **local to their node type**, so `(cpi_Category, r, X)` and `(eci_Industry, r, X)` sharing a key would put two ID spaces in the same row. The multiplicity is forced by the container, so the pipeline publishes the grouping instead of leaving a consumer to guess it by string-splitting edge-type keys.
+  - Each group carries `edge_types` (the keys it covers), `edge_type_count`, summed `count`, `predicate_uri`, `origin`, `has_features` and `feature_dim`. The grouping **partitions** the edge types — every key is in exactly one group.
+  - Nothing is lost by tying: each edge type also carries `src_type_index` / `dst_type_index` into the node-type table (whose entries now carry a stable `index`, assigned by sorted name), so a shared relation weight can still condition on endpoint type through a node-type embedding — one table of *N* types rather than *N×M* matrices.
+- Summary statistics: total node types, total edge types, total relation groups, total nodes, total edges, edge types with features
 - Build metadata: time period, build timestamp, pipeline config
 
 **Generated by:** `constructor.py` after HeteroData assembly, from `node_mapper.node_counts`, `node_mapper.get_type_uri_mapping()`, `edge_mapper.build_edge_indices()`, and `edge_feature_extractor.get_edge_classification()`. The per-type `has_features` flag is read off the assembled feature tensors themselves (`MetadataCollector.register_node_literal_features`), so it cannot drift from the `.pt` it describes.
@@ -980,7 +997,13 @@ Maps specific vector dimensions back to their semantic meaning. Purely for inter
 
 > **`class_identity` in the collision report (slot mapping 1.1).** Class identity is a **multi-hot** code: each class occupies `num_hashes` slots and is identified by the *set*, not by any single slot. Slot reuse is therefore not identity loss. Through slot mapping 1.0 this sub-segment reported `collisions` / `collision_rate` computed as raw slot occupancy, which reads as lost identity and is misleading: with more hash entries than dimensions, pigeonhole forces a high value however healthy the code is. A real build with 44 classes × 4 hashes into 64 dims reported `collision_rate: 0.67` while every one of the 44 codes was distinct, the code matrix was full rank, and its condition number was ~12 — identity fully recoverable.
 >
-> Those keys are now `slot_reuse` / `slot_reuse_rate`, and the fields that do bound identity are reported alongside: `distinct_codes`, `classes_sharing_a_code` (classes that are genuinely indistinguishable), `max_pairwise_slot_overlap`, `capacity_classes`, `headroom_classes`, and `linearly_separable`. Capacity is the one to watch: a `d`-dimensional segment holds at most `d` linearly independent codes, so **more classes than `class_identity` dimensions** means class identity is no longer fully recoverable even though the codes stay distinct. The build logs a `WARNING` when the class count passes 85% of the segment width, and again when it exceeds it.
+> Those keys are now `slot_reuse` / `slot_reuse_rate`, and the fields that do bound identity are reported alongside: `distinct_codes`, `classes_sharing_a_code` (classes that are genuinely indistinguishable), `max_pairwise_slot_overlap`, `capacity_classes`, `headroom_classes`, `code_matrix_rank`, `rank_deficiency`, and `linearly_separable`.
+>
+> **`linearly_separable` is measured, not inferred.** It was previously computed as `num_classes <= dim and not classes_sharing_a_code` — two conditions that are each *necessary* but not together *sufficient*, reported under the name of a rank test. Distinct codes inside the ceiling can still be linearly dependent: the 4-hot codes `{0,1,2,3}`, `{0,1,4,5}`, `{2,3,6,7}`, `{4,5,6,7}` are pairwise distinct and fit in 8 dims, yet A + D − B − C = 0, so one class is exactly a blend of the others and no linear readout can recover it. That build reported `linearly_separable: true` and shipped. The field is now the measured rank of the `num_classes × dim` code matrix (`code_matrix_rank == total_classes`), with `rank_deficiency` giving how many classes are unrecoverable.
+>
+> This also means `capacity_classes` is a **ceiling, not a guarantee** — `d` 4-hot codes drawn into `d` dims measure rank `d−2`, so plan headroom rather than aiming at the limit.
+>
+> A build that is not separable — over-subscribed, sharing a code, or rank-deficient — now **raises `ClassIdentityCapacityError`** instead of logging. A warning was the wrong severity: the artifact ships, every consistency check passes, and the only symptom is a model that never learns to tell two classes apart, weeks downstream with nothing pointing back at the build. `feature_config.allow_class_identity_oversubscription=true` restores warn-and-continue. Approaching the limit (past 85% of the segment width) still only warns.
 
 **Generated by:** `feature_extractor._collect_slot_mapping_metadata()` — computes approximate slot assignments on the driver using a Python hash approximation of Spark's murmur3. The approximation may not match exactly for all inputs; this file is for interpretability only and is never used by training or inference code.
 
