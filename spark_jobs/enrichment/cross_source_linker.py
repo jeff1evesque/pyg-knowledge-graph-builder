@@ -16,7 +16,7 @@ from rdflib.namespace import RDF, RDFS, OWL
 from spark_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, UNIFIED, CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER,
     WKYENG, SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP, CAP, WEATHER,
-    MARKET_FEEDS,
+    MARKET_FEEDS, MARKET_FEEDS_OPTIONS, MARKET_QUOTES,
     ALERT,
     identifier_namespace,
 )
@@ -55,7 +55,61 @@ _BLS_ENTITY_PREFIXES = _entity_prefixes(
     CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER, WKYENG
 )
 _SEC_ENTITY_PREFIXES = _entity_prefixes(SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP)
-_MARKET_ENTITY_PREFIXES = _entity_prefixes(MARKET_FEEDS)
+
+# ALL THREE market vocabularies, not just the feeds one.
+#
+# This list is what _detect_sources tests subjects against, so it decides
+# whether 'market' is in available_sources at all -- and the company/ticker
+# step below is gated on that. Naming only MARKET_FEEDS meant a graph carrying
+# quote snapshots (id/market-quotes/snapshot/...) reported NO market source, so
+# the SEC-to-market bridge was skipped entirely and _create_causal_links found
+# no market entity to point BLS indicators at. Every market node in the e2e
+# fixtures is a quote snapshot, so on that data the gate was always shut.
+#
+# Detection is deliberately broader than any single step's model: this answers
+# "is there market data here", and each step re-filters on the specific types
+# and predicates it understands.
+_MARKET_ENTITY_PREFIXES = _entity_prefixes(
+    MARKET_QUOTES, MARKET_FEEDS_OPTIONS, MARKET_FEEDS
+)
+
+# The symbol-bearing classes of each market vocabulary, as (type, predicate).
+#
+# Listed per vocabulary rather than collapsed, because the two models are
+# deliberately separate and only their symbol predicate happens to line up. A
+# graph carrying either one bridges; a graph carrying both bridges through both.
+_MARKET_SYMBOL_TYPES = (
+    (str(MARKET_QUOTES.EquitySnapshot), str(MARKET_QUOTES.symbol)),
+    (str(MARKET_QUOTES.OptionSnapshot), str(MARKET_QUOTES.symbol)),
+    (str(MARKET_FEEDS.PriceObservation), str(MARKET_FEEDS.symbol)),
+    (str(MARKET_FEEDS.OptionContract), str(MARKET_FEEDS.symbol)),
+)
+
+# An OCC option symbol: six characters of root (space-padded), then the
+# expiration as YYMMDD, then C or P, then the strike in thousandths.
+_OCC_OPTION_SYMBOL = r"^(.{6})\d{6}[CP]\d{8}$"
+
+
+def _equity_symbol(col: F.Column) -> F.Column:
+    """The equity ticker a market symbol refers to.
+
+    Equity symbols pass through trimmed. Option symbols do not: the quote API
+    writes them in OCC form -- "A     260717C00065000" -- which is the ticker
+    left-justified in a six-character field followed by the contract terms. Left
+    as-is, an option snapshot's symbol matches no SEC issuer's ticker and every
+    OptionSnapshot in the graph stays isolated, which is what the fixtures
+    showed. Taking the root joins the option to the company it is written
+    against, which is the relationship a model wants anyway.
+
+    A symbol that does not parse as OCC falls through to the trimmed original
+    rather than being dropped, so a vocabulary using some other option encoding
+    fails to join instead of being silently mangled into the wrong ticker.
+    """
+    root = F.trim(F.regexp_extract(col, _OCC_OPTION_SYMBOL, 1))
+    return F.upper(
+        F.when(F.length(root) > 0, root).otherwise(F.trim(col))
+    )
+
 
 # URI constants
 _RDF_TYPE = str(RDF.type)
@@ -292,30 +346,63 @@ class CrossSourceLinker:
     # Step 3: Company/Ticker Linking
     # ================================================================
 
+    def _market_symbol_bearers(self) -> DataFrame:
+        """(entity, symbol) for every market entity that names a ticker.
+
+        Keyed on the classes each market vocabulary actually declares, per
+        _MARKET_SYMBOL_TYPES. The previous version asked for
+        market-feeds:StockTicker, which belongs to NEITHER model -- feeds is
+        PriceObservation / OptionContract, quotes is EquitySnapshot /
+        OptionSnapshot -- so it matched nothing no matter which namespace it
+        was pointed at, and the SEC-to-market bridge had no market side.
+
+        Both vocabularies are read rather than one, and they are read as
+        separate (type, symbol-predicate) pairs rather than merged: the two
+        remain deliberately un-unified (see the MARKET_QUOTES / MARKET_FEEDS
+        note in rdf_utils), and a graph carrying either -- or both -- should
+        bridge. Nothing here asserts the two models are the same thing; it only
+        collects the ticker each entity states about itself.
+        """
+        frames = [
+            extract_entities_by_type(self.triples_df, type_uri).join(
+                extract_property(self.triples_df, symbol_pred, "raw_symbol"),
+                on=F.col("entity") == F.col("subject"),
+            ).select("entity", "raw_symbol")
+            for type_uri, symbol_pred in _MARKET_SYMBOL_TYPES
+        ]
+
+        union = frames[0]
+        for frame in frames[1:]:
+            union = union.unionByName(frame)
+
+        return union.select(
+            F.col("entity"),
+            _equity_symbol(F.col("raw_symbol")).alias("symbol"),
+        ).filter(F.length(F.col("symbol")) > 0).dropDuplicates()
+
     def _link_by_company(self) -> Optional[DataFrame]:
         """
-        Link SEC filings to Market tickers via ticker symbol.
+        Link SEC issuers to Market quotes via ticker symbol.
 
-        Creates unified:Company_<SYMBOL> entities.
+        Creates unified:Company_<SYMBOL> entities that both sides point at, so
+        a filing reaches a quote through Filing -> Issuer -> Company <- Snapshot.
+
+        The SEC side keys on the ISSUER, not the filing. Upstream renamed
+        hasIssuerTicker to hasIssuerTradingSymbol AND moved it: the symbol is
+        now stated by the filings:Issuer node (itself subClassOf
+        sec-common:Company), which is the thing a ticker actually identifies. A
+        filing is a document and does not have a ticker. Filings still reach the
+        company, one hop further out, via their existing hasIssuer edge.
         """
-        # Get market ticker symbols
-        market_tickers = (
-            extract_entities_by_type(self.triples_df, str(MARKET_FEEDS.StockTicker))
-            .join(
-                extract_property(self.triples_df, str(MARKET_FEEDS.symbol), "symbol"),
-                on=F.col("entity") == F.col("subject")
-            )
-            .select(F.col("entity").alias("ticker_uri"), "symbol")
-            .drop("subject")
-        )
+        market_tickers = self._market_symbol_bearers()
 
-        # Get SEC filing ticker symbols
+        # Get SEC issuer ticker symbols
         sec_tickers = extract_property(
-            self.triples_df, str(SEC_FILINGS.hasIssuerTicker), "symbol"
+            self.triples_df, str(SEC_FILINGS.hasIssuerTradingSymbol), "raw_symbol"
         ).select(
-            F.col("subject").alias("filing_uri"),
-            F.col("symbol")
-        )
+            F.col("subject").alias("issuer_uri"),
+            _equity_symbol(F.col("raw_symbol")).alias("symbol"),
+        ).filter(F.length(F.col("symbol")) > 0)
 
         # Create unified company entities
         unified_uri = F.concat(F.lit(str(UNIFIED)), F.lit("Company_"), F.col("symbol"))
@@ -335,16 +422,16 @@ class CrossSourceLinker:
             F.col("symbol").alias("object")
         )
 
-        # Market ticker → company
+        # Market snapshot → company
         market_links = market_tickers.select(
-            F.col("ticker_uri").alias("subject"),
+            F.col("entity").alias("subject"),
             F.lit(str(BLS_ENRICHMENT.refersToCompany)).alias("predicate"),
             F.concat(F.lit(str(UNIFIED)), F.lit("Company_"), F.col("symbol")).alias("object")
         )
 
-        # SEC filing → company
+        # SEC issuer → company
         sec_links = sec_tickers.select(
-            F.col("filing_uri").alias("subject"),
+            F.col("issuer_uri").alias("subject"),
             F.lit(str(BLS_ENRICHMENT.refersToCompany)).alias("predicate"),
             F.concat(F.lit(str(UNIFIED)), F.lit("Company_"), F.col("symbol")).alias("object")
         )
