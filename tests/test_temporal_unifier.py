@@ -29,10 +29,12 @@ from spark_jobs.enrichment.temporal_unifier import (
     MARKET_OBSERVED_AT,
     MARKET_EXPIRATION_DATE,
     MARKET_OPTION_CONTRACT_TYPE,
+    OBSERVED_IN_PERIOD_PRED,
 )
 
 from spark_jobs.utils.rdf_utils import (
     CPI as _CPI_NS,
+    SEC_FILINGS,
     SYNTHETIC_TEMPORAL_IDS,
     identifier_namespace,
 )
@@ -50,6 +52,7 @@ from spark_jobs.utils.rdf_utils import (
 CPI = str(_CPI_NS)
 CPI_ID = identifier_namespace(CPI)
 MARKET_TEMPORAL = SYNTHETIC_TEMPORAL_IDS["market-feeds"]
+SEC_TEMPORAL = SYNTHETIC_TEMPORAL_IDS["sec"]
 
 
 def _triple_set(result):
@@ -152,13 +155,53 @@ def test_source_temporal_uris_are_typed(spark, make_triples):
     assert (cpi_year, RDF_TYPE, SOURCE_YEAR_TYPE) in triples
 
     # The synthetic URIs minted from date literals are equally untyped at the
-    # source, and the sameAs link is their ONLY edge — so they need it too.
+    # source, so they need typing too.
     assert (MARKET_TEMPORAL + "November", RDF_TYPE, SOURCE_MONTH_TYPE) in triples
 
     # Source and unified temporal entities stay distinguishable: the sameAs
     # target must not carry the type of the canonical entity pointing at it.
     assert (cpi_month, RDF_TYPE, UNIFIED_MONTH_TYPE) not in triples
     assert (UNIFIED_BASE + "November", RDF_TYPE, SOURCE_MONTH_TYPE) not in triples
+
+
+def test_dated_entities_reach_the_period_they_state(spark, make_triples):
+    """A source that states a date must end up ATTACHED to the period.
+
+    The date-literal sources (SEC, NOAA, market-feeds) have no equivalent of the
+    BLS `obs hasMonth cpi:February` triple — they state a date and nothing else.
+    The collector read the date value and threw away the subject, so the unifier
+    minted temporal/sec/August, linked it sameAs unified:August, and stopped:
+    nothing pointed at the period. That is a bridge with no on-ramp, and it
+    still produced Unified* nodes and sameAs edges, so the graph read as
+    connected while every SEC filing sat outside the temporal spine.
+
+    Asserted through to the unified entity, because reaching temporal/sec/August
+    is only useful if that is the same August the other sources reach.
+    """
+    filing = "https://jefflevesque.com/id/sec-filings/0000842657-26-000011_Filing"
+    rows = [
+        (filing, RDF_TYPE, str(SEC_FILINGS.SECFiling)),
+        # Stated as a URI rather than a literal, which is the live shape.
+        (filing, str(SEC_FILINGS.hasFilingDate),
+         "https://jefflevesque.com/id/sec-filings/Date_2026-08-14"),
+    ]
+
+    triples = _triple_set(TemporalUnifier(spark).enrich(make_triples(rows)))
+
+    sec_august = SEC_TEMPORAL + "August"
+    assert (filing, OBSERVED_IN_PERIOD_PRED, sec_august) in triples, (
+        "the filing does not reach the period it dates — the synthetic period "
+        "node is an island"
+    )
+    assert (filing, OBSERVED_IN_PERIOD_PRED, SEC_TEMPORAL + "2026") in triples
+    assert (UNIFIED_BASE + "August", OWL_SAME_AS, sec_august) in triples
+
+    # The on-ramp is something this pipeline inferred, not a fact SEC reported.
+    from spark_jobs.utils.rdf_utils import classify_edge_origin
+
+    assert classify_edge_origin(
+        OBSERVED_IN_PERIOD_PRED, "filings_SECFiling", "temporal_SourceMonth"
+    ) == "enrichment"
 
 
 def test_source_temporal_types_are_not_pipeline_minted_for_origin(spark):
