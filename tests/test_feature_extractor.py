@@ -31,7 +31,8 @@ from spark_jobs.pyg_builder.feature_extractor import (
     VectorLayout,
     _HASH_SEEDS,
     _compute_collision_report,
-    _warn_if_class_identity_is_saturated,
+    ClassIdentityCapacityError,
+    _check_class_identity_capacity,
 )
 
 CPI_INDEX = "https://jefflevesque.com/ontology/cpi/Index"        # -> cpi_Index
@@ -719,7 +720,6 @@ def test_class_identity_max_pairwise_overlap_is_reported():
 @pytest.mark.parametrize("num_classes,dim,expect", [
     (44, 64, None),                       # the real build: quiet
     (56, 64, "near capacity"),            # 87.5% full
-    (70, 64, "over-subscribed"),          # past the ceiling
 ])
 def test_saturation_warning_fires_only_when_identity_is_at_risk(
     caplog, num_classes, dim, expect,
@@ -733,7 +733,7 @@ def test_saturation_warning_fires_only_when_identity_is_at_risk(
     }}
     logger_name = "spark_jobs.pyg_builder.feature_extractor"
     with caplog.at_level(logging.WARNING, logger=logger_name):
-        _warn_if_class_identity_is_saturated(report)
+        _check_class_identity_capacity(report)
 
     if expect is None:
         assert "class_identity" not in caplog.text, (
@@ -743,20 +743,89 @@ def test_saturation_warning_fires_only_when_identity_is_at_risk(
         assert expect in caplog.text
 
 
-def test_saturation_warning_names_the_shared_code_groups(caplog):
+def test_over_subscription_fails_the_build():
+    """Past the ceiling is an error, not a log line.
+
+    A warning was the wrong severity. The artifact ships, every consistency
+    check passes, and the only symptom is a model that never learns to tell two
+    classes apart -- weeks downstream, with nothing pointing back at the build.
+    """
+    report = {"class_identity": {
+        "total_classes": 70,
+        "segment_dim": 64,
+        "classes_sharing_a_code": [],
+    }}
+    with pytest.raises(ClassIdentityCapacityError) as exc:
+        _check_class_identity_capacity(report)
+
+    assert "over-subscribed" in str(exc.value)
+    # The message must name the levers, or it reports a wall with no door.
+    assert "class_identity_dim" in str(exc.value)
+    assert "vector_dim" in str(exc.value)
+
+
+def test_over_subscription_can_be_opted_into(caplog):
+    """An exploratory run may accept partial identity -- but must ask."""
     import logging
 
+    report = {"class_identity": {
+        "total_classes": 70,
+        "segment_dim": 64,
+        "classes_sharing_a_code": [],
+    }}
+    with caplog.at_level(
+        logging.WARNING, logger="spark_jobs.pyg_builder.feature_extractor"
+    ):
+        _check_class_identity_capacity(report, allow_oversubscription=True)
+
+    assert "over-subscribed" in caplog.text
+
+
+def test_shared_codes_fail_the_build_and_name_the_groups():
+    """Identical codes are unrecoverable at any width, so they fail too."""
     report = {"class_identity": {
         "total_classes": 4,
         "segment_dim": 64,
         "classes_sharing_a_code": [["cpi_Area", "cpi_Region"]],
     }}
-    with caplog.at_level(
-        logging.WARNING, logger="spark_jobs.pyg_builder.feature_extractor"
-    ):
-        _warn_if_class_identity_is_saturated(report)
-    assert "indistinguishable" in caplog.text
-    assert "cpi_Area" in caplog.text
+    with pytest.raises(ClassIdentityCapacityError) as exc:
+        _check_class_identity_capacity(report)
+
+    assert "indistinguishable" in str(exc.value)
+    assert "cpi_Area" in str(exc.value)
+
+
+# ======================================================================
+# class_identity width override (feature_config.class_identity_dim)
+# ======================================================================
+
+def test_class_identity_dim_override_takes_dims_from_segment_one():
+    """The production lever: more class capacity at the same vector width.
+
+    Taken from within segment 1 so vector_dim -- and therefore the driver
+    memory held for every node in the graph -- does not move.
+    """
+    default = VectorLayout(1024)
+    wider = VectorLayout(1024, class_identity_dim=200)
+
+    assert wider.seg1_class_identity_dim == 200
+    assert wider.vector_dim == default.vector_dim
+    assert wider.seg1_total == default.seg1_total
+    # Every later segment starts where it did.
+    assert wider.seg2_start == default.seg2_start
+    assert wider.seg3_start == default.seg3_start
+
+
+@pytest.mark.parametrize("bad", [0, -1, 255, 1000])
+def test_class_identity_dim_override_rejects_widths_that_do_not_fit(bad):
+    """Rejected, not clamped.
+
+    The override exists to guarantee a class budget, so silently granting a
+    smaller one would defeat the purpose -- the build would run and the
+    capacity check would then fail on a width nobody asked for.
+    """
+    with pytest.raises(ValueError, match="class_identity_dim"):
+        VectorLayout(1024, class_identity_dim=bad)
 
 
 def test_class_identity_capacity_holds_for_the_real_class_count(spark):
@@ -779,33 +848,99 @@ def test_class_identity_capacity_holds_for_the_real_class_count(spark):
 
 
 @pytest.mark.parametrize("vector_dim", [256, 512, 1024, 2048])
-def test_separability_flips_exactly_at_the_segment_width(vector_dim):
+def test_capacity_is_a_ceiling_not_a_guarantee(vector_dim):
     """The capacity rule, asserted against whatever the layout happens to be.
 
     Deliberately derives every number from VectorLayout rather than pinning a
     width: the segment fractions are a tuning decision and the composition of
-    the feature vector is expected to change. What must not change is the rule
-    -- a d-dim segment separates at most d classes -- so that is what is
-    tested, at four widths, with no hardcoded dims anywhere.
+    the feature vector is expected to change. What must not change is the rule,
+    so that is what is tested, at four widths, with no hardcoded dims anywhere.
+
+    The rule is asymmetric, and the asymmetry is the point:
+
+      * MORE than d classes can never be separable -- pigeonhole, no set of
+        codes can help.
+      * d or fewer MIGHT be separable. It is not guaranteed and has to be
+        measured, because distinct codes under the ceiling can still be
+        linearly dependent.
+
+    This previously asserted separability at exactly d classes, which passed
+    only because the metric was `num_classes <= dim and not shared` -- a count
+    comparison wearing the name of a rank test. Measured, d 4-hot codes in d
+    dims come out rank d-2 at every width here: the nominal ceiling is an upper
+    bound nobody should plan to reach, which is why headroom_classes is
+    reported alongside it rather than instead of it.
     """
     ci_dim = VectorLayout(vector_dim).seg1_class_identity_dim
 
-    for num_classes, separable in (
-        (max(1, ci_dim // 2), True),   # comfortably inside
-        (ci_dim, True),                # exactly at capacity
-        (ci_dim + 1, False),           # one past it
-    ):
-        ci = _class_report(_distinct_codes(num_classes, ci_dim), dim=ci_dim)
-        assert ci["distinct_codes"] == num_classes, (
-            "test fixture must supply distinct codes so the assertion below "
-            "isolates capacity from code collisions"
-        )
-        assert ci["linearly_separable"] is separable, (
-            f"vector_dim={vector_dim} -> class_identity={ci_dim} dims: "
-            f"{num_classes} classes should be "
-            f"{'separable' if separable else 'NOT separable'}"
-        )
-        assert ci["headroom_classes"] == ci_dim - num_classes
+    # Comfortably inside: full rank, genuinely separable.
+    inside = max(1, ci_dim // 2)
+    ci = _class_report(_distinct_codes(inside, ci_dim), dim=ci_dim)
+    assert ci["distinct_codes"] == inside, (
+        "test fixture must supply distinct codes so the assertions below "
+        "isolate capacity from code collisions"
+    )
+    assert ci["code_matrix_rank"] == inside
+    assert ci["linearly_separable"] is True
+    assert ci["headroom_classes"] == ci_dim - inside
+
+    # One past the ceiling: never separable, whatever the codes are.
+    over = ci_dim + 1
+    ci = _class_report(_distinct_codes(over, ci_dim), dim=ci_dim)
+    assert ci["linearly_separable"] is False, (
+        f"vector_dim={vector_dim} -> class_identity={ci_dim} dims: "
+        f"{over} classes cannot be separable"
+    )
+    assert ci["rank_deficiency"] >= 1
+
+    # Exactly at the ceiling: whatever rank says, and separability must agree
+    # with it rather than with the count.
+    ci = _class_report(_distinct_codes(ci_dim, ci_dim), dim=ci_dim)
+    assert ci["distinct_codes"] == ci_dim
+    assert ci["linearly_separable"] is (ci["code_matrix_rank"] == ci_dim)
+    assert ci["headroom_classes"] == 0
+
+
+def test_distinct_codes_under_capacity_can_still_be_dependent():
+    """The case both cheap proxies miss -- and the reason rank is measured.
+
+    Four 4-hot codes over 8 slots, pairwise distinct and well inside the
+    ceiling, yet A + D - B - C = 0: one class is exactly a combination of the
+    others and no linear readout can recover it.
+
+    Under the previous metric (`num_classes <= dim and not shared`) this
+    reported linearly_separable=True and the build shipped.
+    """
+    codes = [(0, 1, 2, 3), (0, 1, 4, 5), (2, 3, 6, 7), (4, 5, 6, 7)]
+    ci = _class_report(codes, dim=8)
+
+    assert ci["distinct_codes"] == 4, "the codes are pairwise distinct"
+    assert ci["classes_sharing_a_code"] == [], "none are identical"
+    assert ci["total_classes"] <= ci["capacity_classes"], "inside the ceiling"
+
+    assert ci["code_matrix_rank"] == 3
+    assert ci["rank_deficiency"] == 1
+    assert ci["linearly_separable"] is False
+
+
+def test_dependent_codes_fail_the_build_with_their_own_diagnosis():
+    """The remedy differs from over-subscription, so the message must too.
+
+    Over-subscription means "too many classes for this width". Dependence
+    inside the ceiling is an unlucky hash draw -- changing the width re-draws
+    every code -- so reporting it as over-subscription would send someone to
+    the wrong fix.
+    """
+    codes = [(0, 1, 2, 3), (0, 1, 4, 5), (2, 3, 6, 7), (4, 5, 6, 7)]
+    report = {"class_identity": _class_report(codes, dim=8)}
+
+    with pytest.raises(ClassIdentityCapacityError) as exc:
+        _check_class_identity_capacity(report)
+
+    message = str(exc.value)
+    assert "linearly dependent" in message
+    assert "over-subscribed" not in message
+    assert "span only 3 dimensions" in message
 
 
 # ======================================================================
