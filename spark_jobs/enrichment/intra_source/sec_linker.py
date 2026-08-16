@@ -72,7 +72,19 @@ _PRECEDES = str(SEC_ENRICHMENT.precedes)
 _FILINGS_HAS_ISSUER_CIK = str(SEC_FILINGS.hasIssuerCik)
 _FILINGS_HAS_REPORTING_OWNER_CIK = str(SEC_FILINGS.hasReportingOwnerCik)
 _FILINGS_HAS_REPORTING_OWNER = str(SEC_FILINGS.hasReportingOwner)
-_FILINGS_HAS_COMPANY = str(SEC_FILINGS.hasCompany)
+# The filing's subject company. Upstream remodelled this from hasCompany --
+# which no filing states any more -- to hasIssuer pointing at a filings:Issuer
+# node (itself subClassOf sec-common:Company), so it is now an object property
+# rather than a literal company name.
+#
+# The grouping below is unaffected by that shape change: it partitions on the
+# object either way. What DOES change is that the groups now form at all --
+# hasCompany matched nothing, so every periodic filing fell out of the join and
+# no 10-K/10-Q/8-K sequence was ever built. Issuer URIs are keyed by CIK
+# (Issuer_0000842657) and shared across that issuer's filings, so grouping on
+# them is the same partition the literal name was meant to produce, minus the
+# name-spelling collisions.
+_FILINGS_HAS_ISSUER = str(SEC_FILINGS.hasIssuer)
 _FILINGS_HAS_PERIOD_OF_REPORT = str(SEC_FILINGS.hasPeriodOfReport)
 _FILINGS_HAS_TRANSACTION_DATE = str(SEC_FILINGS.hasTransactionDate)
 _FILINGS_HAS_ISSUER_TRADING_SYMBOL = str(SEC_FILINGS.hasIssuerTradingSymbol)
@@ -718,7 +730,7 @@ class SECIntraSourceLinker:
 
         filing_companies = (
             self._sec_triples
-            .filter(F.col("predicate") == _FILINGS_HAS_COMPANY)
+            .filter(F.col("predicate") == _FILINGS_HAS_ISSUER)
             .select(
                 F.col("subject").alias("filing"),
                 F.col("object").alias("company"),
