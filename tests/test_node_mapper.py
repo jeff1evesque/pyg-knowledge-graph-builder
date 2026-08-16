@@ -108,10 +108,23 @@ def test_meta_ontology_types_are_excluded(spark, make_triples):
 # Canonical type selection (multi-type entities)
 # ======================================================================
 
-def test_multitype_entity_gets_most_specific_type(spark, make_triples):
-    # e1 is both cpi_Index and cpi_Series. cpi_Index is the more common type
-    # (3 instances) and cpi_Series the rarer/"more specific" one (1 instance),
-    # so e1's single canonical type must be cpi_Series.
+def test_multitype_entity_gets_the_superclass(spark, make_triples):
+    """A subclass loses to the type that subsumes it.
+
+    e1 is both cpi_Index and cpi_Series. Every cpi_Series instance (just e1) is
+    also a cpi_Index, and cpi_Index is strictly larger, so cpi_Series is a
+    subclass by extension and e1 canonicalizes to cpi_Index.
+
+    This reverses the previous rule, which was "most specific wins" -- fewest
+    instances. A subclass is ALWAYS rarer than its parent, so that rule picked
+    the subclass every time and sharded one concept across every sub-class the
+    source happens to state: 40 SEC filings became five node types, and
+    filings_hasIssuer five edge types onto one filings_Issuer.
+
+    cpi_Series does not disappear from the graph -- it stays an rdf:type triple
+    on e1 and is still encoded in the class_identity segment. Only the
+    *canonical* type, the one that decides graph structure, is the parent.
+    """
     triples = make_triples([
         ("https://ex/e1", RDF_TYPE, CPI_INDEX),
         ("https://ex/e1", RDF_TYPE, CPI_SERIES),
@@ -121,10 +134,63 @@ def test_multitype_entity_gets_most_specific_type(spark, make_triples):
     node_id_df, counts = NodeMapper(spark, {}).build_node_id_table(triples)
     mapping = _mapping(node_id_df)
 
-    assert mapping["https://ex/e1"][1] == "cpi_Series"
-    # e1 no longer counts toward cpi_Index; each entity appears exactly once.
-    assert counts == {"cpi_Index": 2, "cpi_Series": 1}
+    assert mapping["https://ex/e1"][1] == "cpi_Index"
+    # cpi_Series is no longer a node type at all; each entity appears once.
+    assert counts == {"cpi_Index": 3}
     assert sorted(mapping) == ["https://ex/e1", "https://ex/e2", "https://ex/e3"]
+
+
+def test_most_specific_still_wins_without_subsumption(spark, make_triples):
+    """Types that merely overlap keep the old rarest-wins tie-break.
+
+    e1 carries both types, but e4 is a cpi_Series that is NOT a cpi_Index, so
+    cpi_Series' instances are not contained in cpi_Index's and neither type
+    subsumes the other. Nothing has been learned about a hierarchy, so the
+    contest falls through to the pre-existing count/name ordering and the rarer
+    type wins -- unchanged behaviour for every entity whose types are simply
+    independent.
+    """
+    triples = make_triples([
+        ("https://ex/e1", RDF_TYPE, CPI_INDEX),
+        ("https://ex/e1", RDF_TYPE, CPI_SERIES),
+        ("https://ex/e2", RDF_TYPE, CPI_INDEX),
+        ("https://ex/e3", RDF_TYPE, CPI_INDEX),
+        ("https://ex/e4", RDF_TYPE, CPI_SERIES),
+    ])
+    node_id_df, counts = NodeMapper(spark, {}).build_node_id_table(triples)
+    mapping = _mapping(node_id_df)
+
+    assert mapping["https://ex/e1"][1] == "cpi_Series"
+    assert counts == {"cpi_Index": 2, "cpi_Series": 2}
+
+
+def test_subsumption_does_not_fire_on_equal_extensions(spark, make_triples):
+    """Two types on exactly the same entities subsume each other -- so neither wins.
+
+    Returning both would make the winner depend on join order, which is a
+    content non-determinism in the emitted graph. The strict `count(sup) >
+    count(sub)` test excludes the pair, leaving the deterministic name
+    tie-break to settle it.
+    """
+    rows = [
+        ("https://ex/e1", RDF_TYPE, CPI_INDEX),
+        ("https://ex/e1", RDF_TYPE, CPI_SERIES),
+        ("https://ex/e2", RDF_TYPE, CPI_INDEX),
+        ("https://ex/e2", RDF_TYPE, CPI_SERIES),
+    ]
+
+    def canonical(triple_rows):
+        node_id_df, counts = NodeMapper(spark, {}).build_node_id_table(
+            make_triples(triple_rows)
+        )
+        return _mapping(node_id_df)["https://ex/e1"][1], counts
+
+    forward = canonical(rows)
+    reversed_ = canonical(list(reversed(rows)))
+
+    assert forward == reversed_, "row order changed the canonical type"
+    # cpi_Index sorts before cpi_Series, so the name tie-break picks it.
+    assert forward[0] == "cpi_Index"
 
 
 # ======================================================================
@@ -204,19 +270,19 @@ def test_type_uri_mapping_is_deterministic_for_multi_typed_node(
     """A node type with several candidate type URIs must resolve identically.
 
     get_type_uri_mapping keeps ONE type URI per node type. e1 carries both
-    CPI_INDEX and CPI_SERIES, and its canonical node type is cpi_Series (the
-    rarer type — see test_multitype_entity_gets_most_specific_type), so BOTH
-    URIs join to node type cpi_Series and one of them has to win.
+    CPI_INDEX and CPI_SERIES, and its canonical node type is cpi_Index (the
+    superclass — see test_multitype_entity_gets_the_superclass), so BOTH URIs
+    join to node type cpi_Index and one of them has to win.
 
     That choice used to be "whichever row Spark returned first", which is
     task-completion order and therefore varied run-to-run — the same input
     produced different metadata on different runs. Sorting the rows made it
-    deterministic but still arbitrary: the smallest URI won, so cpi_Series
-    reported CPI_INDEX.
+    deterministic but still arbitrary: the smallest URI won.
 
     It is no longer arbitrary. The winner is the candidate whose derived PyG
-    name equals the node type, so cpi_Series reports CPI_SERIES — which is what
-    lets graph_schema.json's source_type_uri be trusted, and what stops
+    name equals the node type, so cpi_Index reports CPI_INDEX rather than the
+    subclass URI that also joins to it — which is what lets
+    graph_schema.json's source_type_uri be trusted, and what stops
     ontology_schema.json attributing another class's superclass_chain and
     defined_properties to this type.
 
@@ -240,9 +306,9 @@ def test_type_uri_mapping_is_deterministic_for_multi_typed_node(
     reversed_ = resolve(list(reversed(rows)))
 
     assert forward == reversed_, "input row order changed the type URI mapping"
-    assert forward["cpi_Series"] == CPI_SERIES, (
+    assert forward["cpi_Index"] == CPI_INDEX, (
         "the node type must report its own class, not the smallest candidate "
-        f"URI (got {forward['cpi_Series']})"
+        f"URI (got {forward['cpi_Index']})"
     )
 
 
@@ -278,23 +344,34 @@ def _type_uris(spark, rows, make_triples):
 def _sibling_rows():
     """Two specific rate types under one shared enrichment supertype.
 
-    The supertype must be the MORE common type: canonical selection keeps the
-    rarest type per entity, so a supertype carried by fewer entities than its
-    subtypes would itself become the node type and there would be nothing to
-    mis-report. Spreading it across both siblings (5 entities vs 2 and 3) is
-    what the real data looks like -- every jolts rate type carries it.
+    The supertype must be the MORE common type, or it would itself be the
+    rarest type per entity and there would be nothing to mis-report.
+
+    It must ALSO not subsume either sibling, or canonical selection collapses
+    both into bls_enrichment_RateMeasurement and neither specific node type
+    survives to have a source_type_uri at all. So h3 and q3 carry their rate
+    type WITHOUT the supertype: containment fails in both directions, the
+    hierarchy inference correctly declines to fire, and the sibling types stay
+    on the graph -- which is the situation this URI rule exists for.
+
+    (When every instance DOES carry the supertype -- the shape real jolts data
+    has -- the siblings now merge into it by design. That collapse is the point
+    of the subsumption rule, and it is asserted in
+    test_multitype_entity_gets_the_superclass.)
     """
     return [
         ("https://ex/h1", RDF_TYPE, JOLTS_HIRES_RATE),
         ("https://ex/h1", RDF_TYPE, BLS_RATE_MEASUREMENT),
         ("https://ex/h2", RDF_TYPE, JOLTS_HIRES_RATE),
         ("https://ex/h2", RDF_TYPE, BLS_RATE_MEASUREMENT),
+        ("https://ex/h3", RDF_TYPE, JOLTS_HIRES_RATE),
         ("https://ex/q1", RDF_TYPE, JOLTS_QUITS_RATE),
         ("https://ex/q1", RDF_TYPE, BLS_RATE_MEASUREMENT),
         ("https://ex/q2", RDF_TYPE, JOLTS_QUITS_RATE),
         ("https://ex/q2", RDF_TYPE, BLS_RATE_MEASUREMENT),
         ("https://ex/q3", RDF_TYPE, JOLTS_QUITS_RATE),
         ("https://ex/q3", RDF_TYPE, BLS_RATE_MEASUREMENT),
+        ("https://ex/q4", RDF_TYPE, JOLTS_QUITS_RATE),
     ]
 
 

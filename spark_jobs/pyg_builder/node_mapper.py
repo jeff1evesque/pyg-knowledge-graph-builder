@@ -23,7 +23,9 @@ Multi-type entities:
     1. If config specifies node_types, first match wins
     2. Otherwise, a type in _CANONICAL_TYPE_PRIORITY wins (temporal types, which
        must not shard across per-namespace source types -- see that constant)
-    3. Otherwise, most specific type (fewest instances) wins
+    3. Otherwise, a type that SUBSUMES another of the entity's types loses to
+       nothing and wins -- see _subsumed_node_types()
+    4. Otherwise, most specific type (fewest instances) wins
 """
 import logging
 from typing import Dict, Any, Tuple
@@ -85,6 +87,90 @@ _CANONICAL_TYPE_PRIORITY = (
     "temporal_SourceQuarter",
 )
 _SECTOR_TYPE_FRAGMENTS = ("EconomicSector", "Sector")
+
+
+def _subsumed_node_types(
+    type_triples: DataFrame,
+    type_counts: DataFrame,
+) -> DataFrame:
+    """Node types that are a SUBCLASS of another type the same entities carry.
+
+    The canonical-type contest used to be settled by instance count, "most
+    specific wins". A subclass is by definition rarer than its parent, so that
+    rule always picks the subclass -- and shards one semantic concept across as
+    many node types as the source happens to sub-classify:
+
+        40 SEC filings became five node types (filings_SECFiling 33, Form4 3,
+        Form8K 2, Form10K 1, Form10Q 1) because a Form 4 filing is typed BOTH
+        sec-filings:Form4 and sec-filings:SECFiling. filings_hasIssuer then
+        became five edge types pointing at the same filings_Issuer, and a GNN
+        allocates five weight matrices where the relation is one.
+
+    Subsumption is read off the INSTANCE DATA rather than any declared axiom,
+    because no source declares rdfs:subClassOf (ontology_mapper.py:306) -- the
+    hierarchy exists only as co-typing. A is a subclass of B when every instance
+    of A is also a B and B is strictly larger:
+
+        cooccur(A, B) == count(A)  and  count(B) > count(A)
+
+    Extension containment is exactly what subsumption means for the purpose this
+    serves, and it is the only evidence available. The strict `>` matters: two
+    types with IDENTICAL extensions subsume each other, and returning both would
+    make the winner depend on join order. Excluding them leaves the existing
+    count/name tie-break to settle it deterministically.
+
+    Chains need no transitive closure. If A ⊑ B ⊑ C then A's instances are all
+    C's too, so (A, C) is derived directly and both A and B come back subsumed,
+    leaving C -- the most general -- to win.
+
+    Because containment is global, membership depends only on the type: if A ⊑ B
+    then EVERY entity carrying A also carries B, so there is no entity for which
+    A is the most general choice. That is what lets this return a flat set of
+    type names rather than a per-entity judgement.
+
+    This generalizes _CANONICAL_TYPE_PRIORITY, which pins the same outcome for
+    temporal types by hand. That table is kept: it also covers periods the
+    unifier typed only partially, where containment does not hold and the
+    inference correctly declines to fire.
+
+    Returns:
+        DataFrame(node_type) -- the types that lost. May be empty.
+    """
+    sub_side = type_triples.select(
+        F.col("uri"), F.col("node_type").alias("sub")
+    ).distinct()
+    sup_side = type_triples.select(
+        F.col("uri"), F.col("node_type").alias("sup")
+    ).distinct()
+
+    co_occurrence = (
+        sub_side
+        .join(sup_side, "uri", "inner")
+        .filter(F.col("sub") != F.col("sup"))
+        .groupBy("sub", "sup")
+        .agg(F.count("*").alias("cooccur"))
+    )
+
+    sub_counts = type_counts.select(
+        F.col("node_type").alias("sub"),
+        F.col("type_count").alias("sub_count"),
+    )
+    sup_counts = type_counts.select(
+        F.col("node_type").alias("sup"),
+        F.col("type_count").alias("sup_count"),
+    )
+
+    return (
+        co_occurrence
+        .join(F.broadcast(sub_counts), "sub", "inner")
+        .join(F.broadcast(sup_counts), "sup", "inner")
+        .filter(
+            (F.col("cooccur") == F.col("sub_count"))
+            & (F.col("sup_count") > F.col("sub_count"))
+        )
+        .select(F.col("sub").alias("node_type"))
+        .distinct()
+    )
 
 
 def _build_uri_to_pyg_name_expr(uri_col: str = "type_uri") -> F.Column:
@@ -276,7 +362,8 @@ class NodeMapper:
         type_triples = self._apply_config_filters(type_triples)
 
         # ============================================
-        # Step 5: Assign canonical type per entity (most specific wins)
+        # Step 5: Assign canonical type per entity
+        #         (pinned > superclass > most specific)
         # ============================================
         type_counts = (
             type_triples
@@ -293,15 +380,32 @@ class NodeMapper:
                 F.col("node_type") == pinned_type, F.lit(position)
             ).otherwise(priority_expr)
 
+        # A type that is a subclass of another type on the same entity sorts
+        # last, so the most general of an entity's types wins. Ordered AHEAD of
+        # type_count, which would otherwise pick the subclass every time (a
+        # subclass is always rarer than its parent). Entities whose types stand
+        # in no subsumption relation have every flag at 0 and fall through to
+        # the count/name tie-break unchanged.
+        subsumed = _subsumed_node_types(type_triples, type_counts)
+
         ranked = (
             type_triples
             .join(F.broadcast(type_counts), "node_type", "inner")
+            .join(
+                F.broadcast(subsumed.withColumn("is_subsumed", F.lit(1))),
+                "node_type",
+                "left",
+            )
+            .withColumn(
+                "is_subsumed", F.coalesce(F.col("is_subsumed"), F.lit(0))
+            )
             .withColumn("type_priority", priority_expr)
             .withColumn(
                 "rank",
                 F.row_number().over(
                     Window.partitionBy("uri").orderBy(
                         F.col("type_priority").asc(),
+                        F.col("is_subsumed").asc(),
                         F.col("type_count").asc(),
                         F.col("node_type").asc(),
                     )
