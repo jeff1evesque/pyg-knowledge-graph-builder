@@ -314,6 +314,55 @@ def choose_anchor_periods(feed_periods: dict[str, dict]) -> list[tuple[str, str]
     ]
 
 
+def referenced_types(graph, subj) -> set:
+    """Types of the entities ``subj`` points at, one hop out.
+
+    Distinct from the subject's OWN rdf:type, and that distinction is the whole
+    point. A measurement's type says what was measured (``HiresLevel``); the
+    types it references say along which dimensions (``Industry``, ``Month``,
+    ``Region``, ``EstablishmentSizeClass``). A jolts feed states the same
+    measurement types for every scope, so a region-scoped and an
+    industry-scoped ``HiresLevel`` are indistinguishable by subject type — yet
+    only one of them pulls a ``Region`` entity into the closure.
+
+    Sampling on subject type alone therefore cannot see a dimension class at
+    all: it is never a subject's type, only ever the type of something a
+    subject references. That is how ``jolts:Region`` and
+    ``jolts:EstablishmentSizeClass`` stayed out of the committed fixtures while
+    every measurement type was represented.
+    """
+    import rdflib
+
+    types = set()
+    for obj in graph.objects(subj, None):
+        if isinstance(obj, rdflib.URIRef):
+            types |= set(graph.objects(obj, rdflib.RDF.type))
+    return types
+
+
+def dimension_coverage_seeds(graph, queues) -> list:
+    """One anchored subject per referenced-entity type, URI-first.
+
+    Runs before the round-robin fill so dimension coverage is guaranteed rather
+    than left to alphabetical luck. Drawn only from the anchored queues, so
+    every seed still carries a shared period and the cross-source temporal
+    bridge is unaffected.
+
+    Bounded by the number of distinct dimension types a feed states — four or
+    five in practice — so it costs a handful of the quota's 200 slots and
+    cannot crowd out the anchored sample.
+    """
+    seen: set = set()
+    seeds: list = []
+    for queue in queues:
+        for subj in queue:
+            new = referenced_types(graph, subj) - seen
+            if new:
+                seeds.append(subj)
+                seen |= new
+    return seeds
+
+
 def select_subjects(
     graph,
     periods: dict,
@@ -321,7 +370,7 @@ def select_subjects(
     limit: int,
     anchor_share: float = ANCHOR_SHARE,
 ):
-    """Pick measurement subjects: shared periods first, then type coverage.
+    """Pick measurement subjects: dimension coverage, shared periods, types.
 
     Anchoring on shared periods is what lets the cross-source temporal bridge
     form, so it gets the quota first. Whatever is left over — for feeds with
@@ -329,6 +378,12 @@ def select_subjects(
     introduce an ``rdf:type`` not yet represented, so a thin feed still
     contributes a spread of its ontology rather than a short run of near
     duplicates.
+
+    Ahead of both, a small dimension-coverage pass claims one anchored subject
+    per referenced-entity type. Both other passes rank by the subject's own
+    type, which is blind to a class that appears only on the object side of a
+    reference — see referenced_types(). The seeds are anchored subjects, so
+    this reorders the sample rather than trading period overlap for breadth.
 
     At the default ``anchor_share`` of 1.0 the type-coverage pass is a pure
     fallback. See the ANCHOR_SHARE comment for why broadening it by default is
@@ -353,16 +408,24 @@ def select_subjects(
         sorted(by_period[period], key=str)
         for period in sorted(by_period, key=lambda p: ranked[p])
     ]
-    chosen: list = []
+
+    # Dimension coverage first, then the round-robin fills what is left.
+    # Without this the round-robin takes each period's subjects in URI order
+    # and the quota is exhausted long before it reaches a scope that sorts
+    # late, so a whole dimension class is silently absent from the fixture.
+    chosen: list = list(dimension_coverage_seeds(graph, queues))
+    picked_seeds = set(chosen)
+
     depth_index = 0
     while queues and len(chosen) < anchor_quota:
         progressed = False
         for queue in queues:
             if depth_index < len(queue):
-                chosen.append(queue[depth_index])
                 progressed = True
-                if len(chosen) >= anchor_quota:
-                    break
+                if queue[depth_index] not in picked_seeds:
+                    chosen.append(queue[depth_index])
+                    if len(chosen) >= anchor_quota:
+                        break
         if not progressed:
             break
         depth_index += 1
