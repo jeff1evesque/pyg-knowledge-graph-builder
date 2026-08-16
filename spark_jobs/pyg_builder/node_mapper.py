@@ -28,7 +28,7 @@ Multi-type entities:
     4. Otherwise, most specific type (fewest instances) wins
 """
 import logging
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, List, Tuple
 
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
@@ -92,7 +92,7 @@ _SECTOR_TYPE_FRAGMENTS = ("EconomicSector", "Sector")
 def _subsumed_node_types(
     type_triples: DataFrame,
     type_counts: DataFrame,
-) -> DataFrame:
+) -> List[str]:
     """Node types that are a SUBCLASS of another type the same entities carry.
 
     The canonical-type contest used to be settled by instance count, "most
@@ -133,8 +133,20 @@ def _subsumed_node_types(
     unifier typed only partially, where containment does not hold and the
     inference correctly declines to fire.
 
+    COLLECTED to the driver rather than returned as a DataFrame, and this is a
+    performance contract, not a style choice. Returned lazily, the self-join
+    below becomes part of node_id_df's lineage, and build_features references
+    that frame across ~29 collects and ~73 unions -- every one of which drags
+    the join subtree along. Measured on the encode path, the lazy form cost
+    1.95x (10.0s -> 19.6s per build) with an IDENTICAL number of Spark calls:
+    the same operations, each executing a bigger plan. The result is one row
+    per subsumed type -- bounded by the node-type count, ~80 on the e2e
+    fixtures -- so materializing it is cheap and it collapses to a literal
+    predicate at the call site.
+
     Returns:
-        DataFrame(node_type) -- the types that lost. May be empty.
+        Sorted list of node type names that lost. May be empty. Sorted so the
+        emitted plan is identical across runs on the same data.
     """
     sub_side = type_triples.select(
         F.col("uri"), F.col("node_type").alias("sub")
@@ -160,7 +172,7 @@ def _subsumed_node_types(
         F.col("type_count").alias("sup_count"),
     )
 
-    return (
+    rows = (
         co_occurrence
         .join(F.broadcast(sub_counts), "sub", "inner")
         .join(F.broadcast(sup_counts), "sup", "inner")
@@ -168,9 +180,12 @@ def _subsumed_node_types(
             (F.col("cooccur") == F.col("sub_count"))
             & (F.col("sup_count") > F.col("sub_count"))
         )
-        .select(F.col("sub").alias("node_type"))
+        .select("sub")
         .distinct()
+        .collect()
     )
+
+    return sorted(row["sub"] for row in rows)
 
 
 def _build_uri_to_pyg_name_expr(uri_col: str = "type_uri") -> F.Column:
@@ -388,17 +403,22 @@ class NodeMapper:
         # the count/name tie-break unchanged.
         subsumed = _subsumed_node_types(type_triples, type_counts)
 
+        # A literal predicate rather than a join: `subsumed` is already a
+        # driver-side list, so this adds one IN test to the plan instead of a
+        # second scan of type_triples. The empty case is spelled out because
+        # isin() over an empty list is a degenerate expression -- nothing is
+        # subsumed, so every row scores 0 and the count/name tie-break decides,
+        # exactly as it did before subsumption existed.
+        is_subsumed_expr = (
+            F.col("node_type").isin(subsumed).cast("int")
+            if subsumed
+            else F.lit(0)
+        )
+
         ranked = (
             type_triples
             .join(F.broadcast(type_counts), "node_type", "inner")
-            .join(
-                F.broadcast(subsumed.withColumn("is_subsumed", F.lit(1))),
-                "node_type",
-                "left",
-            )
-            .withColumn(
-                "is_subsumed", F.coalesce(F.col("is_subsumed"), F.lit(0))
-            )
+            .withColumn("is_subsumed", is_subsumed_expr)
             .withColumn("type_priority", priority_expr)
             .withColumn(
                 "rank",
