@@ -394,18 +394,21 @@ def _incident_edge_counts(data):
 # empsit_Industry, jolts_SeparationsLevel, jolts_SeparationsRate. They were
 # never a pipeline defect — the old fixtures were sampled by triple, so the
 # entities on the other end of their edges were not typed and never became
-# nodes. What remains is either non-BLS (filings_*, unknown_*, which draw on
-# separate fixtures) or a BLS type the sample genuinely does not connect.
+# nodes.
+#
+# Eight more went when the fixtures were regenerated against the refactored
+# crawl output. Seven are BLS classes upstream no longer emits at all —
+# cpi_TwelveMonthPercentChange, eci_WagesAndSalariesIndexData,
+# empsit_HouseholdData, empsit_OccupationData, empsit_PeriodOfService,
+# empsit_UnemploymentDurationData, empsit_UnemploymentReasonData — so they can
+# no longer name a node type in any graph built from this data. The eighth is
+# filings_SECFiling, which was orphaned because the SEC fixture was three
+# scraped-HTML stubs pointing at nothing; a real filing states hasIssuer,
+# hasFilingDate and hasPeriodOfReport, and all three resolve.
 KNOWN_ORPHANED_NODE_TYPES = {
+    # Pipeline-minted rather than sampled, so unlike the entries above this one
+    # cannot be settled by reading the fixtures — only by running this suite.
     "bls_enrichment_GeographicRegion",
-    "cpi_TwelveMonthPercentChange",
-    "eci_WagesAndSalariesIndexData",
-    "empsit_HouseholdData",
-    "empsit_OccupationData",
-    "empsit_PeriodOfService",
-    "empsit_UnemploymentDurationData",
-    "empsit_UnemploymentReasonData",
-    "filings_SECFiling",
     # These read "unknown_*" until the source namespaces were re-homed. The
     # prefix was not cosmetic: it meant the market namespace constant pointed
     # somewhere no scraper emitted, so node_mapper matched nothing and fell
