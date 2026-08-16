@@ -24,6 +24,32 @@ first choice and is not viable on size: the smallest single Turtle document is
 612 KB against a ~180 KB budget for the entire fixture set. Hence entity-level
 closure within rows.
 
+WHAT UPSTREAM CHANGED
+---------------------
+Three things this script had encoded and now reads instead:
+
+  * the RDF column is ``rdf_turtle``. It was ``triples`` when this was written;
+    both spellings exist across sources, so the column is now *detected* by the
+    same candidate list the production loader uses
+    (``build_graph.TURTLE_COLUMN_CANDIDATES``) rather than named.
+
+  * a row is filed under the year it is *about*, not the year it was crawled,
+    and a revision replaces the row it revises. ``<feed>/<year>.snappy.parquet``
+    is therefore a whole observation year, and the newest vintage is the current
+    (partial) year — which is what the sample wants anyway.
+
+  * measurements are flat. Values used to hang off a blank node
+    (``[ ns1:value 1.2 ]``); they are now literals on the measurement subject
+    itself, and no BLS feed emits a blank node at all. The validation below
+    keeps the property that mattered — a sampled measurement carries its value —
+    without requiring the blank nodes that used to carry it.
+
+The ontology moved with it (jolts ``LayoffsDischargesLevel`` →
+``LayoffsAndDischargesLevel``, cpi's per-item subclasses collapsed to a
+``Category`` entity, eci keyed on occupation and industry, ...), which is why
+regenerating is not optional: fixtures on the old vocabulary exercise class
+names the pipeline will never see again.
+
 NETWORK BOUNDARY
 ----------------
 S3 access is **generation-time only**. The fixtures stay committed Parquet and
@@ -63,7 +89,19 @@ FEEDS = ("cpi", "eci", "empsit", "jolts")
 # Per-feed cap on sampled measurement subjects. Tuned so the total fixture set
 # lands in the same size ballpark as the ~180 KB it replaces — the e2e suite is
 # stage-count bound and must stay fast.
-SUBJECTS_PER_FEED = 60
+#
+# Re-tuned from 60 to 200 when upstream flattened its measurements. A subject
+# that used to carry a blank-node value tree is now six literals, so 60/feed
+# produced 17 KiB against the 51 KiB the same setting used to produce. 200
+# holds the byte budget and buys type coverage with it:
+#
+#   subjects/feed   measurements   node types   fixture size
+#   60              240            33           17 KiB
+#   200             800            55           45 KiB
+#
+# Still well under the 105 types the pre-refactor fixtures carried, so the
+# stage count this guards is lower than it was, not higher.
+SUBJECTS_PER_FEED = 200
 
 # Fraction of each feed's quota spent anchoring on shared periods; any
 # remainder goes to type coverage. See select_subjects().
@@ -101,6 +139,12 @@ CLOSURE_DEPTH = 2
 # cross-source temporal bridge cannot form no matter how correct the pipeline
 # is. This is asserted, not hoped for.
 MIN_FEEDS_SHARING_PERIOD = 2
+
+# Column names a vintage may spell its Turtle in, newest crawl schema last.
+# Kept identical to build_graph.TURTLE_COLUMN_CANDIDATES: the generator must
+# read exactly what the production loader reads, or a fixture can be sampled
+# from a column the pipeline would ignore.
+TURTLE_COLUMN_CANDIDATES = ("triples", "rdf_turtle")
 
 FIXTURE_ROOT = (
     Path(__file__).resolve().parents[1]
@@ -172,14 +216,27 @@ def discover_objects(s3, bucket: str) -> list[SourceObject]:
     return sorted(found.values(), key=lambda o: (o.feed, o.year))
 
 
+def turtle_column(names) -> str | None:
+    """The column a vintage spells its Turtle in, or None if it carries no RDF.
+
+    Detected rather than named: the crawl renamed ``triples`` to ``rdf_turtle``,
+    and a vintage written either side of that rename is equally valid input.
+    """
+    for candidate in TURTLE_COLUMN_CANDIDATES:
+        if candidate in names:
+            return candidate
+    return None
+
+
 def newest_rdf_vintage(s3, bucket: str, objects: list[SourceObject], feed: str):
     """Newest vintage for ``feed`` that actually carries RDF.
 
-    The 2024 vintages predate the RML mapping and use a 28-column pre-RDF crawl
-    schema with no ``triples`` column at all (10 of 31 objects). Rather than
-    hardcoding "skip 2024", this reads the Parquet *schema* and walks backwards
-    until it finds a vintage that has the column — so a future no-RDF vintage
-    is handled by the same rule.
+    Some vintages predate the RML mapping and use a pre-RDF crawl schema with no
+    Turtle column at all. Rather than hardcoding which years those are, this
+    reads the Parquet *schema* and walks backwards until it finds a vintage that
+    has one — so a future no-RDF vintage is handled by the same rule.
+
+    Returns the object, its bytes, and the column its Turtle is in.
     """
     import pyarrow.parquet as pq
 
@@ -191,25 +248,28 @@ def newest_rdf_vintage(s3, bucket: str, objects: list[SourceObject], feed: str):
     for obj in candidates:
         body = s3.get_object(Bucket=bucket, Key=obj.key)["Body"].read()
         buf = io.BytesIO(body)
-        schema = pq.read_schema(buf)
-        if "triples" in schema.names:
-            return obj, body
-        _log(f"  {feed}: skipping {obj.year} (pre-RDF schema, no 'triples' column)")
-    raise RuntimeError(f"no vintage with a 'triples' column for feed={feed}")
+        column = turtle_column(pq.read_schema(buf).names)
+        if column:
+            return obj, body, column
+        _log(f"  {feed}: skipping {obj.year} (pre-RDF schema, no Turtle column)")
+    raise RuntimeError(
+        f"no vintage with a Turtle column "
+        f"({' / '.join(TURTLE_COLUMN_CANDIDATES)}) for feed={feed}"
+    )
 
 
 # --------------------------------------------------------------------------- #
 # graph sampling
 # --------------------------------------------------------------------------- #
 
-def load_graph(body: bytes):
+def load_graph(body: bytes, column: str):
     """Parse every Turtle document in a vintage into one graph."""
     import pandas as pd
     import rdflib
 
-    frame = pd.read_parquet(io.BytesIO(body))
+    frame = pd.read_parquet(io.BytesIO(body), columns=[column])
     graph = rdflib.Graph()
-    for doc in frame["triples"]:
+    for doc in frame[column]:
         if doc:
             graph.parse(data=doc, format="turtle")
     return graph
@@ -438,11 +498,18 @@ def validate(samples: dict, anchors: list) -> None:
     typed_subjects: set = set()
     distinct_types: set = set()
     triple_counts: dict = defaultdict(int)
-    bnode_values = 0
+    # Measurement subjects: the ones that state a period. These are what the
+    # sample is *for* — the dimension entities they reach (Month, Year,
+    # Industry) are 1-3 triples each by construction and would drown the
+    # measurements out of any statistic taken over all subjects.
+    measurements: set = set()
+    valueless: set = set()
     empty_bnodes = 0
+    bnode_values = 0
     feed_periods = defaultdict(set)
 
     for feed, graph in samples.items():
+        feed_measurements: set = set()
         for subj, pred, obj in graph:
             if isinstance(subj, rdflib.URIRef):
                 total_subjects.add(subj)
@@ -453,25 +520,51 @@ def validate(samples: dict, anchors: list) -> None:
                 distinct_types.add(_local(obj))
             if _local(pred) in ("hasMonth", "hasYear"):
                 feed_periods[feed].add((_local(pred), _local(obj)))
-        for bnode in {s for s in graph.subjects() if isinstance(s, rdflib.BNode)}:
-            values = [
-                o for p, o in graph.predicate_objects(bnode)
-                if isinstance(o, rdflib.Literal)
+                if isinstance(subj, rdflib.URIRef):
+                    feed_measurements.add(subj)
+        measurements |= feed_measurements
+        # A measurement must arrive with its value. Upstream used to hang the
+        # value off a blank node and now states it as a literal on the
+        # measurement itself, so this counts literals wherever they sit:
+        # directly on the subject, or on a blank node it points at. rdfs:label
+        # is excluded because a dimension entity carries one and it says
+        # nothing about whether the measurement survived.
+        for subj in feed_measurements:
+            literals = [
+                o for p, o in graph.predicate_objects(subj)
+                if isinstance(o, rdflib.Literal) and p != rdflib.RDFS.label
             ]
-            if values:
+            for _, obj in graph.predicate_objects(subj):
+                if isinstance(obj, rdflib.BNode):
+                    literals.extend(
+                        o for _, o in graph.predicate_objects(obj)
+                        if isinstance(o, rdflib.Literal)
+                    )
+            if not literals:
+                valueless.add(subj)
+        for bnode in {s for s in graph.subjects() if isinstance(s, rdflib.BNode)}:
+            if any(
+                isinstance(o, rdflib.Literal)
+                for _, o in graph.predicate_objects(bnode)
+            ):
                 bnode_values += 1
             else:
                 empty_bnodes += 1
 
     typed_pct = 100.0 * len(typed_subjects) / max(len(total_subjects), 1)
-    median = statistics.median(triple_counts.values())
+    median = statistics.median(
+        triple_counts[s] for s in measurements
+    ) if measurements else 0
 
     _log("")
     _log("  validation")
     _log(f"    URI subjects .............. {len(total_subjects)}")
     _log(f"    carrying rdf:type ......... {len(typed_subjects)} ({typed_pct:.1f}%)")
-    _log(f"    median triples/subject .... {median}")
-    _log(f"    blank nodes with literals . {bnode_values} (empty: {empty_bnodes})")
+    _log(f"    measurement subjects ...... {len(measurements)} "
+         f"({len(valueless)} with no value)")
+    _log(f"    median triples/measurement  {median}")
+    _log(f"    blank nodes ............... {bnode_values + empty_bnodes} "
+         f"({empty_bnodes} empty)")
     _log(f"    distinct rdf:type values .. {len(distinct_types)}")
 
     # ≥99% of URI subjects carry an rdf:type (was 14.9%).
@@ -479,20 +572,28 @@ def validate(samples: dict, anchors: list) -> None:
         f"only {typed_pct:.1f}% of URI subjects are typed; entity closure is "
         f"incomplete (target >=99%)"
     )
-    # Median triples per subject materially above 1 (was 1).
+    # Measurements are present at all, and arrive whole rather than as
+    # fragments (median was 1 on the fixtures this replaces).
+    assert measurements, (
+        "no subject states a period; the sample carries no measurements, only "
+        "dimension entities"
+    )
     assert median > 3, (
-        f"median triples/subject is {median}; sampling still looks "
+        f"median triples/measurement is {median}; sampling still looks "
         f"triple-level rather than entity-level"
     )
-    # Blank-node measurement values are present AND non-empty. The presence
-    # check is not redundant: an `empty_bnodes == 0` assertion alone passes
-    # vacuously when the closure drops blank nodes entirely, which is the
-    # failure mode that produced the `[ ]` objects in the fixtures this
-    # replaces.
-    assert bnode_values > 0, (
-        "no blank node carries a literal; the closure is dropping the "
-        "measurement values entirely"
+    # Every measurement carries its value. This is the flattened successor to
+    # the blank-node check: what mattered was never that a blank node existed,
+    # but that the numbers did not get stripped off on the way into the
+    # fixture — which is exactly what produced the `[ ]` objects in the
+    # fixtures this replaces.
+    assert not valueless, (
+        f"{len(valueless)} measurement subject(s) carry no literal value, "
+        f"e.g. {sorted(map(str, valueless))[0]}"
     )
+    # Blank nodes are no longer emitted by any BLS feed, so this is dormant
+    # rather than dead: should upstream reintroduce them, a truncated closure
+    # that leaves them empty still fails here.
     assert empty_bnodes == 0, (
         f"{empty_bnodes} blank nodes carry no literal; measurement values were "
         f"stripped"
@@ -556,9 +657,10 @@ def main() -> int:
 
     graphs, all_periods = {}, {}
     for feed in feeds:
-        obj, body = newest_rdf_vintage(s3, args.bucket, objects, feed)
-        _log(f"  {feed}: using {obj.year} ({obj.size / 1024:.0f} KiB)")
-        graph = load_graph(body)
+        obj, body, column = newest_rdf_vintage(s3, args.bucket, objects, feed)
+        _log(f"  {feed}: using {obj.year} ({obj.size / 1024:.0f} KiB, "
+             f"column {column!r})")
+        graph = load_graph(body, column)
         graphs[feed] = graph
         all_periods[feed] = periods_by_subject(graph)
 
