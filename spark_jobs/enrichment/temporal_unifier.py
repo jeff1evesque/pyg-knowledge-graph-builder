@@ -20,7 +20,7 @@ Example output triples:
     unified:November  rdfs:label    "November"
     unified:November  owl:sameAs    cpi:November
     unified:November  owl:sameAs    ppi:November
-    unified:November  owl:sameAs    https://jefflevesque.com/id/temporal/market-feeds/November
+    unified:November  owl:sameAs    https://jefflevesque.com/id/temporal/market-quotes/November
 
     unified:Year2024  rdf:type      bls:UnifiedYear
     unified:Year2024  rdfs:label    "2024"
@@ -42,8 +42,8 @@ from typing import List, Optional
 from spark_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, UNIFIED, SOURCE_TEMPORAL,
     CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER, WKYENG,
-    SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP,
-    MARKET_FEEDS, MARKET_QUOTES, CAP, WEATHER,
+    SEC_FILINGS,
+    MARKET_QUOTES, CAP, WEATHER,
     SYNTHETIC_TEMPORAL_IDS,
     identifier_namespace,
 )
@@ -67,7 +67,7 @@ COVERS_MONTH_PRED = str(BLS_ENRICHMENT.coversMonth)
 
 # The on-ramp from a dated entity to the period it falls in.
 #
-# The date-literal sources (SEC, NOAA, market-feeds) state a date and nothing
+# The date-literal sources (SEC, NOAA, market quotes) state a date and nothing
 # else -- unlike the BLS datasets, whose source data already says
 # `obs hasMonth cpi:February` and so arrives on the spine under its own power.
 # For those three the unifier minted temporal/{source}/February and linked it
@@ -118,29 +118,15 @@ WKYENG_PREFIX = str(WKYENG)
 WKYENG_HAS_QUARTER = str(WKYENG.hasQuarter)
 WKYENG_HAS_YEAR = str(WKYENG.hasYear)
 
-# Market predicates -- FEEDS vocabulary
-MARKET_OBSERVED_AT = str(MARKET_FEEDS.observedAt)
-MARKET_PRICE_OBS_TYPE = str(MARKET_FEEDS.PriceObservation)
-MARKET_OPTION_CONTRACT_TYPE = str(MARKET_FEEDS.OptionContract)
-MARKET_EXPIRATION_DATE = str(MARKET_FEEDS.expirationDate)
-
-# Market predicates -- QUOTES vocabulary
+# Market predicate.
 #
-# Quote snapshots have no observedAt and no expirationDate, so the feeds
-# collector above matched nothing on them and market contributed NO temporal
-# entity of any kind: every snapshot node sat off the spine, unreachable from
-# any other source's periods. captureTime is the quote model's equivalent, and
-# is the only ISO-8601 time it carries -- quoteTime and tradeTime are epoch
-# milliseconds, which the date parser cannot read and must not be handed.
+# captureTime is the only ISO-8601 time a quote snapshot carries -- quoteTime
+# and tradeTime are epoch milliseconds, which the date parser cannot read and
+# must not be handed. This used to be an observedAt / expirationDate pair from
+# the feeds vocabulary, which quote snapshots do not emit and no longer exists
+# anywhere, so market contributed NO temporal entity of any kind: every
+# snapshot node sat off the spine, unreachable from every other source.
 MARKET_CAPTURE_TIME = str(MARKET_QUOTES.captureTime)
-
-# SEC types for detection
-SEC_TYPES = [
-    str(SEC_FILINGS.Form3), str(SEC_FILINGS.Form4),
-    str(SEC_ADMIN.AdministrativeProceeding),
-    str(SEC_LIT.LitigationRelease),
-    str(SEC_SUSP.TradingSuspension),
-]
 
 # SEC date predicates
 #
@@ -159,9 +145,6 @@ SEC_TYPES = [
 SEC_DATE_PREDS = [
     str(SEC_FILINGS.hasPeriodOfReport),
     str(SEC_FILINGS.hasFilingDate),
-    str(SEC_ADMIN.initiationDate),
-    str(SEC_LIT.filingDate),
-    str(SEC_SUSP.startDate),
 ]
 
 # NOAA — aligned with updated RML mapper
@@ -270,10 +253,6 @@ class TemporalUnifier:
             dated_dfs.append(df)
 
         logger.info("  Collecting Market temporal entities...")
-        df = self._collect_market_temporals(triples_df)
-        if df is not None:
-            dated_dfs.append(df)
-
         df = self._collect_market_quote_temporals(triples_df)
         if df is not None:
             dated_dfs.append(df)
@@ -569,30 +548,6 @@ class TemporalUnifier:
     # ================================================================
     # Market: Timestamps + expiration dates → synthetic temporal URIs
     # ================================================================
-
-    def _collect_market_temporals(
-        self, triples_df: DataFrame
-    ) -> Optional[DataFrame]:
-        """
-        Extract month/year from Market price observation timestamps
-        and option expiration dates.
-
-        Price observations use market-feeds:observedAt with dateTime values.
-        Option contracts use market-feeds:expirationDate with date values.
-        Both are ISO format, so we reuse the date parsing logic.
-
-        This is the FEEDS vocabulary, not the quote-snapshot one -- quotes
-        have no observedAt and no PriceObservation. The quote snapshots carry
-        captureTime instead and are handled by the intra-source market linker.
-
-        Returns the same (subject, temporal_uri, normalized_name, kind) shape
-        as the collector it delegates to, so feeds observations get the same
-        on-ramp to the spine that SEC and NOAA entities now do.
-        """
-        market_date_preds = [MARKET_OBSERVED_AT, MARKET_EXPIRATION_DATE]
-        return self._collect_date_based_temporals(
-            triples_df, market_date_preds, SYNTHETIC_TEMPORAL_IDS["market-feeds"]
-        )
 
     def _collect_market_quote_temporals(
         self, triples_df: DataFrame

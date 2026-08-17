@@ -22,7 +22,7 @@ from spark_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, NOAA_ENRICHMENT,
     UNIFIED, CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER,
     CAP, WEATHER,
-    MARKET_FEEDS, MARKET_QUOTES,
+    MARKET_QUOTES,
     PROV_DERIVED_BY, PROV_OBSERVED_LITERAL_DATATYPE,
     PROV_CLASS_HIERARCHY, PROV_PROPERTY_DOMAIN, PROV_PROPERTY_RANGE,
     PROV_PROPERTY_HIERARCHY,
@@ -108,8 +108,6 @@ PROPERTY_MAPPINGS = {
     # separate namespaces whose local names partly overlap (lastPrice and
     # symbol exist in both), so each must be listed explicitly -- a single
     # entry would silently cover only one of the two sources.
-    str(MARKET_FEEDS.observedPrice): str(UNIFIED.measurementValue),
-    str(MARKET_FEEDS.lastPrice): str(UNIFIED.measurementValue),
     str(MARKET_QUOTES.lastPrice): str(UNIFIED.measurementValue),
     str(MARKET_QUOTES.mark): str(UNIFIED.measurementValue),
 
@@ -122,7 +120,6 @@ PROPERTY_MAPPINGS = {
     str(EMPSIT.hasCategory): str(UNIFIED.hasCategory),
 
     # Company/ticker
-    str(MARKET_FEEDS.symbol): str(UNIFIED.ticker),
     str(MARKET_QUOTES.symbol): str(UNIFIED.ticker),
 
     # Geographic

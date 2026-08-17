@@ -6,8 +6,8 @@ Aligned with the flat snapshot model:
   - OptionSnapshot: one row per option quote capture
 
 Properties match the upstream quote-snapshot vocabulary, which this project
-mints itself and which resolves under MARKET_QUOTES. Note this is NOT the
-feeds vocabulary (MARKET_FEEDS): the two model quotes differently and share
-some local names, which is what made a single MARKET constant appear to
-work while matching nothing.
+mints itself and which resolves under MARKET_QUOTES -- the only market
+vocabulary. A second one (MARKET_FEEDS) once sat beside it with different names
+for the same ideas; a single constant asked to name both is what made market
+enrichment appear to work while matching nothing.
 """

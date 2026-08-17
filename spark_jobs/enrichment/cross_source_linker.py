@@ -15,8 +15,8 @@ from rdflib.namespace import RDF, RDFS, OWL
 
 from spark_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, UNIFIED, CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER,
-    WKYENG, SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP, CAP, WEATHER,
-    MARKET_FEEDS, MARKET_FEEDS_OPTIONS, MARKET_QUOTES,
+    WKYENG, SEC_FILINGS, CAP, WEATHER,
+    MARKET_QUOTES,
     ALERT,
     identifier_namespace,
 )
@@ -55,35 +55,20 @@ def _entity_prefixes(*namespaces) -> List[str]:
 _BLS_ENTITY_PREFIXES = _entity_prefixes(
     CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER, WKYENG
 )
-_SEC_ENTITY_PREFIXES = _entity_prefixes(SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP)
+_SEC_ENTITY_PREFIXES = _entity_prefixes(SEC_FILINGS)
 
-# ALL THREE market vocabularies, not just the feeds one.
-#
-# This list is what _detect_sources tests subjects against, so it decides
-# whether 'market' is in available_sources at all -- and the company/ticker
-# step below is gated on that. Naming only MARKET_FEEDS meant a graph carrying
-# quote snapshots (id/market-quotes/snapshot/...) reported NO market source, so
-# the SEC-to-market bridge was skipped entirely and _create_causal_links found
-# no market entity to point BLS indicators at. Every market node in the e2e
-# fixtures is a quote snapshot, so on that data the gate was always shut.
-#
-# Detection is deliberately broader than any single step's model: this answers
-# "is there market data here", and each step re-filters on the specific types
-# and predicates it understands.
-_MARKET_ENTITY_PREFIXES = _entity_prefixes(
-    MARKET_QUOTES, MARKET_FEEDS_OPTIONS, MARKET_FEEDS
-)
+# What _detect_sources tests subjects against, which decides whether 'market' is
+# in available_sources at all -- and the company/ticker step below is gated on
+# that. This named only the feeds vocabulary, so a graph carrying quote
+# snapshots (id/market-quotes/snapshot/...) reported NO market source and the
+# SEC-to-market bridge was skipped without running.
+_MARKET_ENTITY_PREFIXES = _entity_prefixes(MARKET_QUOTES)
 
-# The symbol-bearing classes of each market vocabulary, as (type, predicate).
-#
-# Listed per vocabulary rather than collapsed, because the two models are
-# deliberately separate and only their symbol predicate happens to line up. A
-# graph carrying either one bridges; a graph carrying both bridges through both.
+# The symbol-bearing classes, as (type, predicate). Equity and option snapshots
+# arrive in the same feed and state their ticker the same way.
 _MARKET_SYMBOL_TYPES = (
     (str(MARKET_QUOTES.EquitySnapshot), str(MARKET_QUOTES.symbol)),
     (str(MARKET_QUOTES.OptionSnapshot), str(MARKET_QUOTES.symbol)),
-    (str(MARKET_FEEDS.PriceObservation), str(MARKET_FEEDS.symbol)),
-    (str(MARKET_FEEDS.OptionContract), str(MARKET_FEEDS.symbol)),
 )
 
 # Two-letter postal abbreviations, for matching NWS area descriptions.
@@ -354,13 +339,6 @@ class CrossSourceLinker:
         PriceObservation / OptionContract, quotes is EquitySnapshot /
         OptionSnapshot -- so it matched nothing no matter which namespace it
         was pointed at, and the SEC-to-market bridge had no market side.
-
-        Both vocabularies are read rather than one, and they are read as
-        separate (type, symbol-predicate) pairs rather than merged: the two
-        remain deliberately un-unified (see the MARKET_QUOTES / MARKET_FEEDS
-        note in rdf_utils), and a graph carrying either -- or both -- should
-        bridge. Nothing here asserts the two models are the same thing; it only
-        collects the ticker each entity states about itself.
         """
         frames = [
             extract_entities_by_type(self.triples_df, type_uri).join(
