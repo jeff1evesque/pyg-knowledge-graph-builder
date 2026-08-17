@@ -255,19 +255,25 @@ def split_rows(graph, rows: int) -> list[str]:
     return [emit(bucket) for bucket in buckets if bucket]
 
 
-def ntriples_slice(graph, count: int) -> str:
+def ntriples_slice(docs: list[str], count: int) -> str:
     """N-Triples for the first ``count`` snapshots, line-sorted.
 
-    Sorted because rdflib's N-Triples serializer emits in set order, so the same
-    sample would otherwise produce a different file every run and the fixture
-    would churn in every diff for no reason.
+    Sliced in SELECTION order rather than by sorted URI. Sorting put the
+    unanchored control equity first and the anchored equity last, so a
+    three-snapshot slice held two options and an unrelated equity — both market
+    node types present, but no option whose underlying was in the file, and the
+    option-to-underlying link could not form. Selection order keeps the anchored
+    equity with its own chain, which is the shape this fixture is for.
+
+    Lines are sorted before joining because rdflib's N-Triples serializer emits
+    in set order, so the same sample would otherwise produce a different file
+    every run and the fixture would churn in every diff for no reason.
     """
     import rdflib
 
     part = rdflib.Graph()
-    for subj in sorted(set(graph.subjects()), key=str)[:count]:
-        for pred, obj in graph.predicate_objects(subj):
-            part.add((subj, pred, obj))
+    for doc in docs[:count]:
+        part.parse(data=doc, format="turtle")
     lines = sorted(part.serialize(format="nt").splitlines())
     return "\n".join(line for line in lines if line.strip()) + "\n"
 
@@ -351,7 +357,7 @@ def main() -> int:
     _log(f"  wrote {PARQUET_TARGET.relative_to(REPO_ROOT)} "
          f"({len(turtle_docs)} rows, {PARQUET_TARGET.stat().st_size / 1024:.0f} KiB)")
 
-    nt = ntriples_slice(graph, args.ntriples_snapshots)
+    nt = ntriples_slice(docs, args.ntriples_snapshots)
     NTRIPLES_TARGET.parent.mkdir(parents=True, exist_ok=True)
     NTRIPLES_TARGET.write_text(nt)
     _log(f"  wrote {NTRIPLES_TARGET.relative_to(REPO_ROOT)} "
