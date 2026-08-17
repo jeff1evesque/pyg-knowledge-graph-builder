@@ -34,6 +34,7 @@ from spark_jobs.enrichment.temporal_unifier import (
 
 from spark_jobs.utils.rdf_utils import (
     CPI as _CPI_NS,
+    MARKET_QUOTES,
     SEC_FILINGS,
     SYNTHETIC_TEMPORAL_IDS,
     identifier_namespace,
@@ -53,6 +54,7 @@ CPI = str(_CPI_NS)
 CPI_ID = identifier_namespace(CPI)
 MARKET_TEMPORAL = SYNTHETIC_TEMPORAL_IDS["market-feeds"]
 SEC_TEMPORAL = SYNTHETIC_TEMPORAL_IDS["sec"]
+QUOTES_TEMPORAL = SYNTHETIC_TEMPORAL_IDS["market-quotes"]
 
 
 def _triple_set(result):
@@ -202,6 +204,40 @@ def test_dated_entities_reach_the_period_they_state(spark, make_triples):
     assert classify_edge_origin(
         OBSERVED_IN_PERIOD_PRED, "filings_SECFiling", "temporal_SourceMonth"
     ) == "enrichment"
+
+
+def test_quote_snapshots_reach_the_spine_via_capture_time(spark, make_triples):
+    """The quotes vocabulary gets its own period, off captureTime.
+
+    Market was the one source contributing no temporal entity at all: the market
+    collector keys on the FEEDS predicates (observedAt, expirationDate) and a
+    quote snapshot has neither, so it matched nothing. A snapshot's only other
+    route into the graph is its ticker, which reaches nothing when no filing
+    names the same company — so market could be entirely disconnected while the
+    unifier reported success.
+
+    quoteTime and tradeTime are deliberately NOT collected: they are epoch
+    milliseconds, and the date parser reads `(\\d{4})` as a year, so
+    "1783009237630" would mint a period called 1783.
+    """
+    snap = "https://jefflevesque.com/id/market-quotes/snapshot/A/2026-07-02"
+    rows = [
+        (snap, RDF_TYPE, str(MARKET_QUOTES.EquitySnapshot)),
+        (snap, str(MARKET_QUOTES.captureTime), "2026-07-02T16:40:40.167Z"),
+        (snap, str(MARKET_QUOTES.quoteTime), "1783009237630"),
+    ]
+
+    triples = _triple_set(TemporalUnifier(spark).enrich(make_triples(rows)))
+
+    quotes_july = QUOTES_TEMPORAL + "July"
+    assert (snap, OBSERVED_IN_PERIOD_PRED, quotes_july) in triples
+    assert (UNIFIED_BASE + "July", OWL_SAME_AS, quotes_july) in triples
+    assert (snap, OBSERVED_IN_PERIOD_PRED, QUOTES_TEMPORAL + "2026") in triples
+
+    # The epoch-millis predicate must not have minted a period of its own.
+    assert not [t for t in triples if t[2].endswith("/1783")], (
+        "an epoch-millisecond timestamp was parsed as a calendar year"
+    )
 
 
 def test_source_temporal_types_are_not_pipeline_minted_for_origin(spark):
