@@ -622,11 +622,35 @@ class CrossSourceLinker:
                     noaa_links = noaa_links.unionByName(df)
                 noaa_links = noaa_links.dropDuplicates()
 
-        result = type_triples.unionByName(label_triples)
-        if laus_links is not None:
-            result = result.unionByName(laus_links)
-        if noaa_links is not None:
-            result = result.unionByName(noaa_links)
+        # Only the regions something actually points at.
+        #
+        # All 50 states used to be typed and labelled unconditionally, while the
+        # links below are conditional on a LAUS or NOAA entity naming one. With
+        # no LAUS feed present that is 50 typed nodes with zero incident edges —
+        # a whole node type of isolated vertices a GNN can propagate nothing
+        # through, and 50 rows of feature tensor describing nothing.
+        #
+        # Scoping the scaffolding to the linked set makes the region nodes a
+        # consequence of the data rather than of the state list. Nothing else
+        # changes: a region that IS linked gets exactly the type and label it
+        # got before.
+        links = [df for df in (laus_links, noaa_links) if df is not None]
+        if not links:
+            logger.info("  No geographic links matched — no region entities minted")
+            return None
+
+        all_links = links[0]
+        for df in links[1:]:
+            all_links = all_links.unionByName(df)
+        all_links = all_links.dropDuplicates()
+
+        linked_regions = all_links.select(F.col("object").alias("subject")).distinct()
+
+        result = (
+            type_triples.join(linked_regions, "subject", "left_semi")
+            .unionByName(label_triples.join(linked_regions, "subject", "left_semi"))
+            .unionByName(all_links)
+        )
 
         logger.info("  Geographic linking triples prepared (lazy)")
         return result
