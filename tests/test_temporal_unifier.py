@@ -23,7 +23,6 @@ from spark_jobs.enrichment.temporal_unifier import (
     OWL_SAME_AS,
     UNIFIED_BASE,
     UNIFIED_MONTH_TYPE,
-    UNIFIED_YEAR_TYPE,
     SOURCE_MONTH_TYPE,
     SOURCE_YEAR_TYPE,
     MARKET_CAPTURE_TIME,
