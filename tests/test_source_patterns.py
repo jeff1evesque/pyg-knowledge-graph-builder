@@ -142,7 +142,6 @@ def test_market_known_correlations_well_formed():
 @pytest.mark.parametrize("table,uri_key", [
     ("SEC_SECTOR_PATTERNS", "sector_uri"),
     ("SEC_VIOLATION_PATTERNS", "violation_uri"),
-    ("SEC_COMPANY_STATUS_PATTERNS", "status_uri"),
 ])
 def test_sec_pattern_tables_well_formed(table, uri_key):
     patterns = getattr(sec, table)

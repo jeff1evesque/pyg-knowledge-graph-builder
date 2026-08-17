@@ -660,16 +660,16 @@ def test_overrides_reach_the_emitted_triples(spark, make_triples):
 # the same property -- that a rate is a price -- and left property_hierarchy
 # (81 dims of every node vector) with nothing to encode.
 #
-# The counts moved (41/5 -> 45/4) when the single MARKET namespace was split
-# into the two market vocabularies that actually exist: market-quotes for the
-# flat quote snapshots, market-feeds for the HTML feeds. Their local names
-# partly overlap, so lastPrice and symbol each need a row per vocabulary --
-# one row silently covered only one of the two sources.
+# The counts went 41/5 -> 45/4 when the single MARKET namespace was split into
+# two market vocabularies, and back to 41/5 when market-feeds was removed: no
+# such data is published, so its rows described a source that does not exist.
+# The round trip is exact because the split had added one row per overlapping
+# local name (lastPrice, symbol) and nothing else.
 #
-# unified:ticker moved from equivalence to subsumption as a result, and that
-# is the correct reading rather than an artefact: it now has two source
-# properties pointing at it, and the two symbol properties are distinct
-# properties that share a target, not one property under two names.
+# unified:ticker went to subsumption under the split and is an equivalence
+# again now, which is the correct reading in both directions: two distinct
+# symbol properties sharing a target is subsumption, one property under one
+# name is equivalence.
 
 def test_the_property_table_is_mostly_subsumption():
     assert len(CURATED_SUB_PROPERTIES) + len(TRUE_PROPERTY_EQUIVALENCES) == (
@@ -677,8 +677,8 @@ def test_the_property_table_is_mostly_subsumption():
     )
     # Pinned rather than asserted loosely: the ratio is the whole reason this
     # step exists, so a table edit that inverts it should fail here.
-    assert len(CURATED_SUB_PROPERTIES) == 45
-    assert len(TRUE_PROPERTY_EQUIVALENCES) == 4
+    assert len(CURATED_SUB_PROPERTIES) == 41
+    assert len(TRUE_PROPERTY_EQUIVALENCES) == 5
 
 
 def test_a_property_is_never_both_equivalent_and_a_sub_property(
@@ -719,7 +719,7 @@ def test_the_nine_measurement_properties_become_sub_properties(spark,
                 if r["predicate"] == RDFS_SUB_PROPERTY_OF}
     assert ("https://jefflevesque.com/ontology/jolts/rate", unified_value) in subsumed
     assert (
-        "https://jefflevesque.com/ontology/market-feeds/observedPrice", unified_value
+        "https://jefflevesque.com/ontology/market-quotes/lastPrice", unified_value
     ) in subsumed
 
 
