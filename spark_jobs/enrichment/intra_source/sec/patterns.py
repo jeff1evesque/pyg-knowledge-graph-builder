@@ -13,23 +13,7 @@ SEC_SECTOR_PATTERNS = {
         'relationship': SEC_ENRICHMENT.financialServicesSectorCorrelation
     },
 
-    'accounting_sector': {
-        'description': 'Accounting and auditing profession',
-        'sector_uri': SEC_ENRICHMENT.AccountingSector,
-        'keywords': {
-            'filings': []
-        },
-        'relationship': SEC_ENRICHMENT.accountingSectorCorrelation
-    },
 
-    'legal_sector': {
-        'description': 'Legal profession and attorneys',
-        'sector_uri': SEC_ENRICHMENT.LegalSector,
-        'keywords': {
-            'filings': []
-        },
-        'relationship': SEC_ENRICHMENT.legalSectorCorrelation
-    },
 
     'technology_sector': {
         'description': 'Technology companies',
@@ -91,31 +75,4 @@ SEC_VIOLATION_PATTERNS = {
 
 
 
-}
-
-# Company status patterns for linking related company states
-SEC_COMPANY_STATUS_PATTERNS = {
-    'shell_company': {
-        'description': 'Shell companies with no operations',
-        'status_uri': SEC_ENRICHMENT.ShellCompanyStatus,
-        'keywords': {
-        },
-        'relationship': SEC_ENRICHMENT.shellCompanyLink
-    },
-
-    'delinquent_filer': {
-        'description': 'Companies delinquent in SEC filings',
-        'status_uri': SEC_ENRICHMENT.DelinquentFilerStatus,
-        'keywords': {
-        },
-        'relationship': SEC_ENRICHMENT.delinquentFilerLink
-    },
-
-    'suspended_trading': {
-        'description': 'Companies with suspended trading',
-        'status_uri': SEC_ENRICHMENT.SuspendedTradingStatus,
-        'keywords': {
-        },
-        'relationship': SEC_ENRICHMENT.suspendedTradingLink
-    },
 }
