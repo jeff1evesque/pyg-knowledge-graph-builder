@@ -86,6 +86,30 @@ _MARKET_SYMBOL_TYPES = (
     (str(MARKET_FEEDS.OptionContract), str(MARKET_FEEDS.symbol)),
 )
 
+# Two-letter postal abbreviations, for matching NWS area descriptions.
+#
+# NWS writes them as "Lincoln, KS; Russell, KS" and never spells the state out,
+# so the full-name list alone matched nothing. Kept beside the state list the
+# geographic step already carries rather than derived, because the postal code
+# is not a function of the name.
+_STATE_ABBREVIATIONS = {
+    'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR',
+    'California': 'CA', 'Colorado': 'CO', 'Connecticut': 'CT',
+    'Delaware': 'DE', 'Florida': 'FL', 'Georgia': 'GA', 'Hawaii': 'HI',
+    'Idaho': 'ID', 'Illinois': 'IL', 'Indiana': 'IN', 'Iowa': 'IA',
+    'Kansas': 'KS', 'Kentucky': 'KY', 'Louisiana': 'LA', 'Maine': 'ME',
+    'Maryland': 'MD', 'Massachusetts': 'MA', 'Michigan': 'MI',
+    'Minnesota': 'MN', 'Mississippi': 'MS', 'Missouri': 'MO',
+    'Montana': 'MT', 'Nebraska': 'NE', 'Nevada': 'NV',
+    'New Hampshire': 'NH', 'New Jersey': 'NJ', 'New Mexico': 'NM',
+    'New York': 'NY', 'North Carolina': 'NC', 'North Dakota': 'ND',
+    'Ohio': 'OH', 'Oklahoma': 'OK', 'Oregon': 'OR', 'Pennsylvania': 'PA',
+    'Rhode Island': 'RI', 'South Carolina': 'SC', 'South Dakota': 'SD',
+    'Tennessee': 'TN', 'Texas': 'TX', 'Utah': 'UT', 'Vermont': 'VT',
+    'Virginia': 'VA', 'Washington': 'WA', 'West Virginia': 'WV',
+    'Wisconsin': 'WI', 'Wyoming': 'WY',
+}
+
 # URI constants
 _RDF_TYPE = str(RDF.type)
 _OWL_SAME_AS = str(OWL.sameAs)
@@ -475,8 +499,12 @@ class CrossSourceLinker:
             '56': 'Wyoming',
         }
 
-        state_rows = [(s, s.replace(' ', '')) for s in us_states]
-        states_df = self.spark.createDataFrame(state_rows, schema=["state_name", "state_key"])
+        state_rows = [
+            (s, s.replace(' ', ''), _STATE_ABBREVIATIONS[s]) for s in us_states
+        ]
+        states_df = self.spark.createDataFrame(
+            state_rows, schema=["state_name", "state_key", "state_abbr"]
+        )
 
         # Create unified region entities
         region_uri = F.concat(F.lit(str(UNIFIED)), F.col("state_key"), F.lit("Region"))
@@ -557,8 +585,24 @@ class CrossSourceLinker:
                     .select("alert", "area_desc")
                 )
 
+                # Match the ABBREVIATION as well as the full name.
+                #
+                # NWS writes area descriptions as "Lincoln, KS; Russell, KS" --
+                # county plus two-letter state -- and the full name never
+                # appears. Matching only `contains("Kansas")` therefore matched
+                # nothing on every alert ever ingested, and this strategy
+                # produced no link at all.
+                #
+                # The abbreviation is matched with its ", " separator rather
+                # than bare, because two letters appear inside ordinary words:
+                # a bare "contains('OR')" hits "ORANGE" and a bare "IN" hits
+                # almost everything. Anchoring on the comma is how NWS actually
+                # writes it and keeps the match to the state field.
                 noaa_area_matched = area_to_alert.crossJoin(F.broadcast(states_df)).filter(
                     F.col("area_desc").contains(F.col("state_name"))
+                    | F.col("area_desc").contains(
+                        F.concat(F.lit(", "), F.col("state_abbr"))
+                    )
                 )
 
                 noaa_area_links = noaa_area_matched.select(
@@ -578,11 +622,23 @@ class CrossSourceLinker:
                 state_fips_rows, ["fips_code", "state_name", "state_key"]
             )
 
+            # Normalize the code to the two digits the lookup above is keyed on.
+            #
+            # The lookup holds 2-digit state FIPS ("20" Kansas, "42"
+            # Pennsylvania) while the mapper emits the 3-digit head of a SAME
+            # code -- "020", "042" -- which is a leading part-digit followed by
+            # the state. Compared as strings those never match, so this whole
+            # strategy linked nothing on every alert ever ingested.
+            #
+            # Taking the LAST two digits rather than stripping a leading zero:
+            # the part-digit is not always 0 (it marks a partial-county code),
+            # so trimming zeros would silently mangle those.
             state_fips_triples = self.triples_df.filter(
                 F.col("predicate") == _NWS_HAS_STATE_FIPS
             ).select(
                 F.col("subject").alias("geocode"),
-                F.col("object").alias("state_fips"),
+                F.substring(F.lpad(F.trim(F.col("object")), 2, "0"), -2, 2)
+                .alias("state_fips"),
             )
 
             if state_fips_triples.head(1):
