@@ -217,6 +217,9 @@ def _assert_valid_graph_and_metadata(config, work_dir):
     # --- and no whole SOURCE is connected only to itself ---
     _assert_no_source_builds_as_an_island(data)
 
+    # --- and every inferred link the pipeline claims to make actually exists ---
+    _assert_declared_bridges_resolve(data)
+
 
 # --------------------------------------------------------------------------- #
 # full mode — both loaders
@@ -415,15 +418,14 @@ def _incident_edge_counts(data):
 # namespace only, so a graph of quote snapshots reported no market source at
 # all and the SEC↔market bridge was skipped without running. Both snapshot types
 # now reach unified companies through their ticker.
-KNOWN_ORPHANED_NODE_TYPES = {
-    # Pipeline-minted rather than sampled, so unlike the entries above this one
-    # cannot be settled by reading the fixtures — only by running this suite.
-    # cross_source_linker mints all 50 states unconditionally and links them
-    # only to LAUS entities whose names match; the fixtures contain no LAUS
-    # feed, so there is nothing for them to attach to. Fixture coverage, not a
-    # pipeline defect — but left asserted so it fails the day it becomes one.
-    "bls_enrichment_GeographicRegion",
-}
+# bls_enrichment_GeographicRegion was the last entry here and is now empty
+# rather than exempt: cross_source_linker used to type and label all 50 states
+# unconditionally while linking them only where a LAUS or NOAA entity named one,
+# so a fixture set with no LAUS feed carried 50 isolated region nodes. The
+# scaffolding is now scoped to the regions something actually points at, which
+# removes the orphans without weakening this check — an unlinked region is no
+# longer a node at all.
+KNOWN_ORPHANED_NODE_TYPES: set[str] = set()
 
 
 def _assert_metadata_describes_the_graph(data, found):
@@ -1305,6 +1307,63 @@ def _assert_no_source_builds_as_an_island(data):
     )
 
 
+# The links the pipeline INFERS, which must each resolve into at least one edge.
+#
+# Every defect in this class so far — seven of them — was a join keyed on a term
+# the upstream data no longer emits. A join like that matches nothing, emits
+# nothing and raises nothing, so the only visible trace is a relation that is
+# simply absent from the graph. Nothing looked for absence.
+#
+# _assert_no_source_builds_as_an_island catches the version where a whole source
+# ends up alone. It does NOT catch a single dead join on a source that stays
+# connected by some other edge: market reached unified companies while all three
+# of its option steps produced nothing, and that combination passes every other
+# check in this file.
+#
+# Keyed on the predicate's local name, because the namespace is exactly what
+# these defects get wrong and a test that spelled the full URI would have to be
+# edited by the same hand that broke the code.
+REQUIRED_BRIDGE_RELATIONS = {
+    # SEC issuer / market snapshot -> unified company. Dead for both sides at
+    # once: the market half asked for a class neither market vocabulary
+    # declares, the SEC half for a predicate renamed upstream.
+    "refersToCompany",
+    # Dated entity -> the period it falls in. The on-ramp whose absence left
+    # SEC, NOAA and market minting period nodes nothing pointed at.
+    "observedInPeriod",
+    # Source period -> unified period. The other half of the temporal spine.
+    "sameAs",
+    # Option snapshot -> its underlying equity. Keyed on underlyingSymbol,
+    # which quote snapshots do not emit and never did — confirmed against
+    # full-volume production data, where the raw column is null.
+    "hasUnderlyingEquity",
+}
+
+
+def _assert_declared_bridges_resolve(data):
+    """Every inferred link the pipeline claims to make must exist in the graph.
+
+    See REQUIRED_BRIDGE_RELATIONS. This is the guard for the defect CLASS rather
+    than for any one instance of it: a join that silently matches nothing leaves
+    no trace except a missing relation, and absence is what this looks for.
+
+    Deliberately not derived from the enrichment code — a check generated from
+    the same constants the code uses would agree with a typo. The list is
+    written by hand and each entry says which join it stands for, so a
+    disappeared relation names the step that stopped working.
+    """
+    present = {str(rel).rsplit("/", 1)[-1].rsplit("#", 1)[-1]
+               for _s, rel, _d in data.edge_types}
+
+    missing = REQUIRED_BRIDGE_RELATIONS - present
+    assert not missing, (
+        f"inferred links that resolved into NO edge: {sorted(missing)} — the "
+        f"join behind each either matched nothing or was dropped during edge "
+        f"resolution. A join keyed on a term the data no longer emits fails "
+        f"exactly this way: silently. Relations present: {sorted(present)}"
+    )
+
+
 def _assert_no_node_type_is_orphaned(data):
     """No node type may exist with zero edges attached to it.
 
@@ -1433,6 +1492,15 @@ def _assert_cross_source_temporal_bridge(data):
     Traversed at the INSTANCE level, not over node types: a type-level path
     would be satisfied by cpi reaching February and eci reaching March, which
     is not a bridge. The two measurements must meet at the same period node.
+
+    "Different sources" means different SOURCE FAMILIES, not different
+    namespaces. This test used to split node types on their first underscore,
+    so cpi and eci counted as two sources and the assertion was satisfied by
+    two BLS feeds meeting — while SEC, market and NOAA were all off the spine
+    entirely. It passed throughout the period when three of the four sources
+    reached no other source at all, which is a weaker claim than its name
+    makes. Grouping by family is the same rule _assert_no_source_builds_as_an_
+    island uses, so the two cannot disagree about what a source is.
     """
     # (node_type, node_id) -> set of neighbouring (node_type, node_id)
     neighbors = {}
@@ -1443,6 +1511,8 @@ def _assert_cross_source_temporal_bridge(data):
             neighbors.setdefault((src_t, s), set()).add((dst_t, d))
             neighbors.setdefault((dst_t, d), set()).add((src_t, s))
 
+    by_prefix, hubs = _source_families()
+
     unified_nodes = [
         (nt, i)
         for nt in map(str, data.node_types)
@@ -1451,20 +1521,23 @@ def _assert_cross_source_temporal_bridge(data):
     ]
     assert unified_nodes, "no unified temporal nodes in the graph"
 
+    best = set()
     for unified in unified_nodes:
         # unified period -> the source periods it is sameAs -> what they date
         reached = {
-            _source_prefix(measured[0])
+            _family_of(measured[0], by_prefix)
             for source_period in neighbors.get(unified, ())
             for measured in neighbors.get(source_period, ())
             if measured != unified
-        }
+        } - hubs - {None}
         if len(reached) >= 2:
             return
+        best |= reached
 
     raise AssertionError(
         "no unified temporal entity connects measurements from two different "
-        "sources — the cross-source temporal bridge does not form"
+        f"sources — the cross-source temporal bridge does not form. Sources "
+        f"reaching the spine at all: {sorted(best) or 'none'}"
     )
 
 
