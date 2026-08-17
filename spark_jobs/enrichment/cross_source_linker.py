@@ -23,6 +23,7 @@ from spark_jobs.utils.rdf_utils import (
 from spark_jobs.enrichment.intra_source.bls.patterns import (
     BLS_SECTOR_CORRELATION, BLS_SECTOR_PATTERNS,
 )
+from spark_jobs.enrichment.intra_source.market.symbols import equity_symbol
 from spark_jobs.utils.spark_rdf_utils import (
     extract_entities_by_type, extract_property, deduplicate_against_existing,
 )
@@ -84,32 +85,6 @@ _MARKET_SYMBOL_TYPES = (
     (str(MARKET_FEEDS.PriceObservation), str(MARKET_FEEDS.symbol)),
     (str(MARKET_FEEDS.OptionContract), str(MARKET_FEEDS.symbol)),
 )
-
-# An OCC option symbol: six characters of root (space-padded), then the
-# expiration as YYMMDD, then C or P, then the strike in thousandths.
-_OCC_OPTION_SYMBOL = r"^(.{6})\d{6}[CP]\d{8}$"
-
-
-def _equity_symbol(col: F.Column) -> F.Column:
-    """The equity ticker a market symbol refers to.
-
-    Equity symbols pass through trimmed. Option symbols do not: the quote API
-    writes them in OCC form -- "A     260717C00065000" -- which is the ticker
-    left-justified in a six-character field followed by the contract terms. Left
-    as-is, an option snapshot's symbol matches no SEC issuer's ticker and every
-    OptionSnapshot in the graph stays isolated, which is what the fixtures
-    showed. Taking the root joins the option to the company it is written
-    against, which is the relationship a model wants anyway.
-
-    A symbol that does not parse as OCC falls through to the trimmed original
-    rather than being dropped, so a vocabulary using some other option encoding
-    fails to join instead of being silently mangled into the wrong ticker.
-    """
-    root = F.trim(F.regexp_extract(col, _OCC_OPTION_SYMBOL, 1))
-    return F.upper(
-        F.when(F.length(root) > 0, root).otherwise(F.trim(col))
-    )
-
 
 # URI constants
 _RDF_TYPE = str(RDF.type)
@@ -377,7 +352,7 @@ class CrossSourceLinker:
 
         return union.select(
             F.col("entity"),
-            _equity_symbol(F.col("raw_symbol")).alias("symbol"),
+            equity_symbol(F.col("raw_symbol")).alias("symbol"),
         ).filter(F.length(F.col("symbol")) > 0).dropDuplicates()
 
     def _link_by_company(self) -> Optional[DataFrame]:
@@ -401,7 +376,7 @@ class CrossSourceLinker:
             self.triples_df, str(SEC_FILINGS.hasIssuerTradingSymbol), "raw_symbol"
         ).select(
             F.col("subject").alias("issuer_uri"),
-            _equity_symbol(F.col("raw_symbol")).alias("symbol"),
+            equity_symbol(F.col("raw_symbol")).alias("symbol"),
         ).filter(F.length(F.col("symbol")) > 0)
 
         # Create unified company entities
