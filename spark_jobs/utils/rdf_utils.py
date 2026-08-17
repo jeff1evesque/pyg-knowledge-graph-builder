@@ -53,37 +53,32 @@ BLS_COMMON = Namespace(f"{SOURCE_BASE}bls-common/")
 # 'sec-*' rather than 'sec' for the same reason: SEC_ENRICHMENT owns
 # .../ontology/sec/.
 
+# Only the filings feed is collected. sec-administrative-proceedings,
+# sec-litigation and sec-trading-suspensions were removed with the linker paths
+# that keyed on them: upstream publishes no administrative-proceedings or
+# trading-suspensions feed at all, and feed=litigation was last written 787 days
+# ago. Code keyed on a source nobody collects cannot be distinguished from
+# working code by any test, because both produce nothing — which is how two of
+# the defects on this branch stayed hidden.
 SEC_COMMON = Namespace(f"{SOURCE_BASE}sec-common/")
-SEC_ADMIN = Namespace(f"{SOURCE_BASE}sec-administrative-proceedings/")
-SEC_LIT = Namespace(f"{SOURCE_BASE}sec-litigation/")
-SEC_SUSP = Namespace(f"{SOURCE_BASE}sec-trading-suspensions/")
 SEC_FILINGS = Namespace(f"{SOURCE_BASE}sec-filings/")
 
 # ============================================
-# Market data namespaces
+# Market data namespace
 # ============================================
-# There are TWO market vocabularies, and one constant was previously asked to
-# name both — which is why market enrichment silently produced nothing:
+# ONE market vocabulary. Equity and option quotes arrive together in the
+# upstream intraday snapshots -- EquitySnapshot / OptionSnapshot, flat, with
+# captureTime, askPrice, strikePrice, delta -- and that is the only market RDF
+# published anywhere.
 #
-#   MARKET_QUOTES  the quote-snapshot API scraper (upstream). Flat
-#                  snapshots: EquitySnapshot / OptionSnapshot, with
-#                  captureTime, askPrice, delta.
-#
-#   MARKET_FEEDS   the HTML feed scrapers (upstream). A
-#                  different model: PriceObservation / OptionContract, with
-#                  observedAt and expirationDate.
-#
-# MARKET used to point at the feeds namespace while measurements.py keyed on
-# the quotes local names, so it matched nothing on real data and nothing
-# raised. temporal_unifier.py, which keys on observedAt / PriceObservation,
-# was correct all along — for the feeds vocabulary.
-#
-# They are deliberately NOT unified here. Aligning EquitySnapshot with
-# PriceObservation is an ontology decision, not a rename, and pretending one
-# name covers both is what produced the original defect.
+# There used to be a second, MARKET_FEEDS (PriceObservation / OptionContract,
+# observedAt / expirationDate) from an HTML feed scraper, plus a
+# MARKET_FEEDS_OPTIONS beside it. No such data exists in either bucket, so both
+# are gone along with the code that read them. Their presence was expensive:
+# one constant asked to name both models is what made market enrichment
+# silently produce nothing in the first place, and every market change since
+# had to reason about which of two vocabularies it meant.
 MARKET_QUOTES = Namespace(f"{SOURCE_BASE}market-quotes/")
-MARKET_FEEDS = Namespace(f"{SOURCE_BASE}market-feeds/")
-MARKET_FEEDS_OPTIONS = Namespace(f"{SOURCE_BASE}market-feeds-options/")
 
 # ============================================
 # NOAA WEATHER DATA NAMESPACES
@@ -121,9 +116,8 @@ SOURCE_VOCABULARIES: Tuple[str, ...] = (
     str(CPI), str(PPI), str(ECI), str(EMPSIT), str(JOLTS),
     str(LAUS), str(METRO), str(REALER), str(WKYENG), str(XIMPIM),
     str(BLS_COMMON),
-    str(SEC_COMMON), str(SEC_ADMIN), str(SEC_LIT), str(SEC_SUSP),
-    str(SEC_FILINGS),
-    str(MARKET_QUOTES), str(MARKET_FEEDS), str(MARKET_FEEDS_OPTIONS),
+    str(SEC_COMMON), str(SEC_FILINGS),
+    str(MARKET_QUOTES),
     str(WEATHER), str(CAP),
 )
 
@@ -258,15 +252,14 @@ SOURCE_TEMPORAL = Namespace(f"{ONTOLOGY_BASE}temporal/")
 #
 # IDENTIFIER_BASE is defined with the source identifiers above -- these are
 # individuals like any other, minted by this pipeline rather than a scraper.
-# The two market vocabularies get separate keys for the same reason any two
-# sources do. They are not one source with two spellings -- see the
-# MARKET_QUOTES / MARKET_FEEDS note above -- and only market-feeds had a key
-# here, so quote snapshots had nowhere to mint a period and never reached the
-# spine at all.
+# market-quotes is keyed by its vocabulary rather than plain "market" so the
+# URI keeps saying which model observed the period. There was a market-feeds
+# key here too, and it was the ONLY market key -- quote snapshots had nowhere
+# to mint a period and never reached the spine at all, while the feeds key
+# pointed at data that does not exist.
 SYNTHETIC_TEMPORAL_IDS: Dict[str, str] = {
     "sec": f"{IDENTIFIER_BASE}temporal/sec/",
     "noaa": f"{IDENTIFIER_BASE}temporal/noaa/",
-    "market-feeds": f"{IDENTIFIER_BASE}temporal/market-feeds/",
     "market-quotes": f"{IDENTIFIER_BASE}temporal/market-quotes/",
 }
 
@@ -368,19 +361,9 @@ NAMESPACE_PREFIXES: List[Tuple[str, str]] = [
     (str(BLS_COMMON), "bls_common"),
     (str(BLS_ENRICHMENT), "bls_enrichment"),
     (str(SEC_FILINGS), "filings"),
-    (str(SEC_ADMIN), "sec_admin"),
-    (str(SEC_LIT), "sec_lit"),
-    (str(SEC_SUSP), "sec_susp"),
     (str(SEC_COMMON), "sec_common"),
     (str(SEC_ENRICHMENT), "sec_enrichment"),
     (str(MARKET_ENRICHMENT), "market_enrichment"),
-    # market-feeds-options/ before market-feeds/: the latter is a string
-    # prefix of the former, and node_mapper matches by startswith down this
-    # list, so the shorter one would claim every options URI and name the
-    # node type after the wrong vocabulary. Pinned by
-    # test_longer_namespaces_precede_the_shorter_ones_they_extend.
-    (str(MARKET_FEEDS_OPTIONS), "market_feeds_options"),
-    (str(MARKET_FEEDS), "market_feeds"),
     (str(MARKET_QUOTES), "market_quotes"),
     (str(CAP), "cap"),
     (str(WEATHER), "weather"),
