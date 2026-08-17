@@ -1190,10 +1190,9 @@ def _source_families():
     re-homed namespace moves both at once. Restating prefixes here is the same
     staleness that produced the defect this file exists to catch.
 
-    A "family" is one upstream source, which is NOT one namespace: SEC alone
-    publishes filings / sec-common / sec-administrative-proceedings /
-    sec-litigation / sec-trading-suspensions, and a filing pointing at its own
-    sec-common Date node has not left SEC. Grouping by namespace instead of by
+    A "family" is one upstream source, which is NOT one namespace: SEC spans
+    filings and sec-common, and a filing pointing at its own sec-common Date
+    node has not left SEC. Grouping by namespace instead of by
     family is exactly the mistake that made the first version of the assertion
     below pass on the broken graph: node types were split on their first
     underscore, so filings_SECFiling and sec_common_Date read as two different
@@ -1203,9 +1202,9 @@ def _source_families():
     """
     from spark_jobs.utils.rdf_utils import (
         ALERT, BLS_COMMON, BLS_ENRICHMENT, CAP, CPI, ECI, EMPSIT, JOLTS, LAUS,
-        MARKET_ENRICHMENT, MARKET_FEEDS, MARKET_FEEDS_OPTIONS, MARKET_QUOTES,
-        METRO, NAMESPACE_PREFIXES, NOAA_ENRICHMENT, PPI, REALER, SEC_ADMIN,
-        SEC_COMMON, SEC_ENRICHMENT, SEC_FILINGS, SEC_LIT, SEC_SUSP,
+        MARKET_ENRICHMENT, MARKET_QUOTES,
+        METRO, NAMESPACE_PREFIXES, NOAA_ENRICHMENT, PPI, REALER,
+        SEC_COMMON, SEC_ENRICHMENT, SEC_FILINGS,
         SOURCE_TEMPORAL, UNIFIED, WEATHER, WKYENG, XIMPIM,
     )
 
@@ -1213,8 +1212,8 @@ def _source_families():
     families = {
         "bls": (CPI, PPI, ECI, EMPSIT, JOLTS, LAUS, METRO, REALER, WKYENG,
                 XIMPIM, BLS_COMMON),
-        "sec": (SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP, SEC_COMMON),
-        "market": (MARKET_QUOTES, MARKET_FEEDS, MARKET_FEEDS_OPTIONS),
+        "sec": (SEC_FILINGS, SEC_COMMON),
+        "market": (MARKET_QUOTES,),
         "noaa": (CAP, WEATHER, ALERT),
         # Everything this pipeline mints itself. These are how sources REACH
         # each other, so they are destinations rather than islands — "does it

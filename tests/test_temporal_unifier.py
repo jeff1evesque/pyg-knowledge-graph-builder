@@ -7,10 +7,10 @@ Mirrors the linker test files (test_{bls,noaa,market,sec,cross_source}_linker.py
     asserted at the value level (shared unified URI + owl:sameAs links).
   - Different-period observations are NOT unified — two distinct entities,
     no cross-period sameAs.
-  - The market option expiration-date path (market:expirationDate) is pinned:
-    this module previously shipped a reference to a non-existent
-    MARKET_OPTIONS symbol that broke build_graph in all modes (Bug B), so the
-    period derivation through that predicate gets a direct value-level test.
+  - The market period path (market-quotes:captureTime) is pinned. It replaced
+    an expirationDate/observedAt pair from a feeds vocabulary that no longer
+    exists; that pair is also where a reference to a non-existent
+    MARKET_OPTIONS symbol once broke build_graph in all modes (Bug B).
   - Non-temporal input short-circuits to zero triples.
 
 Drives enrich() over tiny in-memory triples on the shared local SparkSession
@@ -26,9 +26,7 @@ from spark_jobs.enrichment.temporal_unifier import (
     UNIFIED_YEAR_TYPE,
     SOURCE_MONTH_TYPE,
     SOURCE_YEAR_TYPE,
-    MARKET_OBSERVED_AT,
-    MARKET_EXPIRATION_DATE,
-    MARKET_OPTION_CONTRACT_TYPE,
+    MARKET_CAPTURE_TIME,
     OBSERVED_IN_PERIOD_PRED,
 )
 
@@ -52,9 +50,9 @@ from spark_jobs.utils.rdf_utils import (
 # ontology/ cannot notice that no real period ever does.
 CPI = str(_CPI_NS)
 CPI_ID = identifier_namespace(CPI)
-MARKET_TEMPORAL = SYNTHETIC_TEMPORAL_IDS["market-feeds"]
 SEC_TEMPORAL = SYNTHETIC_TEMPORAL_IDS["sec"]
-QUOTES_TEMPORAL = SYNTHETIC_TEMPORAL_IDS["market-quotes"]
+MARKET_TEMPORAL = SYNTHETIC_TEMPORAL_IDS["market-quotes"]
+QUOTES_TEMPORAL = MARKET_TEMPORAL
 
 
 def _triple_set(result):
@@ -67,7 +65,7 @@ def test_same_period_across_sources_unifies_to_one_entity(spark, make_triples):
     cpi_month = CPI_ID + "November"
     rows = [
         (CPI_ID + "obs/1", CPI + "hasMonth", cpi_month),
-        ("https://jefflevesque.com/id/market-feeds/snap/1", MARKET_OBSERVED_AT,
+        ("https://jefflevesque.com/id/market-quotes/snap/1", MARKET_CAPTURE_TIME,
          "2024-11-15T10:00:00"),
     ]
 
@@ -91,7 +89,7 @@ def test_different_periods_are_not_unified(spark, make_triples):
     cpi_month = CPI_ID + "November"
     rows = [
         (CPI_ID + "obs/1", CPI + "hasMonth", cpi_month),
-        ("https://jefflevesque.com/id/market-feeds/snap/1", MARKET_OBSERVED_AT,
+        ("https://jefflevesque.com/id/market-quotes/snap/1", MARKET_CAPTURE_TIME,
          "2024-03-10T10:00:00"),
     ]
 
@@ -112,26 +110,6 @@ def test_different_periods_are_not_unified(spark, make_triples):
     assert month_entities == {november, march}
 
 
-def test_market_expiration_date_derives_period(spark, make_triples):
-    """Option expiration dates (market:expirationDate) derive month + year
-    temporals — the path whose broken symbol reference (Bug B) once took
-    down build_graph in all modes."""
-    opt = "https://jefflevesque.com/id/market-feeds/opt/1"
-    rows = [
-        (opt, RDF_TYPE, MARKET_OPTION_CONTRACT_TYPE),
-        (opt, MARKET_EXPIRATION_DATE, "2025-01-17"),
-    ]
-
-    triples = _triple_set(TemporalUnifier(spark).enrich(make_triples(rows)))
-
-    assert (UNIFIED_BASE + "January", OWL_SAME_AS,
-            MARKET_TEMPORAL + "January") in triples
-    assert (UNIFIED_BASE + "January", RDF_TYPE, UNIFIED_MONTH_TYPE) in triples
-    assert (UNIFIED_BASE + "Year2025", OWL_SAME_AS,
-            MARKET_TEMPORAL + "2025") in triples
-    assert (UNIFIED_BASE + "Year2025", RDF_TYPE, UNIFIED_YEAR_TYPE) in triples
-
-
 def test_source_temporal_uris_are_typed(spark, make_triples):
     """The source-side temporal URIs get an rdf:type of their own.
 
@@ -146,7 +124,7 @@ def test_source_temporal_uris_are_typed(spark, make_triples):
     rows = [
         (CPI_ID + "obs/1", CPI + "hasMonth", cpi_month),
         (CPI_ID + "obs/1", CPI + "hasYear", cpi_year),
-        ("https://jefflevesque.com/id/market-feeds/snap/1", MARKET_OBSERVED_AT,
+        ("https://jefflevesque.com/id/market-quotes/snap/1", MARKET_CAPTURE_TIME,
          "2024-11-15T10:00:00"),
     ]
 

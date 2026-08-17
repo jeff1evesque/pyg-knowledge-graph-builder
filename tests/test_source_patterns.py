@@ -26,7 +26,6 @@ from spark_jobs.enrichment.intra_source.market import patterns as market
 from spark_jobs.enrichment.intra_source.market import measurements as market_meas
 from spark_jobs.enrichment.intra_source.market import correlations as market_corr
 from spark_jobs.enrichment.intra_source.sec import patterns as sec
-from spark_jobs.enrichment.intra_source.sec import correlations as sec_corr
 
 
 def _is_uri(value):
@@ -158,17 +157,6 @@ def test_sec_pattern_tables_well_formed(table, uri_key):
         for group, kws in entry["keywords"].items():
             assert all(isinstance(k, str) and k for k in kws), f"{table}/{key}/{group}"
 
-
-def test_sec_known_correlations_well_formed():
-    corr = sec_corr.KNOWN_CORRELATIONS
-    assert corr
-    names = [c["name"] for c in corr]
-    assert len(names) == len(set(names)), "duplicate correlation names"
-    for c in corr:
-        assert {"source_dataset", "target_dataset", "match_strategy",
-                "relationship", "strength"} <= set(c), c["name"]
-        assert _is_uri(c["relationship"]), c["name"]
-        assert c["strength"] in {"weak", "medium", "strong"}, c["name"]
 
 
 # ======================================================================

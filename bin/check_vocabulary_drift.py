@@ -72,8 +72,8 @@ FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "e2e" / "turtle_parquet"
 # namespaces are deliberately excluded: it emits those itself, so a term it
 # references and never emits is a different (and much louder) kind of bug.
 SOURCE_NAMESPACE_NAMES = (
-    "SEC_FILINGS", "SEC_ADMIN", "SEC_LIT", "SEC_SUSP", "SEC_COMMON",
-    "MARKET_QUOTES", "MARKET_FEEDS", "MARKET_FEEDS_OPTIONS",
+    "SEC_FILINGS", "SEC_COMMON",
+    "MARKET_QUOTES",
     "CAP", "WEATHER",
     "CPI", "PPI", "ECI", "EMPSIT", "JOLTS", "LAUS", "METRO", "REALER",
     "WKYENG", "XIMPIM", "BLS_COMMON",

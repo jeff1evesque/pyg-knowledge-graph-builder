@@ -4,11 +4,11 @@ SEC Intra-Source Enrichment — PySpark Implementation
 Migrated from rdflib SPARQL-based enricher to fully distributed PySpark.
 All operations run on executors — no rdflib, no driver data operations.
 
-Handles:
-- Filings (Forms 3, 4, 5, 10-K, 10-Q, 8-K)
-- Administrative Proceedings
-- Litigation Releases
-- Trading Suspensions
+Handles the filings feed (Forms 3, 4, 5, 10-K, 10-Q, 8-K) -- the only SEC feed
+collected. Administrative proceedings, litigation releases and trading
+suspensions were removed: upstream publishes no such feeds, so every step keyed
+on them matched nothing and returned nothing, which is indistinguishable from
+working correctly.
 
 Enrichment steps:
 1. Unify company entities (by CIK across datasets)
@@ -16,27 +16,29 @@ Enrichment steps:
 3. Link temporal sequences (chronological ordering within each dataset)
 4. Apply sector patterns (keyword matching against URIs and labels)
 5. Apply violation patterns (keyword matching + cross-dataset linking)
-6. Apply known correlations (CIK, ticker, name, pattern, same-parent matching)
+
+Cross-dataset correlations were removed with the datasets they correlated: all
+26 in KNOWN_CORRELATIONS paired filings with administrative proceedings,
+litigation or trading suspensions, and none paired filings with itself.
 """
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql import Window
 from functools import reduce
-from typing import Dict, List, Optional, Set
+from typing import List, Optional, Set
 
 from rdflib.namespace import RDF, RDFS, OWL
 
 from spark_jobs.utils.rdf_utils import (
-    SEC_ENRICHMENT, SEC_ADMIN, SEC_LIT, SEC_SUSP, SEC_FILINGS, SEC_COMMON,
+    SEC_ENRICHMENT, SEC_FILINGS, SEC_COMMON,
     UNIFIED,
     identifier_namespace,
 )
 from spark_jobs.enrichment.intra_source.sec.patterns import (
     SEC_SECTOR_PATTERNS, SEC_VIOLATION_PATTERNS,
 )
-from spark_jobs.enrichment.intra_source.sec.correlations import KNOWN_CORRELATIONS
 from spark_jobs.utils.spark_rdf_utils import (
-    extract_entities_by_type, deduplicate_against_existing,
+    deduplicate_against_existing,
 )
 
 import logging
@@ -53,9 +55,6 @@ _RDFS_LABEL = str(RDFS.label)
 
 # Namespace prefix strings for dataset detection and filtering
 _SEC_FILINGS_NS = str(SEC_FILINGS)
-_SEC_ADMIN_NS = str(SEC_ADMIN)
-_SEC_LIT_NS = str(SEC_LIT)
-_SEC_SUSP_NS = str(SEC_SUSP)
 _UNIFIED_NS = str(UNIFIED)
 _SEC_ENRICHMENT_NS = str(SEC_ENRICHMENT)
 
@@ -90,26 +89,8 @@ _FILINGS_HAS_TRANSACTION_DATE = str(SEC_FILINGS.hasTransactionDate)
 _FILINGS_HAS_ISSUER_TRADING_SYMBOL = str(SEC_FILINGS.hasIssuerTradingSymbol)
 _FILINGS_HAS_ISSUER_NAME = str(SEC_FILINGS.hasIssuerName)
 
-# Dataset-specific predicates (admin)
-_ADMIN_CIK_NUMBER = str(SEC_ADMIN.cikNumber)
-_ADMIN_TICKER_SYMBOL = str(SEC_ADMIN.tickerSymbol)
-_ADMIN_RESPONDENT_NAME = str(SEC_ADMIN.respondentName)
-_ADMIN_HAS_RESPONDENT = str(SEC_ADMIN.hasRespondent)
-_ADMIN_INITIATION_DATE = str(SEC_ADMIN.initiationDate)
 
-# Dataset-specific predicates (litigation)
-_LIT_FILING_DATE = str(SEC_LIT.filingDate)
-_LIT_RELEASE_DATE = str(SEC_LIT.releaseDate)
-_LIT_HAS_DEFENDANT = str(SEC_LIT.hasDefendant)
-_LIT_DEFENDANT_NAME = str(SEC_LIT.defendantName)
-_LIT_COMPANY_NAME = str(SEC_LIT.companyName)
 
-# Dataset-specific predicates (suspensions)
-_SUSP_CIK_NUMBER = str(SEC_SUSP.cikNumber)
-_SUSP_TICKER_SYMBOL = str(SEC_SUSP.tickerSymbol)
-_SUSP_COMPANY_NAME = str(SEC_SUSP.companyName)
-_SUSP_AFFECTS_COMPANY = str(SEC_SUSP.affectsCompany)
-_SUSP_START_DATE = str(SEC_SUSP.startDate)
 
 # Form type URIs
 _FORM3_TYPE = str(SEC_FILINGS.Form3)
@@ -120,23 +101,8 @@ _FORM10Q_TYPE = str(SEC_FILINGS.Form10Q)
 _FORM8K_TYPE = str(SEC_FILINGS.Form8K)
 _OWNERSHIP_DOC_TYPE = str(SEC_FILINGS.OwnershipDocument)
 
-# Admin proceeding type URIs
-_ADMIN_PROCEEDING_TYPE = str(SEC_ADMIN.AdministrativeProceeding)
-_RULE102E_TYPE = str(SEC_ADMIN.Rule102eProceeding)
-_CEASE_DESIST_TYPE = str(SEC_ADMIN.CeaseAndDesistProceeding)
-_SECTION12J_PROC_TYPE = str(SEC_ADMIN.Section12jProceeding)
-_ADMIN_INDIVIDUAL_RESPONDENT_TYPE = str(SEC_ADMIN.IndividualRespondent)
 
-# Litigation type URIs
-_LIT_RELEASE_TYPE = str(SEC_LIT.LitigationRelease)
-_CIVIL_ACTION_TYPE = str(SEC_LIT.CivilEnforcementAction)
-_EMERGENCY_ACTION_TYPE = str(SEC_LIT.EmergencyAction)
 
-# Suspension type URIs
-_TRADING_SUSPENSION_TYPE = str(SEC_SUSP.TradingSuspension)
-_SECTION12K_SUSP_TYPE = str(SEC_SUSP.Section12kSuspension)
-_SECTION12J_SUSP_TYPE = str(SEC_SUSP.Section12jSuspension)
-_EMERGENCY_SUSP_TYPE = str(SEC_SUSP.EmergencySuspension)
 
 # Enrichment type URIs
 _UNIFIED_COMPANY_TYPE = str(SEC_ENRICHMENT.UnifiedCompany)
@@ -153,9 +119,6 @@ _VIOLATION_TYPE_TYPE = str(SEC_ENRICHMENT.ViolationType)
 # terms, and is correct as written.
 DATASET_NS_MAP = {
     'filings': identifier_namespace(_SEC_FILINGS_NS),
-    'administrative_proceedings': identifier_namespace(_SEC_ADMIN_NS),
-    'litigation': identifier_namespace(_SEC_LIT_NS),
-    'trading_suspensions': identifier_namespace(_SEC_SUSP_NS),
 }
 
 
@@ -234,7 +197,6 @@ class SECIntraSourceLinker:
 
         # Step 6: Apply known correlations
         logger.info("\n[Step 6/6] Applying known correlations...")
-        self._append(new_dfs, self._apply_known_correlations())
 
         # Unpersist cached subset
         self._sec_triples.unpersist()
@@ -270,15 +232,6 @@ class SECIntraSourceLinker:
             _FORM10K_TYPE, _FORM10Q_TYPE, _FORM8K_TYPE,
             _OWNERSHIP_DOC_TYPE,
         ]
-        admin_types = [
-            _ADMIN_PROCEEDING_TYPE, _RULE102E_TYPE,
-            _CEASE_DESIST_TYPE, _SECTION12J_PROC_TYPE,
-        ]
-        lit_types = [_LIT_RELEASE_TYPE, _CIVIL_ACTION_TYPE]
-        susp_types = [
-            _TRADING_SUSPENSION_TYPE, _SECTION12K_SUSP_TYPE,
-            _SECTION12J_SUSP_TYPE,
-        ]
 
         type_triples = (
             self.triples_df
@@ -292,12 +245,6 @@ class SECIntraSourceLinker:
 
         if any(t in existing_types for t in filings_types):
             datasets.add('filings')
-        if any(t in existing_types for t in admin_types):
-            datasets.add('administrative_proceedings')
-        if any(t in existing_types for t in lit_types):
-            datasets.add('litigation')
-        if any(t in existing_types for t in susp_types):
-            datasets.add('trading_suspensions')
 
         return datasets
 
@@ -312,7 +259,7 @@ class SECIntraSourceLinker:
         """
         sec_prefixes = [
             *DATASET_NS_MAP.values(),
-            _SEC_FILINGS_NS, _SEC_ADMIN_NS, _SEC_LIT_NS, _SEC_SUSP_NS,
+            _SEC_FILINGS_NS,
             # Date intermediate nodes -- individuals under id/, and the
             # predicates that reach them, under ontology/.
             str(SEC_COMMON), identifier_namespace(str(SEC_COMMON)),
@@ -422,10 +369,17 @@ class SECIntraSourceLinker:
 
     def _unify_company_entities(self) -> Optional[DataFrame]:
         """
-        Unify company entities across SEC datasets using CIK numbers.
+        Unify company entities sharing a CIK.
 
-        Creates unified:Company_{CIK} entities with owl:sameAs links
-        for companies that appear in multiple datasets.
+        Creates unified:Company_{CIK} with owl:sameAs links to every entity
+        stating that CIK, whenever more than one does.
+
+        This said "across SEC datasets ... appear in multiple datasets", which
+        was never what it keys on -- the grouping counts distinct ENTITIES per
+        CIK, not distinct datasets. The distinction became load-bearing when
+        filings became the only collected SEC feed: read as written, the method
+        would now be dead, when in fact it still unifies the repeated filings a
+        single issuer makes.
         """
         # Collect CIK → entity mappings from each dataset
         cik_sources: List[DataFrame] = []
@@ -443,31 +397,7 @@ class SECIntraSourceLinker:
             )
             cik_sources.append(filings_cik)
 
-        # Admin proceedings: CIK number
-        if 'administrative_proceedings' in self.available_datasets:
-            admin_cik = (
-                self._sec_triples
-                .filter(F.col("predicate") == _ADMIN_CIK_NUMBER)
-                .select(
-                    F.col("subject").alias("entity"),
-                    F.trim(F.col("object")).alias("cik"),
-                )
-                .filter(F.length(F.col("cik")) > 0)
-            )
-            cik_sources.append(admin_cik)
 
-        # Trading suspensions: CIK number
-        if 'trading_suspensions' in self.available_datasets:
-            susp_cik = (
-                self._sec_triples
-                .filter(F.col("predicate") == _SUSP_CIK_NUMBER)
-                .select(
-                    F.col("subject").alias("entity"),
-                    F.trim(F.col("object")).alias("cik"),
-                )
-                .filter(F.length(F.col("cik")) > 0)
-            )
-            cik_sources.append(susp_cik)
 
         if not cik_sources:
             return None
@@ -483,7 +413,7 @@ class SECIntraSourceLinker:
             .filter(F.col("entity_count") > 1)
         )
 
-        # Join back to get the entities for multi-dataset CIKs
+        # Join back to get the entities for CIKs stated by more than one entity
         multi_dataset = all_cik_entities.join(cik_counts.select("cik"), "cik", "inner")
 
         # Build unified URI
@@ -545,24 +475,6 @@ class SECIntraSourceLinker:
             )
             cik_sources.append(owner_cik)
 
-        # Admin proceedings: individual respondent CIK
-        if 'administrative_proceedings' in self.available_datasets:
-            # Get individual respondents
-            individual_respondents = extract_entities_by_type(
-                self._sec_triples, _ADMIN_INDIVIDUAL_RESPONDENT_TYPE
-            )
-            admin_person_cik = (
-                self._sec_triples
-                .filter(F.col("predicate") == _ADMIN_CIK_NUMBER)
-                .select(
-                    F.col("subject").alias("entity"),
-                    F.trim(F.col("object")).alias("cik"),
-                )
-                .join(individual_respondents, "entity", "inner")
-                .select("entity", "cik")
-                .filter(F.length(F.col("cik")) > 0)
-            )
-            cik_sources.append(admin_person_cik)
 
         if not cik_sources:
             return None
@@ -618,9 +530,6 @@ class SECIntraSourceLinker:
 
         self._append(new_dfs, self._link_ownership_filing_sequences())
         self._append(new_dfs, self._link_periodic_reporting_sequences())
-        self._append(new_dfs, self._link_admin_proceeding_sequences())
-        self._append(new_dfs, self._link_litigation_sequences())
-        self._append(new_dfs, self._link_trading_suspension_sequences())
 
         if not new_dfs:
             return None
@@ -748,175 +657,6 @@ class SECIntraSourceLinker:
         filings_dated = filings_with_company.join(dates, "filing", "inner")
 
         return self._build_precedes_links(filings_dated, "filing", "company")
-
-    def _link_admin_proceeding_sequences(self) -> Optional[DataFrame]:
-        """Link administrative proceedings chronologically by respondent."""
-        if 'administrative_proceedings' not in self.available_datasets:
-            return None
-
-        proc_types = [
-            _ADMIN_PROCEEDING_TYPE, _RULE102E_TYPE,
-            _CEASE_DESIST_TYPE, _SECTION12J_PROC_TYPE,
-        ]
-
-        proceedings = (
-            self._sec_triples
-            .filter(F.col("predicate") == _RDF_TYPE)
-            .filter(F.col("object").isin(proc_types))
-            .select(F.col("subject").alias("proceeding"))
-            .distinct()
-        )
-
-        if proceedings.head(1) == []:
-            return None
-
-        respondents = (
-            self._sec_triples
-            .filter(F.col("predicate") == _ADMIN_HAS_RESPONDENT)
-            .select(
-                F.col("subject").alias("proceeding"),
-                F.col("object").alias("respondent"),
-            )
-        )
-
-        procs_with_respondent = proceedings.join(respondents, "proceeding", "inner")
-
-        # Admin proceedings use direct date literals on initiationDate
-        dates = (
-            self._sec_triples
-            .filter(F.col("predicate") == _ADMIN_INITIATION_DATE)
-            .select(
-                F.col("subject").alias("proceeding"),
-                F.regexp_extract(F.col("object"), r"(\d{4}-\d{2}-\d{2})", 1).alias("date_value"),
-            )
-            .filter(F.length(F.col("date_value")) > 0)
-        )
-
-        procs_dated = procs_with_respondent.join(dates, "proceeding", "inner")
-
-        return self._build_precedes_links(procs_dated, "proceeding", "respondent")
-
-    def _link_litigation_sequences(self) -> Optional[DataFrame]:
-        """Link litigation actions chronologically by defendant, plus releases."""
-        if 'litigation' not in self.available_datasets:
-            return None
-
-        new_dfs: List[DataFrame] = []
-
-        # Civil/emergency actions by defendant
-        action_types = [_CIVIL_ACTION_TYPE, _EMERGENCY_ACTION_TYPE]
-
-        actions = (
-            self._sec_triples
-            .filter(F.col("predicate") == _RDF_TYPE)
-            .filter(F.col("object").isin(action_types))
-            .select(F.col("subject").alias("action"))
-            .distinct()
-        )
-
-        if actions.head(1) != []:
-            defendants = (
-                self._sec_triples
-                .filter(F.col("predicate") == _LIT_HAS_DEFENDANT)
-                .select(
-                    F.col("subject").alias("action"),
-                    F.col("object").alias("defendant"),
-                )
-            )
-
-            actions_with_defendant = actions.join(defendants, "action", "inner")
-
-            dates = (
-                self._sec_triples
-                .filter(F.col("predicate") == _LIT_FILING_DATE)
-                .select(
-                    F.col("subject").alias("action"),
-                    F.regexp_extract(F.col("object"), r"(\d{4}-\d{2}-\d{2})", 1).alias("date_value"),
-                )
-                .filter(F.length(F.col("date_value")) > 0)
-            )
-
-            actions_dated = actions_with_defendant.join(dates, "action", "inner")
-            self._append(new_dfs, self._build_precedes_links(actions_dated, "action", "defendant"))
-
-        # Litigation releases — chronological (no grouping, use a constant group)
-        releases = extract_entities_by_type(self._sec_triples, _LIT_RELEASE_TYPE)
-
-        if releases.head(1) != []:
-            release_dates = (
-                self._sec_triples
-                .filter(F.col("predicate") == _LIT_RELEASE_DATE)
-                .select(
-                    F.col("subject").alias("entity"),
-                    F.regexp_extract(F.col("object"), r"(\d{4}-\d{2}-\d{2})", 1).alias("date_value"),
-                )
-                .filter(F.length(F.col("date_value")) > 0)
-            )
-
-            releases_dated = (
-                releases
-                .join(release_dates, "entity", "inner")
-                .withColumn("group_key", F.lit("all_releases"))
-            )
-
-            self._append(
-                new_dfs,
-                self._build_precedes_links(releases_dated, "entity", "group_key"),
-            )
-
-        if not new_dfs:
-            return None
-        return reduce(DataFrame.unionAll, new_dfs)
-
-    def _link_trading_suspension_sequences(self) -> Optional[DataFrame]:
-        """Link trading suspensions chronologically by company."""
-        if 'trading_suspensions' not in self.available_datasets:
-            return None
-
-        susp_types = [
-            _TRADING_SUSPENSION_TYPE, _SECTION12K_SUSP_TYPE,
-            _SECTION12J_SUSP_TYPE, _EMERGENCY_SUSP_TYPE,
-        ]
-
-        suspensions = (
-            self._sec_triples
-            .filter(F.col("predicate") == _RDF_TYPE)
-            .filter(F.col("object").isin(susp_types))
-            .select(F.col("subject").alias("suspension"))
-            .distinct()
-        )
-
-        if suspensions.head(1) == []:
-            return None
-
-        companies = (
-            self._sec_triples
-            .filter(F.col("predicate") == _SUSP_AFFECTS_COMPANY)
-            .select(
-                F.col("subject").alias("suspension"),
-                F.col("object").alias("company"),
-            )
-        )
-
-        susps_with_company = suspensions.join(companies, "suspension", "inner")
-
-        dates = (
-            self._sec_triples
-            .filter(F.col("predicate") == _SUSP_START_DATE)
-            .select(
-                F.col("subject").alias("suspension"),
-                F.regexp_extract(F.col("object"), r"(\d{4}-\d{2}-\d{2})", 1).alias("date_value"),
-            )
-            .filter(F.length(F.col("date_value")) > 0)
-        )
-
-        susps_dated = susps_with_company.join(dates, "suspension", "inner")
-
-        return self._build_precedes_links(susps_dated, "suspension", "company")
-
-    # ================================================================
-    # Step 4: Sector patterns
-    # ================================================================
 
     def _apply_sector_patterns(self) -> Optional[DataFrame]:
         """
@@ -1194,333 +934,3 @@ class SECIntraSourceLinker:
     # ================================================================
     # Step 6: Known correlations
     # ================================================================
-
-    def _apply_known_correlations(self) -> Optional[DataFrame]:
-        """Apply known correlations from domain expertise."""
-        new_dfs: List[DataFrame] = []
-
-        for correlation in KNOWN_CORRELATIONS:
-            source_dataset = correlation['source_dataset']
-            target_dataset = correlation['target_dataset']
-
-            if source_dataset not in self.available_datasets:
-                continue
-            if target_dataset not in self.available_datasets:
-                continue
-
-            match_strategy = correlation.get('match_strategy', '')
-            result = None
-
-            if match_strategy == 'cik':
-                result = self._apply_cik_correlation(correlation)
-            elif match_strategy == 'ticker':
-                result = self._apply_ticker_correlation(correlation)
-            elif match_strategy == 'name':
-                result = self._apply_name_correlation(correlation)
-            elif match_strategy in (
-                'violation_type', 'section_type', 'violation_reason',
-                'action_type', 'sanction_consequence', 'reason_hierarchy',
-            ):
-                result = self._apply_pattern_correlation(correlation)
-            elif match_strategy in ('same_proceeding', 'same_action', 'same_suspension'):
-                result = self._apply_same_parent_correlation(correlation)
-
-            self._append(new_dfs, result)
-
-        if not new_dfs:
-            return None
-
-        result = reduce(DataFrame.unionAll, new_dfs)
-        logger.info("  Correlation triples prepared (lazy)")
-        return result
-
-    def _resolve_property(self, prefixed_name: str) -> str:
-        """Resolve a prefixed property name to a full URI string."""
-        prefix_map = {
-            'filings:': _SEC_FILINGS_NS,
-            'sec:': _SEC_ADMIN_NS,
-            'seclit:': _SEC_LIT_NS,
-            'secsusp:': _SEC_SUSP_NS,
-        }
-        for prefix, namespace in prefix_map.items():
-            if prefixed_name.startswith(prefix):
-                local_name = prefixed_name[len(prefix):]
-                return f"{namespace}{local_name}"
-        return ''
-
-    def _apply_cik_correlation(self, correlation: Dict) -> Optional[DataFrame]:
-        """Apply correlation by matching CIK numbers across datasets."""
-        source_prop = self._resolve_property(correlation.get('source_cik_property', ''))
-        target_prop = self._resolve_property(correlation.get('target_cik_property', ''))
-        relationship = str(correlation['relationship'])
-
-        if not source_prop or not target_prop:
-            return None
-
-        source_entities = (
-            self._sec_triples
-            .filter(F.col("predicate") == source_prop)
-            .select(
-                F.col("subject").alias("source_entity"),
-                F.trim(F.col("object")).alias("cik"),
-            )
-            .filter(F.length(F.col("cik")) > 0)
-        )
-
-        target_entities = (
-            self._sec_triples
-            .filter(F.col("predicate") == target_prop)
-            .select(
-                F.col("subject").alias("target_entity"),
-                F.trim(F.col("object")).alias("cik"),
-            )
-            .filter(F.length(F.col("cik")) > 0)
-        )
-
-        matched = source_entities.join(target_entities, "cik", "inner")
-
-        return matched.select(
-            F.col("source_entity").alias("subject"),
-            F.lit(relationship).alias("predicate"),
-            F.col("target_entity").alias("object"),
-        )
-
-    def _apply_ticker_correlation(self, correlation: Dict) -> Optional[DataFrame]:
-        """Apply correlation by matching ticker symbols across datasets."""
-        source_prop = self._resolve_property(correlation.get('source_ticker_property', ''))
-        target_prop = self._resolve_property(correlation.get('target_ticker_property', ''))
-        relationship = str(correlation['relationship'])
-
-        if not source_prop or not target_prop:
-            return None
-
-        source_entities = (
-            self._sec_triples
-            .filter(F.col("predicate") == source_prop)
-            .select(
-                F.col("subject").alias("source_entity"),
-                F.upper(F.trim(F.col("object"))).alias("ticker"),
-            )
-            .filter(F.length(F.col("ticker")) > 0)
-        )
-
-        target_entities = (
-            self._sec_triples
-            .filter(F.col("predicate") == target_prop)
-            .select(
-                F.col("subject").alias("target_entity"),
-                F.upper(F.trim(F.col("object"))).alias("ticker"),
-            )
-            .filter(F.length(F.col("ticker")) > 0)
-        )
-
-        matched = source_entities.join(target_entities, "ticker", "inner")
-
-        return matched.select(
-            F.col("source_entity").alias("subject"),
-            F.lit(relationship).alias("predicate"),
-            F.col("target_entity").alias("object"),
-        )
-
-    def _apply_name_correlation(self, correlation: Dict) -> Optional[DataFrame]:
-        """Apply correlation by matching entity names across datasets."""
-        source_prop = self._resolve_property(correlation.get('source_name_property', ''))
-        target_prop = self._resolve_property(correlation.get('target_name_property', ''))
-        relationship = str(correlation['relationship'])
-
-        if not source_prop or not target_prop:
-            return None
-
-        source_entities = (
-            self._sec_triples
-            .filter(F.col("predicate") == source_prop)
-            .select(
-                F.col("subject").alias("source_entity"),
-                F.lower(F.trim(F.col("object"))).alias("name"),
-            )
-            .filter(F.length(F.col("name")) > 0)
-        )
-
-        target_entities = (
-            self._sec_triples
-            .filter(F.col("predicate") == target_prop)
-            .select(
-                F.col("subject").alias("target_entity"),
-                F.lower(F.trim(F.col("object"))).alias("name"),
-            )
-            .filter(F.length(F.col("name")) > 0)
-        )
-
-        matched = source_entities.join(target_entities, "name", "inner")
-
-        return matched.select(
-            F.col("source_entity").alias("subject"),
-            F.lit(relationship).alias("predicate"),
-            F.col("target_entity").alias("object"),
-        )
-
-    def _apply_pattern_correlation(self, correlation: Dict) -> Optional[DataFrame]:
-        """
-        Apply correlation by matching URI/label patterns across datasets.
-
-        Finds entities whose URIs or labels contain the source and target
-        patterns, then links matching pairs across datasets.
-        """
-        source_ns = DATASET_NS_MAP.get(correlation['source_dataset'], '')
-        target_ns = DATASET_NS_MAP.get(correlation['target_dataset'], '')
-        source_pattern = correlation['source_pattern']
-        target_pattern = correlation['target_pattern']
-        relationship = str(correlation['relationship'])
-
-        if not source_ns or not target_ns:
-            return None
-
-        source_normalized = normalize_keyword_for_uri_matching(source_pattern)
-        target_normalized = normalize_keyword_for_uri_matching(target_pattern)
-
-        # Find source entities by URI or label
-        source_by_uri = (
-            self._sec_triples
-            .select("subject").distinct()
-            .filter(
-                F.col("subject").startswith(source_ns) &
-                F.col("subject").contains(source_normalized)
-            )
-            .select(F.col("subject").alias("source_entity"))
-        )
-
-        source_by_label = (
-            self._sec_triples
-            .filter(F.col("predicate") == _RDFS_LABEL)
-            .filter(F.col("subject").startswith(source_ns))
-            .filter(F.lower(F.col("object")).contains(source_pattern.lower()))
-            .select(F.col("subject").alias("source_entity"))
-        )
-
-        source_entities = source_by_uri.unionAll(source_by_label).distinct()
-
-        # Find target entities by URI or label
-        target_by_uri = (
-            self._sec_triples
-            .select("subject").distinct()
-            .filter(
-                F.col("subject").startswith(target_ns) &
-                F.col("subject").contains(target_normalized)
-            )
-            .select(F.col("subject").alias("target_entity"))
-        )
-
-        target_by_label = (
-            self._sec_triples
-            .filter(F.col("predicate") == _RDFS_LABEL)
-            .filter(F.col("subject").startswith(target_ns))
-            .filter(F.lower(F.col("object")).contains(target_pattern.lower()))
-            .select(F.col("subject").alias("target_entity"))
-        )
-
-        target_entities = target_by_uri.unionAll(target_by_label).distinct()
-
-        # Cross join source × target (both should be small for pattern matches)
-        matched = source_entities.crossJoin(target_entities)
-
-        return matched.select(
-            F.col("source_entity").alias("subject"),
-            F.lit(relationship).alias("predicate"),
-            F.col("target_entity").alias("object"),
-        )
-
-    def _apply_same_parent_correlation(self, correlation: Dict) -> Optional[DataFrame]:
-        """
-        Apply correlation for entities within the same parent entity.
-
-        Finds source and target pattern entities that are connected to
-        the same parent (proceeding/action/suspension) via any property.
-        """
-        source_ns = DATASET_NS_MAP.get(correlation['source_dataset'], '')
-        source_pattern = correlation['source_pattern']
-        target_pattern = correlation['target_pattern']
-        relationship = str(correlation['relationship'])
-        match_strategy = correlation['match_strategy']
-
-        if not source_ns:
-            return None
-
-        source_normalized = normalize_keyword_for_uri_matching(source_pattern)
-        target_normalized = normalize_keyword_for_uri_matching(target_pattern)
-
-        # Determine parent types based on strategy
-        if match_strategy == 'same_proceeding':
-            parent_types = [
-                _ADMIN_PROCEEDING_TYPE, _RULE102E_TYPE,
-                _CEASE_DESIST_TYPE, _SECTION12J_PROC_TYPE,
-            ]
-        elif match_strategy == 'same_action':
-            parent_types = [_CIVIL_ACTION_TYPE, _EMERGENCY_ACTION_TYPE]
-        elif match_strategy == 'same_suspension':
-            parent_types = [
-                _TRADING_SUSPENSION_TYPE, _SECTION12K_SUSP_TYPE,
-                _SECTION12J_SUSP_TYPE, _EMERGENCY_SUSP_TYPE,
-            ]
-        else:
-            return None
-
-        # Find parent entities
-        parents = (
-            self._sec_triples
-            .filter(F.col("predicate") == _RDF_TYPE)
-            .filter(F.col("object").isin(parent_types))
-            .select(F.col("subject").alias("parent"))
-            .distinct()
-        )
-
-        # Find all children connected to parents (parent → child or child → parent)
-        # Forward: parent ?p child
-        forward_children = (
-            self._sec_triples
-            .select(
-                F.col("subject").alias("parent"),
-                F.col("object").alias("child"),
-            )
-            .filter(F.col("child").startswith(source_ns))
-        )
-
-        # Reverse: child ?p parent
-        reverse_children = (
-            self._sec_triples
-            .select(
-                F.col("object").alias("parent"),
-                F.col("subject").alias("child"),
-            )
-            .filter(F.col("child").startswith(source_ns))
-        )
-
-        all_children = (
-            forward_children.unionAll(reverse_children)
-            .join(parents, "parent", "inner")
-            .distinct()
-        )
-
-        # Separate into source and target matches
-        source_matches = (
-            all_children
-            .filter(F.col("child").contains(source_normalized))
-            .select(F.col("parent"), F.col("child").alias("source_entity"))
-        )
-
-        target_matches = (
-            all_children
-            .filter(F.col("child").contains(target_normalized))
-            .select(F.col("parent"), F.col("child").alias("target_entity"))
-        )
-
-        # Join on parent — link source to target within same parent
-        matched = (
-            source_matches.join(target_matches, "parent", "inner")
-            .filter(F.col("source_entity") != F.col("target_entity"))
-        )
-
-        return matched.select(
-            F.col("source_entity").alias("subject"),
-            F.lit(relationship).alias("predicate"),
-            F.col("target_entity").alias("object"),
-        )

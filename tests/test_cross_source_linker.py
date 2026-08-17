@@ -21,7 +21,7 @@ from rdflib.namespace import OWL, RDF, RDFS
 
 from spark_jobs.enrichment.cross_source_linker import CrossSourceLinker
 from spark_jobs.utils.rdf_utils import (
-    ALERT, BLS_ENRICHMENT, CAP, CPI, MARKET_FEEDS, MARKET_QUOTES, WEATHER,
+    ALERT, BLS_ENRICHMENT, CAP, CPI, MARKET_QUOTES, WEATHER,
     SEC_FILINGS, UNIFIED,
 )
 
@@ -50,9 +50,8 @@ def test_cross_source_company_linking_shares_unified_company(spark, make_triples
     the same unified Company entity (the cross-source hub).
 
     Both sides of this join were dead. The market side asked for
-    market-feeds:StockTicker, a class NEITHER market vocabulary declares (feeds
-    models PriceObservation / OptionContract, quotes models EquitySnapshot /
-    OptionSnapshot), so it matched nothing whichever namespace it named. The SEC
+    market-feeds:StockTicker, a class nothing declares -- the model is
+    EquitySnapshot / OptionSnapshot -- so it matched nothing. The SEC
     side asked for hasIssuerTicker, which upstream renamed to
     hasIssuerTradingSymbol and moved off the filing onto the filings:Issuer
     node. The previous version of this test asserted the dead shape was correct,
@@ -80,34 +79,6 @@ def test_cross_source_company_linking_shares_unified_company(spark, make_triples
     assert (issuer, REFERS_TO_COMPANY, company) in triples
     assert (company, RDF_TYPE, UNIFIED_COMPANY_TYPE) in triples
     assert (company, TICKER_PRED, "AAPL") in triples
-
-
-def test_cross_source_company_linking_reads_the_feeds_vocabulary_too(
-    spark, make_triples
-):
-    """The other market vocabulary bridges as well.
-
-    The two are deliberately not unified (see the MARKET_QUOTES / MARKET_FEEDS
-    note in rdf_utils), so the join reads each on its own terms rather than
-    assuming one name covers both — which is the mistake that produced the
-    original silent-nothing defect.
-    """
-    observation = str(MARKET_FEEDS) + "observation/AAPL_1"
-    issuer = str(SEC_FILINGS) + "Issuer_0000320193"
-    rows = [
-        (observation, RDF_TYPE, str(MARKET_FEEDS.PriceObservation)),
-        (observation, str(MARKET_FEEDS.symbol), "AAPL"),
-        (issuer, RDF_TYPE, str(SEC_FILINGS.Issuer)),
-        (issuer, str(SEC_FILINGS.hasIssuerTradingSymbol), "AAPL"),
-    ]
-
-    triples = _triple_set(
-        CrossSourceLinker(spark, make_triples(rows)).enrich()
-    )
-
-    company = str(UNIFIED) + "Company_AAPL"
-    assert (observation, REFERS_TO_COMPANY, company) in triples
-    assert (issuer, REFERS_TO_COMPANY, company) in triples
 
 
 def test_cross_source_company_linking_resolves_occ_option_symbols(
@@ -188,7 +159,7 @@ def test_cross_source_does_not_unify_temporal_entities(spark, make_triples):
     exists in real data, which contains only bare month URIs and measurements.
     """
     measurement = str(CPI) + "SeasonallyAdjustedPercentChange_Food_2025_September"
-    snapshot = str(MARKET_FEEDS) + "snapshot/AAPL_1"
+    snapshot = str(MARKET_QUOTES) + "snapshot/AAPL_1"
     rows = [
         (measurement, RDFS_LABEL, "Food, Sep 2025"),
         (snapshot, RDFS_LABEL, "AAPL snapshot"),  # second source, no month
@@ -215,7 +186,7 @@ def test_cross_source_does_not_unify_year_suffixed_uris(spark, make_triples):
     in a year is not the year.
     """
     measurement = str(CPI) + "UnadjustedIndex_Apparel_2024"
-    snapshot = str(MARKET_FEEDS) + "snapshot/AAPL_1"
+    snapshot = str(MARKET_QUOTES) + "snapshot/AAPL_1"
     rows = [
         (measurement, RDFS_LABEL, "Apparel index 2024"),
         (snapshot, RDFS_LABEL, "AAPL snapshot"),  # second source
@@ -250,7 +221,7 @@ def test_cross_source_unlinkable_sources_produce_no_entity_edges(spark, make_tri
     """Two sources with no shared key (no tickers, months, sectors, regions)
     produce no edges touching the input entities and no linking predicates
     (unified-region scaffolding triples are allowed)."""
-    market_e = str(MARKET_FEEDS) + "zzq-a"
+    market_e = str(MARKET_QUOTES) + "zzq-a"
     sec_e = str(SEC_FILINGS) + "zzq-b"
     rows = [
         (market_e, RDFS_LABEL, "zzq a"),
