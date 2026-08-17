@@ -258,10 +258,16 @@ SOURCE_TEMPORAL = Namespace(f"{ONTOLOGY_BASE}temporal/")
 #
 # IDENTIFIER_BASE is defined with the source identifiers above -- these are
 # individuals like any other, minted by this pipeline rather than a scraper.
+# The two market vocabularies get separate keys for the same reason any two
+# sources do. They are not one source with two spellings -- see the
+# MARKET_QUOTES / MARKET_FEEDS note above -- and only market-feeds had a key
+# here, so quote snapshots had nowhere to mint a period and never reached the
+# spine at all.
 SYNTHETIC_TEMPORAL_IDS: Dict[str, str] = {
     "sec": f"{IDENTIFIER_BASE}temporal/sec/",
     "noaa": f"{IDENTIFIER_BASE}temporal/noaa/",
     "market-feeds": f"{IDENTIFIER_BASE}temporal/market-feeds/",
+    "market-quotes": f"{IDENTIFIER_BASE}temporal/market-quotes/",
 }
 
 # Statements ABOUT the pipeline's own derivations rather than about the data.
