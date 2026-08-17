@@ -43,7 +43,7 @@ from spark_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, UNIFIED, SOURCE_TEMPORAL,
     CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER, WKYENG,
     SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP,
-    MARKET_FEEDS, CAP, WEATHER,
+    MARKET_FEEDS, MARKET_QUOTES, CAP, WEATHER,
     SYNTHETIC_TEMPORAL_IDS,
     identifier_namespace,
 )
@@ -118,11 +118,21 @@ WKYENG_PREFIX = str(WKYENG)
 WKYENG_HAS_QUARTER = str(WKYENG.hasQuarter)
 WKYENG_HAS_YEAR = str(WKYENG.hasYear)
 
-# Market predicates
+# Market predicates -- FEEDS vocabulary
 MARKET_OBSERVED_AT = str(MARKET_FEEDS.observedAt)
 MARKET_PRICE_OBS_TYPE = str(MARKET_FEEDS.PriceObservation)
 MARKET_OPTION_CONTRACT_TYPE = str(MARKET_FEEDS.OptionContract)
 MARKET_EXPIRATION_DATE = str(MARKET_FEEDS.expirationDate)
+
+# Market predicates -- QUOTES vocabulary
+#
+# Quote snapshots have no observedAt and no expirationDate, so the feeds
+# collector above matched nothing on them and market contributed NO temporal
+# entity of any kind: every snapshot node sat off the spine, unreachable from
+# any other source's periods. captureTime is the quote model's equivalent, and
+# is the only ISO-8601 time it carries -- quoteTime and tradeTime are epoch
+# milliseconds, which the date parser cannot read and must not be handed.
+MARKET_CAPTURE_TIME = str(MARKET_QUOTES.captureTime)
 
 # SEC types for detection
 SEC_TYPES = [
@@ -261,6 +271,10 @@ class TemporalUnifier:
 
         logger.info("  Collecting Market temporal entities...")
         df = self._collect_market_temporals(triples_df)
+        if df is not None:
+            dated_dfs.append(df)
+
+        df = self._collect_market_quote_temporals(triples_df)
         if df is not None:
             dated_dfs.append(df)
 
@@ -578,6 +592,27 @@ class TemporalUnifier:
         market_date_preds = [MARKET_OBSERVED_AT, MARKET_EXPIRATION_DATE]
         return self._collect_date_based_temporals(
             triples_df, market_date_preds, SYNTHETIC_TEMPORAL_IDS["market-feeds"]
+        )
+
+    def _collect_market_quote_temporals(
+        self, triples_df: DataFrame
+    ) -> Optional[DataFrame]:
+        """
+        Extract month/year from quote-snapshot capture times.
+
+        The quotes vocabulary is a different model from the feeds one and shares
+        none of its temporal predicates, so it needs its own collector rather
+        than another entry in the feeds list -- and its own synthetic prefix, so
+        a period a quote observed stays distinguishable from the same period a
+        feed observed until the sameAs step deliberately links them.
+
+        Without this, market was the one source contributing no temporal entity
+        at all: quote snapshots reached the graph only through their ticker, and
+        a snapshot whose company matched nothing was left with no path to any
+        other source.
+        """
+        return self._collect_date_based_temporals(
+            triples_df, [MARKET_CAPTURE_TIME], SYNTHETIC_TEMPORAL_IDS["market-quotes"]
         )
 
     # ================================================================
