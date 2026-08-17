@@ -67,6 +67,11 @@ HAS_MONEYNESS_PRED = str(MARKET_ENRICHMENT.hasMoneyness)
 ATM_URI = str(MARKET_ENRICHMENT.AtTheMoney)
 ITM_URI = str(MARKET_ENRICHMENT.InTheMoney)
 OTM_URI = str(MARKET_ENRICHMENT.OutOfTheMoney)
+
+# The class the three moneyness individuals belong to. They are categories an
+# option is assigned to, so they are individuals that need a type of their own
+# -- see the note in _compute_moneyness for what their being untyped cost.
+MONEYNESS_CLASS_TYPE = str(MARKET_ENRICHMENT.Moneyness)
 STRADDLE_WITH_PRED = str(MARKET_ENRICHMENT.straddleWith)
 CALL_SPREAD_WITH_PRED = str(MARKET_ENRICHMENT.callSpreadWith)
 PUT_SPREAD_WITH_PRED = str(MARKET_ENRICHMENT.putSpreadWith)
@@ -819,11 +824,29 @@ class MarketIntraSourceLinker:
             )
             return None
 
-        result = moneyness_df.select(
+        links = moneyness_df.select(
             F.col("option").alias("subject"),
             F.lit(HAS_MONEYNESS_PRED).alias("predicate"),
             F.col("moneyness").alias("object"),
         )
 
+        # Type the three moneyness classes, which is what makes them nodes.
+        #
+        # node_mapper only creates a node for a URI that carries an rdf:type,
+        # and nothing typed market:InTheMoney / AtTheMoney / OutOfTheMoney
+        # anywhere. The links above were emitted correctly and then dropped
+        # whole during edge resolution -- the step logged success, the triples
+        # were in the enriched output, and the graph had no moneyness edge at
+        # all. Same untyped-URI defect as the source temporal URIs, one hop
+        # further out.
+        #
+        # Emitted for the classes actually USED rather than all three, so the
+        # graph never carries a category no option was assigned.
+        class_triples = moneyness_df.select(
+            F.col("moneyness").alias("subject"),
+            F.lit(RDF_TYPE).alias("predicate"),
+            F.lit(MONEYNESS_CLASS_TYPE).alias("object"),
+        ).distinct()
+
         logger.info("  Moneyness computation complete")
-        return result
+        return links.unionByName(class_triples)
