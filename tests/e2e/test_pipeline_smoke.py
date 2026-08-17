@@ -1180,16 +1180,70 @@ def _assert_temporal_types_are_not_sharded(data):
     )
 
 
-# Namespace prefixes that exist only to be pointed at from other namespaces, so
-# "does it reach outside itself" is not a meaningful question for them. Every
-# edge a unified/temporal hub has is by construction cross-namespace, and their
-# connectivity is already asserted directly by
-# _assert_cross_source_temporal_bridge and _assert_temporal_edges_present.
-_HUB_PREFIXES = frozenset({"unified", "temporal"})
+def _source_families():
+    """(node_type_prefix -> source family) and the set of pipeline hub families.
+
+    Built from the rdf_utils namespace constants rather than spelled out, so a
+    re-homed namespace moves both at once. Restating prefixes here is the same
+    staleness that produced the defect this file exists to catch.
+
+    A "family" is one upstream source, which is NOT one namespace: SEC alone
+    publishes filings / sec-common / sec-administrative-proceedings /
+    sec-litigation / sec-trading-suspensions, and a filing pointing at its own
+    sec-common Date node has not left SEC. Grouping by namespace instead of by
+    family is exactly the mistake that made the first version of the assertion
+    below pass on the broken graph: node types were split on their first
+    underscore, so filings_SECFiling and sec_common_Date read as two different
+    sources and `filings_SECFiling -> sec_common_Date` counted as leaving. Those
+    two edge types were the ENTIRE cross-namespace footprint of SEC before the
+    joins were fixed, and the issue named them specifically as not counting.
+    """
+    from spark_jobs.utils.rdf_utils import (
+        ALERT, BLS_COMMON, BLS_ENRICHMENT, CAP, CPI, ECI, EMPSIT, JOLTS, LAUS,
+        MARKET_ENRICHMENT, MARKET_FEEDS, MARKET_FEEDS_OPTIONS, MARKET_QUOTES,
+        METRO, NAMESPACE_PREFIXES, NOAA_ENRICHMENT, PPI, REALER, SEC_ADMIN,
+        SEC_COMMON, SEC_ENRICHMENT, SEC_FILINGS, SEC_LIT, SEC_SUSP,
+        SOURCE_TEMPORAL, UNIFIED, WEATHER, WKYENG, XIMPIM,
+    )
+
+    prefix_of = dict(NAMESPACE_PREFIXES)
+    families = {
+        "bls": (CPI, PPI, ECI, EMPSIT, JOLTS, LAUS, METRO, REALER, WKYENG,
+                XIMPIM, BLS_COMMON),
+        "sec": (SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP, SEC_COMMON),
+        "market": (MARKET_QUOTES, MARKET_FEEDS, MARKET_FEEDS_OPTIONS),
+        "noaa": (CAP, WEATHER, ALERT),
+        # Everything this pipeline mints itself. These are how sources REACH
+        # each other, so they are destinations rather than islands — "does it
+        # reach outside itself" is vacuous for a hub, and their own
+        # connectivity is asserted by _assert_cross_source_temporal_bridge and
+        # _assert_temporal_edges_present.
+        "PIPELINE": (BLS_ENRICHMENT, SEC_ENRICHMENT, MARKET_ENRICHMENT,
+                     NOAA_ENRICHMENT, UNIFIED, SOURCE_TEMPORAL),
+    }
+
+    by_prefix = {}
+    for family, namespaces in families.items():
+        for ns in namespaces:
+            by_prefix[prefix_of[str(ns)]] = family
+    return by_prefix, {"PIPELINE"}
+
+
+def _family_of(node_type, by_prefix):
+    """The source family a node type belongs to, by longest prefix match.
+
+    Longest-first because the prefixes nest: bls_common_ and bls_enrichment_
+    both start with bls, and market_feeds_ is a prefix of market_feeds_options_.
+    """
+    name = str(node_type)
+    for prefix in sorted(by_prefix, key=len, reverse=True):
+        if name.startswith(prefix + "_"):
+            return by_prefix[prefix]
+    return None
 
 
 def _assert_no_source_builds_as_an_island(data):
-    """Every source namespace must have at least one edge leaving it.
+    """Every source must have at least one edge leaving it.
 
     This is the check whose absence let four dead vocabulary constants ship
     green. The suite was thorough about internal consistency — the graph builds,
@@ -1202,34 +1256,52 @@ def _assert_no_source_builds_as_an_island(data):
     so no cross-source signal — filings against economic indicators, quotes
     against filings — was learnable, because the edges did not exist.
 
-    Asserted per NAMESPACE rather than per node type because that is the level
-    the defect lives at. Four separate joins each keyed on a term the upstream
-    data no longer emits; each matched nothing, emitted nothing and raised
-    nothing, and the shared symptom was a whole source sitting alone.
+    Asserted per SOURCE rather than per node type because that is the level the
+    defect lives at. Four separate joins each keyed on a term the upstream data
+    no longer emits; each matched nothing, emitted nothing and raised nothing,
+    and the shared symptom was a whole source sitting alone.
     _assert_no_node_type_is_orphaned already covers the finer-grained "this one
     type got dropped" case, and would be satisfied by a source whose types are
     all busily connected to each other and to nobody else.
 
-    A namespace with no nodes at all is not an island — it is absent, which is a
+    Reaching a PIPELINE hub counts as leaving, because routing through a hub is
+    how this graph is designed to connect sources — a filing and a quote meet at
+    a unified company, not by a direct edge. That makes this necessary but not
+    sufficient: two sources can both reach the hub TYPE while attaching to
+    different hub NODES and never meeting. _assert_cross_source_temporal_bridge
+    is the one that checks they actually meet, at the instance level.
+
+    A source with no nodes at all is not an island — it is absent, which is a
     fixture-coverage question and not this assertion's business.
     """
+    by_prefix, hubs = _source_families()
+
+    unmapped = sorted(
+        {str(nt) for nt in data.node_types if _family_of(nt, by_prefix) is None}
+    )
+    assert not unmapped, (
+        f"node types belong to no known source family: {unmapped} — either a "
+        "namespace was added without updating _source_families(), or these "
+        "node types are named after a namespace nothing declares"
+    )
+
+    present = {_family_of(nt, by_prefix) for nt in data.node_types}
     reaches_out = set()
-    present = {_source_prefix(nt) for nt in map(str, data.node_types)}
-
     for src, _rel, dst in data.edge_types:
-        src_prefix, dst_prefix = _source_prefix(str(src)), _source_prefix(str(dst))
-        if src_prefix != dst_prefix:
-            reaches_out.add(src_prefix)
-            reaches_out.add(dst_prefix)
+        src_family = _family_of(src, by_prefix)
+        dst_family = _family_of(dst, by_prefix)
+        if src_family != dst_family:
+            reaches_out.add(src_family)
+            reaches_out.add(dst_family)
 
-    islands = present - reaches_out - _HUB_PREFIXES
+    islands = present - reaches_out - hubs
     assert not islands, (
-        f"namespaces that build as islands: {sorted(islands)} — every edge "
-        "type touching them has both endpoints inside the same namespace, so "
-        "they contribute node features and participate in no cross-source "
-        "message passing. Check that the joins bridging them key on terms the "
-        "data actually emits: a join matching nothing emits nothing and "
-        "raises nothing."
+        f"sources that build as islands: {sorted(islands)} — every edge type "
+        "touching them has both endpoints inside the same source, so they "
+        "contribute node features and participate in no cross-source message "
+        "passing. Check that the joins bridging them key on terms the data "
+        "actually emits: a join matching nothing emits nothing and raises "
+        "nothing."
     )
 
 
