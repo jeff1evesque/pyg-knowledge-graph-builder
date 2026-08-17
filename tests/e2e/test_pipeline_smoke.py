@@ -219,6 +219,7 @@ def _assert_valid_graph_and_metadata(config, work_dir):
 
     # --- and every inferred link the pipeline claims to make actually exists ---
     _assert_declared_bridges_resolve(data)
+    _assert_bridge_absences_are_still_true(data)
 
 
 # --------------------------------------------------------------------------- #
@@ -1323,21 +1324,88 @@ def _assert_no_source_builds_as_an_island(data):
 # Keyed on the predicate's local name, because the namespace is exactly what
 # these defects get wrong and a test that spelled the full URI would have to be
 # edited by the same hand that broke the code.
+# Each entry maps a relation's LOCAL NAME to the node types that must be present
+# for it to be required. An empty tuple means unconditional: those three are the
+# temporal spine and the company hub, and a graph of two or more sources that
+# lacks them is by definition the defect this guards.
 REQUIRED_BRIDGE_RELATIONS = {
     # SEC issuer / market snapshot -> unified company. Dead for both sides at
     # once: the market half asked for a class neither market vocabulary
     # declares, the SEC half for a predicate renamed upstream.
-    "refersToCompany",
+    "refersToCompany": (),
     # Dated entity -> the period it falls in. The on-ramp whose absence left
     # SEC, NOAA and market minting period nodes nothing pointed at.
-    "observedInPeriod",
+    "observedInPeriod": (),
     # Source period -> unified period. The other half of the temporal spine.
-    "sameAs",
+    "sameAs": (),
     # Option snapshot -> its underlying equity. Keyed on underlyingSymbol,
     # which quote snapshots do not emit and never did — confirmed against
     # full-volume production data, where the raw column is null.
-    "hasUnderlyingEquity",
+    #
+    # Conditional, because it needs BOTH sides in the graph and the N-Triples
+    # fixture carries only a slice of the market sample (it is a loader test,
+    # not a graph test, so it holds three snapshots and they are not guaranteed
+    # to include the equity a kept option is written against). Requiring it
+    # everywhere would fail that fixture for a reason that is not a defect.
+    "hasUnderlyingEquity": (
+        "market_quotes_EquitySnapshot",
+        "market_quotes_OptionSnapshot",
+    ),
+    # Entity -> its economic sector, and the per-sector correlation edge.
+    "belongsToSector": ("cpi_Index",),
+    "hasSectorCorrelation": ("cpi_Index",),
+    # Chronological ordering within a source.
+    "precedes": ("cpi_Index",),
+    # Alert -> the state it affects. Both of its strategies were dead: the
+    # area-description matcher looked for full state names in descriptions NWS
+    # writes as "Lincoln, KS", and the FIPS matcher compared 2-digit lookup
+    # keys against the 3-digit SAME-code head the mapper emits.
+    "affectsRegion": ("cap_Alert",),
+    # Option -> ATM/ITM/OTM. The links were emitted and then dropped whole,
+    # because nothing typed the three category URIs and node_mapper makes nodes
+    # only for typed URIs.
+    "hasMoneyness": ("market_quotes_OptionSnapshot",),
 }
+
+# Inferred links that legitimately do NOT resolve on these fixtures, with the
+# reason. Not exemptions for defects — each is a claim that the INPUTS are
+# absent, which is a fixture-coverage fact rather than a pipeline one.
+#
+# Checked for staleness below: if one of these starts resolving, the entry is
+# wrong and must move to REQUIRED_BRIDGE_RELATIONS rather than sit here
+# silently excusing a relation that now works.
+KNOWN_ABSENT_BRIDGES = {
+    # Needs a call AND a put at the same strike, expiry and capture time. The
+    # market sample holds two calls on one underlying, so the vertical-spread
+    # branch fires and the straddle/strangle branches cannot.
+    "straddleWith": "no put in the market sample",
+    "strangleWith": "no put in the market sample",
+    "putSpreadWith": "no put in the market sample",
+    # Needs a BLS entity and a market entity that share a sector. Market sector
+    # classification reads the GICS ticker CSV from S3, which the e2e run does
+    # not configure, so no market entity carries a sector to join on.
+    "leadsTo": "market sector classification needs the GICS CSV, unset in e2e",
+}
+
+
+def _assert_bridge_absences_are_still_true(data):
+    """A relation listed as legitimately absent must still be absent.
+
+    The allowlist above exists so the required list can stay strict without
+    failing on fixture gaps. That only works if the entries stay honest: an
+    entry that starts resolving is no longer a fixture fact, and leaving it
+    here would exempt a relation that could later die unnoticed.
+    """
+    present = {str(rel) for _s, rel, _d in data.edge_types}
+    resolved = sorted(
+        relation for relation in KNOWN_ABSENT_BRIDGES
+        if any(n == relation or n.endswith(f"_{relation}") for n in present)
+    )
+    assert not resolved, (
+        f"{resolved} now resolve into edges — move them from "
+        f"KNOWN_ABSENT_BRIDGES to REQUIRED_BRIDGE_RELATIONS so they stay "
+        f"guarded"
+    )
 
 
 def _assert_declared_bridges_resolve(data):
@@ -1352,13 +1420,29 @@ def _assert_declared_bridges_resolve(data):
     written by hand and each entry says which join it stands for, so a
     disappeared relation names the step that stopped working.
     """
-    present = {str(rel).rsplit("/", 1)[-1].rsplit("#", 1)[-1]
-               for _s, rel, _d in data.edge_types}
+    node_types = set(map(str, data.node_types))
 
-    missing = REQUIRED_BRIDGE_RELATIONS - present
+    # A PyG relation is already namespace-SHORTENED by node_mapper —
+    # "bls_enrichment_refersToCompany", not a URI — so the local name is a
+    # suffix, not the last path segment. Splitting on "/" is a no-op on these
+    # names and made every required relation look absent while all four were
+    # present; it cost a full run to notice, which is the same lesson as the
+    # defects this guards.
+    present = {str(rel) for _s, rel, _d in data.edge_types}
+
+    def resolved(relation: str) -> bool:
+        return any(
+            name == relation or name.endswith(f"_{relation}") for name in present
+        )
+
+    missing = sorted(
+        relation
+        for relation, requires in REQUIRED_BRIDGE_RELATIONS.items()
+        if set(requires) <= node_types and not resolved(relation)
+    )
     assert not missing, (
-        f"inferred links that resolved into NO edge: {sorted(missing)} — the "
-        f"join behind each either matched nothing or was dropped during edge "
+        f"inferred links that resolved into NO edge: {missing} — the join "
+        f"behind each either matched nothing or was dropped during edge "
         f"resolution. A join keyed on a term the data no longer emits fails "
         f"exactly this way: silently. Relations present: {sorted(present)}"
     )
