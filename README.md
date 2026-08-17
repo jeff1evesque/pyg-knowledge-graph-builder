@@ -1704,6 +1704,25 @@ cpi:November a temporal:SourceMonth ; rdfs:label "November" .
 >
 > **These types are pinned as canonical.** Many source periods already carry a source type — `cpi:2024` is both `cpi:Year` and `temporal:SourceYear`. `node_mapper`'s default rule (fewest instances wins) picks the *source* type, because it is per-namespace and therefore rarer, which shards one concept across every namespace that names it: measured on the e2e fixtures, 37 months split over `cpi_Month`/`jolts_Month`/`empsit_Month`/`eci_Month`/`temporal_SourceMonth` and 14 years likewise, leaving `temporal_SourceYear` holding a single node. The `owl:sameAs` edges then land on whichever shard a period fell into, and a heterogeneous GNN sees unrelated node types with no path between them. `node_mapper._CANONICAL_TYPE_PRIORITY` pins `temporal_Source*` ahead of the count heuristic so every period lands in one node type per granularity. The source type is not lost — it remains an `rdf:type` triple and appears in `ontology_schema.json`; only the canonical type used for graph *structure* is overridden. Predicates stay per-source (`cpi_hasYear`, `jolts_hasYear`, …), so the sources agree on what a year *is* without being forced to share measurement semantics.
 
+> **Cross-source paths are four hops, so size the model accordingly.** Every
+> route between sources goes through a hub rather than a direct edge, and the
+> temporal spine is the longest of them:
+>
+> ```
+> SEC filing → temporal/sec/July → unified:July → cpi:July → cpi measurement
+>      1              2                 3            4
+> ```
+>
+> The company hub is shorter but the same shape
+> (`filing → issuer → unified:Company_X ← quote snapshot`). This is the design —
+> hub-and-spoke is what lets *N* sources agree on a period without *N²* joins —
+> but it has a direct consequence for training: **a message-passing depth of
+> fewer than 4 layers cannot propagate any signal between two sources.** A
+> 2-layer model trained on this graph learns within-source structure only, no
+> matter how many cross-source edges the enrichment produced. Measured on the
+> e2e fixtures, all six source-family pairs (bls/sec/market/noaa) are connected,
+> and every one of them at distance 4.
+
 **Linking Strategies** (applied across 100+ ontologies):
 
 1. **Sector-Based Linking** — Links entities sharing economic sectors
