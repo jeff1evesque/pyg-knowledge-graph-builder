@@ -80,7 +80,7 @@ MEASUREMENT_TYPES = {
             'date_property': SEC_FILINGS.hasPeriodOfReport,
             'date_value_property': SEC_BASE.hasDateValue,
             'grouping_property': SEC_FILINGS.hasIssuer,
-            'cik_property': SEC_BASE.hasCik,
+            'cik_property': SEC_FILINGS.hasIssuerCik,
             'description': 'Annual Report',
         },
 
@@ -89,7 +89,7 @@ MEASUREMENT_TYPES = {
             'date_property': SEC_FILINGS.hasPeriodOfReport,
             'date_value_property': SEC_BASE.hasDateValue,
             'grouping_property': SEC_FILINGS.hasIssuer,
-            'cik_property': SEC_BASE.hasCik,
+            'cik_property': SEC_FILINGS.hasIssuerCik,
             'description': 'Quarterly Report',
         },
 
@@ -98,7 +98,7 @@ MEASUREMENT_TYPES = {
             'date_property': SEC_FILINGS.hasPeriodOfReport,
             'date_value_property': SEC_BASE.hasDateValue,
             'grouping_property': SEC_FILINGS.hasIssuer,
-            'cik_property': SEC_BASE.hasCik,
+            'cik_property': SEC_FILINGS.hasIssuerCik,
             'description': 'Current Report',
         },
 
