@@ -29,6 +29,9 @@ from spark_jobs.utils.rdf_utils import MARKET_QUOTES, MARKET_ENRICHMENT
 from spark_jobs.enrichment.intra_source.market.patterns import (
     get_sector_patterns,
 )
+from spark_jobs.enrichment.intra_source.market.symbols import (
+    occ_expiration_date, occ_underlying,
+)
 
 import logging
 
@@ -96,6 +99,58 @@ def _canonical_contract_type(col: F.Column) -> F.Column:
         F.when(upper.isin("C", "CALL"), F.lit("CALL"))
         .when(upper.isin("P", "PUT"), F.lit("PUT"))
         .otherwise(upper)
+    )
+
+
+def _resolve_option_property(
+    triples_df: DataFrame,
+    stated_predicate: str,
+    derive,
+    alias: str,
+) -> DataFrame:
+    """(option, <alias>) for every option snapshot, stated or derived.
+
+    Prefers what the data says. Falls back to reading the value out of the OCC
+    symbol, which is where the quote-snapshot vocabulary keeps it: quotes emit
+    neither underlyingSymbol nor expirationDate, so the stated side is empty on
+    every graph built from them and the inner joins downstream dropped every
+    option row. Three steps -- underlying linking, straddles/spreads/strangles,
+    and the option leg of sector classification -- each logged "no option
+    snapshots found" and returned None on data made entirely of option
+    snapshots.
+
+    A left join rather than a union, so an option that states the property
+    keeps its stated value and never gets two rows. Rows where neither side
+    resolves are dropped: they are not options this can say anything about.
+    """
+    options = triples_df.filter(
+        (F.col("predicate") == RDF_TYPE)
+        & (F.col("object") == OPTION_SNAPSHOT_TYPE)
+    ).select(F.col("subject").alias("option"))
+
+    stated = triples_df.filter(
+        F.col("predicate") == stated_predicate
+    ).select(
+        F.col("subject").alias("option"),
+        F.col("object").alias("stated"),
+    )
+
+    derived = triples_df.filter(
+        F.col("predicate") == SYMBOL_PRED
+    ).select(
+        F.col("subject").alias("option"),
+        derive(F.col("object")).alias("derived"),
+    )
+
+    return (
+        options
+        .join(stated, "option", "left")
+        .join(derived, "option", "left")
+        .select(
+            F.col("option"),
+            F.coalesce(F.col("stated"), F.col("derived")).alias(alias),
+        )
+        .filter(F.col(alias).isNotNull())
     )
 
 
@@ -257,25 +312,18 @@ class MarketIntraSourceLinker:
         """
         Link option snapshots to their underlying equity snapshots.
 
-        Uses the underlyingSymbol property on OptionSnapshots to find
-        the corresponding EquitySnapshot with the same symbol and
-        closest captureTime.
+        Uses the underlying symbol of each OptionSnapshot -- stated, or read
+        out of its OCC symbol -- to find the corresponding EquitySnapshot with
+        the same symbol and closest captureTime.
 
         Produces:
             option_snapshot  hasUnderlyingEquity  equity_snapshot
         """
-        # Option snapshots with their underlying symbol
-        option_snapshots = triples_df.filter(
-            (F.col("predicate") == RDF_TYPE)
-            & (F.col("object") == OPTION_SNAPSHOT_TYPE)
-        ).select(F.col("subject").alias("option"))
-
-        option_underlying = triples_df.filter(
-            F.col("predicate") == UNDERLYING_SYMBOL_PRED
-        ).select(
-            F.col("subject").alias("option"),
-            F.col("object").alias("underlying_symbol"),
+        option_underlying = _resolve_option_property(
+            triples_df, UNDERLYING_SYMBOL_PRED, occ_underlying, "underlying_symbol"
         )
+
+        option_snapshots = option_underlying.select("option").distinct()
 
         option_times = triples_df.filter(
             F.col("predicate") == CAPTURE_TIME_PRED
@@ -291,7 +339,7 @@ class MarketIntraSourceLinker:
         )
 
         if options_df.head(1) == []:
-            logger.info("  No option snapshots with underlyingSymbol found")
+            logger.info("  No option snapshots with a resolvable underlying found")
             return None
 
         # Equity snapshots with their symbol and time
@@ -378,31 +426,23 @@ class MarketIntraSourceLinker:
 
         Works directly with OptionSnapshot subjects and their properties.
         """
-        # Build options table from triples
-        option_snapshots = triples_df.filter(
-            (F.col("predicate") == RDF_TYPE)
-            & (F.col("object") == OPTION_SNAPSHOT_TYPE)
-        ).select(F.col("subject").alias("option"))
-
-        underlying = triples_df.filter(
-            F.col("predicate") == UNDERLYING_SYMBOL_PRED
-        ).select(
-            F.col("subject").alias("option"),
-            F.col("object").alias("underlying"),
+        # Build options table from triples. Underlying and expiration are
+        # resolved rather than read directly: quotes state neither, and an
+        # inner join against an empty frame silently emptied this whole step.
+        underlying = _resolve_option_property(
+            triples_df, UNDERLYING_SYMBOL_PRED, occ_underlying, "underlying"
         )
+        expirations = _resolve_option_property(
+            triples_df, EXPIRATION_DATE_PRED, occ_expiration_date, "expiration"
+        )
+
+        option_snapshots = underlying.select("option").distinct()
 
         strikes = triples_df.filter(
             F.col("predicate") == STRIKE_PRICE_PRED
         ).select(
             F.col("subject").alias("option"),
             F.col("object").cast("double").alias("strike"),
-        )
-
-        expirations = triples_df.filter(
-            F.col("predicate") == EXPIRATION_DATE_PRED
-        ).select(
-            F.col("subject").alias("option"),
-            F.col("object").alias("expiration"),
         )
 
         contract_types = triples_df.filter(
@@ -647,12 +687,15 @@ class MarketIntraSourceLinker:
             F.col("object").alias("ticker"),
         )
 
-        # Also match option snapshots by underlyingSymbol
-        option_underlying = triples_df.filter(
-            F.col("predicate") == UNDERLYING_SYMBOL_PRED
+        # Also match option snapshots by their underlying, which for a quote
+        # snapshot is only recoverable from the OCC symbol. Read literally, an
+        # option's own symbol ("A     260717C00065000") matches no ticker in
+        # the sector table, so options were classified into no sector at all.
+        option_underlying = _resolve_option_property(
+            triples_df, UNDERLYING_SYMBOL_PRED, occ_underlying, "ticker"
         ).select(
-            F.col("subject").alias("snapshot"),
-            F.col("object").alias("ticker"),
+            F.col("option").alias("snapshot"),
+            F.col("ticker"),
         )
 
         all_symbols = equity_symbols.unionAll(option_underlying)
