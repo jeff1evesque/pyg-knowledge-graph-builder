@@ -33,20 +33,9 @@ SEC_BASE = SEC_COMMON
 MEASUREMENT_TYPES = {
 
     # ============================================
-    # FILINGS - Ownership Documents (Forms 3, 4, 5)
+    # FILINGS - the four form classes upstream declares
     # ============================================
     'filings': {
-
-        'Form3': {
-            'class': SEC_FILINGS.Form3,
-            'date_property': SEC_FILINGS.hasPeriodOfReport,
-            'date_value_property': SEC_BASE.hasDateValue,
-            'grouping_property': SEC_FILINGS.hasIssuer,
-            'owner_property': SEC_FILINGS.hasReportingOwner,
-            'cik_property': SEC_FILINGS.hasIssuerCik,
-            'owner_cik_property': SEC_FILINGS.hasReportingOwnerCik,
-            'description': 'Initial Statement of Beneficial Ownership',
-        },
 
         'Form4': {
             'class': SEC_FILINGS.Form4,
@@ -58,17 +47,6 @@ MEASUREMENT_TYPES = {
             'owner_cik_property': SEC_FILINGS.hasReportingOwnerCik,
             'transaction_date_property': SEC_FILINGS.hasTransactionDate,
             'description': 'Statement of Changes in Beneficial Ownership',
-        },
-
-        'Form5': {
-            'class': SEC_FILINGS.Form5,
-            'date_property': SEC_FILINGS.hasPeriodOfReport,
-            'date_value_property': SEC_BASE.hasDateValue,
-            'grouping_property': SEC_FILINGS.hasIssuer,
-            'owner_property': SEC_FILINGS.hasReportingOwner,
-            'cik_property': SEC_FILINGS.hasIssuerCik,
-            'owner_cik_property': SEC_FILINGS.hasReportingOwnerCik,
-            'description': 'Annual Statement of Changes in Beneficial Ownership',
         },
 
         'Form10K': {
@@ -98,18 +76,6 @@ MEASUREMENT_TYPES = {
             'description': 'Current Report',
         },
 
-        # Generic ownership document (when specific form type not determined)
-        'OwnershipDocument': {
-            'class': SEC_FILINGS.OwnershipDocument,
-            'date_property': SEC_FILINGS.hasPeriodOfReport,
-            'date_value_property': SEC_BASE.hasDateValue,
-            'grouping_property': SEC_FILINGS.hasIssuer,
-            'owner_property': SEC_FILINGS.hasReportingOwner,
-            'cik_property': SEC_FILINGS.hasIssuerCik,
-            'owner_cik_property': SEC_FILINGS.hasReportingOwnerCik,
-            'description': 'Generic ownership document',
-        },
-
         # Transactions within filings (for sub-entity temporal linking)
         'NonDerivativeTransaction': {
             'class': SEC_FILINGS.NonDerivativeTransaction,
@@ -118,17 +84,18 @@ MEASUREMENT_TYPES = {
             'description': 'Non-derivative transaction within an ownership filing',
         },
 
+        # hasExerciseDate is the one dead term here -- upstream declares
+        # hasExercisePrice but no exercise DATE under any name. The class and
+        # its other two dates are live, so only that property is dropped.
         'DerivativeTransaction': {
             'class': SEC_FILINGS.DerivativeTransaction,
             'date_property': SEC_FILINGS.hasTransactionDate,
             'date_value_property': SEC_BASE.hasDateValue,
             'expiration_property': SEC_FILINGS.hasExpirationDate,
-            'exercise_property': SEC_FILINGS.hasExerciseDate,
             'description': 'Derivative transaction within an ownership filing',
         },
+
     },
-
-
 
 }
 
