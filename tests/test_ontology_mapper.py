@@ -709,15 +709,20 @@ def test_a_property_is_never_both_equivalent_and_a_sub_property(
 
 def test_the_nine_measurement_properties_become_sub_properties(spark,
                                                                make_triples):
+    # jolts:rateValue, not jolts:rate -- the bare spelling was never an upstream
+    # term, so the mapping keyed on it covered nothing and this test pinned the
+    # dead name in place.
     unified_value = PROPERTY_MAPPINGS[
-        "https://jefflevesque.com/ontology/jolts/rate"
+        "https://jefflevesque.com/ontology/jolts/rateValue"
     ]
     triples = make_triples([("https://ex/n", RDF_TYPE, "https://ex/Nothing")])
     rows = OntologyMapper(spark).enrich(triples).collect()
 
     subsumed = {(r["subject"], r["object"]) for r in rows
                 if r["predicate"] == RDFS_SUB_PROPERTY_OF}
-    assert ("https://jefflevesque.com/ontology/jolts/rate", unified_value) in subsumed
+    assert (
+        "https://jefflevesque.com/ontology/jolts/rateValue", unified_value
+    ) in subsumed
     assert (
         "https://jefflevesque.com/ontology/market-quotes/lastPrice", unified_value
     ) in subsumed

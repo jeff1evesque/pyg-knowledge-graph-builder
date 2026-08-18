@@ -245,19 +245,30 @@ def test_cross_source_unlinkable_sources_produce_no_entity_edges(spark, make_tri
 # ======================================================================
 
 @pytest.mark.parametrize("fips,region_key", [
-    ("48", "Texas"),          # mapped code -> Alert affectsRegion TexasRegion
-    ("99", None),             # unmapped code -> no region link
+    ("048", "Texas"),         # SAME-code head, the shape upstream emits
+    ("040", "Oklahoma"),      # ditto, from the Tornado Warning fixture
+    ("48", "Texas"),          # bare 2-digit, tolerated
+    ("099", None),            # unmapped code -> no region link
 ])
 def test_cross_source_geography_fips_chain(spark, make_triples, fips, region_key):
     """State-FIPS linking traverses Alert -> Info -> Area -> Geocode and maps
-    the 2-digit code through the state lookup. No area-description triples are
-    present, so this also pins that the FIPS strategy works standalone."""
+    the code through the state lookup. No area-description triples are present,
+    so this also pins that the FIPS strategy works standalone.
+
+    Upstream emits nws:hasStateFIPS as the 3-character head of a SAME code --
+    value[:3], so "048" not "48" -- and this pinned only the 2-digit form, which
+    is the shape that never arrives. Both are parametrised now: the 3-digit case
+    is what production sees, the 2-digit case pins that normalising it did not
+    break the plain form."""
     alert = str(ALERT) + "urn:oid:2.49.0.1.840.0.test"
     info = alert + "#info"
     area = alert + "#area"
     geocode = alert + "#geocode-" + fips
     rows = [
-        (alert, RDF_TYPE, str(CAP.Alert)),
+        # nws:WeatherAlert, not cap:Alert -- upstream types alert nodes with the
+        # former and emits the latter nowhere, so a fixture built on cap:Alert
+        # exercised a shape production never sees.
+        (alert, RDF_TYPE, str(WEATHER.WeatherAlert)),
         (alert, str(CAP.hasInfo), info),
         (info, str(CAP.hasArea), area),
         (area, str(CAP.hasGeocode), geocode),
