@@ -60,9 +60,13 @@ RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
 
 # Class URIs — aligned with RML mapper output
-# The mapper types alerts as nws:WeatherAlert (subClassOf cap:Alert)
+#
+# nws:WeatherAlert is the only type the mapper writes on an alert node.
+# cap:Alert was carried alongside it "in case of mixed data": it is declared in
+# the CAP model, emitted by nothing, and shares its rdfs:label "Alert" with the
+# named individual cap:AlertMessage that cap:hasMessageType points at -- so the
+# fallback could never fire and made the real type look optional.
 WEATHER_ALERT_TYPE = str(WEATHER.WeatherAlert)
-ALERT_TYPE = str(CAP.Alert)
 INFO_TYPE = str(CAP.Info)
 AREA_TYPE = str(CAP.Area)
 GEOCODE_TYPE = str(CAP.Geocode)
@@ -150,13 +154,9 @@ class NOAAIntraSourceLinker:
 
         # Quick check: is there any NOAA data?
         # The RML mapper types alerts as nws:WeatherAlert.
-        # Also check for cap:Alert in case of mixed data or future changes.
         has_noaa = triples_df.filter(
             (F.col("predicate") == RDF_TYPE)
-            & (
-                (F.col("object") == WEATHER_ALERT_TYPE)
-                | (F.col("object") == ALERT_TYPE)
-            )
+            & (F.col("object") == WEATHER_ALERT_TYPE)
         ).limit(1).count() > 0
 
         if not has_noaa:
@@ -256,13 +256,10 @@ class NOAAIntraSourceLinker:
             alert, info, sent_time, event, severity_uri, urgency_uri,
             certainty_uri, category_uri, area, area_desc
         """
-        # Alerts — detect both nws:WeatherAlert and cap:Alert
+        # Alerts — nws:WeatherAlert is the only type an alert node carries
         alerts = triples_df.filter(
             (F.col("predicate") == RDF_TYPE)
-            & (
-                (F.col("object") == WEATHER_ALERT_TYPE)
-                | (F.col("object") == ALERT_TYPE)
-            )
+            & (F.col("object") == WEATHER_ALERT_TYPE)
         ).select(F.col("subject").alias("alert"))
 
         # Alert → Info (cap:hasInfo)
