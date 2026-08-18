@@ -103,7 +103,6 @@ _SECTOR_CORRELATION = str(BLS_SECTOR_CORRELATION)
 
 # NOAA type URIs — aligned with updated RML mapper
 _NWS_WEATHER_ALERT_TYPE = str(WEATHER.WeatherAlert)
-_CAP_ALERT_TYPE = str(CAP.Alert)
 
 # NOAA area description — on Area subject (alert:{id}#area)
 _CAP_HAS_AREA_DESC = str(CAP.hasAreaDescription)
@@ -370,6 +369,15 @@ class CrossSourceLinker:
         sec-common:Company), which is the thing a ticker actually identifies. A
         filing is a document and does not have a ticker. Filings still reach the
         company, one hop further out, via their existing hasIssuer edge.
+
+        Expect this bridge to be SPARSE at volume, and do not read that as a
+        regression. hasIssuerTradingSymbol has exactly one upstream emitter --
+        the ownership-form document parser -- so it requires a filing that (a)
+        had its document fetched and stored, (b) stored it as XML, and (c) is a
+        Form 3/4/5, the only forms whose schema carries <issuerTradingSymbol>.
+        The EDGAR search API never returns a ticker, so the metadata half of
+        every row cannot supply one. The bridge's ceiling is therefore the
+        ownership-form share of filings, not their total.
         """
         market_tickers = self._market_symbol_bearers()
 
@@ -591,7 +599,16 @@ class CrossSourceLinker:
                 noaa_link_dfs.append(noaa_area_links)
 
             # Strategy 2: State FIPS code matching
-            # Geocode subjects have nws:hasStateFIPS with 2-digit state codes
+            #
+            # Geocode subjects carry nws:hasStateFIPS as the 3-character head of
+            # a SAME code ("040", "024"), never a 2-digit FIPS -- upstream slices
+            # it as value[:3], so the leading part-digit is structural and always
+            # present. The lookup below is keyed 2-digit; see the normalisation.
+            #
+            # Note also that nws:hasFIPSCode carries the SAME value as
+            # nws:hasSAMECode -- both read upstream's fips_code column, which is
+            # populated from properties.geocode.SAME. hasFIPSCode is a misnomer
+            # for the SAME code and is not a county FIPS.
             state_fips_rows = [
                 (fips, name, name.replace(' ', ''))
                 for fips, name in state_fips_to_name.items()
@@ -611,12 +628,23 @@ class CrossSourceLinker:
             # Taking the LAST two digits rather than stripping a leading zero:
             # the part-digit is not always 0 (it marks a partial-county code),
             # so trimming zeros would silently mangle those.
+            #
+            # substring(-2, 2) alone, NOT lpad(...,2,"0") first. Spark's lpad
+            # truncates when the input is LONGER than the target width, and it
+            # truncates from the right -- lpad("040",2,"0") is "04", not "40".
+            # That destroyed the state digit and silently produced the WRONG
+            # state: every "0NN" head resolved to state "0N", so Oklahoma (040)
+            # and Texas (048) both linked to Arizona (04), and the unmapped 099
+            # linked to Connecticut (09) instead of dropping. This failed
+            # louder than a dead join -- it emitted confident, wrong edges.
+            #
+            # substring with a negative start already reads from the end and is
+            # safe on short input, so no padding is needed at all.
             state_fips_triples = self.triples_df.filter(
                 F.col("predicate") == _NWS_HAS_STATE_FIPS
             ).select(
                 F.col("subject").alias("geocode"),
-                F.substring(F.lpad(F.trim(F.col("object")), 2, "0"), -2, 2)
-                .alias("state_fips"),
+                F.substring(F.trim(F.col("object")), -2, 2).alias("state_fips"),
             )
 
             if state_fips_triples.head(1):
