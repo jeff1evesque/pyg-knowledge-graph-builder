@@ -44,9 +44,13 @@ logger = logging.getLogger(__name__)
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 
 # Class URIs (flat snapshot model)
+#
+# QuoteSnapshot is declared upstream and nothing is ever typed with it -- the
+# mapper picks EquitySnapshot or OptionSnapshot off the asset_type column, so
+# these two are the whole model. The name survives in upstream's own docstring
+# for the shared predicate block, which is how it came to be treated as a type.
 EQUITY_SNAPSHOT_TYPE = str(MARKET_QUOTES.EquitySnapshot)
 OPTION_SNAPSHOT_TYPE = str(MARKET_QUOTES.OptionSnapshot)
-QUOTE_SNAPSHOT_TYPE = str(MARKET_QUOTES.QuoteSnapshot)
 
 # Property URIs
 SYMBOL_PRED = str(MARKET_QUOTES.symbol)
@@ -201,7 +205,6 @@ class MarketIntraSourceLinker:
             & (
                 (F.col("object") == EQUITY_SNAPSHOT_TYPE)
                 | (F.col("object") == OPTION_SNAPSHOT_TYPE)
-                | (F.col("object") == QUOTE_SNAPSHOT_TYPE)
             )
         ).limit(1).count() > 0
 
