@@ -155,7 +155,6 @@ SEC_DATE_PREDS = [
 # month/year from the literal values regardless of which subject
 # they appear on — it only needs the predicate and object columns.
 NOAA_WEATHER_ALERT_TYPE = str(WEATHER.WeatherAlert)
-CAP_ALERT_TYPE = str(CAP.Alert)
 
 # All NOAA date predicates that carry temporal information.
 # hasSentTime, hasEffectiveTime, hasOnsetTime, hasExpirationTime, hasEndsTime
