@@ -93,13 +93,19 @@ _FILINGS_HAS_ISSUER_NAME = str(SEC_FILINGS.hasIssuerName)
 
 
 # Form type URIs
-_FORM3_TYPE = str(SEC_FILINGS.Form3)
+#
+# Upstream declares exactly four form classes -- Form4, Form8K, Form10K,
+# Form10Q. Form3, Form5 and OwnershipDocument were referenced here and are not
+# declared under any name, so every filter naming them matched nothing.
+#
+# Forms 3 and 5 ARE collected upstream (both are in its seed form list); they
+# simply carry no class that distinguishes them, so they cannot be selected by
+# rdf:type at all. That is an upstream gap, not something this linker can work
+# around -- selecting them would need root_form, which the RDF does not carry.
 _FORM4_TYPE = str(SEC_FILINGS.Form4)
-_FORM5_TYPE = str(SEC_FILINGS.Form5)
 _FORM10K_TYPE = str(SEC_FILINGS.Form10K)
 _FORM10Q_TYPE = str(SEC_FILINGS.Form10Q)
 _FORM8K_TYPE = str(SEC_FILINGS.Form8K)
-_OWNERSHIP_DOC_TYPE = str(SEC_FILINGS.OwnershipDocument)
 
 
 
@@ -228,9 +234,7 @@ class SECIntraSourceLinker:
 
         # Check for filings types
         filings_types = [
-            _FORM3_TYPE, _FORM4_TYPE, _FORM5_TYPE,
-            _FORM10K_TYPE, _FORM10Q_TYPE, _FORM8K_TYPE,
-            _OWNERSHIP_DOC_TYPE,
+            _FORM4_TYPE, _FORM10K_TYPE, _FORM10Q_TYPE, _FORM8K_TYPE,
         ]
 
         type_triples = (
@@ -578,11 +582,19 @@ class SECIntraSourceLinker:
         return precedes_triples
 
     def _link_ownership_filing_sequences(self) -> Optional[DataFrame]:
-        """Link Form 3 → Form 4 → Form 5 sequences for same reporting owner."""
+        """Link an owner's ownership filings into a dated sequence.
+
+        This said "Form 3 → Form 4 → Form 5", which upstream cannot express:
+        Form4 is the only ownership class it declares, so the 3 and 5 legs
+        selected nothing and the sequence was always Form 4 to Form 4. That is
+        still the useful edge -- a reporting owner's transaction history is
+        their run of Form 4s -- but it is a sequence within one form, not
+        across three.
+        """
         if 'filings' not in self.available_datasets:
             return None
 
-        ownership_types = [_FORM3_TYPE, _FORM4_TYPE, _FORM5_TYPE]
+        ownership_types = [_FORM4_TYPE]
 
         # Get all ownership filings
         ownership_filings = (
