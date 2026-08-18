@@ -29,6 +29,9 @@ from spark_jobs.utils.rdf_utils import MARKET_QUOTES, MARKET_ENRICHMENT
 from spark_jobs.enrichment.intra_source.market.patterns import (
     get_sector_patterns,
 )
+from spark_jobs.enrichment.intra_source.market.symbols import (
+    occ_expiration_date, occ_underlying,
+)
 
 import logging
 
@@ -41,9 +44,13 @@ logger = logging.getLogger(__name__)
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 
 # Class URIs (flat snapshot model)
+#
+# QuoteSnapshot is declared upstream and nothing is ever typed with it -- the
+# mapper picks EquitySnapshot or OptionSnapshot off the asset_type column, so
+# these two are the whole model. The name survives in upstream's own docstring
+# for the shared predicate block, which is how it came to be treated as a type.
 EQUITY_SNAPSHOT_TYPE = str(MARKET_QUOTES.EquitySnapshot)
 OPTION_SNAPSHOT_TYPE = str(MARKET_QUOTES.OptionSnapshot)
-QUOTE_SNAPSHOT_TYPE = str(MARKET_QUOTES.QuoteSnapshot)
 
 # Property URIs
 SYMBOL_PRED = str(MARKET_QUOTES.symbol)
@@ -64,6 +71,11 @@ HAS_MONEYNESS_PRED = str(MARKET_ENRICHMENT.hasMoneyness)
 ATM_URI = str(MARKET_ENRICHMENT.AtTheMoney)
 ITM_URI = str(MARKET_ENRICHMENT.InTheMoney)
 OTM_URI = str(MARKET_ENRICHMENT.OutOfTheMoney)
+
+# The class the three moneyness individuals belong to. They are categories an
+# option is assigned to, so they are individuals that need a type of their own
+# -- see the note in _compute_moneyness for what their being untyped cost.
+MONEYNESS_CLASS_TYPE = str(MARKET_ENRICHMENT.Moneyness)
 STRADDLE_WITH_PRED = str(MARKET_ENRICHMENT.straddleWith)
 CALL_SPREAD_WITH_PRED = str(MARKET_ENRICHMENT.callSpreadWith)
 PUT_SPREAD_WITH_PRED = str(MARKET_ENRICHMENT.putSpreadWith)
@@ -96,6 +108,58 @@ def _canonical_contract_type(col: F.Column) -> F.Column:
         F.when(upper.isin("C", "CALL"), F.lit("CALL"))
         .when(upper.isin("P", "PUT"), F.lit("PUT"))
         .otherwise(upper)
+    )
+
+
+def _resolve_option_property(
+    triples_df: DataFrame,
+    stated_predicate: str,
+    derive,
+    alias: str,
+) -> DataFrame:
+    """(option, <alias>) for every option snapshot, stated or derived.
+
+    Prefers what the data says. Falls back to reading the value out of the OCC
+    symbol, which is where the quote-snapshot vocabulary keeps it: quotes emit
+    neither underlyingSymbol nor expirationDate, so the stated side is empty on
+    every graph built from them and the inner joins downstream dropped every
+    option row. Three steps -- underlying linking, straddles/spreads/strangles,
+    and the option leg of sector classification -- each logged "no option
+    snapshots found" and returned None on data made entirely of option
+    snapshots.
+
+    A left join rather than a union, so an option that states the property
+    keeps its stated value and never gets two rows. Rows where neither side
+    resolves are dropped: they are not options this can say anything about.
+    """
+    options = triples_df.filter(
+        (F.col("predicate") == RDF_TYPE)
+        & (F.col("object") == OPTION_SNAPSHOT_TYPE)
+    ).select(F.col("subject").alias("option"))
+
+    stated = triples_df.filter(
+        F.col("predicate") == stated_predicate
+    ).select(
+        F.col("subject").alias("option"),
+        F.col("object").alias("stated"),
+    )
+
+    derived = triples_df.filter(
+        F.col("predicate") == SYMBOL_PRED
+    ).select(
+        F.col("subject").alias("option"),
+        derive(F.col("object")).alias("derived"),
+    )
+
+    return (
+        options
+        .join(stated, "option", "left")
+        .join(derived, "option", "left")
+        .select(
+            F.col("option"),
+            F.coalesce(F.col("stated"), F.col("derived")).alias(alias),
+        )
+        .filter(F.col(alias).isNotNull())
     )
 
 
@@ -141,7 +205,6 @@ class MarketIntraSourceLinker:
             & (
                 (F.col("object") == EQUITY_SNAPSHOT_TYPE)
                 | (F.col("object") == OPTION_SNAPSHOT_TYPE)
-                | (F.col("object") == QUOTE_SNAPSHOT_TYPE)
             )
         ).limit(1).count() > 0
 
@@ -257,25 +320,18 @@ class MarketIntraSourceLinker:
         """
         Link option snapshots to their underlying equity snapshots.
 
-        Uses the underlyingSymbol property on OptionSnapshots to find
-        the corresponding EquitySnapshot with the same symbol and
-        closest captureTime.
+        Uses the underlying symbol of each OptionSnapshot -- stated, or read
+        out of its OCC symbol -- to find the corresponding EquitySnapshot with
+        the same symbol and closest captureTime.
 
         Produces:
             option_snapshot  hasUnderlyingEquity  equity_snapshot
         """
-        # Option snapshots with their underlying symbol
-        option_snapshots = triples_df.filter(
-            (F.col("predicate") == RDF_TYPE)
-            & (F.col("object") == OPTION_SNAPSHOT_TYPE)
-        ).select(F.col("subject").alias("option"))
-
-        option_underlying = triples_df.filter(
-            F.col("predicate") == UNDERLYING_SYMBOL_PRED
-        ).select(
-            F.col("subject").alias("option"),
-            F.col("object").alias("underlying_symbol"),
+        option_underlying = _resolve_option_property(
+            triples_df, UNDERLYING_SYMBOL_PRED, occ_underlying, "underlying_symbol"
         )
+
+        option_snapshots = option_underlying.select("option").distinct()
 
         option_times = triples_df.filter(
             F.col("predicate") == CAPTURE_TIME_PRED
@@ -291,7 +347,7 @@ class MarketIntraSourceLinker:
         )
 
         if options_df.head(1) == []:
-            logger.info("  No option snapshots with underlyingSymbol found")
+            logger.info("  No option snapshots with a resolvable underlying found")
             return None
 
         # Equity snapshots with their symbol and time
@@ -378,31 +434,23 @@ class MarketIntraSourceLinker:
 
         Works directly with OptionSnapshot subjects and their properties.
         """
-        # Build options table from triples
-        option_snapshots = triples_df.filter(
-            (F.col("predicate") == RDF_TYPE)
-            & (F.col("object") == OPTION_SNAPSHOT_TYPE)
-        ).select(F.col("subject").alias("option"))
-
-        underlying = triples_df.filter(
-            F.col("predicate") == UNDERLYING_SYMBOL_PRED
-        ).select(
-            F.col("subject").alias("option"),
-            F.col("object").alias("underlying"),
+        # Build options table from triples. Underlying and expiration are
+        # resolved rather than read directly: quotes state neither, and an
+        # inner join against an empty frame silently emptied this whole step.
+        underlying = _resolve_option_property(
+            triples_df, UNDERLYING_SYMBOL_PRED, occ_underlying, "underlying"
         )
+        expirations = _resolve_option_property(
+            triples_df, EXPIRATION_DATE_PRED, occ_expiration_date, "expiration"
+        )
+
+        option_snapshots = underlying.select("option").distinct()
 
         strikes = triples_df.filter(
             F.col("predicate") == STRIKE_PRICE_PRED
         ).select(
             F.col("subject").alias("option"),
             F.col("object").cast("double").alias("strike"),
-        )
-
-        expirations = triples_df.filter(
-            F.col("predicate") == EXPIRATION_DATE_PRED
-        ).select(
-            F.col("subject").alias("option"),
-            F.col("object").alias("expiration"),
         )
 
         contract_types = triples_df.filter(
@@ -647,12 +695,15 @@ class MarketIntraSourceLinker:
             F.col("object").alias("ticker"),
         )
 
-        # Also match option snapshots by underlyingSymbol
-        option_underlying = triples_df.filter(
-            F.col("predicate") == UNDERLYING_SYMBOL_PRED
+        # Also match option snapshots by their underlying, which for a quote
+        # snapshot is only recoverable from the OCC symbol. Read literally, an
+        # option's own symbol ("A     260717C00065000") matches no ticker in
+        # the sector table, so options were classified into no sector at all.
+        option_underlying = _resolve_option_property(
+            triples_df, UNDERLYING_SYMBOL_PRED, occ_underlying, "ticker"
         ).select(
-            F.col("subject").alias("snapshot"),
-            F.col("object").alias("ticker"),
+            F.col("option").alias("snapshot"),
+            F.col("ticker"),
         )
 
         all_symbols = equity_symbols.unionAll(option_underlying)
@@ -776,11 +827,29 @@ class MarketIntraSourceLinker:
             )
             return None
 
-        result = moneyness_df.select(
+        links = moneyness_df.select(
             F.col("option").alias("subject"),
             F.lit(HAS_MONEYNESS_PRED).alias("predicate"),
             F.col("moneyness").alias("object"),
         )
 
+        # Type the three moneyness classes, which is what makes them nodes.
+        #
+        # node_mapper only creates a node for a URI that carries an rdf:type,
+        # and nothing typed market:InTheMoney / AtTheMoney / OutOfTheMoney
+        # anywhere. The links above were emitted correctly and then dropped
+        # whole during edge resolution -- the step logged success, the triples
+        # were in the enriched output, and the graph had no moneyness edge at
+        # all. Same untyped-URI defect as the source temporal URIs, one hop
+        # further out.
+        #
+        # Emitted for the classes actually USED rather than all three, so the
+        # graph never carries a category no option was assigned.
+        class_triples = moneyness_df.select(
+            F.col("moneyness").alias("subject"),
+            F.lit(RDF_TYPE).alias("predicate"),
+            F.lit(MONEYNESS_CLASS_TYPE).alias("object"),
+        ).distinct()
+
         logger.info("  Moneyness computation complete")
-        return result
+        return links.unionByName(class_triples)

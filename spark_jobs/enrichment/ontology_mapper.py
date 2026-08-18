@@ -22,7 +22,7 @@ from spark_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, NOAA_ENRICHMENT,
     UNIFIED, CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER,
     CAP, WEATHER,
-    MARKET_FEEDS, MARKET_QUOTES,
+    MARKET_QUOTES,
     PROV_DERIVED_BY, PROV_OBSERVED_LITERAL_DATATYPE,
     PROV_CLASS_HIERARCHY, PROV_PROPERTY_DOMAIN, PROV_PROPERTY_RANGE,
     PROV_PROPERTY_HIERARCHY,
@@ -100,16 +100,18 @@ PROPERTY_MAPPINGS = {
     str(CPI.indexValue): str(UNIFIED.measurementValue),
     str(PPI.changeValue): str(UNIFIED.measurementValue),
     str(PPI.indexValue): str(UNIFIED.measurementValue),
-    str(JOLTS.level): str(UNIFIED.measurementValue),
-    str(JOLTS.rate): str(UNIFIED.measurementValue),
+    # jolts:level / jolts:rate were never upstream terms under any name -- the
+    # value properties have always been levelValue / rateValue. The bare
+    # spellings read like the obvious names, which is why they survived: a
+    # Namespace resolves them, and the dict entry simply never matched.
+    str(JOLTS.levelValue): str(UNIFIED.measurementValue),
+    str(JOLTS.rateValue): str(UNIFIED.measurementValue),
     str(EMPSIT.value): str(UNIFIED.measurementValue),
     str(ECI.indexValue): str(UNIFIED.measurementValue),
     # Both market vocabularies map onto the same unified predicate. They are
     # separate namespaces whose local names partly overlap (lastPrice and
     # symbol exist in both), so each must be listed explicitly -- a single
     # entry would silently cover only one of the two sources.
-    str(MARKET_FEEDS.observedPrice): str(UNIFIED.measurementValue),
-    str(MARKET_FEEDS.lastPrice): str(UNIFIED.measurementValue),
     str(MARKET_QUOTES.lastPrice): str(UNIFIED.measurementValue),
     str(MARKET_QUOTES.mark): str(UNIFIED.measurementValue),
 
@@ -119,15 +121,20 @@ PROPERTY_MAPPINGS = {
     str(ECI.hasOccupationalGroup): str(UNIFIED.hasCategory),
     str(JOLTS.hasIndustry): str(UNIFIED.hasCategory),
     str(EMPSIT.hasIndustry): str(UNIFIED.hasCategory),
-    str(EMPSIT.hasCategory): str(UNIFIED.hasCategory),
+    # empsit declares hasCategory but no mapper emits it; the dimension link it
+    # actually writes is hasLaborForceCategory.
+    str(EMPSIT.hasLaborForceCategory): str(UNIFIED.hasCategory),
 
     # Company/ticker
-    str(MARKET_FEEDS.symbol): str(UNIFIED.ticker),
     str(MARKET_QUOTES.symbol): str(UNIFIED.ticker),
 
     # Geographic
     str(LAUS.hasState): str(UNIFIED.hasRegion),
-    str(METRO.hasMetropolitanArea): str(UNIFIED.hasRegion),
+    # metro states its area through hasRegion, not hasMetropolitanArea -- the
+    # latter is declared in the ontology and reached by no mapper. This was the
+    # only METRO edge onto the unified geography, so it left metro with no
+    # region link at all.
+    str(METRO.hasRegion): str(UNIFIED.hasRegion),
 
     # NOAA temporal properties → unified equivalents
     # cap:hasSentTime is the primary temporal property for NOAA alerts
@@ -166,10 +173,16 @@ CLASS_MAPPINGS = {
     str(METRO.UnemploymentRate): str(BLS_ENRICHMENT.RateMeasurement),
 
     # Change measurements
-    str(CPI.PercentChange): str(BLS_ENRICHMENT.ChangeMeasurement),
+    # cpi:PercentChange and eci:PercentChangeData are declared umbrella classes
+    # that no mapper emits -- upstream types each change by its own window, so
+    # the umbrella never appears and these two entries covered nothing. The
+    # windowed classes below are the ones instances actually carry.
+    str(CPI.OneMonthPercentChange): str(BLS_ENRICHMENT.ChangeMeasurement),
+    str(CPI.TwelveMonthPercentChange): str(BLS_ENRICHMENT.ChangeMeasurement),
     str(PPI.MonthlyChange): str(BLS_ENRICHMENT.ChangeMeasurement),
     str(PPI.TwelveMonthChange): str(BLS_ENRICHMENT.ChangeMeasurement),
-    str(ECI.PercentChangeData): str(BLS_ENRICHMENT.ChangeMeasurement),
+    str(ECI.ThreeMonthPercentChangeData): str(BLS_ENRICHMENT.ChangeMeasurement),
+    str(ECI.TwelveMonthPercentChangeData): str(BLS_ENRICHMENT.ChangeMeasurement),
 
     # Level measurements
     str(JOLTS.JobOpeningsLevel): str(BLS_ENRICHMENT.LevelMeasurement),
@@ -179,7 +192,9 @@ CLASS_MAPPINGS = {
 
     # Economic indicators
     str(CPI.Category): str(BLS_ENRICHMENT.EconomicIndicator),
-    str(PPI.CommodityGrouping): str(BLS_ENRICHMENT.EconomicIndicator),
+    # ppi types its groupings ppi:Grouping; CommodityGrouping is not a declared
+    # term at all (hasCommodityGrouping, the PROPERTY, is what exists).
+    str(PPI.Grouping): str(BLS_ENRICHMENT.EconomicIndicator),
 
     # Industry classifications
     str(JOLTS.Industry): str(BLS_ENRICHMENT.IndustryClassification),
@@ -188,13 +203,19 @@ CLASS_MAPPINGS = {
 
     # Occupational classifications
     str(ECI.OccupationalGroup): str(BLS_ENRICHMENT.OccupationalClassification),
-    str(EMPSIT.Occupation): str(BLS_ENRICHMENT.OccupationalClassification),
+    # empsit:Occupation and empsit:OccupationData are both declared and neither
+    # is emitted. The two dimension classes empsit actually types are Industry
+    # (already mapped above) and LaborForceCategory, which is the closest thing
+    # this source has to an occupational grouping.
+    str(EMPSIT.LaborForceCategory): str(BLS_ENRICHMENT.OccupationalClassification),
 
     # NOAA alert classes → unified emergency alert type
-    # nws:WeatherAlert is the primary type from the RML mapper
-    # (subClassOf cap:Alert in the ontology)
+    # nws:WeatherAlert is the ONLY type the RML mapper writes on an alert node.
+    # cap:Alert is declared in the CAP model and never emitted -- it also shares
+    # its rdfs:label "Alert" with cap:AlertMessage, the named individual that
+    # cap:hasMessageType actually points at, so the two are easy to confuse.
+    # Neither is an rdf:type of anything, so no entry belongs here for them.
     str(WEATHER.WeatherAlert): str(NOAA_ENRICHMENT.EmergencyAlert),
-    str(CAP.Alert): str(NOAA_ENRICHMENT.EmergencyAlert),
 
     # NOAA sub-structures
     str(CAP.Info): str(NOAA_ENRICHMENT.AlertInfo),

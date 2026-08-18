@@ -15,14 +15,15 @@ from rdflib.namespace import RDF, RDFS, OWL
 
 from spark_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, UNIFIED, CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER,
-    WKYENG, SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP, CAP, WEATHER,
-    MARKET_FEEDS,
+    WKYENG, SEC_FILINGS, CAP, WEATHER,
+    MARKET_QUOTES,
     ALERT,
     identifier_namespace,
 )
 from spark_jobs.enrichment.intra_source.bls.patterns import (
     BLS_SECTOR_CORRELATION, BLS_SECTOR_PATTERNS,
 )
+from spark_jobs.enrichment.intra_source.market.symbols import equity_symbol
 from spark_jobs.utils.spark_rdf_utils import (
     extract_entities_by_type, extract_property, deduplicate_against_existing,
 )
@@ -54,8 +55,45 @@ def _entity_prefixes(*namespaces) -> List[str]:
 _BLS_ENTITY_PREFIXES = _entity_prefixes(
     CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER, WKYENG
 )
-_SEC_ENTITY_PREFIXES = _entity_prefixes(SEC_FILINGS, SEC_ADMIN, SEC_LIT, SEC_SUSP)
-_MARKET_ENTITY_PREFIXES = _entity_prefixes(MARKET_FEEDS)
+_SEC_ENTITY_PREFIXES = _entity_prefixes(SEC_FILINGS)
+
+# What _detect_sources tests subjects against, which decides whether 'market' is
+# in available_sources at all -- and the company/ticker step below is gated on
+# that. This named only the feeds vocabulary, so a graph carrying quote
+# snapshots (id/market-quotes/snapshot/...) reported NO market source and the
+# SEC-to-market bridge was skipped without running.
+_MARKET_ENTITY_PREFIXES = _entity_prefixes(MARKET_QUOTES)
+
+# The symbol-bearing classes, as (type, predicate). Equity and option snapshots
+# arrive in the same feed and state their ticker the same way.
+_MARKET_SYMBOL_TYPES = (
+    (str(MARKET_QUOTES.EquitySnapshot), str(MARKET_QUOTES.symbol)),
+    (str(MARKET_QUOTES.OptionSnapshot), str(MARKET_QUOTES.symbol)),
+)
+
+# Two-letter postal abbreviations, for matching NWS area descriptions.
+#
+# NWS writes them as "Lincoln, KS; Russell, KS" and never spells the state out,
+# so the full-name list alone matched nothing. Kept beside the state list the
+# geographic step already carries rather than derived, because the postal code
+# is not a function of the name.
+_STATE_ABBREVIATIONS = {
+    'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR',
+    'California': 'CA', 'Colorado': 'CO', 'Connecticut': 'CT',
+    'Delaware': 'DE', 'Florida': 'FL', 'Georgia': 'GA', 'Hawaii': 'HI',
+    'Idaho': 'ID', 'Illinois': 'IL', 'Indiana': 'IN', 'Iowa': 'IA',
+    'Kansas': 'KS', 'Kentucky': 'KY', 'Louisiana': 'LA', 'Maine': 'ME',
+    'Maryland': 'MD', 'Massachusetts': 'MA', 'Michigan': 'MI',
+    'Minnesota': 'MN', 'Mississippi': 'MS', 'Missouri': 'MO',
+    'Montana': 'MT', 'Nebraska': 'NE', 'Nevada': 'NV',
+    'New Hampshire': 'NH', 'New Jersey': 'NJ', 'New Mexico': 'NM',
+    'New York': 'NY', 'North Carolina': 'NC', 'North Dakota': 'ND',
+    'Ohio': 'OH', 'Oklahoma': 'OK', 'Oregon': 'OR', 'Pennsylvania': 'PA',
+    'Rhode Island': 'RI', 'South Carolina': 'SC', 'South Dakota': 'SD',
+    'Tennessee': 'TN', 'Texas': 'TX', 'Utah': 'UT', 'Vermont': 'VT',
+    'Virginia': 'VA', 'Washington': 'WA', 'West Virginia': 'WV',
+    'Wisconsin': 'WI', 'Wyoming': 'WY',
+}
 
 # URI constants
 _RDF_TYPE = str(RDF.type)
@@ -65,7 +103,6 @@ _SECTOR_CORRELATION = str(BLS_SECTOR_CORRELATION)
 
 # NOAA type URIs — aligned with updated RML mapper
 _NWS_WEATHER_ALERT_TYPE = str(WEATHER.WeatherAlert)
-_CAP_ALERT_TYPE = str(CAP.Alert)
 
 # NOAA area description — on Area subject (alert:{id}#area)
 _CAP_HAS_AREA_DESC = str(CAP.hasAreaDescription)
@@ -292,30 +329,65 @@ class CrossSourceLinker:
     # Step 3: Company/Ticker Linking
     # ================================================================
 
+    def _market_symbol_bearers(self) -> DataFrame:
+        """(entity, symbol) for every market entity that names a ticker.
+
+        Keyed on the classes each market vocabulary actually declares, per
+        _MARKET_SYMBOL_TYPES. The previous version asked for
+        market-feeds:StockTicker, which belongs to NEITHER model -- feeds is
+        PriceObservation / OptionContract, quotes is EquitySnapshot /
+        OptionSnapshot -- so it matched nothing no matter which namespace it
+        was pointed at, and the SEC-to-market bridge had no market side.
+        """
+        frames = [
+            extract_entities_by_type(self.triples_df, type_uri).join(
+                extract_property(self.triples_df, symbol_pred, "raw_symbol"),
+                on=F.col("entity") == F.col("subject"),
+            ).select("entity", "raw_symbol")
+            for type_uri, symbol_pred in _MARKET_SYMBOL_TYPES
+        ]
+
+        union = frames[0]
+        for frame in frames[1:]:
+            union = union.unionByName(frame)
+
+        return union.select(
+            F.col("entity"),
+            equity_symbol(F.col("raw_symbol")).alias("symbol"),
+        ).filter(F.length(F.col("symbol")) > 0).dropDuplicates()
+
     def _link_by_company(self) -> Optional[DataFrame]:
         """
-        Link SEC filings to Market tickers via ticker symbol.
+        Link SEC issuers to Market quotes via ticker symbol.
 
-        Creates unified:Company_<SYMBOL> entities.
+        Creates unified:Company_<SYMBOL> entities that both sides point at, so
+        a filing reaches a quote through Filing -> Issuer -> Company <- Snapshot.
+
+        The SEC side keys on the ISSUER, not the filing. Upstream renamed
+        hasIssuerTicker to hasIssuerTradingSymbol AND moved it: the symbol is
+        now stated by the filings:Issuer node (itself subClassOf
+        sec-common:Company), which is the thing a ticker actually identifies. A
+        filing is a document and does not have a ticker. Filings still reach the
+        company, one hop further out, via their existing hasIssuer edge.
+
+        Expect this bridge to be SPARSE at volume, and do not read that as a
+        regression. hasIssuerTradingSymbol has exactly one upstream emitter --
+        the ownership-form document parser -- so it requires a filing that (a)
+        had its document fetched and stored, (b) stored it as XML, and (c) is a
+        Form 3/4/5, the only forms whose schema carries <issuerTradingSymbol>.
+        The EDGAR search API never returns a ticker, so the metadata half of
+        every row cannot supply one. The bridge's ceiling is therefore the
+        ownership-form share of filings, not their total.
         """
-        # Get market ticker symbols
-        market_tickers = (
-            extract_entities_by_type(self.triples_df, str(MARKET_FEEDS.StockTicker))
-            .join(
-                extract_property(self.triples_df, str(MARKET_FEEDS.symbol), "symbol"),
-                on=F.col("entity") == F.col("subject")
-            )
-            .select(F.col("entity").alias("ticker_uri"), "symbol")
-            .drop("subject")
-        )
+        market_tickers = self._market_symbol_bearers()
 
-        # Get SEC filing ticker symbols
+        # Get SEC issuer ticker symbols
         sec_tickers = extract_property(
-            self.triples_df, str(SEC_FILINGS.hasIssuerTicker), "symbol"
+            self.triples_df, str(SEC_FILINGS.hasIssuerTradingSymbol), "raw_symbol"
         ).select(
-            F.col("subject").alias("filing_uri"),
-            F.col("symbol")
-        )
+            F.col("subject").alias("issuer_uri"),
+            equity_symbol(F.col("raw_symbol")).alias("symbol"),
+        ).filter(F.length(F.col("symbol")) > 0)
 
         # Create unified company entities
         unified_uri = F.concat(F.lit(str(UNIFIED)), F.lit("Company_"), F.col("symbol"))
@@ -335,16 +407,16 @@ class CrossSourceLinker:
             F.col("symbol").alias("object")
         )
 
-        # Market ticker → company
+        # Market snapshot → company
         market_links = market_tickers.select(
-            F.col("ticker_uri").alias("subject"),
+            F.col("entity").alias("subject"),
             F.lit(str(BLS_ENRICHMENT.refersToCompany)).alias("predicate"),
             F.concat(F.lit(str(UNIFIED)), F.lit("Company_"), F.col("symbol")).alias("object")
         )
 
-        # SEC filing → company
+        # SEC issuer → company
         sec_links = sec_tickers.select(
-            F.col("filing_uri").alias("subject"),
+            F.col("issuer_uri").alias("subject"),
             F.lit(str(BLS_ENRICHMENT.refersToCompany)).alias("predicate"),
             F.concat(F.lit(str(UNIFIED)), F.lit("Company_"), F.col("symbol")).alias("object")
         )
@@ -413,8 +485,12 @@ class CrossSourceLinker:
             '56': 'Wyoming',
         }
 
-        state_rows = [(s, s.replace(' ', '')) for s in us_states]
-        states_df = self.spark.createDataFrame(state_rows, schema=["state_name", "state_key"])
+        state_rows = [
+            (s, s.replace(' ', ''), _STATE_ABBREVIATIONS[s]) for s in us_states
+        ]
+        states_df = self.spark.createDataFrame(
+            state_rows, schema=["state_name", "state_key", "state_abbr"]
+        )
 
         # Create unified region entities
         region_uri = F.concat(F.lit(str(UNIFIED)), F.col("state_key"), F.lit("Region"))
@@ -495,8 +571,24 @@ class CrossSourceLinker:
                     .select("alert", "area_desc")
                 )
 
+                # Match the ABBREVIATION as well as the full name.
+                #
+                # NWS writes area descriptions as "Lincoln, KS; Russell, KS" --
+                # county plus two-letter state -- and the full name never
+                # appears. Matching only `contains("Kansas")` therefore matched
+                # nothing on every alert ever ingested, and this strategy
+                # produced no link at all.
+                #
+                # The abbreviation is matched with its ", " separator rather
+                # than bare, because two letters appear inside ordinary words:
+                # a bare "contains('OR')" hits "ORANGE" and a bare "IN" hits
+                # almost everything. Anchoring on the comma is how NWS actually
+                # writes it and keeps the match to the state field.
                 noaa_area_matched = area_to_alert.crossJoin(F.broadcast(states_df)).filter(
                     F.col("area_desc").contains(F.col("state_name"))
+                    | F.col("area_desc").contains(
+                        F.concat(F.lit(", "), F.col("state_abbr"))
+                    )
                 )
 
                 noaa_area_links = noaa_area_matched.select(
@@ -507,7 +599,16 @@ class CrossSourceLinker:
                 noaa_link_dfs.append(noaa_area_links)
 
             # Strategy 2: State FIPS code matching
-            # Geocode subjects have nws:hasStateFIPS with 2-digit state codes
+            #
+            # Geocode subjects carry nws:hasStateFIPS as the 3-character head of
+            # a SAME code ("040", "024"), never a 2-digit FIPS -- upstream slices
+            # it as value[:3], so the leading part-digit is structural and always
+            # present. The lookup below is keyed 2-digit; see the normalisation.
+            #
+            # Note also that nws:hasFIPSCode carries the SAME value as
+            # nws:hasSAMECode -- both read upstream's fips_code column, which is
+            # populated from properties.geocode.SAME. hasFIPSCode is a misnomer
+            # for the SAME code and is not a county FIPS.
             state_fips_rows = [
                 (fips, name, name.replace(' ', ''))
                 for fips, name in state_fips_to_name.items()
@@ -516,11 +617,34 @@ class CrossSourceLinker:
                 state_fips_rows, ["fips_code", "state_name", "state_key"]
             )
 
+            # Normalize the code to the two digits the lookup above is keyed on.
+            #
+            # The lookup holds 2-digit state FIPS ("20" Kansas, "42"
+            # Pennsylvania) while the mapper emits the 3-digit head of a SAME
+            # code -- "020", "042" -- which is a leading part-digit followed by
+            # the state. Compared as strings those never match, so this whole
+            # strategy linked nothing on every alert ever ingested.
+            #
+            # Taking the LAST two digits rather than stripping a leading zero:
+            # the part-digit is not always 0 (it marks a partial-county code),
+            # so trimming zeros would silently mangle those.
+            #
+            # substring(-2, 2) alone, NOT lpad(...,2,"0") first. Spark's lpad
+            # truncates when the input is LONGER than the target width, and it
+            # truncates from the right -- lpad("040",2,"0") is "04", not "40".
+            # That destroyed the state digit and silently produced the WRONG
+            # state: every "0NN" head resolved to state "0N", so Oklahoma (040)
+            # and Texas (048) both linked to Arizona (04), and the unmapped 099
+            # linked to Connecticut (09) instead of dropping. This failed
+            # louder than a dead join -- it emitted confident, wrong edges.
+            #
+            # substring with a negative start already reads from the end and is
+            # safe on short input, so no padding is needed at all.
             state_fips_triples = self.triples_df.filter(
                 F.col("predicate") == _NWS_HAS_STATE_FIPS
             ).select(
                 F.col("subject").alias("geocode"),
-                F.col("object").alias("state_fips"),
+                F.substring(F.trim(F.col("object")), -2, 2).alias("state_fips"),
             )
 
             if state_fips_triples.head(1):
@@ -560,11 +684,35 @@ class CrossSourceLinker:
                     noaa_links = noaa_links.unionByName(df)
                 noaa_links = noaa_links.dropDuplicates()
 
-        result = type_triples.unionByName(label_triples)
-        if laus_links is not None:
-            result = result.unionByName(laus_links)
-        if noaa_links is not None:
-            result = result.unionByName(noaa_links)
+        # Only the regions something actually points at.
+        #
+        # All 50 states used to be typed and labelled unconditionally, while the
+        # links below are conditional on a LAUS or NOAA entity naming one. With
+        # no LAUS feed present that is 50 typed nodes with zero incident edges —
+        # a whole node type of isolated vertices a GNN can propagate nothing
+        # through, and 50 rows of feature tensor describing nothing.
+        #
+        # Scoping the scaffolding to the linked set makes the region nodes a
+        # consequence of the data rather than of the state list. Nothing else
+        # changes: a region that IS linked gets exactly the type and label it
+        # got before.
+        links = [df for df in (laus_links, noaa_links) if df is not None]
+        if not links:
+            logger.info("  No geographic links matched — no region entities minted")
+            return None
+
+        all_links = links[0]
+        for df in links[1:]:
+            all_links = all_links.unionByName(df)
+        all_links = all_links.dropDuplicates()
+
+        linked_regions = all_links.select(F.col("object").alias("subject")).distinct()
+
+        result = (
+            type_triples.join(linked_regions, "subject", "left_semi")
+            .unionByName(label_triples.join(linked_regions, "subject", "left_semi"))
+            .unionByName(all_links)
+        )
 
         logger.info("  Geographic linking triples prepared (lazy)")
         return result

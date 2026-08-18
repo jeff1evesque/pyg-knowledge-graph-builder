@@ -1,0 +1,36 @@
+{
+  "CAP": [
+    "AllClear",
+    "Assess",
+    "Avoid",
+    "Cancel",
+    "Evacuate",
+    "Execute",
+    "Expected",
+    "Extreme",
+    "Likely",
+    "Minor",
+    "Moderate",
+    "Past",
+    "Prepare",
+    "Unlikely"
+  ],
+  "CPI": [
+    "OneMonthPercentChange",
+    "TwelveMonthPercentChange"
+  ],
+  "ECI": [
+    "StateLocalGovernmentThreeMonthPercentChangeData",
+    "StateLocalGovernmentTwelveMonthPercentChangeData",
+    "StateLocalGovernmentWorkerIndexData",
+    "WagesAndSalariesIndexData"
+  ],
+  "EMPSIT": [
+    "AverageOvertimeHoursData"
+  ],
+  "MARKET_QUOTES": [
+    "expirationDate",
+    "inTheMoney",
+    "underlyingSymbol"
+  ]
+}

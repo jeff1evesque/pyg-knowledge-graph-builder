@@ -16,7 +16,7 @@ Covered:
 from rdflib.namespace import RDF, RDFS
 
 from spark_jobs.utils.rdf_utils import (
-    CPI, MARKET_FEEDS, BLS_ENRICHMENT, identifier_namespace,
+    CPI, MARKET_QUOTES, BLS_ENRICHMENT, identifier_namespace,
 )
 from spark_jobs.enrichment.intra_source.bls_linker import (
     BLSIntraSourceLinker,
@@ -182,8 +182,8 @@ def test_enrich_produces_temporal_sector_and_hierarchy(spark, make_triples):
 def test_enrich_returns_empty_for_non_bls_data(spark, make_triples):
     """Data with no BLS-namespaced subjects short-circuits to zero new triples."""
     rows = [
-        (str(MARKET_FEEDS["AAPL_20241115"]), RDF_TYPE, str(MARKET_FEEDS.EquitySnapshot)),
-        (str(MARKET_FEEDS["AAPL_20241115"]), str(MARKET_FEEDS.symbol), "AAPL"),
+        (str(MARKET_QUOTES["AAPL_20241115"]), RDF_TYPE, str(MARKET_QUOTES.EquitySnapshot)),
+        (str(MARKET_QUOTES["AAPL_20241115"]), str(MARKET_QUOTES.symbol), "AAPL"),
     ]
     result = BLSIntraSourceLinker(spark).enrich(make_triples(rows))
     assert result.count() == 0

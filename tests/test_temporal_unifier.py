@@ -7,10 +7,10 @@ Mirrors the linker test files (test_{bls,noaa,market,sec,cross_source}_linker.py
     asserted at the value level (shared unified URI + owl:sameAs links).
   - Different-period observations are NOT unified — two distinct entities,
     no cross-period sameAs.
-  - The market option expiration-date path (market:expirationDate) is pinned:
-    this module previously shipped a reference to a non-existent
-    MARKET_OPTIONS symbol that broke build_graph in all modes (Bug B), so the
-    period derivation through that predicate gets a direct value-level test.
+  - The market period path (market-quotes:captureTime) is pinned. It replaced
+    an expirationDate/observedAt pair from a feeds vocabulary that no longer
+    exists; that pair is also where a reference to a non-existent
+    MARKET_OPTIONS symbol once broke build_graph in all modes (Bug B).
   - Non-temporal input short-circuits to zero triples.
 
 Drives enrich() over tiny in-memory triples on the shared local SparkSession
@@ -23,16 +23,16 @@ from spark_jobs.enrichment.temporal_unifier import (
     OWL_SAME_AS,
     UNIFIED_BASE,
     UNIFIED_MONTH_TYPE,
-    UNIFIED_YEAR_TYPE,
     SOURCE_MONTH_TYPE,
     SOURCE_YEAR_TYPE,
-    MARKET_OBSERVED_AT,
-    MARKET_EXPIRATION_DATE,
-    MARKET_OPTION_CONTRACT_TYPE,
+    MARKET_CAPTURE_TIME,
+    OBSERVED_IN_PERIOD_PRED,
 )
 
 from spark_jobs.utils.rdf_utils import (
     CPI as _CPI_NS,
+    MARKET_QUOTES,
+    SEC_FILINGS,
     SYNTHETIC_TEMPORAL_IDS,
     identifier_namespace,
 )
@@ -49,7 +49,9 @@ from spark_jobs.utils.rdf_utils import (
 # ontology/ cannot notice that no real period ever does.
 CPI = str(_CPI_NS)
 CPI_ID = identifier_namespace(CPI)
-MARKET_TEMPORAL = SYNTHETIC_TEMPORAL_IDS["market-feeds"]
+SEC_TEMPORAL = SYNTHETIC_TEMPORAL_IDS["sec"]
+MARKET_TEMPORAL = SYNTHETIC_TEMPORAL_IDS["market-quotes"]
+QUOTES_TEMPORAL = MARKET_TEMPORAL
 
 
 def _triple_set(result):
@@ -62,7 +64,7 @@ def test_same_period_across_sources_unifies_to_one_entity(spark, make_triples):
     cpi_month = CPI_ID + "November"
     rows = [
         (CPI_ID + "obs/1", CPI + "hasMonth", cpi_month),
-        ("https://jefflevesque.com/id/market-feeds/snap/1", MARKET_OBSERVED_AT,
+        ("https://jefflevesque.com/id/market-quotes/snap/1", MARKET_CAPTURE_TIME,
          "2024-11-15T10:00:00"),
     ]
 
@@ -86,7 +88,7 @@ def test_different_periods_are_not_unified(spark, make_triples):
     cpi_month = CPI_ID + "November"
     rows = [
         (CPI_ID + "obs/1", CPI + "hasMonth", cpi_month),
-        ("https://jefflevesque.com/id/market-feeds/snap/1", MARKET_OBSERVED_AT,
+        ("https://jefflevesque.com/id/market-quotes/snap/1", MARKET_CAPTURE_TIME,
          "2024-03-10T10:00:00"),
     ]
 
@@ -107,26 +109,6 @@ def test_different_periods_are_not_unified(spark, make_triples):
     assert month_entities == {november, march}
 
 
-def test_market_expiration_date_derives_period(spark, make_triples):
-    """Option expiration dates (market:expirationDate) derive month + year
-    temporals — the path whose broken symbol reference (Bug B) once took
-    down build_graph in all modes."""
-    opt = "https://jefflevesque.com/id/market-feeds/opt/1"
-    rows = [
-        (opt, RDF_TYPE, MARKET_OPTION_CONTRACT_TYPE),
-        (opt, MARKET_EXPIRATION_DATE, "2025-01-17"),
-    ]
-
-    triples = _triple_set(TemporalUnifier(spark).enrich(make_triples(rows)))
-
-    assert (UNIFIED_BASE + "January", OWL_SAME_AS,
-            MARKET_TEMPORAL + "January") in triples
-    assert (UNIFIED_BASE + "January", RDF_TYPE, UNIFIED_MONTH_TYPE) in triples
-    assert (UNIFIED_BASE + "Year2025", OWL_SAME_AS,
-            MARKET_TEMPORAL + "2025") in triples
-    assert (UNIFIED_BASE + "Year2025", RDF_TYPE, UNIFIED_YEAR_TYPE) in triples
-
-
 def test_source_temporal_uris_are_typed(spark, make_triples):
     """The source-side temporal URIs get an rdf:type of their own.
 
@@ -141,7 +123,7 @@ def test_source_temporal_uris_are_typed(spark, make_triples):
     rows = [
         (CPI_ID + "obs/1", CPI + "hasMonth", cpi_month),
         (CPI_ID + "obs/1", CPI + "hasYear", cpi_year),
-        ("https://jefflevesque.com/id/market-feeds/snap/1", MARKET_OBSERVED_AT,
+        ("https://jefflevesque.com/id/market-quotes/snap/1", MARKET_CAPTURE_TIME,
          "2024-11-15T10:00:00"),
     ]
 
@@ -152,13 +134,87 @@ def test_source_temporal_uris_are_typed(spark, make_triples):
     assert (cpi_year, RDF_TYPE, SOURCE_YEAR_TYPE) in triples
 
     # The synthetic URIs minted from date literals are equally untyped at the
-    # source, and the sameAs link is their ONLY edge — so they need it too.
+    # source, so they need typing too.
     assert (MARKET_TEMPORAL + "November", RDF_TYPE, SOURCE_MONTH_TYPE) in triples
 
     # Source and unified temporal entities stay distinguishable: the sameAs
     # target must not carry the type of the canonical entity pointing at it.
     assert (cpi_month, RDF_TYPE, UNIFIED_MONTH_TYPE) not in triples
     assert (UNIFIED_BASE + "November", RDF_TYPE, SOURCE_MONTH_TYPE) not in triples
+
+
+def test_dated_entities_reach_the_period_they_state(spark, make_triples):
+    """A source that states a date must end up ATTACHED to the period.
+
+    The date-literal sources (SEC, NOAA, market-feeds) have no equivalent of the
+    BLS `obs hasMonth cpi:February` triple — they state a date and nothing else.
+    The collector read the date value and threw away the subject, so the unifier
+    minted temporal/sec/August, linked it sameAs unified:August, and stopped:
+    nothing pointed at the period. That is a bridge with no on-ramp, and it
+    still produced Unified* nodes and sameAs edges, so the graph read as
+    connected while every SEC filing sat outside the temporal spine.
+
+    Asserted through to the unified entity, because reaching temporal/sec/August
+    is only useful if that is the same August the other sources reach.
+    """
+    filing = "https://jefflevesque.com/id/sec-filings/0000842657-26-000011_Filing"
+    rows = [
+        (filing, RDF_TYPE, str(SEC_FILINGS.SECFiling)),
+        # Stated as a URI rather than a literal, which is the live shape.
+        (filing, str(SEC_FILINGS.hasFilingDate),
+         "https://jefflevesque.com/id/sec-filings/Date_2026-08-14"),
+    ]
+
+    triples = _triple_set(TemporalUnifier(spark).enrich(make_triples(rows)))
+
+    sec_august = SEC_TEMPORAL + "August"
+    assert (filing, OBSERVED_IN_PERIOD_PRED, sec_august) in triples, (
+        "the filing does not reach the period it dates — the synthetic period "
+        "node is an island"
+    )
+    assert (filing, OBSERVED_IN_PERIOD_PRED, SEC_TEMPORAL + "2026") in triples
+    assert (UNIFIED_BASE + "August", OWL_SAME_AS, sec_august) in triples
+
+    # The on-ramp is something this pipeline inferred, not a fact SEC reported.
+    from spark_jobs.utils.rdf_utils import classify_edge_origin
+
+    assert classify_edge_origin(
+        OBSERVED_IN_PERIOD_PRED, "filings_SECFiling", "temporal_SourceMonth"
+    ) == "enrichment"
+
+
+def test_quote_snapshots_reach_the_spine_via_capture_time(spark, make_triples):
+    """The quotes vocabulary gets its own period, off captureTime.
+
+    Market was the one source contributing no temporal entity at all: the market
+    collector keys on the FEEDS predicates (observedAt, expirationDate) and a
+    quote snapshot has neither, so it matched nothing. A snapshot's only other
+    route into the graph is its ticker, which reaches nothing when no filing
+    names the same company — so market could be entirely disconnected while the
+    unifier reported success.
+
+    quoteTime and tradeTime are deliberately NOT collected: they are epoch
+    milliseconds, and the date parser reads `(\\d{4})` as a year, so
+    "1783009237630" would mint a period called 1783.
+    """
+    snap = "https://jefflevesque.com/id/market-quotes/snapshot/A/2026-07-02"
+    rows = [
+        (snap, RDF_TYPE, str(MARKET_QUOTES.EquitySnapshot)),
+        (snap, str(MARKET_QUOTES.captureTime), "2026-07-02T16:40:40.167Z"),
+        (snap, str(MARKET_QUOTES.quoteTime), "1783009237630"),
+    ]
+
+    triples = _triple_set(TemporalUnifier(spark).enrich(make_triples(rows)))
+
+    quotes_july = QUOTES_TEMPORAL + "July"
+    assert (snap, OBSERVED_IN_PERIOD_PRED, quotes_july) in triples
+    assert (UNIFIED_BASE + "July", OWL_SAME_AS, quotes_july) in triples
+    assert (snap, OBSERVED_IN_PERIOD_PRED, QUOTES_TEMPORAL + "2026") in triples
+
+    # The epoch-millis predicate must not have minted a period of its own.
+    assert not [t for t in triples if t[2].endswith("/1783")], (
+        "an epoch-millisecond timestamp was parsed as a calendar year"
+    )
 
 
 def test_source_temporal_types_are_not_pipeline_minted_for_origin(spark):
