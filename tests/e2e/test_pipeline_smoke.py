@@ -24,6 +24,7 @@ identical logic runs on CPU.
 
 import collections
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -195,6 +196,12 @@ def _assert_valid_graph_and_metadata(config, work_dir):
     assert index["uri"].is_unique, "node_index maps two rows to one entity"
     assert len(index) == sum(data[nt].num_nodes for nt in data.node_types)
 
+    # --- and two rows are never the same entity spelled two ways ---
+    # is_unique above compares URIs as strings, so it is satisfied by exactly
+    # the defect this looks for: one filer under both a padded and an unpadded
+    # CIK is two distinct strings and two distinct nodes.
+    _assert_no_entity_is_split_by_identifier_padding(index)
+
     # --- the graph has a temporal dimension ---
     _assert_temporal_edges_present(config, data)
 
@@ -220,6 +227,9 @@ def _assert_valid_graph_and_metadata(config, work_dir):
     # --- and every inferred link the pipeline claims to make actually exists ---
     _assert_declared_bridges_resolve(data)
     _assert_bridge_absences_are_still_true(data)
+
+    # --- and exists at full strength, rather than resolving into one edge ---
+    _assert_declared_bridges_are_not_degenerate(config)
 
 
 # --------------------------------------------------------------------------- #
@@ -1444,6 +1454,164 @@ def _assert_declared_bridges_resolve(data):
         f"behind each either matched nothing or was dropped during edge "
         f"resolution. A join keyed on a term the data no longer emits fails "
         f"exactly this way: silently. Relations present: {sorted(present)}"
+    )
+
+
+# What a working bridge's endpoints look like, so a join resolving into ONE
+# edge fails the way a join resolving into none already does.
+#
+# _assert_declared_bridges_resolve proves a relation is PRESENT. Present is not
+# complete, and the gap between them is this issue: a bridge that should link
+# every ticker-bearing issuer to a company and links one of them satisfies that
+# guard completely. The term is live, the join is correct, and the data behind
+# it is shaped so most rows fall out -- which no drift check can see, because
+# every term involved is emitted.
+#
+# Expressed as a RATIO of the population that ought to be covered, never as an
+# edge count. A count is a property of the fixture and changes every time it is
+# regenerated, so it would have to be re-tuned by hand -- and a threshold people
+# re-tune to make the suite pass stops being a guard. "Every issuer that states
+# a ticker reaches a company" is a property of the PIPELINE and holds at any
+# scale, on three rows or on three million.
+#
+# Measured on the ENRICHED TRIPLES, not on the graph. That is the layer the join
+# runs at, so a failure here means the join under-covered -- distinct from an
+# edge lost later during node typing, which _assert_no_node_type_is_orphaned and
+# the required-relations guard look for. The two failures want different fixes,
+# so they are worth telling apart.
+#
+# Matched on the predicate's LOCAL NAME for the same reason the required list
+# is: the namespace is exactly what this class of defect gets wrong, and a check
+# spelling the full URI would have to be edited by the same hand that broke it.
+_BridgeCoverage = collections.namedtuple(
+    "_BridgeCoverage", "relation candidates label floor why"
+)
+
+BRIDGE_COVERAGE = (
+    _BridgeCoverage(
+        relation="refersToCompany",
+        candidates="hasIssuerTradingSymbol",
+        label="SEC issuer -> unified company",
+        floor=1.0,
+        # The ticker is the ONLY path from a filing to a market quote, and the
+        # SEC half of the join reads it straight off the issuer. Every issuer
+        # stating one must therefore reach a company; there is no filtering
+        # step between the two that could legitimately drop any.
+        #
+        # 1.0 rather than a measured fraction because this is a conditional
+        # rate: the term's overall sparsity (24.57% of filings, being 100% of
+        # ownership Forms 3/4/5 and 0% of everything else) is about which
+        # filings HAVE a ticker, not about how many of those get linked.
+        why="every issuer stating a ticker is linked; no step filters them",
+    ),
+    _BridgeCoverage(
+        relation="refersToCompany",
+        candidates="symbol",
+        label="market snapshot -> unified company",
+        floor=1.0,
+        # The market half, which reads market-quotes:symbol off equity and
+        # option snapshots alike. equity_symbol() resolves an OCC option symbol
+        # to its underlying and falls through to the trimmed original for
+        # anything else, so it never returns null for a well-formed input --
+        # meaning every symbol-bearing snapshot has a company to reach.
+        why="equity_symbol() never drops a well-formed symbol",
+    ),
+)
+
+
+def _assert_declared_bridges_are_not_degenerate(config):
+    """Every declared bridge must cover its endpoints, not merely exist.
+
+    See BRIDGE_COVERAGE.
+
+    A rule whose candidate population is empty HERE is skipped, because the
+    fixtures deliberately differ: the N-Triples fixture is a loader test
+    carrying a slice of each source, and its SEC half states no ticker at all,
+    so requiring the SEC rule against it would fail for a fixture-coverage
+    reason rather than a pipeline one -- the same trap KNOWN_ABSENT_BRIDGES and
+    the conditional entries in REQUIRED_BRIDGE_RELATIONS exist to avoid.
+
+    Skipping is only safe because a rule that measures nothing EVERYWHERE is
+    caught elsewhere: tests/test_bridge_coverage_guard.py asserts that every
+    rule has a candidate population somewhere in the committed fixtures. That
+    check belongs in the fast suite anyway -- it is a statement about the
+    fixtures, needs no pipeline run, and so runs constantly rather than only
+    when someone runs the heavy suite by hand.
+    """
+    import pandas as pd
+
+    files = sorted(Path(config.enriched_parquet_path).rglob("*.parquet"))
+    if not files:
+        return  # split-mode runs may not re-emit the enriched frame
+    df = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
+
+    def subjects_of(local_name):
+        suffix = f"/{local_name}"
+        return set(df[df["predicate"].str.endswith(suffix)]["subject"])
+
+    thin = []
+    for rule in BRIDGE_COVERAGE:
+        candidates = subjects_of(rule.candidates)
+        if not candidates:
+            continue  # not verifiable on this fixture; see the docstring
+        covered = candidates & subjects_of(rule.relation)
+        ratio = len(covered) / len(candidates)
+        if ratio < rule.floor:
+            thin.append(
+                f"{rule.label}: {len(covered)}/{len(candidates)} "
+                f"({ratio:.1%}) of subjects stating {rule.candidates} reach "
+                f"{rule.relation}, floor {rule.floor:.0%} — {rule.why}"
+            )
+
+    assert not thin, (
+        "bridges that resolved but under-cover their endpoints:\n  "
+        + "\n  ".join(thin)
+        + "\n\nThe relation exists, so _assert_declared_bridges_resolve passes. "
+        "The join behind it is matching a fraction of what it should — check "
+        "whether the data on one side is shaped as the join assumes (padding, "
+        "datatype, which subject states the term) rather than whether the term "
+        "is still emitted."
+    )
+
+
+# Identifier locals that upstream keys on a CIK, and the shape of the URI it
+# mints from one. Written out here rather than imported from
+# utils/canonicalization.py deliberately: a check built from the same constants
+# as the code under test agrees with that code's mistakes.
+_CIK_KEYED_URI = re.compile(
+    r"^(.*/id/sec-filings/(?:Issuer|ReportingOwner|Owner)_)(\d+)(?:\.0+)?$"
+)
+
+
+def _assert_no_entity_is_split_by_identifier_padding(index):
+    """One filer must be one node, however upstream spelled its CIK.
+
+    Upstream states a CIK two ways -- "0001729997" from its metadata path and
+    an unpadded, decimal-typed 1729997 from its document path -- and a single
+    Form 144 can carry both, pointing hasIssuer at each. Those are different
+    URIs, so they are different nodes for one company, and the graph partitions
+    that company's filings between them without anything erroring.
+
+    Asserted over the node_index rather than over the triples because this is
+    about node identity: the node_index is the artifact that says which entity
+    each row of the tensor IS, so two rows for one filer is precisely what it
+    would show.
+
+    Keyed on the digits with leading zeros stripped, so the padded and unpadded
+    spellings of one CIK collide here even though they do not collide as URIs.
+    """
+    groups = collections.defaultdict(set)
+    for uri in map(str, index["uri"]):
+        match = _CIK_KEYED_URI.match(uri)
+        if match:
+            prefix, digits = match.group(1), match.group(2)
+            groups[(prefix, digits.lstrip("0") or "0")].add(uri)
+
+    split = {key: sorted(uris) for key, uris in groups.items() if len(uris) > 1}
+    assert not split, (
+        "one entity appears as several nodes differing only in CIK padding: "
+        f"{split} — canonicalization did not merge them, so this filer's edges "
+        "and message passing are partitioned across the copies"
     )
 
 

@@ -23,7 +23,6 @@ import pytest
 
 from spark_jobs.enrichment.intra_source.noaa import patterns as noaa
 from spark_jobs.enrichment.intra_source.market import patterns as market
-from spark_jobs.enrichment.intra_source.market import measurements as market_meas
 from spark_jobs.enrichment.intra_source.market import correlations as market_corr
 from spark_jobs.enrichment.intra_source.sec import patterns as sec
 
@@ -115,13 +114,22 @@ def test_market_option_strategy_patterns_well_formed():
         assert entry["description"], key
 
 
-def test_market_measurement_types_have_class_and_properties():
-    assert market_meas.MEASUREMENT_TYPES
-    for group, classes in market_meas.MEASUREMENT_TYPES.items():
-        assert classes, f"measurement group {group} is empty"
-        for cls_name, props in classes.items():
-            assert _is_uri(props["class"]), f"{group}/{cls_name} class not a URI"
-            assert any(_is_uri(v) for v in props.values()), f"{group}/{cls_name} has no URI props"
+# market/measurements.py and sec/measurements.py were deleted, and the test that
+# stood here went with the market one. It asserted that a config no production
+# code imported was well-formed -- the only thing keeping either file alive, and
+# a check that could never fail in a way that mattered. Both files described the
+# classes, date properties and grouping keys their linkers already hardcode, so
+# they were a second description of the code sitting beside it, consulted by
+# nothing while being maintained as though they were wired up.
+#
+# bls/measurements.py is the one that stays, because bls/base_enricher.py really
+# does loop over it: adding an entry there changes what the pipeline emits.
+#
+# The SEC config also described two entries nothing implements -- transaction-
+# level temporal sequencing over NonDerivativeTransaction (18.16% of filings)
+# and DerivativeTransaction (7.05%). That is real missing graph structure rather
+# than dead config, so it was raised as its own issue instead of being deleted
+# silently.
 
 
 def test_market_known_correlations_well_formed():

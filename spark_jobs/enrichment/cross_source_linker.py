@@ -378,6 +378,29 @@ class CrossSourceLinker:
         The EDGAR search API never returns a ticker, so the metadata half of
         every row cannot supply one. The bridge's ceiling is therefore the
         ownership-form share of filings, not their total.
+
+        MEASURED COVERAGE. From a census of 23,983 filing rows across
+        2026-08-07, 2026-08-06, 2026-08-04 and 2025-10-02
+        (bin/census_sec_terms.py):
+
+            rows stating hasIssuerTradingSymbol   5,893   24.57% of all filings
+              of which root_form 4                5,229   100% of the 5,229
+              of which root_form 3                  655   100% of the 655
+              of which root_form 5                    9   100% of the 9
+            rows on any other form                    0
+
+        So the ceiling is exactly the ownership-form share, and WITHIN that
+        share the term is complete rather than partial: 5,893 = 655 + 5,229 + 9
+        with nothing left over. A thin result on this bridge should be compared
+        against that, not against a guess -- "a quarter of filings" is the
+        expected figure and anything near zero is the defect. Note it is
+        ownership forms generally, not Form 4 alone; Forms 3 and 5 carry the
+        ticker too, and they are 11% of the term's rows.
+
+        Every ticker-bearing issuer in that census states a 10-digit padded
+        CIK, so the CIK canonicalization in utils/canonicalization.py does not
+        move this number -- the split it repairs is on Form 144, which carries
+        no ticker.
         """
         market_tickers = self._market_symbol_bearers()
 

@@ -32,5 +32,8 @@
     "expirationDate",
     "inTheMoney",
     "underlyingSymbol"
+  ],
+  "SEC_FILINGS": [
+    "hasOtherManager"
   ]
 }
