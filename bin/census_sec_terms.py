@@ -59,6 +59,13 @@ _spec.loader.exec_module(_cvd)
 
 SEC_PREFIX = "raw/source=sec/feed=filings/"
 
+# The SEC namespaces whose referenced terms this censuses, and the prefix each
+# is printed under. Both are needed: the filings vocabulary carries the form
+# classes and their properties, sec-common the shared Date/Company classes and
+# hasDateValue.
+SEC_NAMESPACE_NAMES = ("SEC_FILINGS", "SEC_COMMON")
+_PREFIX_OF = {"SEC_FILINGS": "sec-filings", "SEC_COMMON": "sec-common"}
+
 # Issuer subject shapes. Upstream mints three, and they do not merge:
 #   Issuer_0000320193          CIK-keyed, current
 #   0001-26-1_Issuer_0         positional -- the PERMANENT fallback for a
@@ -179,7 +186,19 @@ def census(bucket: str, dates: list[str], rows: int) -> dict:
     }
 
 
-def report(result: dict, base: str) -> None:
+def report(result: dict, bases: dict) -> None:
+    """Print the per-form census.
+
+    ``bases`` maps each namespace CONSTANT NAME to its URI, and every term is
+    resolved under the namespace it was referenced from. Resolving them all
+    under one base is not a cosmetic error: this report once built every URI
+    from SEC_FILINGS, so sec-common:hasDateValue was looked up at
+    ontology/sec-filings/hasDateValue, found nowhere, and reported ABSENT
+    (0.00%) -- while the term is in fact emitted by 100% of filing rows and is
+    the ONLY path by which any SEC date resolves. A census that mis-resolves a
+    term reports a live term as dead, which is a licence to delete working
+    code; it is the exact failure the census exists to prevent, turned around.
+    """
     form_rows = result["form_rows"]
     by_form = result["by_form"]
     total = sum(form_rows.values())
@@ -192,14 +211,23 @@ def report(result: dict, base: str) -> None:
     for form, n in sorted(form_rows.items(), key=lambda kv: -kv[1]):
         print(f"  {form:<12} {n:>8}  ({100.0 * n / total:.1f}%)")
 
-    # Overall and best-form rate for every referenced sec-filings term.
+    # Overall and best-form rate for every referenced SEC term, each resolved
+    # under its OWN namespace.
     referenced = _cvd.referenced_terms()
-    terms = sorted(referenced.get("SEC_FILINGS", set()) | referenced.get("SEC_COMMON", set()))
+    terms = sorted(
+        (term, name)
+        for name in bases
+        for term in referenced.get(name, set())
+    )
     print(f"\nper-term presence ({len(terms)} referenced terms):")
     print(f"  {'term':<36} {'overall':>8}  best form (rate)")
     buckets = {"POPULATED": [], "SPARSE": [], "ABSENT": []}
-    for term in terms:
-        uri = base + term
+    for term, namespace in terms:
+        uri = bases[namespace] + term
+        # Printed with its namespace, so two namespaces declaring the same
+        # local name stay distinguishable in the output as well as in the
+        # lookup.
+        label = f"{_PREFIX_OF[namespace]}:{term}"
         hits = {f: by_form.get(f, {}).get(uri, 0) for f in form_rows}
         overall = sum(hits.values())
         pct = 100.0 * overall / total if total else 0.0
@@ -209,12 +237,12 @@ def report(result: dict, base: str) -> None:
             default=("-", 0.0),
         )
         if overall == 0:
-            buckets["ABSENT"].append(term)
+            buckets["ABSENT"].append(label)
         elif pct >= 90.0:
-            buckets["POPULATED"].append(term)
+            buckets["POPULATED"].append(label)
         else:
-            buckets["SPARSE"].append(term)
-        print(f"  {term:<36} {pct:>7.2f}%  {best[0]} ({best[1]:.1f}%)")
+            buckets["SPARSE"].append(label)
+        print(f"  {label:<36} {pct:>7.2f}%  {best[0]} ({best[1]:.1f}%)")
 
     print("\nbuckets:")
     for name, items in buckets.items():
@@ -248,7 +276,9 @@ def main() -> int:
     result = census(bucket, dates, args.rows)
 
     from spark_jobs.utils import rdf_utils
-    report(result, str(rdf_utils.SEC_FILINGS))
+    report(result, {
+        name: str(getattr(rdf_utils, name)) for name in SEC_NAMESPACE_NAMES
+    })
 
     if args.json:
         Path(args.json).write_text(json.dumps(result, indent=2))
