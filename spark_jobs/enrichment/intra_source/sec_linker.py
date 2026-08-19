@@ -58,7 +58,28 @@ _SEC_FILINGS_NS = str(SEC_FILINGS)
 _UNIFIED_NS = str(UNIFIED)
 _SEC_ENRICHMENT_NS = str(SEC_ENRICHMENT)
 
-# SEC Base namespace for date intermediate nodes
+# SEC Base namespace for date intermediate nodes.
+#
+# This is the LIVE path, not a fallback -- see _resolve_dates. Every SEC date
+# predicate that this linker sequences on points at an intermediate node, never
+# at a literal: measured over 23,983 filing rows, hasFilingDate resolves through
+# a node on 23,983 of them and hasPeriodOfReport on all 10,628 that state it,
+# with zero literal objects between them. hasDateValue is then stated by 100% of
+# rows. Delete this constant and both temporal sequence steps resolve no date
+# and emit no precedes edge at all.
+#
+# Recorded because a census run reported it ABSENT at 0.00% and proposed
+# removing it. That reading came from resolving the term under the sec-filings
+# namespace when it is declared in sec-common; the drift checker, which resolves
+# qnames through each document's own @prefix, has always reported it correctly
+# as emitted. See the note in bin/census_sec_terms.py's report().
+#
+# Upstream guarantees the pairing rather than merely happening to emit it: the
+# date individual's subject URI is built from the date column, and a null column
+# makes the whole mapping emit nothing. So a Date or ReportingDate node cannot
+# exist without its hasDateValue -- the 100% is structural, not a sample
+# artifact. Those two are also the only date classes declared, and hasDateValue
+# has sec-common:Date as its rdfs:domain with ReportingDate a subclass of it.
 _SEC_BASE_HAS_DATE_VALUE = str(SEC_COMMON.hasDateValue)
 
 # Enrichment predicates
@@ -301,6 +322,18 @@ class SECIntraSourceLinker:
 
         Also handles direct literal dates:
             entity → date_predicate → "2024-01-15"
+
+        Both branches are live and neither is the fallback, but which one fires
+        depends entirely on the predicate, so they are not interchangeable:
+
+          hasFilingDate       node    23,983 of 23,983 rows,  0 literals
+          hasPeriodOfReport   node    10,628 of 10,628 stating it, 0 literals
+          hasTransactionDate  literal 11,651 occurrences, no node
+
+        Both sequence steps below key on hasPeriodOfReport, so today the node
+        branch carries all of them and the literal branch carries none. It is
+        kept because hasTransactionDate is the shape a transaction-level
+        sequence would need, and it is a literal.
 
         Returns DataFrame with columns: (entity_col, date_value)
         """
