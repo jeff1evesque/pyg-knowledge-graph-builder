@@ -131,18 +131,46 @@ def test_one_side_thin_fails_even_when_the_other_is_complete(tmp_path):
         _smoke._assert_declared_bridges_are_not_degenerate(_write(tmp_path, rows))
 
 
-def test_a_rule_measuring_nothing_is_reported_not_passed(tmp_path):
-    """An empty candidate population must not read as success.
+def test_a_rule_with_no_candidates_is_skipped_on_that_fixture(tmp_path):
+    """Fixtures differ, and a rule cannot be verified where its input is absent.
 
-    A coverage rule whose population is absent measures nothing and would
-    otherwise pass silently -- the precise shape of a check that looks like
-    protection and is not.
+    The N-Triples fixture is a loader test carrying a slice of each source; its
+    SEC half states no ticker at all. Failing there would report a
+    fixture-coverage fact as a pipeline defect.
+
+    This is only safe because a rule that measures nothing EVERYWHERE is caught
+    by test_every_rule_is_exercised_by_the_committed_fixtures below.
     """
-    rows = [r for r in _healthy_rows() if r[1] not in (_SYMBOL,)]
-    rows = [r for r in rows if r[0] not in _SNAPSHOTS]
+    rows = [r for r in _healthy_rows() if r[0] not in _SNAPSHOTS]
+    _smoke._assert_declared_bridges_are_not_degenerate(_write(tmp_path, rows))
 
-    with pytest.raises(AssertionError, match="no candidates in this fixture"):
-        _smoke._assert_declared_bridges_are_not_degenerate(_write(tmp_path, rows))
+
+def test_every_rule_is_exercised_by_the_committed_fixtures():
+    """No coverage rule may be vacuous across the whole fixture set.
+
+    A rule whose candidate predicate appears in NO fixture measures nothing
+    wherever it runs, which is the precise shape of a check that looks like
+    protection and is not. Skipping per-fixture is only defensible with this
+    standing behind it.
+
+    Reads the emitted-term inventory the drift checker already builds from the
+    committed fixtures, rather than re-parsing them here -- same source of
+    truth, so the two cannot disagree about what the fixtures contain.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "_cvd", Path(__file__).resolve().parents[1] / "bin" / "check_vocabulary_drift.py"
+    )
+    cvd = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cvd)
+
+    emitted = cvd.emitted_from_fixtures()
+    for rule in _smoke.BRIDGE_COVERAGE:
+        suffix = f"/{rule.candidates}"
+        assert any(term.endswith(suffix) for term in emitted), (
+            f"{rule.label}: no committed fixture emits {rule.candidates}, so "
+            f"this rule can never measure anything. Give a fixture an example "
+            f"or drop the rule."
+        )
 
 
 # ======================================================================
