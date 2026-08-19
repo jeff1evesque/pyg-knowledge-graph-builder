@@ -1522,10 +1522,21 @@ BRIDGE_COVERAGE = (
 def _assert_declared_bridges_are_not_degenerate(config):
     """Every declared bridge must cover its endpoints, not merely exist.
 
-    See BRIDGE_COVERAGE. A rule whose candidate population is empty in this
-    fixture is reported as unverifiable rather than passed over in silence --
-    absence is the other guard's job, and a coverage rule that quietly measures
-    nothing is exactly the kind of check that looks like protection and is not.
+    See BRIDGE_COVERAGE.
+
+    A rule whose candidate population is empty HERE is skipped, because the
+    fixtures deliberately differ: the N-Triples fixture is a loader test
+    carrying a slice of each source, and its SEC half states no ticker at all,
+    so requiring the SEC rule against it would fail for a fixture-coverage
+    reason rather than a pipeline one -- the same trap KNOWN_ABSENT_BRIDGES and
+    the conditional entries in REQUIRED_BRIDGE_RELATIONS exist to avoid.
+
+    Skipping is only safe because a rule that measures nothing EVERYWHERE is
+    caught elsewhere: tests/test_bridge_coverage_guard.py asserts that every
+    rule has a candidate population somewhere in the committed fixtures. That
+    check belongs in the fast suite anyway -- it is a statement about the
+    fixtures, needs no pipeline run, and so runs constantly rather than only
+    when someone runs the heavy suite by hand.
     """
     import pandas as pd
 
@@ -1538,12 +1549,11 @@ def _assert_declared_bridges_are_not_degenerate(config):
         suffix = f"/{local_name}"
         return set(df[df["predicate"].str.endswith(suffix)]["subject"])
 
-    thin, unverifiable = [], []
+    thin = []
     for rule in BRIDGE_COVERAGE:
         candidates = subjects_of(rule.candidates)
         if not candidates:
-            unverifiable.append(f"{rule.label} (no {rule.candidates} in fixture)")
-            continue
+            continue  # not verifiable on this fixture; see the docstring
         covered = candidates & subjects_of(rule.relation)
         ratio = len(covered) / len(candidates)
         if ratio < rule.floor:
@@ -1561,11 +1571,6 @@ def _assert_declared_bridges_are_not_degenerate(config):
         "whether the data on one side is shaped as the join assumes (padding, "
         "datatype, which subject states the term) rather than whether the term "
         "is still emitted."
-    )
-    assert not unverifiable, (
-        f"coverage rules with no candidates in this fixture: {unverifiable} — "
-        "the rule measured nothing and passed, which is indistinguishable from "
-        "working. Give the fixture an example or remove the rule."
     )
 
 
