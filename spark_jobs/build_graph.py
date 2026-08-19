@@ -82,6 +82,7 @@ import boto3
 from spark_jobs.enrichment.pipeline import EnrichmentPipeline
 
 from spark_jobs.utils.spark_rdf_utils import literal_datatype_observations
+from spark_jobs.utils.canonicalization import canonicalize_source_triples
 
 from spark_jobs.pyg_builder.metadata_writer import (
     write_metadata_to_s3,
@@ -166,6 +167,82 @@ TRIPLES_SCHEMA = StructType([
 # Default number of Parquet output partitions.
 # Targets ~128 MB per partition for 30-50M triples (~2-4 GB total Parquet).
 DEFAULT_PARQUET_PARTITIONS = 200
+
+# ============================================
+# Source coverage: which SEC feed this job handles
+# ============================================
+# The archive holds eight SEC feeds under raw/source=sec/. This pipeline
+# handles exactly one of them, and the restriction has until now been
+# incidental — a property of whichever prefix the caller happened to pass —
+# rather than stated anywhere. Measured against the archive:
+#
+#   feed=filings             218 objects,   2.4 GB   RDF (rdf_turtle column)
+#   feed=filings_documents   712,351 objects, 150 GB  raw filing documents
+#   feed=filing-detail       364 objects            crawler telemetry columns
+#   feed=litigation            1 object              only, no Turtle column
+#   feed=press-release         2 objects             (parsed / parse-start /
+#   feed=speeches              2 objects              failures / user-agent)
+#   feed=statements            2 objects
+#   feed=testimony             1 object
+#
+# filings_documents is not Parquet at all and not one format either: sampled
+# over 400,000 keys it is 233,759 .xml, 160,196 .zip (upstream now packages
+# each filing's documents together with its XBRL members), plus .txt, .htm,
+# .pdf and images. Nothing there is RDF.
+#
+# So a run pointed at the SEC source root does not under-cover quietly — the
+# six telemetry feeds have no Turtle column at all and resolve_turtle_column
+# raises, while filings_documents is not something the Parquet reader can open.
+# It fails, but it fails deep in the loader with a column-name error that says
+# nothing about feeds. This turns that into a statement of scope at the point
+# the job is configured.
+#
+# The one thing NOT guarded here, because storage says it is already resolved:
+# the retired crawler also wrote into feed=filings itself, on a 10-column
+# schema whose RDF column was named `triples` rather than `rdf_turtle`. All 218
+# objects now carry the same 29-column scraper schema, so the migration ran to
+# completion and no mixed-schema read is possible. Worth re-checking if that
+# object count ever jumps backwards.
+#
+# Keyed on the partition name rather than on "sec" anywhere in the path: a
+# local fixture directory called /data/sec/ is not the archive convention and
+# is none of this check's business.
+SEC_SOURCE_PARTITION = "source=sec"
+SEC_HANDLED_FEED = "feed=filings"
+# filings_documents starts with the handled feed's name, so a plain substring
+# test would accept it. It is a different feed and carries no RDF.
+SEC_UNHANDLED_FEEDS = (
+    "feed=filings_documents", "feed=filing-detail", "feed=litigation",
+    "feed=press-release", "feed=speeches", "feed=statements",
+    "feed=testimony",
+)
+
+
+def assert_sec_paths_name_the_handled_feed(source_paths: List[str]) -> None:
+    """Every SEC source path must name feed=filings explicitly.
+
+    Raises:
+        ValueError: if a path under the SEC source partition names a feed this
+            pipeline does not handle, or names no feed at all.
+    """
+    for path in source_paths:
+        if SEC_SOURCE_PARTITION not in path:
+            continue
+        unhandled = [f for f in SEC_UNHANDLED_FEEDS if f in path]
+        if unhandled:
+            raise ValueError(
+                f"source path names an unhandled SEC feed {unhandled[0]!r}: "
+                f"{path}. Only {SEC_HANDLED_FEED!r} carries RDF; the others "
+                f"hold crawler telemetry or raw XML and no pipeline step reads "
+                f"them."
+            )
+        if SEC_HANDLED_FEED not in path:
+            raise ValueError(
+                f"SEC source path does not name a feed: {path}. This pipeline "
+                f"handles {SEC_HANDLED_FEED!r} only, and the SEC source "
+                f"partition holds seven other feeds it cannot read. Point at "
+                f"raw/{SEC_SOURCE_PARTITION}/{SEC_HANDLED_FEED}/... instead."
+            )
 
 
 # ============================================
@@ -323,6 +400,7 @@ class JobConfig:
                 raise ValueError(
                     f"source_paths is required for mode '{self.mode}'"
                 )
+            assert_sec_paths_name_the_handled_feed(self.source_paths)
         if self.mode in ("full", "pyg_only"):
             if not _pyg_builder_available:
                 raise ImportError(
@@ -882,6 +960,14 @@ def load_source_triples(
         triples_df = loaded[0]
         for df in loaded[1:]:
             triples_df = triples_df.unionAll(df)
+
+    # Collapse identifiers upstream spells two ways onto one, before anything
+    # reads the frame. See canonicalization.py: this adds no triple and drops
+    # none, it only makes the two spellings of one entity the same URI. Done
+    # here rather than in a pipeline phase because the enriched Parquet is
+    # written from this frame, so a later repair would leave `pyg_only` runs
+    # reading the unrepaired shape.
+    triples_df = canonicalize_source_triples(triples_df)
 
     # Cache and materialize once — all downstream steps read from cache.
     # For turtle_parquet, this also ensures the rdflib UDF runs exactly
