@@ -50,14 +50,22 @@ filing whose document WAS fetched has its full contents, on every day sampled
 
 SAMPLING
 --------
-Two passes over one day's filings, both deterministic:
+Three passes over one day's filings, all deterministic:
 
   1. **Type coverage.** The rare classes are genuinely rare — on a typical day
      ``XbrlFact`` and ``XbrlDimension`` appear in 2 documents of ~11,000,
      ``ProxyVote`` in 4. A random or head-of-file sample misses all of them, so
      documents are picked greedily by the classes they introduce.
 
-  2. **Period anchoring.** The remainder goes to filings whose reporting period
+  2. **Sequence coverage.** A class being present is not the same as its
+     STRUCTURE being present. Pass 1 introduces NonDerivativeTransaction with
+     the cheapest document that carries one, which is a Form 4 reporting a
+     single transaction — and a lone transaction can form no sequence, so the
+     transaction-level ``precedes`` chain had nothing to build on and its e2e
+     guard measured nothing. This pass adds the cheapest ownership filing that
+     reports two or more transactions of one class.
+
+  3. **Period anchoring.** The remainder goes to filings whose reporting period
      falls in a month the *committed BLS fixtures* also carry, so the
      cross-source temporal bridge has something to join on. This is read out of
      the BLS fixtures on disk, not assumed — regenerate BLS first if both are
@@ -169,6 +177,14 @@ _TYPES_RE = re.compile(r"\ba\s+((?:ns\d+:\w+\s*,\s*)*ns\d+:\w+)")
 # Both date entities embed their ISO date in the URI. Read from there rather
 # than from hasDateValue so a document can be classified before it is parsed.
 _REPORTING_DATE_RE = re.compile(r"ReportingDate_(\d{4})-(\d{2})-\d{2}")
+
+# `<...0002121472-26-000004_NonDerivativeTransaction_1>` — one match per
+# transaction the document reports, whether it appears as the filing's pointer
+# object or as its own subject, which is why the matches are deduplicated
+# before they are counted.
+_TRANSACTION_RE = re.compile(
+    r"/id/sec-filings/([^\s<>\"]*_((?:Non)?DerivativeTransaction)_\d+)"
+)
 
 MONTH_NAMES = (
     "January", "February", "March", "April", "May", "June",
@@ -285,6 +301,24 @@ def document_profile(doc: str) -> tuple[frozenset, frozenset]:
     return frozenset(classes), frozenset(periods)
 
 
+def sequenceable_transactions(doc: str) -> int:
+    """Largest number of transactions of ONE class the document reports.
+
+    2 or more is what the transaction-level ``precedes`` chain needs to form an
+    edge: the chain groups by (reporting owner, transaction class), so a filing
+    reporting one non-derivative and one derivative transaction contributes two
+    groups of one and no edge at all.
+
+    Counted per class for that reason, and over the distinct transaction URIs
+    rather than the raw matches — each one appears at least twice in the
+    document, once as the filing's pointer object and once as its own subject.
+    """
+    per_class: dict[str, set[str]] = defaultdict(set)
+    for local_name, klass in _TRANSACTION_RE.findall(doc):
+        per_class[klass].add(local_name)
+    return max((len(v) for v in per_class.values()), default=0)
+
+
 def bls_fixture_periods() -> set[tuple[str, str]]:
     """(month, year) pairs the committed BLS fixtures carry.
 
@@ -316,7 +350,8 @@ def bls_fixture_periods() -> set[tuple[str, str]]:
 def select_documents(
     docs: list[str], anchors: set[tuple[str, str]], limit: int
 ) -> list[int]:
-    """Pick document indices: type coverage first, then period anchoring.
+    """Pick document indices: type coverage, then sequence coverage, then
+    period anchoring.
 
     Type coverage goes first because it is the scarce resource — a class that
     appears in 2 documents out of 11,000 is only ever going to arrive by being
@@ -344,7 +379,23 @@ def select_documents(
             picked.add(index)
             covered |= classes
 
-    # Pass 2 — filings reporting into a period the BLS fixtures also carry.
+    # Pass 2 — one ownership filing that reports a SEQUENCE, if pass 1 has not
+    # already produced one. Cheapest again, and skipped entirely when the day
+    # carries no such filing: this is a preference, not a requirement, and a
+    # generator that raised here would be unable to sample a day on which
+    # upstream reported only single-transaction filings. validate() is where
+    # the outcome is asserted.
+    if not any(sequenceable_transactions(docs[i]) > 1 for i in chosen):
+        for index in by_cost:
+            if len(chosen) >= limit:
+                break
+            if index not in picked and sequenceable_transactions(docs[index]) > 1:
+                chosen.append(index)
+                picked.add(index)
+                covered |= profiles[index][0]
+                break
+
+    # Pass 3 — filings reporting into a period the BLS fixtures also carry.
     anchored = [
         index for index in range(len(docs))
         if index not in picked and profiles[index][1] & anchors
@@ -355,7 +406,7 @@ def select_documents(
         chosen.append(index)
         picked.add(index)
 
-    # Pass 3 — top up, so a day whose filings mostly report into unanchored
+    # Pass 4 — top up, so a day whose filings mostly report into unanchored
     # periods still yields a full-sized sample.
     for index in range(len(docs)):
         if len(chosen) >= limit:
@@ -576,6 +627,23 @@ def validate(graph, anchors: set[tuple[str, str]], selected_types: set) -> None:
     }
     shared = sample_periods & anchors
 
+    # Transactions that can be SEQUENCED, not merely transactions present. The
+    # chain groups by (owner, class) and needs two DATED members in one group,
+    # so this is measured on the sampled graph — the closure's FAN_OUT_CAP
+    # bounds how many of a filing's transactions survive into it — and it
+    # counts only the ones carrying a transaction date.
+    dated_transactions = {
+        subj for subj in graph.subjects()
+        if _has_local(graph, subj, "hasTransactionDate")
+    }
+    per_group: dict = defaultdict(set)
+    for subj, pred, obj in graph:
+        local = _local(pred)
+        if local in ("hasNonDerivativeTransaction", "hasDerivativeTransaction"):
+            if obj in dated_transactions:
+                per_group[(subj, local)].add(obj)
+    sequenceable = max((len(v) for v in per_group.values()), default=0)
+
     _log("")
     _log("  validation")
     _log(f"    URI subjects .............. {len(total_subjects)}")
@@ -587,6 +655,7 @@ def validate(graph, anchors: set[tuple[str, str]], selected_types: set) -> None:
     _log(f"    dangling references ....... {len(dangling)} "
          f"({len(external)} external vocabulary, not counted)")
     _log(f"    periods shared with BLS ... {sorted(shared)}")
+    _log(f"    largest dated transaction group  {sequenceable}")
 
     assert typed_pct >= 99.0, (
         f"only {typed_pct:.1f}% of URI subjects are typed; entity closure is "
@@ -629,6 +698,15 @@ def validate(graph, anchors: set[tuple[str, str]], selected_types: set) -> None:
     assert shared, (
         "no reporting period in the sample is a period the committed BLS "
         "fixtures carry; the cross-source temporal bridge cannot form"
+    )
+    # A chain of N transactions produces N-1 edges, so a sample whose largest
+    # group is 1 produces none — and the e2e chain guard then measures nothing
+    # while still reporting green. See pass 2 in select_documents.
+    assert sequenceable > 1, (
+        f"the largest group of dated transactions reported by one filing is "
+        f"{sequenceable}; the transaction-level precedes chain needs two in "
+        f"one (filing, class) group to produce a single edge, so the fixture "
+        f"cannot exercise it"
     )
 
 
