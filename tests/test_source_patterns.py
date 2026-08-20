@@ -125,11 +125,12 @@ def test_market_option_strategy_patterns_well_formed():
 # bls/measurements.py is the one that stays, because bls/base_enricher.py really
 # does loop over it: adding an entry there changes what the pipeline emits.
 #
-# The SEC config also described two entries nothing implements -- transaction-
-# level temporal sequencing over NonDerivativeTransaction (18.16% of filings)
-# and DerivativeTransaction (7.05%). That is real missing graph structure rather
-# than dead config, so it was raised as its own issue instead of being deleted
-# silently.
+# The SEC config also described two entries nothing implemented at the time --
+# transaction-level temporal sequencing over NonDerivativeTransaction (18.16%
+# of filings) and DerivativeTransaction (7.05%). That was real missing graph
+# structure rather than dead config, so it was raised as its own issue instead
+# of being deleted silently, and sec_linker._link_transaction_sequences now
+# builds it.
 
 
 def test_market_known_correlations_well_formed():
