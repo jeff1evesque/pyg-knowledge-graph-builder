@@ -25,7 +25,7 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql import Window
 from functools import reduce
-from typing import List, Optional, Set
+from typing import List, Optional, Sequence, Set, Union
 
 from rdflib.namespace import RDF, RDFS, OWL
 
@@ -579,17 +579,30 @@ class SECIntraSourceLinker:
         self,
         entities_with_dates: DataFrame,
         entity_col: str,
-        group_col: str,
+        group_col: Union[str, Sequence[str]],
+        order_cols: Sequence[str] = (),
     ) -> Optional[DataFrame]:
         """
         Generic helper: given a DataFrame with (entity, group_key, date_value),
         produce precedes triples linking consecutive entities within each group
         ordered by date.
 
+        The window is ordered on date_value, then on any order_cols the caller
+        supplies, then ALWAYS on the entity URI. That last key is what makes the
+        chain reproducible: entities sharing a date are otherwise ordered by
+        whatever row order the shuffle happened to produce, which differs
+        between runs of the same input. Ties are not hypothetical -- most
+        multi-transaction groups contain one -- and the e2e suite pins
+        reproducibility across twin runs.
+
         Args:
-            entities_with_dates: DataFrame with columns (entity_col, group_col, date_value)
+            entities_with_dates: DataFrame with columns (entity_col, date_value,
+                and every column named by group_col and order_cols)
             entity_col: name of the entity URI column
-            group_col: name of the grouping column (e.g., owner, company, respondent)
+            group_col: name of the grouping column, or several names to
+                partition on jointly
+            order_cols: tie-break columns applied after date_value and before
+                the entity URI, most significant first
 
         Returns:
             DataFrame of (subject, predicate, object) precedes triples
@@ -597,8 +610,12 @@ class SECIntraSourceLinker:
         if entities_with_dates is None:
             return None
 
-        # Window: partition by group, order by date
-        w = Window.partitionBy(group_col).orderBy("date_value")
+        group_cols = [group_col] if isinstance(group_col, str) else list(group_col)
+
+        # Window: partition by group, order by date and then to a total order
+        w = Window.partitionBy(*group_cols).orderBy(
+            "date_value", *order_cols, entity_col
+        )
 
         with_next = (
             entities_with_dates
