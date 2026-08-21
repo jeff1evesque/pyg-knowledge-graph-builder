@@ -88,7 +88,10 @@ def _fully_registered_collector():
             "reports": "http://ex/reports",
             "sameAs": "http://ex/sameAs",
         },
-        edge_origins={"reports": "raw", "sameAs": "unification"},
+        edge_origins={
+            ("Company", "reports", "Observation"): "raw",
+            ("Company", "sameAs", "Company"): "unification",
+        },
         edge_feature_flags={"reports": True, "sameAs": False},
         edge_feature_dims={"reports": 64, "sameAs": 0},
     )
@@ -303,7 +306,11 @@ def test_relation_groups_collapse_edge_types_sharing_a_relation():
             "reports": "http://ex/reports",
             "sameAs": "http://ex/sameAs",
         },
-        edge_origins={"reports": "raw", "sameAs": "unification"},
+        edge_origins={
+            ("Company", "reports", "Observation"): "raw",
+            ("Observation", "reports", "Observation"): "raw",
+            ("Company", "sameAs", "Company"): "unification",
+        },
         edge_feature_flags={"reports": True, "sameAs": False},
         edge_feature_dims={"reports": 64, "sameAs": 0},
     )
@@ -721,7 +728,10 @@ def test_edge_origin_is_populated_not_unknown():
                 "https://jefflevesque.com/ontology/bls-common/enrichment/correlatesWith"
             ),
         },
-        edge_origins={"reports": "raw", "correlatesWith": "enrichment"},
+        edge_origins={
+            ("Company", "reports", "Observation"): "raw",
+            ("Sector", "correlatesWith", "Sector"): "enrichment",
+        },
     )
     edges = c._build_graph_schema()["edge_types"]
 
@@ -743,6 +753,69 @@ def test_edge_origin_falls_back_to_unknown_when_not_supplied():
     )
     edges = c._build_graph_schema()["edge_types"]
     assert next(iter(edges.values()))["origin"] == "unknown"
+
+
+def test_one_relation_keeps_a_separate_origin_per_endpoint_pair():
+    """A relation's origin is per edge type, not shared across the name.
+
+    edge_origins used to be keyed by relation name while the caller iterated
+    (src, rel, dst), so a relation spanning several endpoint pairs kept only
+    whichever origin was built last and every edge type published it. On the e2e
+    fixtures that stamped 3 edge types (90 edges) `raw` for links the pipeline
+    inferred -- jolts:hasIndustry leaving the minted bls_enrichment_RateMeasurement,
+    overwritten by its 21 raw siblings. Presenting an inference as an observed
+    fact is the mislabelling the origin field exists to prevent, so the two
+    endpoint pairs below must survive as different origins.
+    """
+    c = MetadataCollector("2099-01", 1024, 64, True, {})
+    c.register_edge_types(
+        edge_counts={
+            ("jolts_HiresLevel", "hasIndustry", "jolts_Industry"): 30,
+            ("bls_enrichment_RateMeasurement", "hasIndustry", "jolts_Industry"): 30,
+        },
+        edge_predicate_uris={"hasIndustry": "https://www.bls.gov/jolts/hasIndustry"},
+        edge_origins={
+            ("jolts_HiresLevel", "hasIndustry", "jolts_Industry"): "raw",
+            ("bls_enrichment_RateMeasurement", "hasIndustry", "jolts_Industry"):
+                "enrichment",
+        },
+    )
+    schema = c._build_graph_schema()
+
+    origins = {k: v["origin"] for k, v in schema["edge_types"].items()}
+    assert origins == {
+        "(jolts_HiresLevel, hasIndustry, jolts_Industry)": "raw",
+        "(bls_enrichment_RateMeasurement, hasIndustry, jolts_Industry)": "enrichment",
+    }
+
+    # The group spans both, so it cannot honestly name one origin. "mixed" says
+    # "ask the edge types" -- naming either would restate the same defect one
+    # level up, and it is not an origin value a consumer can mistake for a
+    # trust level.
+    assert schema["relation_groups"]["hasIndustry"]["origin"] == "mixed"
+
+
+def test_relation_group_keeps_the_origin_its_edge_types_agree_on():
+    """"mixed" is reserved for genuine disagreement, not applied to every group.
+
+    Guards the obvious over-correction of the test above: if `mixed` leaked onto
+    agreeing groups, the field would stop distinguishing anything at all.
+    """
+    c = MetadataCollector("2099-01", 1024, 64, True, {})
+    c.register_edge_types(
+        edge_counts={
+            ("cpi_Index", "hasMonth", "temporal_SourceMonth"): 4,
+            ("cpi_Series", "hasMonth", "temporal_SourceMonth"): 2,
+        },
+        edge_predicate_uris={"hasMonth": "https://www.bls.gov/cpi/hasMonth"},
+        edge_origins={
+            ("cpi_Index", "hasMonth", "temporal_SourceMonth"): "raw",
+            ("cpi_Series", "hasMonth", "temporal_SourceMonth"): "raw",
+        },
+    )
+    groups = c._build_graph_schema()["relation_groups"]
+    assert groups["hasMonth"]["edge_type_count"] == 2
+    assert groups["hasMonth"]["origin"] == "raw"
 
 
 # ======================================================================
