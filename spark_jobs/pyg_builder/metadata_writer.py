@@ -158,7 +158,7 @@ class MetadataCollector:
         self,
         edge_counts: Dict[Tuple[str, str, str], int],
         edge_predicate_uris: Dict[str, str],
-        edge_origins: Optional[Dict[str, str]] = None,
+        edge_origins: Optional[Dict[Tuple[str, str, str], str]] = None,
         edge_feature_flags: Optional[Dict[str, bool]] = None,
         edge_feature_dims: Optional[Dict[str, int]] = None,
     ) -> None:
@@ -168,13 +168,25 @@ class MetadataCollector:
         Args:
             edge_counts: Dict[(src, rel, dst) -> num_edges]
             edge_predicate_uris: Dict[relation_name -> predicate_uri]
-            edge_origins: Optional Dict[relation_name -> origin] where
+            edge_origins: Optional Dict[(src, rel, dst) -> origin] where
                 origin is one of: raw, enrichment, unification
                 (see rdf_utils.classify_edge_origin). Three values, not
                 the four once listed here: intra- and cross-source enrichment
                 share a namespace, so nothing available at this layer can
                 separate them, and promising a distinction that is never
                 emitted is the same defect as the "unknown" default below.
+
+                Keyed by the FULL edge type, not the relation name alone.
+                classify_edge_origin reads the endpoints as well as the
+                predicate, so one relation legitimately has different origins
+                per endpoint pair: jolts:hasIndustry is raw from jolts_HiresLevel
+                but enrichment from the pipeline-minted
+                bls_enrichment_RateMeasurement. Keyed by name, those collapsed to
+                whichever the caller built last -- 3 edge types (90 edges) on the
+                e2e fixtures were stamped `raw` for links this pipeline inferred,
+                the "observed fact" mislabelling classify_edge_origin exists to
+                prevent. A relation-name key cannot express the distinction, so
+                the key has to carry the endpoints.
             edge_feature_flags: Dict[relation_name -> has_features]
             edge_feature_dims: Dict[relation_name -> feature_dim]
         """
@@ -187,7 +199,7 @@ class MetadataCollector:
                 "dst_type": dst,
                 "count": count,
                 "predicate_uri": edge_predicate_uris.get(rel, ""),
-                "origin": (edge_origins or {}).get(rel, "unknown"),
+                "origin": (edge_origins or {}).get((src, rel, dst), "unknown"),
                 "has_features": (edge_feature_flags or {}).get(rel, False),
                 "feature_dim": (edge_feature_dims or {}).get(rel, 0),
                 # Schema 1.2. The group a consumer should share weights over —
@@ -489,17 +501,29 @@ class MetadataCollector:
         never collide, and `predicate_uri` is carried on the group to make that
         checkable.
 
+        `origin` is the group's only field that its edge types can genuinely
+        disagree on: origin reads the endpoints (see register_edge_types) and a
+        group spans endpoint pairs by definition, so jolts:hasIndustry is `raw`
+        across 21 of its edge types and `enrichment` on the one leaving a minted
+        node. A disagreeing group reports "mixed" rather than one member's value
+        -- naming a single origin there would restate at group level the exact
+        mislabelling that keying origin by relation name used to cause. "mixed"
+        means "ask the edge types"; it is deliberately not one of the three
+        origin values, so a consumer that switches on origin cannot read it as a
+        trust level.
+
         Returns:
             Dict[relation_name -> {edge_types, count, ...}], sorted by name.
         """
         groups: Dict[str, Dict[str, Any]] = {}
         for key, entry in sorted(edge_types.items()):
             group = entry.get("relation_group") or entry.get("relation", "")
+            origin = entry.get("origin", "unknown")
             bucket = groups.setdefault(
                 group,
                 {
                     "predicate_uri": entry.get("predicate_uri", ""),
-                    "origin": entry.get("origin", "unknown"),
+                    "origin": origin,
                     "edge_types": [],
                     "edge_type_count": 0,
                     "count": 0,
@@ -507,6 +531,8 @@ class MetadataCollector:
                     "feature_dim": 0,
                 },
             )
+            if bucket["origin"] != origin:
+                bucket["origin"] = "mixed"
             bucket["edge_types"].append(key)
             bucket["edge_type_count"] += 1
             bucket["count"] += int(entry.get("count", 0))

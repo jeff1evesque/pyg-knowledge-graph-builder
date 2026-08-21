@@ -205,3 +205,75 @@ def test_single_node_type_no_edges_does_not_crash(spark):
     assert list(data.node_types) == ["cpi_Index"]
     assert list(data.edge_types) == []
     assert data["cpi_Index"].num_nodes == 2
+
+
+# ======================================================================
+# Edge origin — every edge type says where it came from, correctly
+# ======================================================================
+#
+# Both assertions below exist in the e2e smoke too, but that suite is
+# workflow_dispatch-only (.github/workflows/e2e.yml) and takes ~8 minutes, so
+# nothing caught either regression per-PR. This is the same check against the
+# real constructor on tiny triples, in the tier that runs on every push.
+
+def test_every_edge_type_records_the_origin_its_endpoints_imply(spark):
+    """origin must be populated AND correct -- two separate regressions.
+
+    "unknown" is the not-supplied fallback, so it appearing here means
+    constructor.py stopped passing edge_origins; that shipped once already and
+    made every edge type indistinguishable between a reported fact and a
+    pipeline inference.
+
+    Correctness is checked against classify_edge_origin rather than a literal,
+    because the second regression produced *valid* values that were wrong for
+    their endpoints: origin was keyed by relation name, so cpi:hasCategory
+    leaving the minted bls_enrichment_RateMeasurement below was overwritten by
+    its raw cpi_Index sibling and published `raw`. A membership check
+    (origin in {raw, enrichment, unification}) passes that happily -- it asks
+    whether the value is a legal word, never whether it is the right one.
+    """
+    from spark_jobs.utils.rdf_utils import CPI, classify_edge_origin
+
+    rate = f"{BLS_ENRICHMENT}RateMeasurement"   # -> bls_enrichment_RateMeasurement
+    category = f"{CPI}Category"                 # -> cpi_Category
+    has_category = f"{CPI}hasCategory"          # raw predicate, either endpoint
+
+    triples = spark.createDataFrame([
+        ("https://ex/i1", RDF_TYPE, CPI_INDEX),
+        ("https://ex/r1", RDF_TYPE, rate),
+        ("https://ex/c1", RDF_TYPE, category),
+        # One relation, two endpoint pairs, two different origins: raw from the
+        # source-data node, enrichment from the pipeline-minted one.
+        ("https://ex/i1", has_category, "https://ex/c1"),
+        ("https://ex/r1", has_category, "https://ex/c1"),
+        # A minted predicate, so the enrichment verdict does not rest solely on
+        # endpoint types.
+        ("https://ex/i1", PRECEDES, "https://ex/i1"),
+    ], schema="subject STRING, predicate STRING, object STRING")
+
+    _data, metadata, _node_index = build_hetero_data(
+        spark, triples, config=NO_EDGE_FEATURES
+    )
+    edge_types = metadata._build_graph_schema()["edge_types"]
+    assert edge_types, "no edge types registered -- the assertions below are vacuous"
+
+    origins = {k: v["origin"] for k, v in edge_types.items()}
+    assert "unknown" not in origins.values(), f"unrecorded origin: {origins}"
+
+    for key, entry in edge_types.items():
+        expected = classify_edge_origin(
+            entry["predicate_uri"], entry["src_type"], entry["dst_type"]
+        )
+        assert entry["origin"] == expected, (
+            f"{key} published origin={entry['origin']!r} but its endpoints imply "
+            f"{expected!r}"
+        )
+
+    # The specific pair that regressed, spelled out so the intent survives a
+    # future refactor of the loop above.
+    assert origins[
+        "(cpi_Index, cpi_hasCategory, cpi_Category)"
+    ] == "raw"
+    assert origins[
+        "(bls_enrichment_RateMeasurement, cpi_hasCategory, cpi_Category)"
+    ] == "enrichment"

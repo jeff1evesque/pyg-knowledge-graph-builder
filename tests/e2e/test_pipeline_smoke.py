@@ -29,6 +29,8 @@ from pathlib import Path
 
 import pytest
 
+from spark_jobs.utils.rdf_utils import classify_edge_origin
+
 pytestmark = pytest.mark.e2e
 
 _RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
@@ -172,6 +174,25 @@ def _assert_valid_graph_and_metadata(config, work_dir):
     assert "unknown" not in origins, "edge types with unrecorded origin"
     assert origins <= {"raw", "enrichment", "unification"}, (
         f"unexpected origin values: {origins}"
+    )
+
+    # ...and that the origin recorded is the one its endpoints imply. The two
+    # assertions above only ask whether the value is a legal word, which is why
+    # they passed while origin was keyed by relation name alone: one relation
+    # spans many endpoint pairs, so all of them kept whichever origin the
+    # constructor built last. 3 edge types (90 edges) published `raw` for links
+    # the pipeline had inferred -- a legal value, the wrong one, and exactly the
+    # "inference presented as observed fact" the field exists to rule out.
+    mislabelled = [
+        (key, entry["origin"], expected)
+        for key, entry in schema["edge_types"].items()
+        if (expected := classify_edge_origin(
+            entry["predicate_uri"], entry["src_type"], entry["dst_type"]
+        )) != entry["origin"]
+    ]
+    assert not mislabelled, (
+        f"{len(mislabelled)} edge types record an origin their endpoints "
+        f"contradict: {mislabelled[:5]}"
     )
 
     # --- the metadata actually describes the tensors that were emitted ---

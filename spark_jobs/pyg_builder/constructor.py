@@ -370,8 +370,16 @@ def build_hetero_data(
     # minted NODE but a standard predicate (unified:Nov owl:sameAs cpi:Nov), so
     # predicate alone reports them as raw -- an inferred link passed off as an
     # observed fact.
+    #
+    # Keyed by the full edge type for that same reason. Because the endpoints
+    # are read, one relation has different origins per endpoint pair, so a
+    # relation-name key silently kept whichever this loop built last:
+    # jolts:hasIndustry leaving the minted bls_enrichment_RateMeasurement is
+    # enrichment, but its 21 raw siblings overwrote it and all 22 published
+    # `raw`. 3 edge types (90 edges) on the e2e fixtures claimed to be observed
+    # facts while being pipeline inferences.
     edge_origins = {
-        rel: classify_edge_origin(
+        (src, rel, dst): classify_edge_origin(
             edge_predicate_uris.get(rel, ""), src, dst
         )
         for (src, rel, dst) in edge_counts
