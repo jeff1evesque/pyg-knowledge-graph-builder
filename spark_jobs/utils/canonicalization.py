@@ -169,11 +169,14 @@ OPAQUE_CODE_PREDICATES = (
 #   hasCusip                  6.85%   86% of 13F-HR, 98% of NPORT-P
 #   hasOtherManager           1.22%   19% of 13F-HR
 #
-# hasOtherManager is the reason conf/vocabulary_baseline.json carries a
-# SEC_FILINGS entry. The e2e fixtures include 13F-HR rows but none that happens
-# to carry it, so referencing it here registers as drift against the fixtures
-# while being demonstrably live in production. That is a fixture-coverage fact,
-# which is what the baseline is for -- not an excused dead reference.
+# hasOtherManager used to be the reason conf/vocabulary_baseline.json carried a
+# SEC_FILINGS entry: the e2e fixtures held 13F-HR rows but none that happened to
+# carry it, so referencing it here registered as drift against the fixtures
+# while being demonstrably live in production. Re-sampling the fixture from a
+# day upstream had backfilled (see generate_sec_e2e_fixtures.py, WHICH DAY TO
+# SAMPLE) picked up a 13F-HR that states it, and the entry left the baseline.
+# The lesson is about the baseline rather than about this term -- an entry there
+# is a claim about the FIXTURES, and a better sample can retire one.
 
 # Deliberately NOT repaired: the ownership flags (isDirector, isOfficer,
 # isTenPercentOwner, isOther, hasEquitySwapInvolved) also arrive as 0.0 / 1.0.

@@ -231,6 +231,9 @@ def _assert_valid_graph_and_metadata(config, work_dir):
     # --- and exists at full strength, rather than resolving into one edge ---
     _assert_declared_bridges_are_not_degenerate(config)
 
+    # --- a chain of N transactions is N-1 edges, not "some precedes present" ---
+    _assert_transaction_chains_are_complete(config)
+
 
 # --------------------------------------------------------------------------- #
 # full mode — both loaders
@@ -1571,6 +1574,126 @@ def _assert_declared_bridges_are_not_degenerate(config):
         "whether the data on one side is shaped as the join assumes (padding, "
         "datatype, which subject states the term) rather than whether the term "
         "is still emitted."
+    )
+
+
+# The transaction chain, which the ratio rules above cannot express.
+#
+# BRIDGE_COVERAGE asks what fraction of a candidate population reaches a
+# relation, and a chain does not have that shape: the LAST transaction in a
+# group correctly reaches nothing, so the honest floor is (N - groups) / N,
+# which is a property of how the fixture's filings happen to be distributed
+# rather than of the pipeline. What IS a property of the pipeline is the
+# chain itself -- N dated transactions in one group are N-1 edges laid end to
+# end, no more and no fewer.
+#
+# That distinction is the whole point. "precedes edges exist between
+# transactions" is satisfied by one edge among forty transactions, and a
+# window that resolved a date for one member of each group would produce
+# exactly that while looking healthy from every other angle.
+#
+# The grouping is re-derived HERE from the filing structure -- transaction ->
+# filing -> reporting owner, split by class -- rather than read from the
+# linker. It therefore encodes the same choice the linker's docstring states,
+# and changing that choice means changing this too. That coupling is
+# unavoidable for an exact count, and an exact count is the only thing that
+# separates a chain from a scattering of edges.
+_TRANSACTION_CLASSES = ("NonDerivativeTransaction", "DerivativeTransaction")
+_TRANSACTION_POINTERS = ("hasNonDerivativeTransaction", "hasDerivativeTransaction")
+
+
+def _assert_transaction_chains_are_complete(config):
+    """Every group of N dated transactions carries exactly N-1 precedes edges.
+
+    Skipped when the fixture holds no group of two, for the same reason the
+    coverage rules skip a rule with no candidates: a filing reporting a single
+    transaction has nothing to sequence, and failing on that would report a
+    fixture-coverage fact as a pipeline defect. tests/test_bridge_coverage_guard
+    .py is what keeps the skip honest -- it asserts the committed fixtures DO
+    carry such a group, and generate_sec_e2e_fixtures.py selects one on purpose.
+
+    Measured on the enriched triples rather than on the graph, like the bridge
+    coverage above: this is a statement about the join, and an edge lost later
+    in node typing is a different failure with a different fix.
+    """
+    import pandas as pd
+
+    files = sorted(Path(config.enriched_parquet_path).rglob("*.parquet"))
+    if not files:
+        return  # split-mode runs may not re-emit the enriched frame
+    df = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
+
+    local = df["predicate"].str.rsplit("/", n=1).str[-1].str.rsplit("#", n=1).str[-1]
+    object_local = df["object"].str.rsplit("/", n=1).str[-1]
+
+    typed = df[(df["predicate"] == _RDF_TYPE) & object_local.isin(_TRANSACTION_CLASSES)]
+    transaction_class = dict(zip(typed["subject"], object_local[typed.index]))
+    if not transaction_class:
+        return  # no ownership transactions in this fixture
+
+    dated = set(df.loc[local == "hasTransactionDate", "subject"])
+
+    pointers = df[local.isin(_TRANSACTION_POINTERS)]
+    filing_of = dict(zip(pointers["object"], pointers["subject"]))
+
+    reported_by = df[local == "hasReportingOwner"]
+    owners_of = collections.defaultdict(list)
+    for filing, owner in zip(reported_by["subject"], reported_by["object"]):
+        owners_of[filing].append(owner)
+
+    groups = collections.defaultdict(set)
+    for transaction, klass in transaction_class.items():
+        if transaction not in dated:
+            continue
+        for owner in owners_of.get(filing_of.get(transaction), ()):
+            groups[(owner, klass)].add(transaction)
+
+    chains = {key: members for key, members in groups.items() if len(members) > 1}
+    if not chains:
+        return  # nothing to sequence here; see the docstring
+
+    sequenced = df[local == "precedes"]
+    between_transactions = {
+        (s, o) for s, o in zip(sequenced["subject"], sequenced["object"])
+        if s in transaction_class and o in transaction_class
+    }
+
+    broken = []
+    for (owner, klass), members in sorted(chains.items()):
+        inside = {(s, o) for s, o in between_transactions
+                  if s in members and o in members}
+        successors = collections.Counter(s for s, _ in inside)
+        predecessors = collections.Counter(o for _, o in inside)
+        forks = sorted(s for s, n in successors.items() if n > 1)
+        joins = sorted(o for o, n in predecessors.items() if n > 1)
+        if len(inside) != len(members) - 1 or forks or joins:
+            broken.append(
+                f"{owner.rsplit('/', 1)[-1]} / {klass}: {len(members)} dated "
+                f"transactions linked by {len(inside)} edge(s), expected "
+                f"{len(members) - 1}"
+                + (f"; branches at {forks}" if forks else "")
+                + (f"; merges at {joins}" if joins else "")
+            )
+
+    assert not broken, (
+        "transaction chains that are not chains:\n  " + "\n  ".join(broken)
+        + "\n\nA group of N dated transactions is a path of N-1 precedes edges. "
+        "Too few and the window resolved a date for only some members — check "
+        "the date join, not whether the relation exists. Branching or merging "
+        "means the ordering is not a total one, which on this data means the "
+        "tie-break stopped applying: transactions sharing a transaction date "
+        "are the common case, not the exception."
+    )
+
+    stray = sorted(
+        (s, o) for s, o in between_transactions
+        if not any(s in members and o in members for members in groups.values())
+    )
+    assert not stray, (
+        f"precedes edges between transactions in different groups: {stray} — "
+        "the window is partitioning on something wider than (reporting owner, "
+        "transaction class), so unrelated filers' transactions are being "
+        "ordered against each other"
     )
 
 

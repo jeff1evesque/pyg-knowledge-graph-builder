@@ -174,6 +174,151 @@ def test_every_rule_is_exercised_by_the_committed_fixtures():
 
 
 # ======================================================================
+# The transaction chain: N dated transactions, N-1 edges
+# ======================================================================
+#
+# Same argument as above, one level down. The bridge rules ask what fraction of
+# a population is linked at all; a chain also has to be SHAPED like a chain, and
+# the two ways it degenerates -- too few edges, or edges that branch -- both
+# leave `precedes` present and every term involved live.
+
+_RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+_ND_TYPE = f"{_ONT}sec-filings/NonDerivativeTransaction"
+_D_TYPE = f"{_ONT}sec-filings/DerivativeTransaction"
+_HAS_ND = f"{_ONT}sec-filings/hasNonDerivativeTransaction"
+_HAS_D = f"{_ONT}sec-filings/hasDerivativeTransaction"
+_TX_DATE = f"{_ONT}sec-filings/hasTransactionDate"
+_REPORTING_OWNER = f"{_ONT}sec-filings/hasReportingOwner"
+_PRECEDES = f"{_ONT}sec/precedes"
+
+_OWNER = f"{_ID}sec-filings/ReportingOwner_0000000001"
+_FILING = f"{_ID}sec-filings/0000000001-26-000001_Filing"
+
+
+def _transaction(index, kind="NonDerivative"):
+    return f"{_ID}sec-filings/0000000001-26-000001_{kind}Transaction_{index}"
+
+
+def _reported(index, date, kind="NonDerivative"):
+    """A filing reporting one dated transaction, and the pointer to it."""
+    transaction = _transaction(index, kind)
+    return [
+        (_FILING, _HAS_ND if kind == "NonDerivative" else _HAS_D, transaction),
+        (transaction, _RDF_TYPE, _ND_TYPE if kind == "NonDerivative" else _D_TYPE),
+        (transaction, _TX_DATE, date),
+    ]
+
+
+def _chain_rows(edges=((0, 1), (1, 2))):
+    """Three dated transactions of one owner, chained by ``edges``."""
+    rows = [(_FILING, _REPORTING_OWNER, _OWNER)]
+    for index, date in enumerate(("2026-08-10", "2026-08-11", "2026-08-12")):
+        rows += _reported(index, date)
+    rows += [
+        (_transaction(a), _PRECEDES, _transaction(b)) for a, b in edges
+    ]
+    return rows
+
+
+def test_a_complete_chain_passes(tmp_path):
+    _smoke._assert_transaction_chains_are_complete(_write(tmp_path, _chain_rows()))
+
+
+def test_a_group_of_one_is_not_required_to_chain(tmp_path):
+    """A filing reporting a single transaction has nothing to sequence.
+
+    The overwhelmingly common case upstream — and it must not read as a defect,
+    or every fixture fails for a fact about ownership filings rather than about
+    the pipeline.
+    """
+    rows = [(_FILING, _REPORTING_OWNER, _OWNER), *_reported(0, "2026-08-10")]
+    _smoke._assert_transaction_chains_are_complete(_write(tmp_path, rows))
+
+
+def test_a_chain_missing_its_middle_edge_fails(tmp_path):
+    """The defect this exists for.
+
+    Two of three transactions are linked, so `precedes` is present between
+    transactions and every guard that asks whether the relation resolved is
+    satisfied. Only the count says the third is stranded.
+    """
+    with pytest.raises(AssertionError, match="linked by 1 edge"):
+        _smoke._assert_transaction_chains_are_complete(
+            _write(tmp_path, _chain_rows(edges=((0, 1),)))
+        )
+
+
+def test_a_star_is_not_a_chain(tmp_path):
+    """N-1 edges is necessary and not sufficient.
+
+    One transaction pointing at both others has the right edge COUNT and the
+    wrong shape: it is what a window ordered on a non-total key can produce, and
+    it says two things happened next.
+    """
+    with pytest.raises(AssertionError, match="branches at"):
+        _smoke._assert_transaction_chains_are_complete(
+            _write(tmp_path, _chain_rows(edges=((0, 1), (0, 2))))
+        )
+
+
+def test_classes_chained_together_fail(tmp_path):
+    """A derivative and a non-derivative transaction are two groups, not one.
+
+    Chaining across them leaves each class-group short of its own edges, which
+    is what fires here — and the merged edge itself is then reported as
+    crossing groups.
+    """
+    rows = [
+        (_FILING, _REPORTING_OWNER, _OWNER),
+        *_reported(0, "2026-08-10"),
+        *_reported(1, "2026-08-11"),
+        *_reported(0, "2026-08-12", kind="Derivative"),
+        (_transaction(1), _PRECEDES, _transaction(0, "Derivative")),
+    ]
+    with pytest.raises(AssertionError) as caught:
+        _smoke._assert_transaction_chains_are_complete(_write(tmp_path, rows))
+    assert "0 edge(s), expected 1" in str(caught.value)
+
+
+def test_the_committed_fixture_carries_a_chain_to_measure():
+    """The guard skips a fixture with no group of two, so one must have one.
+
+    Exactly the argument behind test_every_rule_is_exercised_by_the_committed_
+    fixtures: a skip is only defensible while something proves the check is not
+    skipped everywhere. Upstream reports one transaction per filing far more
+    often than several, so this does not hold by luck --
+    generate_sec_e2e_fixtures.py selects such a filing on purpose and asserts it
+    survived the sample.
+    """
+    import collections
+
+    import rdflib
+
+    fixture = (
+        Path(__file__).resolve().parents[1]
+        / "tests" / "fixtures" / "e2e" / "turtle_parquet" / "sec"
+        / "sec_sample.parquet"
+    )
+    graph = rdflib.Graph()
+    for document in pd.read_parquet(fixture)["triples"]:
+        graph.parse(data=document, format="turtle")
+
+    dated = set(graph.subjects(rdflib.URIRef(_TX_DATE), None))
+    groups = collections.Counter(
+        (subject, predicate)
+        for predicate in (rdflib.URIRef(_HAS_ND), rdflib.URIRef(_HAS_D))
+        for subject, obj in graph.subject_objects(predicate)
+        if obj in dated
+    )
+    assert max(groups.values(), default=0) > 1, (
+        "no committed SEC fixture has a filing reporting two dated "
+        "transactions of one class, so _assert_transaction_chains_are_complete "
+        "skips wherever it runs and measures nothing. Regenerate the fixture "
+        "(bin/generate_sec_e2e_fixtures.py), which selects one for this reason."
+    )
+
+
+# ======================================================================
 # The node-level half: one filer, one node
 # ======================================================================
 

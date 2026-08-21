@@ -1540,6 +1540,8 @@ triples_df (raw)
     │   ├── Company unification (owl:sameAs by CIK)
     │   ├── Person unification (owl:sameAs by CIK)
     │   ├── Filing sequences (precedes by date)
+    │   ├── Transaction sequences (precedes by transaction date, within
+    │   │   a reporting owner and instrument class)
     │   ├── Sector classification (belongsToSector)
     │   └── Violation type linking (hasViolationType)
     │

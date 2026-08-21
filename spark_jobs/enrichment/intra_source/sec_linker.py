@@ -13,7 +13,8 @@ working correctly.
 Enrichment steps:
 1. Unify company entities (by CIK across datasets)
 2. Unify person entities (by CIK across datasets)
-3. Link temporal sequences (chronological ordering within each dataset)
+3. Link temporal sequences (chronological ordering of filings by owner and by
+   issuer, and of the transactions an ownership filing reports)
 4. Apply sector patterns (keyword matching against URIs and labels)
 5. Apply violation patterns (keyword matching + cross-dataset linking)
 
@@ -25,7 +26,7 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql import Window
 from functools import reduce
-from typing import List, Optional, Set
+from typing import List, Optional, Sequence, Set, Union
 
 from rdflib.namespace import RDF, RDFS, OWL
 
@@ -110,6 +111,15 @@ _FILINGS_HAS_TRANSACTION_DATE = str(SEC_FILINGS.hasTransactionDate)
 _FILINGS_HAS_ISSUER_TRADING_SYMBOL = str(SEC_FILINGS.hasIssuerTradingSymbol)
 _FILINGS_HAS_ISSUER_NAME = str(SEC_FILINGS.hasIssuerName)
 
+# The two pointers from an ownership filing to the transactions it reports.
+# They are the only path from a transaction back to the document it was
+# reported in, and through it to the reporting owner -- the transaction states
+# neither.
+_FILINGS_HAS_NON_DERIVATIVE_TRANSACTION = str(
+    SEC_FILINGS.hasNonDerivativeTransaction
+)
+_FILINGS_HAS_DERIVATIVE_TRANSACTION = str(SEC_FILINGS.hasDerivativeTransaction)
+
 
 
 
@@ -127,6 +137,31 @@ _FORM4_TYPE = str(SEC_FILINGS.Form4)
 _FORM10K_TYPE = str(SEC_FILINGS.Form10K)
 _FORM10Q_TYPE = str(SEC_FILINGS.Form10Q)
 _FORM8K_TYPE = str(SEC_FILINGS.Form8K)
+
+# The two transaction classes an ownership filing reports. Unlike Form3/Form5
+# above, these ARE declared and emitted: measured over 2026-08-06,
+# NonDerivativeTransaction appears in 2,226 of 12,223 filing documents and
+# DerivativeTransaction in 805 -- which is the large majority of the 2,679
+# Form 4s, the only documents that can carry either.
+#
+# Those figures come from the 2026-08-03..08-07 objects, which upstream wrote
+# as a backfill on 08-11. Every DAILY object written since is a tenth the size
+# and carries almost none of this -- 08-19 enriched 132 filings of 2,894 -- and
+# the reason is COVERAGE, not a mapping change. Upstream fetches the filing
+# DOCUMENT for at most 150 accessions per run, selected as the head of EDGAR's
+# accession-descending order with no cursor, so the same few hundred filings
+# are re-read and the rest are never fetched. An ownership filing whose
+# document was fetched has its full contents: 606 of 606 on 08-07, 33 of 33 on
+# 08-10, 23 of 23 on 08-19. Reporting owner present is exactly equivalent to
+# "the document was fetched".
+#
+# Two consequences here. The filing-level ownership sequence above is starved
+# on recent daily data for the same reason -- it has almost nothing to link,
+# rather than being broken. And an e2e fixture must be sampled from a day
+# upstream backfilled, or it encodes 5% document coverage as though that were
+# the shape of the data.
+_NON_DERIVATIVE_TRANSACTION_TYPE = str(SEC_FILINGS.NonDerivativeTransaction)
+_DERIVATIVE_TRANSACTION_TYPE = str(SEC_FILINGS.DerivativeTransaction)
 
 
 
@@ -330,10 +365,10 @@ class SECIntraSourceLinker:
           hasPeriodOfReport   node    10,628 of 10,628 stating it, 0 literals
           hasTransactionDate  literal 11,651 occurrences, no node
 
-        Both sequence steps below key on hasPeriodOfReport, so today the node
-        branch carries all of them and the literal branch carries none. It is
-        kept because hasTransactionDate is the shape a transaction-level
-        sequence would need, and it is a literal.
+        Both filing-level sequence steps below key on hasPeriodOfReport and so
+        take the node branch; _link_transaction_sequences keys on
+        hasTransactionDate and is the caller the literal branch carries. Neither
+        branch is dead and neither can serve the other's predicate.
 
         Returns DataFrame with columns: (entity_col, date_value)
         """
@@ -567,6 +602,7 @@ class SECIntraSourceLinker:
 
         self._append(new_dfs, self._link_ownership_filing_sequences())
         self._append(new_dfs, self._link_periodic_reporting_sequences())
+        self._append(new_dfs, self._link_transaction_sequences())
 
         if not new_dfs:
             return None
@@ -579,17 +615,30 @@ class SECIntraSourceLinker:
         self,
         entities_with_dates: DataFrame,
         entity_col: str,
-        group_col: str,
+        group_col: Union[str, Sequence[str]],
+        order_cols: Sequence[str] = (),
     ) -> Optional[DataFrame]:
         """
         Generic helper: given a DataFrame with (entity, group_key, date_value),
         produce precedes triples linking consecutive entities within each group
         ordered by date.
 
+        The window is ordered on date_value, then on any order_cols the caller
+        supplies, then ALWAYS on the entity URI. That last key is what makes the
+        chain reproducible: entities sharing a date are otherwise ordered by
+        whatever row order the shuffle happened to produce, which differs
+        between runs of the same input. Ties are not hypothetical -- see
+        _link_transaction_sequences, where most groups contain one -- and the
+        e2e suite pins reproducibility across twin runs.
+
         Args:
-            entities_with_dates: DataFrame with columns (entity_col, group_col, date_value)
+            entities_with_dates: DataFrame with columns (entity_col, date_value,
+                and every column named by group_col and order_cols)
             entity_col: name of the entity URI column
-            group_col: name of the grouping column (e.g., owner, company, respondent)
+            group_col: name of the grouping column, or several names to
+                partition on jointly (e.g. owner AND transaction class)
+            order_cols: tie-break columns applied after date_value and before
+                the entity URI, most significant first
 
         Returns:
             DataFrame of (subject, predicate, object) precedes triples
@@ -597,8 +646,12 @@ class SECIntraSourceLinker:
         if entities_with_dates is None:
             return None
 
-        # Window: partition by group, order by date
-        w = Window.partitionBy(group_col).orderBy("date_value")
+        group_cols = [group_col] if isinstance(group_col, str) else list(group_col)
+
+        # Window: partition by group, order by date and then to a total order
+        w = Window.partitionBy(*group_cols).orderBy(
+            "date_value", *order_cols, entity_col
+        )
 
         with_next = (
             entities_with_dates
@@ -702,6 +755,166 @@ class SECIntraSourceLinker:
         filings_dated = filings_with_company.join(dates, "filing", "inner")
 
         return self._build_precedes_links(filings_dated, "filing", "company")
+
+    def _link_transaction_sequences(self) -> Optional[DataFrame]:
+        """Chain a reporting owner's ownership transactions into a sequence.
+
+        The two steps above sequence whole FILINGS and nothing inside them. The
+        transactions a Form 4 reports are the signal the filing exists to carry,
+        and they had no precedes edge at all: a director who bought on the 3rd
+        and sold on the 11th produced two nodes with no relative order, so a
+        GNN aggregated them as an unordered bag instead of along a path.
+
+        GROUPING KEY -- (reporting owner, transaction class).
+
+        Owner rather than filing, because the owner's transaction history is
+        what the ordering is ABOUT and it does not stop at a document boundary.
+        Within one day's data the two keys give the identical partition
+        (measured on 2026-08-19: all 21 transaction-bearing filings state
+        exactly one reporting owner, and no owner filed twice that day), so
+        choosing owner costs nothing there and chains an owner's filings
+        together once a run spans several days -- which production runs do, as
+        they read the whole feed prefix rather than one partition. That works
+        because upstream mints ReportingOwner_{cik} as ONE global node per
+        person across every filing they appear on, deliberately and not
+        accession-scoped. Filing-grouping would throw that away.
+
+        The owner IS reachable, which had to be confirmed rather than assumed:
+        a transaction states neither its filing nor its owner, so the join runs
+        the other way, filing -> hasNonDerivativeTransaction/
+        hasDerivativeTransaction -> transaction and filing ->
+        hasReportingOwner -> owner. Both hops are already in _sec_triples.
+
+        Joint filings are real -- 15 of the 606 ownership filings on 2026-08-07
+        name more than one reporting owner, one of them ten -- so a
+        transaction there joins EACH of those owners' chains. That fan-out is
+        faithful rather than lossy: upstream attaches transactions to the
+        filing and never to an owner, because the form itself does not say
+        which owner a row belongs to. A consumer counting edges per transaction
+        has to expect it.
+
+        Class is in the key for two reasons. The instruments differ -- an
+        option grant and an open-market purchase are reported in different
+        tables and are not consecutive events in one series, and merging them
+        interleaves two streams into a single path (25 edges rather than 19 on
+        2026-08-19), answering "what happened next" wrongly rather than not at
+        all. And the tie-break below depends on it: upstream's index counter
+        runs per CLASS, so _NonDerivativeTransaction_0 and
+        _DerivativeTransaction_0 are different rows of different tables and the
+        index only identifies a row once the class is fixed.
+
+        TIE-BREAK -- (date, filing, document index, transaction URI).
+
+        Required, not defensive: 7 of the 11 multi-transaction groups on
+        2026-08-19 contain a repeated transaction date, so ordering on date
+        alone leaves most chains to the row order a shuffle happens to produce,
+        which is not stable between runs -- and the e2e suite pins
+        reproducibility across twin runs. Filing comes first so one document's
+        transactions stay contiguous; the trailing _N of the transaction URI is
+        the row's position in the form's transaction table, which upstream
+        assigns in document order and which re-maps byte-identically from the
+        same filing (contiguous 0..n-1 across all 606 ownership filings on
+        2026-08-07). It is cast to an int so _10 sorts after _2, and it agrees
+        with date order wherever both are defined -- 0 inversions over a day.
+        The URI closes the order so it is total even for a shape carrying no
+        index.
+
+        WHAT IS DELIBERATELY LEFT OUT
+
+        Undated transactions. 28 of 1,097 on 2026-08-07 (2.55%) carry no
+        hasTransactionDate, so the date join drops them and they are chained to
+        nothing. That is the right outcome -- an undated event has no place in
+        a dated sequence -- but it is a live case rather than a rounding error,
+        and it is upstream-recoverable: a FOOTNOTED <transactionDate> defeats
+        the parser's unwrapping and the date is emitted under hasMarketValue
+        instead. The count will drop if that is fixed; nothing here changes.
+
+        The filing's form type. Transactions are keyed on their own classes and
+        on the pointers to them, never on Form4, because Forms 3 and 5 report
+        transactions identically and upstream declares no class for either. A
+        form-based filter would silently see Form 4 only.
+
+        hasExpirationDate, the other date a DerivativeTransaction carries: it
+        dates when the instrument expires, not when the reported event
+        happened.
+        """
+        if 'filings' not in self.available_datasets:
+            return None
+
+        transaction_types = [
+            _NON_DERIVATIVE_TRANSACTION_TYPE, _DERIVATIVE_TRANSACTION_TYPE,
+        ]
+
+        transactions = (
+            self._sec_triples
+            .filter(F.col("predicate") == _RDF_TYPE)
+            .filter(F.col("object").isin(transaction_types))
+            .select(
+                F.col("subject").alias("transaction"),
+                F.col("object").alias("transaction_class"),
+            )
+            .distinct()
+        )
+
+        if transactions.head(1) == []:
+            return None
+
+        # Which document reported each transaction. Both pointers in one frame:
+        # the class is read off rdf:type above, so all this has to establish is
+        # the filing, and through it the owner.
+        reported_in = (
+            self._sec_triples
+            .filter(F.col("predicate").isin([
+                _FILINGS_HAS_NON_DERIVATIVE_TRANSACTION,
+                _FILINGS_HAS_DERIVATIVE_TRANSACTION,
+            ]))
+            .select(
+                F.col("subject").alias("filing"),
+                F.col("object").alias("transaction"),
+            )
+            .distinct()
+        )
+
+        filing_owners = (
+            self._sec_triples
+            .filter(F.col("predicate") == _FILINGS_HAS_REPORTING_OWNER)
+            .select(
+                F.col("subject").alias("filing"),
+                F.col("object").alias("owner"),
+            )
+            .distinct()
+        )
+
+        with_owner = (
+            transactions
+            .join(reported_in, "transaction", "inner")
+            .join(filing_owners, "filing", "inner")
+        )
+
+        # hasTransactionDate is the literal branch of _resolve_dates -- 11,651
+        # occurrences, never an intermediate node -- and it is the only date
+        # predicate here that dates the event.
+        dates = (
+            self._resolve_dates(
+                with_owner.select(F.col("transaction").alias("entity")).distinct(),
+                "entity",
+                _FILINGS_HAS_TRANSACTION_DATE,
+            )
+            .withColumnRenamed("entity", "transaction")
+            .distinct()
+        )
+
+        dated = with_owner.join(dates, "transaction", "inner").withColumn(
+            "document_index",
+            F.regexp_extract(F.col("transaction"), r"_(\d+)$", 1).cast("int"),
+        )
+
+        return self._build_precedes_links(
+            dated,
+            "transaction",
+            ["owner", "transaction_class"],
+            order_cols=("filing", "document_index"),
+        )
 
     def _apply_sector_patterns(self) -> Optional[DataFrame]:
         """
