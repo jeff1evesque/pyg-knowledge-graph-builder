@@ -26,6 +26,7 @@ from functools import reduce
 from typing import List, Optional
 
 from spark_jobs.utils.rdf_utils import MARKET_QUOTES, MARKET_ENRICHMENT
+from spark_jobs.enrichment.sector_crosswalk import EQUITY_SECTOR_TYPE
 from spark_jobs.enrichment.intra_source.market.patterns import (
     get_sector_patterns,
 )
@@ -728,7 +729,34 @@ class MarketIntraSourceLinker:
             F.col("sector_uri").alias("object"),
         )
 
-        return belongs_triples.unionAll(correlation_triples)
+        # Type the sector URIs this step points AT.
+        #
+        # They were never typed, and node_mapper only makes a node out of a
+        # typed URI -- so every equity sector was a dangling object and every
+        # belongsToSector edge above was dropped during edge resolution. The
+        # market side reported "no edges to any sector" while emitting a
+        # belongsToSector triple per snapshot, because the triples were real
+        # and the destination node was not.
+        #
+        # market:EquitySector rather than bls:EconomicSector, deliberately. A
+        # GICS sector sorts companies by revenue source and an economic sector
+        # sorts price series by consumption category; typing one as the other
+        # asserts an equivalence that does not hold. They are joined instead,
+        # by a curated table, under a weaker predicate -- see
+        # enrichment/sector_crosswalk.py.
+        sectors = joined.select("sector_uri").distinct()
+
+        sector_type_triples = sectors.select(
+            F.col("sector_uri").alias("subject"),
+            F.lit(RDF_TYPE).alias("predicate"),
+            F.lit(EQUITY_SECTOR_TYPE).alias("object"),
+        )
+
+        return (
+            belongs_triples
+            .unionAll(correlation_triples)
+            .unionAll(sector_type_triples)
+        )
 
     # ================================================================
     # Step 5: Compute Moneyness
