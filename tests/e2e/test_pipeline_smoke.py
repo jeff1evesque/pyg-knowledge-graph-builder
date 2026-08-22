@@ -185,7 +185,7 @@ def _assert_valid_graph_and_metadata(config, work_dir):
     # _September). owl:sameAs is RDF's strongest claim, so those became real
     # graph edges. Guarded here as well as in the unit tests because this asserts
     # the property of the WHOLE pipeline -- any enricher reintroducing it fails.
-    _assert_sameas_links_only_temporal(config)
+    _assert_sameas_links_only_unified_vocabularies(config)
 
     # --- every edge type records where it came from ---
     # "unknown" is the not-supplied fallback, so seeing it in a real build means
@@ -1999,11 +1999,38 @@ def _assert_cross_source_temporal_bridge(data):
     )
 
 
-def _assert_sameas_links_only_temporal(config):
-    """Every owl:sameAs in the enriched output must link two temporal entities."""
+def _assert_sameas_links_only_unified_vocabularies(config):
+    """Every owl:sameAs must point at a PERIOD or a REGION, never a measurement.
+
+    THE DEFECT THIS GUARDS. A deleted cross-source matcher was anchored only at
+    the end of the subject, so it matched any URI merely ENDING with a month
+    name and asserted `unified:September owl:sameAs cpi:...PercentChange_...
+    _September` -- that a measurement IS the month. owl:sameAs is RDF's
+    strongest claim, so those became real edges and licensed a reasoner to
+    merge the two. What makes that shape detectable is the OBJECT: a
+    measurement URI carries its period inside a longer name, and a period URI
+    is the period and nothing else.
+
+    WHY REGIONS ARE HERE TOO. The unifier now has a second axis. Aligning
+    `unified:MidwestCensusRegion` with `jolts:Midwest_Region` is the same
+    operation as aligning `unified:February` with `cpi:February` -- one
+    real-world thing named by two source vocabularies -- and
+    classify_edge_origin already reports both as `unification`. So the rule is
+    not "sameAs is temporal", which was only ever true because the temporal
+    unifier was its sole producer; it is "sameAs relates two names for one
+    entity in a vocabulary this pipeline unifies".
+
+    The admitted shapes stay ENUMERATED rather than loosened to something like
+    "contains no measurement keyword". A laxer rule would readmit the original
+    defect, which is the one thing this must not do.
+    """
     import re
 
     import pandas as pd
+
+    from spark_jobs.enrichment.region_crosswalk import (
+        CENSUS_REGIONS, US_STATES, state_key,
+    )
 
     files = sorted(
         Path(config.enriched_parquet_path).rglob("*.parquet")
@@ -2020,26 +2047,43 @@ def _assert_sameas_links_only_temporal(config):
         "|October|November|December"
     )
 
-    def temporal(uri):
-        local = str(uri).rsplit("/", 1)[-1]
+    def temporal(local):
         return bool(
             re.fullmatch(months, local)
             or re.fullmatch(r"\d{4}", local)
             or re.fullmatch(r"Year\d{4}", local)
             or re.fullmatch(r"Q[1-4]", local)
             # The day grain: id/temporal/{source}/2026-07-03 on the source
-            # side, unified/Day2026-07-03 on the unified side. Spelled out
-            # rather than loosened to "contains digits", because the defect
-            # this guard exists for was owl:sameAs pointing at a MEASUREMENT
-            # whose URI ends in a period name -- a laxer rule would readmit it.
+            # side, unified/Day2026-07-03 on the unified side.
             or re.fullmatch(r"\d{4}-\d{2}-\d{2}", local)
             or re.fullmatch(r"Day\d{4}-\d{2}-\d{2}", local)
         )
 
-    bad = same_as[~same_as["object"].map(temporal)]
+    # The unified region nodes, spelled from the crosswalk rather than by
+    # pattern, so a region node this pipeline does not actually mint cannot
+    # sneak through as "looks region-shaped".
+    unified_regions = {f"{state_key(s)}Region" for s in US_STATES} | {
+        f"{state_key(c)}CensusRegion" for c in CENSUS_REGIONS
+    }
+
+    def region(local):
+        # Source-side region entities are "{Name}_Region" -- the shape jolts
+        # mints. Digits are excluded because that is exactly what separates a
+        # region entity from a measurement ABOUT a region:
+        # "Midwest_Region" is the place, "Midwest_June2026_HiresLevel" is a
+        # number, and only the first may ever be a sameAs object.
+        return local in unified_regions or bool(
+            re.fullmatch(r"[A-Za-z]+(?:_[A-Za-z]+)*_Region", local)
+        )
+
+    def unifiable(uri):
+        local = str(uri).rsplit("/", 1)[-1]
+        return temporal(local) or region(local)
+
+    bad = same_as[~same_as["object"].map(unifiable)]
     assert bad.empty, (
-        f"{len(bad)} owl:sameAs triples point at a NON-temporal entity, e.g. "
-        f"{bad['object'].iloc[0]}"
+        f"{len(bad)} owl:sameAs triples point at an entity that is neither a "
+        f"period nor a region, e.g. {bad['object'].iloc[0]}"
     )
 
 def _load_node_index(pyg_output_path):
