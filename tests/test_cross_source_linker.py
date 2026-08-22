@@ -27,9 +27,16 @@ from spark_jobs.enrichment.sector_crosswalk import (
     EQUITY_SECTOR_TYPE, RELATED_TO_ECONOMIC_SECTOR,
 )
 from spark_jobs.utils.rdf_utils import (
-    ALERT, BLS_ENRICHMENT, CAP, CPI, MARKET_ENRICHMENT, MARKET_QUOTES,
-    SEC_ENRICHMENT, WEATHER, SEC_FILINGS, UNIFIED,
+    ALERT, BLS_ENRICHMENT, CAP, CPI, JOLTS, LAUS, MARKET_ENRICHMENT,
+    MARKET_QUOTES, SEC_ENRICHMENT, WEATHER, SEC_FILINGS, UNIFIED,
+    identifier_namespace,
 )
+
+# The regional series are INDIVIDUALS, so they live under id/, not ontology/.
+# Keying a fixture on the term namespace builds entities no source detector
+# recognises, and the whole geographic step then reports "no bls source".
+JOLTS_ID = identifier_namespace(str(JOLTS))
+LAUS_ID = identifier_namespace(str(LAUS))
 
 RDF_TYPE = str(RDF.type)
 OWL_SAME_AS = str(OWL.sameAs)
@@ -46,6 +53,8 @@ SHARES_SUB_INDUSTRY = str(MARKET_ENRICHMENT.sharesSubIndustryWith)
 BELONGS_TO_SECTOR = str(BLS_ENRICHMENT.belongsToSector)
 UNIFIED_MONTH_TYPE = str(BLS_ENRICHMENT.UnifiedMonth)
 AFFECTS_REGION = str(BLS_ENRICHMENT.affectsRegion)
+HAS_REGION = str(BLS_ENRICHMENT.hasRegion)
+WITHIN_CENSUS_REGION = str(BLS_ENRICHMENT.withinCensusRegion)
 LEADS_TO = str(BLS_ENRICHMENT.leadsTo)
 TICKER_PRED = str(BLS_ENRICHMENT.ticker)
 
@@ -671,9 +680,10 @@ def test_cross_source_unlinkable_sources_produce_no_entity_edges(spark, make_tri
 # ======================================================================
 
 @pytest.mark.parametrize("fips,region_key", [
-    ("048", "Texas"),         # SAME-code head, the shape upstream emits
+    ("048", "Texas"),         # SAME-code head, the shape upstream emits TODAY
     ("040", "Oklahoma"),      # ditto, from the Tornado Warning fixture
-    ("48", "Texas"),          # bare 2-digit, tolerated
+    ("48", "Texas"),          # bare 2-digit, the shape upstream is MOVING TO
+    ("20", "Kansas"),         # ditto
     ("099", None),            # unmapped code -> no region link
 ])
 def test_cross_source_geography_fips_chain(spark, make_triples, fips, region_key):
@@ -685,7 +695,15 @@ def test_cross_source_geography_fips_chain(spark, make_triples, fips, region_key
     value[:3], so "048" not "48" -- and this pinned only the 2-digit form, which
     is the shape that never arrives. Both are parametrised now: the 3-digit case
     is what production sees, the 2-digit case pins that normalising it did not
-    break the plain form."""
+    break the plain form.
+
+    BOTH FORMS MUST KEEP PASSING. Upstream is correcting hasStateFIPS to drop
+    the leading pad digit, so the 2-digit rows are not hypothetical -- they are
+    the shape after the fix. Reading the last two digits is correct either way,
+    which is what makes that fix non-breaking and needs no backfill, and it is
+    why this reader stays tolerant permanently rather than being tightened once
+    the fix lands. Narrowing it to one form breaks the join in one direction or
+    the other."""
     alert = str(ALERT) + "urn:oid:2.49.0.1.840.0.test"
     info = alert + "#info"
     area = alert + "#area"
@@ -710,3 +728,199 @@ def test_cross_source_geography_fips_chain(spark, make_triples, fips, region_key
     else:
         expected = str(UNIFIED) + region_key + "Region"
         assert region_links == {(alert, AFFECTS_REGION, expected)}
+
+
+# ======================================================================
+# Deep: region unification (the weather -> economic path)
+# ======================================================================
+
+def _alert_rows(fips):
+    alert = str(ALERT) + "urn:oid:2.49.0.1.840.0.test"
+    info, area = alert + "#info", alert + "#area"
+    geocode = alert + "#geocode-" + fips
+    return alert, [
+        (alert, RDF_TYPE, str(WEATHER.WeatherAlert)),
+        (alert, str(CAP.hasInfo), info),
+        (info, str(CAP.hasArea), area),
+        (area, str(CAP.hasGeocode), geocode),
+        (geocode, str(WEATHER.hasStateFIPS), fips),
+    ]
+
+
+def _jolts_region_rows(name):
+    """A regional job-openings series, as the live fixture shapes it."""
+    region = str(JOLTS_ID) + f"{name}_Region"
+    series = str(JOLTS_ID) + f"{name}_June2026_HiresLevel"
+    return region, [
+        (region, RDF_TYPE, str(JOLTS.Region)),
+        (region, RDFS_LABEL, f"{name} region"),
+        (series, RDF_TYPE, str(JOLTS.HiresLevel)),
+        (series, str(JOLTS.hasRegion), region),
+    ]
+
+
+def test_a_weather_alert_and_a_regional_series_share_a_region_node(
+    spark, make_triples
+):
+    """The path Part 4 exists to build.
+
+    Two region vocabularies existed -- bls_enrichment_GeographicRegion, where
+    the weather feed attaches, and jolts_Region, where the regional economic
+    series attach -- and NOTHING joined them, so
+    `WeatherAlert -> Region -> regional indicator` did not exist even though
+    both halves were built.
+
+    The join is geographic and only geographic. A sector is not located in a
+    region, so weather reaches economic activity through place and reaches an
+    industry only transitively.
+    """
+    alert, rows = _alert_rows("020")            # Kansas
+    region, jolts_rows = _jolts_region_rows("Midwest")
+    rows = rows + jolts_rows
+
+    triples = _triple_set(
+        CrossSourceLinker(spark, make_triples(rows)).enrich()
+    )
+
+    kansas = str(UNIFIED) + "KansasRegion"
+    midwest = str(UNIFIED) + "MidwestCensusRegion"
+
+    assert (alert, AFFECTS_REGION, kansas) in triples
+    assert (kansas, WITHIN_CENSUS_REGION, midwest) in triples, (
+        "Kansas did not reach its census region — the 51-row table is the only "
+        "thing that can carry a state to the job-openings grain"
+    )
+    assert (midwest, OWL_SAME_AS, region) in triples, (
+        "the census region and the jolts region are still two nodes"
+    )
+    assert (midwest, RDF_TYPE, str(BLS_ENRICHMENT.CensusRegion)) in triples
+
+
+def test_a_state_reaches_only_its_own_census_region(spark, make_triples):
+    """Kansas is Midwest. A table row that also put it in the South would give
+    the weather feed a path to series it has nothing to do with."""
+    alert, rows = _alert_rows("020")
+    for name in ("Midwest", "South", "Northeast", "West"):
+        rows += _jolts_region_rows(name)[1]
+
+    triples = _triple_set(
+        CrossSourceLinker(spark, make_triples(rows)).enrich()
+    )
+
+    kansas = str(UNIFIED) + "KansasRegion"
+    reached = {o for s, p, o in triples if s == kansas and p == WITHIN_CENSUS_REGION}
+    assert reached == {str(UNIFIED) + "MidwestCensusRegion"}
+
+
+def test_region_unification_does_not_merge_a_shared_label_prefix(
+    spark, make_triples
+):
+    """West Virginia is not Virginia.
+
+    The LAUS matcher asked `subject.contains(state_key)`, so every West
+    Virginia series linked to VirginiaRegion as well as to its own -- and
+    Virginia is the ONLY state name that sits inside another, so this pair is
+    the whole population rather than a sample of it. Merging two genuinely
+    distinct regions is worse than missing one: the weather feed then reaches
+    the wrong state's unemployment series with full confidence.
+
+    WHAT THIS DOES NOT FIX, stated so nobody reads more into the anchor than is
+    there: a metro area whose NAME BEGINS with a state name still claims that
+    state. "Kansas_City_MO" reads as "_Kansas_City_..." and starts with
+    "_Kansas_", so it lands on KansasRegion, though the metro straddles Kansas
+    and Missouri. Separating that needs the federal delineation file that puts
+    metro resolution out of scope for this work, so the anchor is deliberately
+    the state-vs-state fix and not the metro one.
+    """
+    west_virginia = str(LAUS_ID) + "West_Virginia_June2026_UnemploymentRate"
+    virginia = str(LAUS_ID) + "Virginia_June2026_UnemploymentRate"
+    alert, rows = _alert_rows("020")
+    rows += [
+        (west_virginia, RDF_TYPE, str(LAUS.UnemploymentRate)),
+        (virginia, RDF_TYPE, str(LAUS.UnemploymentRate)),
+    ]
+
+    triples = _triple_set(
+        CrossSourceLinker(spark, make_triples(rows)).enrich()
+    )
+
+    def regions_of(entity):
+        return {o for s, p, o in triples if s == entity and p == HAS_REGION}
+
+    assert regions_of(west_virginia) == {str(UNIFIED) + "WestVirginiaRegion"}, (
+        "the West Virginia series reached a region that is not West Virginia"
+    )
+    assert regions_of(virginia) == {str(UNIFIED) + "VirginiaRegion"}, (
+        "the Virginia series lost its own region to the anchoring rule"
+    )
+
+
+def test_the_regional_state_fips_reader_is_written_against_the_agreed_shape(
+    spark, make_triples
+):
+    """laus:hasStateFIPS is NOT emitted yet — this drives it synthetically.
+
+    The regional series currently state a name and a slug and no code at all.
+    The reader is written and tested ahead of the term because the failure it
+    guards is silent: a numeric 1 never matches a string "01", and the join
+    comes back empty with no error, looking exactly like data that does not
+    overlap.
+    """
+    series = str(LAUS_ID) + "SomeArea_June2026_UnemploymentRate"
+    alert, rows = _alert_rows("020")
+    rows += [
+        (series, RDF_TYPE, str(LAUS.UnemploymentRate)),
+        (series, str(LAUS.hasStateFIPS), "20"),
+    ]
+
+    triples = _triple_set(
+        CrossSourceLinker(spark, make_triples(rows)).enrich()
+    )
+
+    kansas = str(UNIFIED) + "KansasRegion"
+    assert (series, HAS_REGION, kansas) in triples
+    assert (alert, AFFECTS_REGION, kansas) in triples, (
+        "both sides must land on ONE region node, or the path does not exist"
+    )
+
+
+def test_a_census_region_code_keys_the_bridge_when_upstream_states_one(
+    spark, make_triples
+):
+    """jolts:hasCensusRegionCode is the term upstream is adding.
+
+    Zero-padded string, per the agreed shape. The name path already works, so
+    the code merely confirms the bridge rather than enabling it — but a code
+    that failed to key it would be a silent regression the day it lands.
+    """
+    region = str(JOLTS_ID) + "Region_2"
+    series = str(JOLTS_ID) + "Region_2_June2026_HiresLevel"
+    alert, rows = _alert_rows("020")
+    rows += [
+        (region, RDF_TYPE, str(JOLTS.Region)),
+        (region, str(JOLTS.hasCensusRegionCode), "02"),
+        (series, str(JOLTS.hasRegion), region),
+    ]
+
+    triples = _triple_set(
+        CrossSourceLinker(spark, make_triples(rows)).enrich()
+    )
+
+    midwest = str(UNIFIED) + "MidwestCensusRegion"
+    assert (midwest, OWL_SAME_AS, region) in triples
+
+
+def test_no_census_region_is_minted_when_nothing_reaches_one(spark, make_triples):
+    """Four typed nodes with no incident edge is four rows of feature tensor
+    describing nothing."""
+    market_e = str(MARKET_QUOTES) + "snapshot/AAPL/2026-07-02"
+    rows = _snapshot_rows(market_e, "AAPL") + _issuer_rows(
+        str(SEC_FILINGS) + "Issuer_0000320193", "0000320193"
+    )
+
+    triples = _triple_set(
+        CrossSourceLinker(spark, make_triples(rows)).enrich()
+    )
+
+    assert not [t for t in triples if t[1] == WITHIN_CENSUS_REGION]
+    assert not [t for t in triples if t[2] == str(BLS_ENRICHMENT.CensusRegion)]
