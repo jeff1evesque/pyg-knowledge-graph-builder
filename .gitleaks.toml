@@ -300,7 +300,7 @@ description = "Real S3 bucket name in code or documentation"
 # code -- a rule that noisy gets switched off within a week, which would cost
 # more than the hole it closed. Measured at zero false positives across authored
 # source with the lookahead in place.
-regex = '''(?i)(?:s3://|s3a://|arn:aws:s3:::|Bucket\s*=\s*["']|bucket_name\s*=\s*["']|bucket[^"'\n]{0,40}["'](?=[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)+["'])|https?://[a-z0-9.-]+\.s3[.-])([a-z0-9][a-z0-9.-]{2,62})'''
+regex = '''(?i)(?:s3://|s3a://|arn:aws:s3:::|Bucket\s*=\s*["']|bucket_name\s*=\s*["']|https?://[a-z0-9.-]+\.s3[.-])([a-z0-9][a-z0-9.-]{2,62})'''
 path = '''(?i)\.(py|md|ipynb|ya?ml|json|tf|sh|cfg|toml)$'''
 secretGroup = 1
 tags = ["aws", "s3", "portability"]
@@ -313,3 +313,47 @@ regexes = [
   '''(?i)(?://|:::|["'])(?:bucket|my-bucket|my-archive|my-data|my-data-lake|example|example-bucket|test|test-bucket|placeholder|your-bucket|some-bucket|sample|demo)(?:[/"'`\s]|$)''',
 ]
 regexTarget = "match"
+
+# --------------------------------------------------------------------------- #
+# Repository-specific: a bucket name written as prose
+# --------------------------------------------------------------------------- #
+
+[[rules]]
+id = "hardcoded-s3-bucket-prose"
+description = "Real S3 bucket name written as documentation rather than as code"
+# A SECOND rule rather than another alternative in 'hardcoded-s3-bucket', for
+# two reasons. The value has a different shape here -- it must look like a
+# hostname -- so it cannot share that rule's trailing capture group. And
+# expressing "the quoted value must be hostname-shaped" inside one alternation
+# needs a LOOKAHEAD, which RE2 does not have; gitleaks panics on one. See the
+# note in scripts/check_secrets.py, which this rule is the reason for.
+#
+# WHAT IT CATCHES. Every anchor in the other rule is an ASSIGNMENT. A real
+# bucket name sat on the default branch for months because it was written as
+# prose instead:
+#
+#     bucket: S3 bucket name (e.g., "<a real bucket>")
+#
+# An Args: line in a docstring. No assignment, so no anchor, so no finding --
+# from the local hook or from CI. A README sentence slips through identically.
+# Worse than a comment, too: Python keeps a docstring as __doc__, so the value
+# ships inside the built artifact and not only in the source.
+#
+# The value must be HOSTNAME-SHAPED (dot-joined labels) for this to fire. With
+# any quoted value accepted it matched the `["Body"]` in
+# `s3.get_object(Bucket=bucket, Key=key)["Body"]` and 68 other lines of
+# ordinary code -- a rule that noisy gets switched off within a week, which
+# costs more than the hole it closes. As written: zero false positives across
+# authored source.
+regex = '''(?i)bucket[^"'\n]{0,40}["']([a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)+)["']'''
+path = '''(?i)\.(py|md|ipynb|ya?ml|json|tf|sh|cfg|toml)$'''
+secretGroup = 1
+tags = ["aws", "s3", "portability"]
+
+[rules.allowlist]
+# Placeholders a README should still be able to write, and the RFC 2606
+# documentation domains.
+regexes = [
+  '''(?i)^(?:bucket|my-bucket|my-archive|my-data|my-data-lake|example|example-bucket|test|test-bucket|placeholder|your-bucket|some-bucket|sample|demo)\.''',
+  '''(?i)(?:^|\.)(?:example\.(?:com|org|net|edu)|localhost|invalid)$''',
+]
