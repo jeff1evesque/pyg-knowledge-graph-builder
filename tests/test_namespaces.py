@@ -375,7 +375,7 @@ def test_the_temporal_type_names_still_match_their_namespace():
 
     expected = {
         _naming_rule(str(SOURCE_TEMPORAL), local)
-        for local in ("SourceMonth", "SourceYear", "SourceQuarter")
+        for local in ("SourceMonth", "SourceYear", "SourceQuarter", "SourceDay")
     }
     assert set(_CANONICAL_TYPE_PRIORITY) == expected
 
