@@ -21,11 +21,13 @@ import pytest
 from spark_jobs.pyg_builder.feature_extractor import VectorLayout
 from spark_jobs.pyg_builder.edge_feature_extractor import EdgeVectorLayout
 from spark_jobs.pyg_builder.metadata_writer import (
+    LATEST_ALIAS_FILES,
     MetadataCollector,
     _round_floats,
     _sanitize_config,
     derive_metadata_prefix,
     derive_node_index_prefix,
+    write_latest_alias,
     write_metadata_to_local,
 )
 
@@ -623,6 +625,113 @@ def test_write_metadata_to_local_creates_missing_dir(tmp_path):
     dest = tmp_path / "a" / "b" / "metadata"
     write_metadata_to_local({"graph_schema.json": {"version": "1.0"}}, str(dest))
     assert (dest / "graph_schema.json").exists()
+
+
+# ======================================================================
+# write_latest_alias — the fixed key a consumer can fetch without listing
+# ======================================================================
+
+def test_latest_alias_is_byte_identical_to_the_period_copy(tmp_path):
+    """The alias must be the same bytes, not merely the same content.
+
+    A consumer that caches on ETag or compares checksums against the period
+    copy sees a spurious change if the two are serialized differently -- same
+    JSON, different separators or key order is still a different object. Both
+    paths therefore go through one serializer.
+    """
+    files = _fully_registered_collector().to_metadata_files()
+    period = tmp_path / "year=2099" / "month=01" / "metadata"
+    latest = tmp_path / "latest" / "metadata"
+
+    write_metadata_to_local(files, str(period))
+    write_latest_alias(files, str(latest))
+
+    assert (latest / "graph_schema.json").read_bytes() == (
+        period / "graph_schema.json"
+    ).read_bytes()
+
+
+def test_latest_alias_carries_only_the_consumer_facing_schema(tmp_path):
+    """The alias is a pointer, not a mirror of the build.
+
+    Copying all six would advertise `latest/` as a complete build, which it is
+    not -- there is no .pt and no node index there.
+    """
+    files = _fully_registered_collector().to_metadata_files()
+    latest = tmp_path / "latest" / "metadata"
+
+    write_latest_alias(files, str(latest))
+
+    assert {p.name for p in latest.iterdir()} == set(LATEST_ALIAS_FILES)
+
+
+def test_latest_alias_overwrites_so_the_pointer_tracks_the_newest_build(
+    tmp_path,
+):
+    """A rebuild replaces the alias rather than appending or erroring.
+
+    This is the property the whole feature rests on: the fixed key must name
+    the most recent build, so the second write has to win.
+    """
+    latest = tmp_path / "latest" / "metadata"
+
+    write_latest_alias({"graph_schema.json": {"version": "1.0"}}, str(latest))
+    write_latest_alias({"graph_schema.json": {"version": "1.2"}}, str(latest))
+
+    written = json.loads((latest / "graph_schema.json").read_text())
+    assert written == {"version": "1.2"}
+
+
+def test_latest_alias_without_a_schema_is_a_noop_not_a_failure(tmp_path):
+    """Partial metadata must not take down an otherwise good build.
+
+    to_metadata_files() always emits all six, but write_latest_alias() is a
+    public helper and a caller holding a subset is a legitimate state. The
+    alias has no consumer yet in that case, which is not worth an exception.
+    """
+    latest = tmp_path / "latest" / "metadata"
+
+    write_latest_alias({"feature_spec.json": {"version": "1.0"}}, str(latest))
+
+    assert not latest.exists()
+
+
+def test_latest_alias_uri_without_spark_raises_instead_of_localizing(
+    tmp_path, monkeypatch
+):
+    """The alias inherits the scheme-aware write, so it fails loudly.
+
+    Delegating to write_metadata_to_local() is what buys this. A hand-rolled
+    open() here would reintroduce exactly the defect fs_utils exists to
+    prevent -- logging a successful write while the bytes land in a junk
+    ./s3a:/... tree on the driver.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValueError) as excinfo:
+        write_latest_alias(
+            {"graph_schema.json": {"version": "1.2"}},
+            "s3a://bucket/pyg/latest/metadata",
+            spark=None,
+        )
+
+    assert "s3a://bucket/pyg/latest/metadata" in str(excinfo.value)
+    assert not (tmp_path / "s3a:").exists()
+
+
+def test_latest_alias_prefix_separates_experiment_variants():
+    """Two variants must not overwrite each other's alias.
+
+    `latest/` collapses the period dimension, so if the variant dimension also
+    collapsed, a 512d build and a default build would fight over one key and
+    the pointer would name whichever ran last regardless of which graph the
+    consumer wanted.
+    """
+    default = derive_metadata_prefix("pyg/latest/hetero_data.pt")
+    variant = derive_metadata_prefix("pyg/latest/hetero_data_512d.pt")
+
+    assert default == "pyg/latest/metadata/"
+    assert variant == "pyg/latest/hetero_data_512d_metadata/"
 
 
 # ======================================================================
