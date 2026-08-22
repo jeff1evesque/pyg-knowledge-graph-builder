@@ -11,23 +11,27 @@ All methods:
 """
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
+from pyspark.sql.window import Window
 from rdflib.namespace import RDF, RDFS, OWL
 
 from spark_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, UNIFIED, CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER,
-    WKYENG, SEC_FILINGS, CAP, WEATHER,
-    MARKET_QUOTES,
+    WKYENG, SEC_ENRICHMENT, SEC_FILINGS, CAP, WEATHER,
+    MARKET_ENRICHMENT, MARKET_QUOTES,
     ALERT,
     identifier_namespace,
 )
 from spark_jobs.enrichment.intra_source.bls.patterns import (
     BLS_SECTOR_CORRELATION, BLS_SECTOR_PATTERNS,
 )
+from spark_jobs.enrichment.intra_source.market.patterns import (
+    assert_ciks_are_padded,
+)
 from spark_jobs.enrichment.intra_source.market.symbols import equity_symbol
 from spark_jobs.utils.spark_rdf_utils import (
     extract_entities_by_type, extract_property, deduplicate_against_existing,
 )
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
@@ -101,15 +105,45 @@ _OWL_SAME_AS = str(OWL.sameAs)
 _RDFS_LABEL = str(RDFS.label)
 _SECTOR_CORRELATION = str(BLS_SECTOR_CORRELATION)
 
+# The unified company node, as sec_linker._unify_company_entities already mints
+# it: keyed on the padded CIK, typed sec:UnifiedCompany, stating sec:hasCik.
+#
+# BOTH halves are spelled from that module's constants rather than from this
+# one's, and that is the entire fix for Part 1 of the split-company defect. This
+# module used to mint unified:Company_{SYMBOL} typed bls:UnifiedCompany, which
+# collided with NOTHING sec_linker produced -- same URI prefix, different key,
+# different type -- so one company became two nodes carrying half its
+# neighbourhood each, and the graph stayed connected only because the issuer
+# happened to point at both. Keying and typing identically is what makes them
+# one node.
+_UNIFIED_COMPANY_PREFIX = f"{str(UNIFIED)}Company_"
+_UNIFIED_COMPANY_TYPE = str(SEC_ENRICHMENT.UnifiedCompany)
+_HAS_CIK = str(SEC_ENRICHMENT.hasCik)
+
+_FILINGS_HAS_ISSUER_CIK = str(SEC_FILINGS.hasIssuerCik)
+_FILINGS_HAS_ISSUER_TRADING_SYMBOL = str(SEC_FILINGS.hasIssuerTradingSymbol)
+
+# Peer relation between two companies in one GICS sub-industry. In the MARKET
+# enrichment namespace because the sub-industry is GICS vocabulary, and the
+# subject and object are both companies the market feed classifies.
+_SHARES_SUB_INDUSTRY = str(MARKET_ENRICHMENT.sharesSubIndustryWith)
+
 # NOAA type URIs — aligned with updated RML mapper
 _NWS_WEATHER_ALERT_TYPE = str(WEATHER.WeatherAlert)
 
 # NOAA area description — on Area subject (alert:{id}#area)
 _CAP_HAS_AREA_DESC = str(CAP.hasAreaDescription)
 
-# NOAA geocode properties for geographic linking
+# NOAA geocode properties for geographic linking.
+#
+# nws:hasFIPSCode is deliberately NOT bound here. It was, and was never
+# referenced -- the FIPS strategy below reads hasStateFIPS only. Worse than
+# unused: the name reads as "the county FIPS is available", when upstream
+# populates that column from properties.geocode.SAME and it carries the SAME
+# code unchanged. Anyone reaching for the dead constant would have joined a
+# SAME code against a county-FIPS lookup. Upstream is correcting the term; if a
+# county-level join is ever wanted here, bind it then, against the fixed shape.
 _NWS_HAS_STATE_FIPS = str(WEATHER.hasStateFIPS)
-_NWS_HAS_FIPS_CODE = str(WEATHER.hasFIPSCode)
 
 # NOAA structural properties for traversal
 _CAP_HAS_INFO = str(CAP.hasInfo)
@@ -130,9 +164,30 @@ class CrossSourceLinker:
     6. Measurement Type Alignment — Link similar measurement types
     """
 
-    def __init__(self, spark: SparkSession, triples_df: DataFrame):
+    def __init__(
+        self,
+        spark: SparkSession,
+        triples_df: DataFrame,
+        ticker_cik_map: Optional[Dict[str, str]] = None,
+        sub_industries: Optional[Sequence[Tuple[str, str]]] = None,
+    ):
         self.spark = spark
         self.triples_df = triples_df
+
+        # Index-constituent reference data, read from the constituents CSV on
+        # the driver before the job starts. Both are small enough to broadcast
+        # (~500 rows) and both are OPTIONAL: with neither, the company bridge
+        # still resolves through the CIKs the filings state, and the peer step
+        # simply produces nothing.
+        self._ticker_cik_map = dict(ticker_cik_map or {})
+        self._sub_industries = list(sub_industries or [])
+
+        # Validate before the first join rather than after the last one. An
+        # unpadded CIK here joins against no filing and emits no edge, which is
+        # indistinguishable from a fixture with no overlap -- so it has to stop
+        # the build instead of being discovered in a graph_schema.json diff.
+        assert_ciks_are_padded(self._ticker_cik_map)
+
         self.available_sources = self._detect_sources()
         logger.info(f"Detected data sources: {', '.join(self.available_sources)}")
 
@@ -202,20 +257,23 @@ class CrossSourceLinker:
         # did not already find correctly. Deleted rather than repaired: fixing
         # the regex would still leave two implementations minting the same
         # unified:{Month} URIs.
-        logger.info("\n[Step 1/5] Creating sector-based links...")
+        logger.info("\n[Step 1/6] Creating sector-based links...")
         self._append(new_dfs, self._link_by_sector())
 
-        logger.info("\n[Step 2/5] Linking by company/ticker...")
+        logger.info("\n[Step 2/6] Linking by company/ticker...")
         if 'sec' in self.available_sources and 'market' in self.available_sources:
             self._append(new_dfs, self._link_by_company())
 
-        logger.info("\n[Step 3/5] Linking by geographic region...")
+            logger.info("\n[Step 3/6] Linking constituents by sub-industry...")
+            self._append(new_dfs, self._link_by_sub_industry())
+
+        logger.info("\n[Step 4/6] Linking by geographic region...")
         self._append(new_dfs, self._link_by_geography())
 
-        logger.info("\n[Step 4/5] Creating causal relationships...")
+        logger.info("\n[Step 5/6] Creating causal relationships...")
         self._append(new_dfs, self._create_causal_links())
 
-        logger.info("\n[Step 5/5] Aligning measurement types...")
+        logger.info("\n[Step 6/6] Aligning measurement types...")
         self._append(new_dfs, self._align_measurement_types())
 
         if not new_dfs:
@@ -356,32 +414,19 @@ class CrossSourceLinker:
             equity_symbol(F.col("raw_symbol")).alias("symbol"),
         ).filter(F.length(F.col("symbol")) > 0).dropDuplicates()
 
-    def _link_by_company(self) -> Optional[DataFrame]:
-        """
-        Link SEC issuers to Market quotes via ticker symbol.
+    def _issuer_ciks(self) -> DataFrame:
+        """(issuer_uri, cik) for every SEC issuer that states a CIK.
 
-        Creates unified:Company_<SYMBOL> entities that both sides point at, so
-        a filing reaches a quote through Filing -> Issuer -> Company <- Snapshot.
-
-        The SEC side keys on the ISSUER, not the filing. Upstream renamed
-        hasIssuerTicker to hasIssuerTradingSymbol AND moved it: the symbol is
-        now stated by the filings:Issuer node (itself subClassOf
-        sec-common:Company), which is the thing a ticker actually identifies. A
-        filing is a document and does not have a ticker. Filings still reach the
-        company, one hop further out, via their existing hasIssuer edge.
-
-        Expect this bridge to be SPARSE at volume, and do not read that as a
-        regression. hasIssuerTradingSymbol has exactly one upstream emitter --
-        the ownership-form document parser -- so it requires a filing that (a)
-        had its document fetched and stored, (b) stored it as XML, and (c) is a
+        This is the SEC half of the company bridge, and it replaces a half
+        keyed on ``hasIssuerTradingSymbol``. The ticker was never the issuer's
+        identifier here -- it is emitted by exactly one upstream parser, the
+        ownership-form document walker, so it requires a filing that (a) had
+        its document fetched and stored, (b) stored it as XML, and (c) is a
         Form 3/4/5, the only forms whose schema carries <issuerTradingSymbol>.
-        The EDGAR search API never returns a ticker, so the metadata half of
-        every row cannot supply one. The bridge's ceiling is therefore the
-        ownership-form share of filings, not their total.
+        The EDGAR search API never returns a ticker at all.
 
-        MEASURED COVERAGE. From a census of 23,983 filing rows across
-        2026-08-07, 2026-08-06, 2026-08-04 and 2025-10-02
-        (bin/census_sec_terms.py):
+        MEASURED, from a census of 23,983 filing rows across 2026-08-07,
+        2026-08-06, 2026-08-04 and 2025-10-02 (bin/census_sec_terms.py):
 
             rows stating hasIssuerTradingSymbol   5,893   24.57% of all filings
               of which root_form 4                5,229   100% of the 5,229
@@ -389,69 +434,267 @@ class CrossSourceLinker:
               of which root_form 5                    9   100% of the 9
             rows on any other form                    0
 
-        So the ceiling is exactly the ownership-form share, and WITHIN that
-        share the term is complete rather than partial: 5,893 = 655 + 5,229 + 9
-        with nothing left over. A thin result on this bridge should be compared
-        against that, not against a guess -- "a quarter of filings" is the
-        expected figure and anything near zero is the defect. Note it is
-        ownership forms generally, not Form 4 alone; Forms 3 and 5 carry the
-        ticker too, and they are 11% of the term's rows.
+        So the OLD bridge's ceiling was exactly the ownership-form share --
+        about a quarter of filings -- and no amount of market-side work could
+        lift it. hasIssuerCik has no such ceiling: the issuer states it on
+        every filing, from both the metadata path and the document path, which
+        is what moves this from a quarter to all of them.
 
-        Every ticker-bearing issuer in that census states a 10-digit padded
-        CIK, so the CIK canonicalization in utils/canonicalization.py does not
-        move this number -- the split it repairs is on Form 144, which carries
-        no ticker.
+        The CIK arrives already zero-padded to ten, because
+        utils/canonicalization.canonicalize_sec_identifiers runs in the LOADER,
+        before any enricher sees the frame. Nothing is re-padded here on
+        purpose: if that ever stops being true the join under-covers visibly
+        rather than being silently patched in two places that can disagree.
         """
-        market_tickers = self._market_symbol_bearers()
+        return extract_property(
+            self.triples_df, _FILINGS_HAS_ISSUER_CIK, "raw_cik"
+        ).select(
+            F.col("subject").alias("issuer_uri"),
+            F.trim(F.col("raw_cik")).alias("cik"),
+        ).filter(F.length(F.col("cik")) > 0).dropDuplicates()
 
-        # Get SEC issuer ticker symbols
-        sec_tickers = extract_property(
-            self.triples_df, str(SEC_FILINGS.hasIssuerTradingSymbol), "raw_symbol"
+    def _ticker_to_cik(self) -> Optional[DataFrame]:
+        """(symbol, cik) — how the market side reaches the regulator's key.
+
+        Two sources, in priority order:
+
+        0. THE FILINGS THEMSELVES. An ownership-form issuer states both its
+           ticker and its CIK, so the graph already carries the mapping for
+           every issuer whose filings were ingested. It needs no external file
+           and it cannot disagree with the SEC half of the bridge, because it
+           IS the SEC half read a second way.
+        1. THE INDEX CONSTITUENTS CSV, which pairs the symbol with the CIK for
+           index members whose filings may not have been ingested at all. This
+           is the widening path, and the reason market/patterns.py now reads a
+           column it used to discard.
+
+        The priority matters when the two disagree: a ticker is reassigned when
+        a company delists and another takes the symbol, so the CSV can carry a
+        pairing that was true at publication and is not true of the filing in
+        front of us. Ranking keeps ONE CIK per symbol, so a snapshot links to
+        one company rather than to two -- which would rebuild, on the market
+        side, exactly the split this work removes.
+        """
+        graph_pairs = extract_property(
+            self.triples_df, _FILINGS_HAS_ISSUER_TRADING_SYMBOL, "raw_symbol"
         ).select(
             F.col("subject").alias("issuer_uri"),
             equity_symbol(F.col("raw_symbol")).alias("symbol"),
-        ).filter(F.length(F.col("symbol")) > 0)
+        ).filter(F.length(F.col("symbol")) > 0).join(
+            self._issuer_ciks(), "issuer_uri", "inner"
+        ).select(
+            F.col("symbol"),
+            F.col("cik"),
+            F.lit(0).alias("priority"),
+        )
 
-        # Create unified company entities
-        unified_uri = F.concat(F.lit(str(UNIFIED)), F.lit("Company_"), F.col("symbol"))
+        pairs = graph_pairs
+        if self._ticker_cik_map:
+            csv_pairs = self.spark.createDataFrame(
+                sorted(self._ticker_cik_map.items()), schema=["symbol", "cik"]
+            ).select(
+                F.col("symbol"),
+                F.col("cik"),
+                F.lit(1).alias("priority"),
+            )
+            pairs = pairs.unionByName(csv_pairs)
 
-        # Type triples
-        all_symbols = market_tickers.select("symbol").union(sec_tickers.select("symbol")).distinct()
-        type_triples = all_symbols.select(
+        pairs = pairs.dropDuplicates(["symbol", "cik", "priority"])
+
+        # One CIK per symbol. Ordered by priority then by the CIK itself, so a
+        # tie inside one source resolves the same way on every run rather than
+        # on whichever row a shuffle happens to deliver first.
+        ranked = pairs.withColumn(
+            "_rank",
+            F.row_number().over(
+                Window.partitionBy("symbol").orderBy(
+                    F.col("priority").asc(), F.col("cik").asc()
+                )
+            ),
+        )
+
+        return ranked.filter(F.col("_rank") == 1).select("symbol", "cik")
+
+    def _market_companies(self) -> DataFrame:
+        """(entity, symbol, cik) for every market entity that reaches a company.
+
+        An INNER join against the ticker -> CIK table, deliberately: a snapshot
+        whose ticker resolves to no CIK contributes nothing. It does NOT fall
+        back to a symbol-keyed company node, which is exactly what used to mint
+        the second half of the split entity.
+        """
+        return self._market_symbol_bearers().join(
+            self._ticker_to_cik(), "symbol", "inner"
+        ).select("entity", "symbol", "cik")
+
+    def _link_by_company(self) -> Optional[DataFrame]:
+        """
+        Link SEC issuers and market quotes to ONE unified company node.
+
+        Both sides now key on the regulator's CIK, so a filing and a quote for
+        the same company land on the same ``unified:Company_{CIK}`` node that
+        sec_linker._unify_company_entities already mints:
+
+            Filing -> Issuer -> Company <- Snapshot
+
+        WHAT THIS REPLACES. Two code paths used to mint company entities into
+        the same URI namespace under different keys -- sec_linker on the CIK,
+        this module on the ticker -- and nothing reconciled them. The CIK-keyed
+        node carried the filing structure, the symbol-keyed node carried the
+        market link, and neither carried both. The graph still looked connected,
+        because the issuer pointed at both, so a quote reached a filing as
+        ``Snapshot -> Company_<SYMBOL> <- Issuer -> Company_<CIK>``: a split
+        entity doing a bridge's job. For a GNN that is strictly worse than one
+        node -- the neighbourhood describing one company is halved, and the two
+        halves sit an extra hop apart.
+
+        The type is spelled from sec_linker's constant for the same reason the
+        key is: the two paths used to disagree about that as well
+        (bls:UnifiedCompany here, sec:UnifiedCompany there), which sharded one
+        concept across two node types in the PyG schema even where the URIs
+        did match.
+
+        The market side needs a ticker -> CIK step to get there; see
+        _ticker_to_cik. The SEC side needs nothing, which is the coverage win:
+        it reads hasIssuerCik, stated by every filing, instead of
+        hasIssuerTradingSymbol, stated by a measured 24.57% of them.
+        """
+        market_companies = self._market_companies()
+        issuer_companies = self._issuer_ciks()
+
+        unified_uri = F.concat(F.lit(_UNIFIED_COMPANY_PREFIX), F.col("cik"))
+
+        # Scaffolding for exactly the companies something points at, matching
+        # how _link_by_geography scopes its region nodes. A typed node with no
+        # incident edge is a row of feature tensor describing nothing.
+        all_ciks = (
+            market_companies.select("cik")
+            .unionByName(issuer_companies.select("cik"))
+            .distinct()
+        )
+
+        type_triples = all_ciks.select(
             unified_uri.alias("subject"),
             F.lit(_RDF_TYPE).alias("predicate"),
-            F.lit(str(BLS_ENRICHMENT.UnifiedCompany)).alias("object")
+            F.lit(_UNIFIED_COMPANY_TYPE).alias("object"),
         )
 
-        # Ticker label triples
-        ticker_label_triples = all_symbols.select(
+        cik_triples = all_ciks.select(
+            unified_uri.alias("subject"),
+            F.lit(_HAS_CIK).alias("predicate"),
+            F.col("cik").alias("object"),
+        )
+
+        # The ticker survives as a PROPERTY of the unified company rather than
+        # as its key. It is still the symbol a human recognises the company by,
+        # and it is still what the market feed states -- it is simply no longer
+        # what decides node identity.
+        ticker_label_triples = market_companies.select("cik", "symbol").distinct().select(
             unified_uri.alias("subject"),
             F.lit(str(BLS_ENRICHMENT.ticker)).alias("predicate"),
-            F.col("symbol").alias("object")
+            F.col("symbol").alias("object"),
         )
 
-        # Market snapshot → company
-        market_links = market_tickers.select(
+        market_links = market_companies.select(
             F.col("entity").alias("subject"),
             F.lit(str(BLS_ENRICHMENT.refersToCompany)).alias("predicate"),
-            F.concat(F.lit(str(UNIFIED)), F.lit("Company_"), F.col("symbol")).alias("object")
+            unified_uri.alias("object"),
         )
 
-        # SEC issuer → company
-        sec_links = sec_tickers.select(
+        sec_links = issuer_companies.select(
             F.col("issuer_uri").alias("subject"),
             F.lit(str(BLS_ENRICHMENT.refersToCompany)).alias("predicate"),
-            F.concat(F.lit(str(UNIFIED)), F.lit("Company_"), F.col("symbol")).alias("object")
+            unified_uri.alias("object"),
         )
 
         result = (
             type_triples
+            .unionByName(cik_triples)
             .unionByName(ticker_label_triples)
             .unionByName(market_links)
             .unionByName(sec_links)
         )
 
         logger.info("  Company linking triples prepared (lazy)")
+        return result
+
+    # ================================================================
+    # Step 3b: Sub-industry peer edges
+    # ================================================================
+
+    def _link_by_sub_industry(self) -> Optional[DataFrame]:
+        """Peer edges between companies sharing one GICS sub-industry.
+
+        WHY SUB-INDUSTRY AND NOT SECTOR. The constituents CSV carries both, and
+        only the coarse one was ever read. Sector is too coarse to be a
+        similarity signal: eleven buckets over 503 constituents, the largest
+        holding 73 of them, so "same sector" separates almost nothing and a
+        peer edge built on it is noise with a high degree. Sub-industry is
+        roughly 160 buckets of 3-5 constituents, where "same sub-industry" is a
+        sharp claim -- these are companies competing in one market.
+
+        WHY PEER EDGES AND NOT A HUB NODE. A shared sub-industry node would be
+        another high-degree hub that aggregates its whole bucket into one
+        representation, which is the failure Part 2 of this work is unpicking
+        for the period nodes. A bucket of 3-5 is small enough that the pairs
+        themselves are cheap -- about ten edges per bucket -- and a pair says
+        what a hub cannot: which specific company this one competes with.
+
+        Restricted to companies the graph actually carries. The CSV lists every
+        index member, and minting a node for each would add hundreds of
+        vertices whose only edges are to each other -- a disconnected clique
+        lattice bolted onto the graph, describing companies no source in this
+        build mentions.
+
+        No cross-taxonomy judgment is involved: one vocabulary, one column,
+        already downloaded. That is why this half of the sector work lands
+        first and the equity-to-economic mapping (which needs judgment, and
+        deliberate gaps) is separate.
+        """
+        if not self._sub_industries:
+            return None
+
+        constituents = self.spark.createDataFrame(
+            sorted(set(self._sub_industries)), schema=["symbol", "sub_industry"]
+        )
+
+        # Symbol -> CIK -> the company node, then keep only the companies some
+        # source in this build actually points at.
+        present = (
+            self._market_companies().select("cik")
+            .unionByName(self._issuer_ciks().select("cik"))
+            .distinct()
+        )
+
+        members = (
+            constituents.join(F.broadcast(self._ticker_to_cik()), "symbol", "inner")
+            .join(present, "cik", "left_semi")
+            .select("cik", "sub_industry")
+            .distinct()
+        )
+
+        left = members.select(
+            F.col("cik").alias("cik_a"), F.col("sub_industry")
+        )
+        right = members.select(
+            F.col("cik").alias("cik_b"), F.col("sub_industry")
+        )
+
+        # One edge per unordered pair. `<` rather than `!=` because the relation
+        # is symmetric and emitting both directions would double every peer
+        # edge -- the same doubling the duplicated sector relation already costs
+        # this graph elsewhere.
+        pairs = left.join(right, "sub_industry", "inner").filter(
+            F.col("cik_a") < F.col("cik_b")
+        )
+
+        result = pairs.select(
+            F.concat(F.lit(_UNIFIED_COMPANY_PREFIX), F.col("cik_a")).alias("subject"),
+            F.lit(_SHARES_SUB_INDUSTRY).alias("predicate"),
+            F.concat(F.lit(_UNIFIED_COMPANY_PREFIX), F.col("cik_b")).alias("object"),
+        )
+
+        logger.info("  Sub-industry peer triples prepared (lazy)")
         return result
 
     # ================================================================
@@ -839,7 +1082,17 @@ class CrossSourceLinker:
         return result
 
 
-def enrich_cross_source(spark: SparkSession, triples_df: DataFrame) -> DataFrame:
-    """Main entry point for cross-source enrichment."""
-    linker = CrossSourceLinker(spark, triples_df)
+def enrich_cross_source(
+    spark: SparkSession,
+    triples_df: DataFrame,
+    ticker_cik_map: Optional[Dict[str, str]] = None,
+    sub_industries: Optional[Sequence[Tuple[str, str]]] = None,
+) -> DataFrame:
+    """Main entry point for cross-source enrichment.
+
+    The two reference tables are read from the index-constituents CSV by the
+    caller (see EnrichmentPipeline), not here, so this module stays free of S3
+    and stays testable with a literal dict.
+    """
+    linker = CrossSourceLinker(spark, triples_df, ticker_cik_map, sub_industries)
     return linker.enrich()
