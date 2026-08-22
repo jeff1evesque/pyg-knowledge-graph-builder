@@ -839,6 +839,30 @@ For experiment variants (non-default `--pyg_filename`), the metadata and node-in
 
 The metadata and node-index directories are derived automatically from the `.pt` filename (`--pyg_filename`, and the S3 `--s3_pyg_key` when archiving) by `derive_metadata_prefix()` / `derive_node_index_prefix()` in `metadata_writer.py`. No additional configuration is required.
 
+### The `latest` Alias — a Consumer-Facing Contract
+
+The period layout above is addressable only by a reader who already knows which period is newest. A consumer fetching one fixed URL cannot list the storage to find out, and should not be able to. Every build therefore also writes `graph_schema.json` to a fixed segment that always names the most recent build:
+
+```
+<local_work_dir>/pyg/latest/metadata/graph_schema.json
+```
+
+This is the **stable key**. It is the same layout as a period path with `year=YYYY/month=MM` replaced by `latest`, so a consumer URL differs from a period URL by exactly one segment. Treat the following as the contract:
+
+| property | guarantee |
+|---|---|
+| key | `<base>/pyg/latest/metadata/graph_schema.json` |
+| content | byte-identical to that build's period-partitioned copy |
+| freshness | overwritten by every build; always the most recent |
+| variants | a non-default `--pyg_filename` aliases to `<base>/pyg/latest/{stem}_metadata/graph_schema.json`, so variants never collide |
+| scope | **only** `graph_schema.json` — there is no `.pt` and no node index under `latest/` |
+
+Only the schema is aliased because it is the only artifact with an external reader. Copying all six metadata files would advertise `latest/` as a complete build, which it is not.
+
+`--s3_archive_bucket` mirrors the period copy using the same relative shape — `s3_pyg_key` defaults to `pyg/{period_partition}/{pyg_filename}` — so the archive and work-dir layouts already agree segment for segment. The alias is written to the work dir only; making it reachable to an external consumer (public-read, CORS, CDN) is a hosting concern outside this repository.
+
+> **Edge case:** `--time_period latest` is a legal non-monthly label that renders to this same directory. The collision is benign — that period copy already *is* the newest build — and the alias write is skipped on the equality rather than duplicating it.
+
 ### File Descriptions
 
 #### `graph_schema.json`

@@ -87,8 +87,10 @@ from spark_jobs.utils.canonicalization import canonicalize_source_triples
 from spark_jobs.pyg_builder.metadata_writer import (
     write_metadata_to_s3,
     write_metadata_to_local,
+    write_latest_alias,
     derive_metadata_prefix,
     derive_node_index_prefix,
+    LATEST_PARTITION,
 )
 
 # PyG builder — imported conditionally since enrichment_only mode doesn't need it
@@ -337,6 +339,16 @@ class JobConfig:
         self.pyg_output_path = (
             f"{self.local_work_dir}/pyg/"
             f"{self.period_partition}/{self.pyg_filename}"
+        )
+
+        # Fixed-key alias for the newest build, at the same depth as the period
+        # copy with only the partition segment replaced -- so a consumer's URL
+        # differs from a period URL by exactly that segment, and
+        # derive_metadata_prefix() separates experiment variants here for the
+        # same reason it does per period.
+        self.latest_pyg_path = (
+            f"{self.local_work_dir}/pyg/"
+            f"{LATEST_PARTITION}/{self.pyg_filename}"
         )
 
         # Derived S3 key for the archived .pt (only used when archiving)
@@ -1385,6 +1397,17 @@ def save_final_artifacts(
     local_metadata_dir = derive_metadata_prefix(config.pyg_output_path)
     write_metadata_to_local(metadata_files, local_metadata_dir, spark=spark)
 
+    # Overwritten by every build, so the fixed key always resolves to the most
+    # recent one. Written unconditionally rather than only when archiving: it
+    # points at the work dir, which is where the artifacts actually are.
+    #
+    # `--time_period latest` is a legal non-monthly label, and it renders to
+    # this very directory -- at which point the period copy already IS the
+    # alias and re-writing it would only log the same bytes twice.
+    latest_metadata_dir = derive_metadata_prefix(config.latest_pyg_path)
+    if latest_metadata_dir != local_metadata_dir:
+        write_latest_alias(metadata_files, latest_metadata_dir, spark=spark)
+
     node_index_dir = derive_node_index_prefix(config.pyg_output_path)
     if node_index_df is not None:
         save_node_index(node_index_df, node_index_dir)
@@ -1393,6 +1416,7 @@ def save_final_artifacts(
         "node_index_location": node_index_dir,
         "pyg_location": config.pyg_output_path,
         "metadata_location": local_metadata_dir,
+        "latest_metadata_location": latest_metadata_dir,
     }
 
     # --- S3 mirror (optional) ---
