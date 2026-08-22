@@ -21,8 +21,8 @@ from rdflib.namespace import OWL, RDF, RDFS
 
 from spark_jobs.enrichment.cross_source_linker import CrossSourceLinker
 from spark_jobs.utils.rdf_utils import (
-    ALERT, BLS_ENRICHMENT, CAP, CPI, MARKET_QUOTES, WEATHER,
-    SEC_FILINGS, UNIFIED,
+    ALERT, BLS_ENRICHMENT, CAP, CPI, MARKET_ENRICHMENT, MARKET_QUOTES,
+    SEC_ENRICHMENT, WEATHER, SEC_FILINGS, UNIFIED,
 )
 
 RDF_TYPE = str(RDF.type)
@@ -30,7 +30,13 @@ OWL_SAME_AS = str(OWL.sameAs)
 RDFS_LABEL = str(RDFS.label)
 
 REFERS_TO_COMPANY = str(BLS_ENRICHMENT.refersToCompany)
-UNIFIED_COMPANY_TYPE = str(BLS_ENRICHMENT.UnifiedCompany)
+
+# Spelled from SEC_ENRICHMENT, not BLS_ENRICHMENT: the unified company node is
+# the one sec_linker mints, and the two modules used to disagree about its type
+# as well as about its key.
+UNIFIED_COMPANY_TYPE = str(SEC_ENRICHMENT.UnifiedCompany)
+HAS_CIK_PRED = str(SEC_ENRICHMENT.hasCik)
+SHARES_SUB_INDUSTRY = str(MARKET_ENRICHMENT.sharesSubIndustryWith)
 UNIFIED_MONTH_TYPE = str(BLS_ENRICHMENT.UnifiedMonth)
 AFFECTS_REGION = str(BLS_ENRICHMENT.affectsRegion)
 LEADS_TO = str(BLS_ENRICHMENT.leadsTo)
@@ -45,40 +51,278 @@ def _triple_set(result):
 # Tier 2 smokes
 # ======================================================================
 
-def test_cross_source_company_linking_shares_unified_company(spark, make_triples):
-    """A market quote and an SEC issuer with the same symbol both link to
-    the same unified Company entity (the cross-source hub).
+def _issuer_rows(issuer, cik, symbol=None):
+    """An SEC issuer as upstream states it: a CIK always, a ticker sometimes."""
+    rows = [
+        (issuer, RDF_TYPE, str(SEC_FILINGS.Issuer)),
+        (issuer, str(SEC_FILINGS.hasIssuerCik), cik),
+    ]
+    if symbol is not None:
+        rows.append((issuer, str(SEC_FILINGS.hasIssuerTradingSymbol), symbol))
+    return rows
 
-    Both sides of this join were dead. The market side asked for
+
+def _snapshot_rows(snapshot, symbol, snapshot_type=None):
+    return [
+        (snapshot, RDF_TYPE, str(snapshot_type or MARKET_QUOTES.EquitySnapshot)),
+        (snapshot, str(MARKET_QUOTES.symbol), symbol),
+    ]
+
+
+def test_cross_source_company_linking_shares_unified_company(spark, make_triples):
+    """A market quote and an SEC issuer for one company land on ONE node.
+
+    Both sides of this join were once dead. The market side asked for
     market-feeds:StockTicker, a class nothing declares -- the model is
     EquitySnapshot / OptionSnapshot -- so it matched nothing. The SEC
     side asked for hasIssuerTicker, which upstream renamed to
     hasIssuerTradingSymbol and moved off the filing onto the filings:Issuer
-    node. The previous version of this test asserted the dead shape was correct,
-    using a fixture built to match it — which is why the suite stayed green
-    while SEC and market built as disconnected islands.
+    node.
 
-    The SEC subject here is the ISSUER, not the filing: a ticker identifies a
-    company, and a filing reaches that company through its hasIssuer edge.
+    Both are now keyed on the CIK instead, so this asserts the CIK-keyed node
+    sec_linker also mints. The SEC subject is the ISSUER, not the filing: a
+    filing is a document and reaches its company through hasIssuer.
     """
     snapshot = str(MARKET_QUOTES) + "snapshot/AAPL/2026-07-02"
     issuer = str(SEC_FILINGS) + "Issuer_0000320193"
-    rows = [
-        (snapshot, RDF_TYPE, str(MARKET_QUOTES.EquitySnapshot)),
-        (snapshot, str(MARKET_QUOTES.symbol), "AAPL"),
-        (issuer, RDF_TYPE, str(SEC_FILINGS.Issuer)),
-        (issuer, str(SEC_FILINGS.hasIssuerTradingSymbol), "AAPL"),
-    ]
+    rows = (
+        _snapshot_rows(snapshot, "AAPL")
+        + _issuer_rows(issuer, "0000320193", "AAPL")
+    )
 
     triples = _triple_set(
         CrossSourceLinker(spark, make_triples(rows)).enrich()
     )
 
-    company = str(UNIFIED) + "Company_AAPL"
+    company = str(UNIFIED) + "Company_0000320193"
     assert (snapshot, REFERS_TO_COMPANY, company) in triples
     assert (issuer, REFERS_TO_COMPANY, company) in triples
     assert (company, RDF_TYPE, UNIFIED_COMPANY_TYPE) in triples
+    assert (company, HAS_CIK_PRED, "0000320193") in triples
     assert (company, TICKER_PRED, "AAPL") in triples
+
+
+def test_a_ticker_and_its_filing_resolve_to_one_company_node(spark, make_triples):
+    """The split this work exists to close: ONE company, not two nodes.
+
+    The market side used to mint unified:Company_{SYMBOL} while sec_linker
+    minted unified:Company_{CIK} -- same URI prefix, different key, never
+    reconciled -- so the quote and the filing described the same company
+    through two nodes an extra hop apart, each carrying half its
+    neighbourhood.
+
+    Asserting the absence is the point. A regression here re-adds a node
+    rather than removing one, so a test that only checked the CIK-keyed node
+    was present would pass while the split came back.
+    """
+    snapshot = str(MARKET_QUOTES) + "snapshot/AAPL/2026-07-02"
+    issuer = str(SEC_FILINGS) + "Issuer_0000320193"
+    rows = (
+        _snapshot_rows(snapshot, "AAPL")
+        + _issuer_rows(issuer, "0000320193", "AAPL")
+    )
+
+    triples = _triple_set(
+        CrossSourceLinker(spark, make_triples(rows)).enrich()
+    )
+
+    companies = {
+        s for s, _p, _o in triples
+        if s.startswith(str(UNIFIED) + "Company_")
+    }
+    assert companies == {str(UNIFIED) + "Company_0000320193"}, (
+        f"expected exactly one company node keyed on the CIK, got {companies}"
+    )
+
+    assert str(UNIFIED) + "Company_AAPL" not in companies
+    assert not any(
+        o == str(UNIFIED) + "Company_AAPL" for _s, _p, o in triples
+    ), "a symbol-keyed company node is still being referenced"
+
+
+def test_the_company_bridge_reaches_a_filing_with_no_trading_symbol(
+    spark, make_triples
+):
+    """The coverage win: hasIssuerCik is on every filing, the ticker is not.
+
+    hasIssuerTradingSymbol has one upstream emitter -- the ownership-form
+    document parser -- so it caps the bridge at the Form 3/4/5 share of
+    filings, a measured 24.57%. An issuer stating only its CIK is the other
+    75.43%, and it used to reach no company node at all.
+    """
+    issuer = str(SEC_FILINGS) + "Issuer_0000084112"
+    snapshot = str(MARKET_QUOTES) + "snapshot/CBOE/2026-07-02"
+    rows = (
+        _snapshot_rows(snapshot, "CBOE")
+        + _issuer_rows(issuer, "0000084112")
+    )
+
+    triples = _triple_set(
+        CrossSourceLinker(spark, make_triples(rows)).enrich()
+    )
+
+    company = str(UNIFIED) + "Company_0000084112"
+    assert (issuer, REFERS_TO_COMPANY, company) in triples, (
+        "an issuer stating no ticker did not reach its company node"
+    )
+    assert (company, RDF_TYPE, UNIFIED_COMPANY_TYPE) in triples
+
+
+def test_the_constituents_map_widens_the_bridge_beyond_ingested_filings(
+    spark, make_triples
+):
+    """The CSV path: a quote reaches a company whose filings are not here.
+
+    The in-graph ticker -> CIK derivation only covers issuers whose ownership
+    filings were ingested. The index-constituents CSV pairs the symbol with
+    the CIK for every index member, which is the column market/patterns.py
+    used to read past.
+    """
+    snapshot = str(MARKET_QUOTES) + "snapshot/AAPL/2026-07-02"
+    issuer = str(SEC_FILINGS) + "Issuer_0000084112"
+    rows = (
+        _snapshot_rows(snapshot, "AAPL")
+        + _issuer_rows(issuer, "0000084112")
+    )
+
+    triples = _triple_set(
+        CrossSourceLinker(
+            spark, make_triples(rows), ticker_cik_map={"AAPL": "0000320193"}
+        ).enrich()
+    )
+
+    company = str(UNIFIED) + "Company_0000320193"
+    assert (snapshot, REFERS_TO_COMPANY, company) in triples
+    assert (company, TICKER_PRED, "AAPL") in triples
+
+
+def test_the_filings_win_when_the_constituents_csv_disagrees(spark, make_triples):
+    """One CIK per symbol, and the graph's own pairing outranks the file.
+
+    A ticker is reassigned when a company delists and another takes the
+    symbol, so the CSV can carry a pairing that was true at publication and is
+    not true of the filing in front of us. Emitting both would rebuild the
+    split on the market side -- one snapshot pointing at two companies.
+    """
+    snapshot = str(MARKET_QUOTES) + "snapshot/AAPL/2026-07-02"
+    issuer = str(SEC_FILINGS) + "Issuer_0000320193"
+    rows = (
+        _snapshot_rows(snapshot, "AAPL")
+        + _issuer_rows(issuer, "0000320193", "AAPL")
+    )
+
+    triples = _triple_set(
+        CrossSourceLinker(
+            spark, make_triples(rows), ticker_cik_map={"AAPL": "0000999999"}
+        ).enrich()
+    )
+
+    linked = {o for s, p, o in triples if s == snapshot and p == REFERS_TO_COMPANY}
+    assert linked == {str(UNIFIED) + "Company_0000320193"}, (
+        f"the snapshot should reach exactly the filed CIK, got {linked}"
+    )
+
+
+def test_an_unpadded_constituent_cik_fails_loudly(spark, make_triples):
+    """An unpadded key must raise, not yield an empty bridge.
+
+    The CSV states the CIK unpadded ("320193") and the filings state it padded
+    to ten ("0000320193"). Joined as strings those match nothing, emit no
+    edge, and raise nothing -- so the failure is indistinguishable from a
+    fixture with no overlap and survives review. The guard turns the silent
+    version of this bug into a loud one.
+    """
+    rows = _issuer_rows(str(SEC_FILINGS) + "Issuer_0000320193", "0000320193")
+
+    with pytest.raises(ValueError, match="zero-padded"):
+        CrossSourceLinker(
+            spark, make_triples(rows), ticker_cik_map={"AAPL": "320193"}
+        )
+
+
+def test_sub_industry_peers_link_and_a_shared_sector_alone_does_not(
+    spark, make_triples
+):
+    """Sub-industry is the signal; sector is too coarse to be one.
+
+    NVDA and AMD are both GICS "Semiconductors"; MSFT is "Application
+    Software". All three sit in the same GICS SECTOR (Information Technology),
+    which is the point -- the largest sector holds 73 of 503 constituents, so a
+    peer edge built on sector would link all three and say nothing. The
+    sub-industry buckets are 3-5 constituents wide, where the claim is sharp.
+    """
+    snapshots = {
+        symbol: str(MARKET_QUOTES) + f"snapshot/{symbol}/2026-07-02"
+        for symbol in ("NVDA", "AMD", "MSFT")
+    }
+    ciks = {"NVDA": "0001045810", "AMD": "0000002488", "MSFT": "0000789019"}
+
+    rows = [(str(SEC_FILINGS) + "Issuer_0000320193", RDF_TYPE, str(SEC_FILINGS.Issuer))]
+    for symbol, snapshot in snapshots.items():
+        rows += _snapshot_rows(snapshot, symbol)
+        rows += _issuer_rows(
+            str(SEC_FILINGS) + f"Issuer_{ciks[symbol]}", ciks[symbol]
+        )
+
+    triples = _triple_set(
+        CrossSourceLinker(
+            spark,
+            make_triples(rows),
+            ticker_cik_map=ciks,
+            sub_industries=[
+                ("NVDA", "Semiconductors"),
+                ("AMD", "Semiconductors"),
+                ("MSFT", "Application Software"),
+            ],
+        ).enrich()
+    )
+
+    peers = {
+        (s, o) for s, p, o in triples if p == SHARES_SUB_INDUSTRY
+    }
+
+    def company(symbol):
+        return str(UNIFIED) + "Company_" + ciks[symbol]
+
+    assert peers == {(company("AMD"), company("NVDA"))}, (
+        "expected exactly one unordered peer pair, the two semiconductor "
+        f"constituents, got {peers}"
+    )
+
+    assert not any(
+        company("MSFT") in pair for pair in peers
+    ), "a constituent sharing only the broader sector was linked as a peer"
+
+
+def test_sub_industry_peers_are_not_minted_for_absent_companies(
+    spark, make_triples
+):
+    """The CSV lists every index member; the graph carries a few of them.
+
+    Minting a company node per constituent would bolt hundreds of vertices
+    onto the graph whose only edges are to each other -- a disconnected clique
+    lattice describing companies no source in this build mentions.
+    """
+    snapshot = str(MARKET_QUOTES) + "snapshot/NVDA/2026-07-02"
+    issuer = str(SEC_FILINGS) + "Issuer_0001045810"
+    rows = _snapshot_rows(snapshot, "NVDA") + _issuer_rows(issuer, "0001045810")
+
+    triples = _triple_set(
+        CrossSourceLinker(
+            spark,
+            make_triples(rows),
+            ticker_cik_map={"NVDA": "0001045810", "AMD": "0000002488"},
+            sub_industries=[
+                ("NVDA", "Semiconductors"),
+                ("AMD", "Semiconductors"),
+            ],
+        ).enrich()
+    )
+
+    assert not [t for t in triples if t[1] == SHARES_SUB_INDUSTRY], (
+        "a peer edge was minted to a company the graph does not carry"
+    )
+    assert str(UNIFIED) + "Company_0000002488" not in {s for s, _p, _o in triples}
 
 
 def test_cross_source_company_linking_resolves_occ_option_symbols(
@@ -94,18 +338,18 @@ def test_cross_source_company_linking_resolves_occ_option_symbols(
     """
     option = str(MARKET_QUOTES) + "snapshot/A_260717C00065000/2026-07-02"
     issuer = str(SEC_FILINGS) + "Issuer_0001090872"
-    rows = [
-        (option, RDF_TYPE, str(MARKET_QUOTES.OptionSnapshot)),
-        (option, str(MARKET_QUOTES.symbol), "A     260717C00065000"),
-        (issuer, RDF_TYPE, str(SEC_FILINGS.Issuer)),
-        (issuer, str(SEC_FILINGS.hasIssuerTradingSymbol), "A"),
-    ]
+    rows = (
+        _snapshot_rows(
+            option, "A     260717C00065000", MARKET_QUOTES.OptionSnapshot
+        )
+        + _issuer_rows(issuer, "0001090872", "A")
+    )
 
     triples = _triple_set(
         CrossSourceLinker(spark, make_triples(rows)).enrich()
     )
 
-    company = str(UNIFIED) + "Company_A"
+    company = str(UNIFIED) + "Company_0001090872"
     assert (option, REFERS_TO_COMPANY, company) in triples, (
         "the option did not resolve to its underlying equity's company"
     )
