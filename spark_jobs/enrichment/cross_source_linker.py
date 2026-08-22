@@ -25,9 +25,16 @@ from spark_jobs.enrichment.intra_source.bls.patterns import (
     BLS_SECTOR_CORRELATION, BLS_SECTOR_PATTERNS,
 )
 from spark_jobs.enrichment.intra_source.market.patterns import (
-    assert_ciks_are_padded,
+    assert_ciks_are_padded, _gics_sector_to_pascal,
 )
 from spark_jobs.enrichment.intra_source.market.symbols import equity_symbol
+from spark_jobs.enrichment.sector_crosswalk import (
+    EQUITY_SECTOR_TYPE as _EQUITY_SECTOR_TYPE,
+    EQUITY_TO_ECONOMIC_SECTORS,
+    RELATED_TO_ECONOMIC_SECTOR,
+    RELATION_CONFIDENCE,
+    SIC_DIVISIONS,
+)
 from spark_jobs.utils.spark_rdf_utils import (
     extract_entities_by_type, extract_property, deduplicate_against_existing,
 )
@@ -122,6 +129,8 @@ _HAS_CIK = str(SEC_ENRICHMENT.hasCik)
 
 _FILINGS_HAS_ISSUER_CIK = str(SEC_FILINGS.hasIssuerCik)
 _FILINGS_HAS_ISSUER_TRADING_SYMBOL = str(SEC_FILINGS.hasIssuerTradingSymbol)
+_FILINGS_HAS_ISSUER = str(SEC_FILINGS.hasIssuer)
+_FILINGS_HAS_SIC = str(SEC_FILINGS.hasSic)
 
 # Peer relation between two companies in one GICS sub-industry. In the MARKET
 # enrichment namespace because the sub-industry is GICS vocabulary, and the
@@ -257,23 +266,29 @@ class CrossSourceLinker:
         # did not already find correctly. Deleted rather than repaired: fixing
         # the regex would still leave two implementations minting the same
         # unified:{Month} URIs.
-        logger.info("\n[Step 1/6] Creating sector-based links...")
+        logger.info("\n[Step 1/8] Creating sector-based links...")
         self._append(new_dfs, self._link_by_sector())
 
-        logger.info("\n[Step 2/6] Linking by company/ticker...")
+        logger.info("\n[Step 2/8] Relating equity sectors to economic sectors...")
+        self._append(new_dfs, self._link_equity_to_economic_sectors())
+
+        logger.info("\n[Step 3/8] Linking by company/ticker...")
         if 'sec' in self.available_sources and 'market' in self.available_sources:
             self._append(new_dfs, self._link_by_company())
 
-            logger.info("\n[Step 3/6] Linking constituents by sub-industry...")
+            logger.info("\n[Step 4/8] Linking constituents by sub-industry...")
             self._append(new_dfs, self._link_by_sub_industry())
 
-        logger.info("\n[Step 4/6] Linking by geographic region...")
+            logger.info("\n[Step 5/8] Linking filings to sectors by SIC code...")
+            self._append(new_dfs, self._link_filings_by_sic())
+
+        logger.info("\n[Step 6/8] Linking by geographic region...")
         self._append(new_dfs, self._link_by_geography())
 
-        logger.info("\n[Step 5/6] Creating causal relationships...")
+        logger.info("\n[Step 7/8] Creating causal relationships...")
         self._append(new_dfs, self._create_causal_links())
 
-        logger.info("\n[Step 6/6] Aligning measurement types...")
+        logger.info("\n[Step 8/8] Aligning measurement types...")
         self._append(new_dfs, self._align_measurement_types())
 
         if not new_dfs:
@@ -344,6 +359,24 @@ class CrossSourceLinker:
             )
             .filter(F.length(F.col("local_name")) > 0)
         )
+
+        # SEC entities are excluded from the keyword classifier.
+        #
+        # They now reach a sector through filings:hasSic -- the issuer's
+        # registered industry classification, stated by upstream on every
+        # filing -- which is a fact about the company rather than a substring
+        # of its URI. See _link_filings_by_sic.
+        #
+        # What this classifier was doing to them was matching BLS keyword
+        # fragments against an accession number: a filing's local name is
+        # "0001178913-26-003947_Filing", and any sector keyword that happens to
+        # appear inside one produces a confident, meaningless membership claim.
+        # Keeping both paths would leave the real classification competing with
+        # the accidental one on the same predicate.
+        sec_match = F.lit(False)
+        for prefix in _SEC_ENTITY_PREFIXES:
+            sec_match = sec_match | F.col("subject").startswith(prefix)
+        entities = entities.filter(~sec_match)
 
         # Join: entity local name contains sector keyword
         # Use broadcast for the small sector lookup
@@ -617,6 +650,184 @@ class CrossSourceLinker:
 
         logger.info("  Company linking triples prepared (lazy)")
         return result
+
+    # ================================================================
+    # Step 1b: Equity sector -> economic sector
+    # ================================================================
+
+    def _link_equity_to_economic_sectors(self) -> Optional[DataFrame]:
+        """Join the two sector vocabularies, by hand, with the gaps kept.
+
+        bls:EconomicSector is the best-connected hub in the graph -- every
+        economic-indicator type attaches to it -- and the market side had zero
+        edges to it, because the market enricher classifies into its own GICS
+        namespace and nothing reconciled the two. This is the Part 1 split one
+        level up: the same concept represented twice, in parallel, never
+        joined.
+
+        The join is a CURATED table, not a name match, and it is deliberately
+        incomplete: three GICS sectors map to nothing. See
+        enrichment/sector_crosswalk.py for each row's reasoning and for why
+        "completing" the table would make the graph worse.
+
+        Emitted under relatedToEconomicSector, never belongsToSector. A
+        constituent BELONGS TO its GICS sector; that GICS sector is merely
+        RELATED TO an economic one. Collapsing membership and similarity into
+        one relation would deny a GNN the ability to weight them differently.
+        """
+        rows = [
+            (
+                str(MARKET_ENRICHMENT[f"{_gics_sector_to_pascal(gics)}Sector"]),
+                sector_uri,
+                confidence,
+            )
+            for gics, mapped in EQUITY_TO_ECONOMIC_SECTORS.items()
+            for sector_uri, confidence in mapped
+        ]
+
+        if not rows:
+            return None
+
+        crosswalk = self.spark.createDataFrame(
+            sorted(rows), schema=["equity_sector", "economic_sector", "confidence"]
+        )
+
+        # Only the equity sectors this build actually classified something
+        # into. The table covers eleven GICS sectors; a build holding quotes
+        # for two of them should not carry nine sector nodes with one edge
+        # each and no constituents.
+        present = (
+            self.triples_df
+            .filter(F.col("predicate") == _RDF_TYPE)
+            .filter(F.col("object") == _EQUITY_SECTOR_TYPE)
+            .select(F.col("subject").alias("equity_sector"))
+            .distinct()
+        )
+
+        matched = crosswalk.join(F.broadcast(present), "equity_sector", "inner")
+
+        # Type the economic sector too. _link_by_sector types the ones its
+        # keywords hit, but a build with market data and no BLS feed would
+        # otherwise point these edges at an untyped URI, and node_mapper drops
+        # an edge whose destination is not a node.
+        economic_types = matched.select("economic_sector").distinct().select(
+            F.col("economic_sector").alias("subject"),
+            F.lit(_RDF_TYPE).alias("predicate"),
+            F.lit(str(BLS_ENRICHMENT.EconomicSector)).alias("object"),
+        )
+
+        related = matched.select(
+            F.col("equity_sector").alias("subject"),
+            F.lit(RELATED_TO_ECONOMIC_SECTOR).alias("predicate"),
+            F.col("economic_sector").alias("object"),
+        )
+
+        # Confidence rides as a property of the equity sector node rather than
+        # splitting the relation into strong/moderate variants, which would
+        # double the edge types for something a scalar states better.
+        confidence = matched.select(
+            F.col("equity_sector").alias("subject"),
+            F.lit(RELATION_CONFIDENCE).alias("predicate"),
+            F.col("confidence").alias("object"),
+        ).distinct()
+
+        logger.info("  Equity-to-economic sector triples prepared (lazy)")
+        return economic_types.unionByName(related).unionByName(confidence)
+
+    # ================================================================
+    # Step 1c: Filings -> economic sector, via the SIC code
+    # ================================================================
+
+    def _link_filings_by_sic(self) -> Optional[DataFrame]:
+        """The filings' own industry code, instead of a keyword match.
+
+        filings:hasSic is stated by upstream on every filing, and this repo
+        read it nowhere -- so the filings side reached the economic sector hub
+        only through _link_by_sector's keyword classifier, which matches
+        substrings of a URI's local name and for a filing is matching an
+        accession number.
+
+        The sector lands on the COMPANY, not on the filing, and that is what
+        makes it worth doing here rather than as a SEC intra-source step: a
+        filing is a document, its industry is a fact about the issuer, and
+        every filing by that issuer then inherits it through the company node
+        Part 1 unified. The chain is
+
+            Filing -hasSic-> code
+            Filing -hasIssuer-> Issuer -hasIssuerCik-> CIK -> Company
+
+        so this depends on the CIK-keyed company node existing, which is why
+        it lands with Part 1 rather than before it.
+
+        belongsToSector, not relatedToEconomicSector: this IS membership. The
+        issuer's registered industry classification is a claim about what the
+        company does, unlike the GICS-to-economic mapping above, which is a
+        claim about two taxonomies resembling each other.
+        """
+        sic = extract_property(
+            self.triples_df, _FILINGS_HAS_SIC, "raw_sic"
+        ).select(
+            F.col("subject").alias("filing"),
+            F.trim(F.col("raw_sic")).alias("sic"),
+        ).filter(F.length(F.col("sic")) > 0)
+
+        if sic.head(1) == []:
+            return None
+
+        filing_issuers = self.triples_df.filter(
+            F.col("predicate") == _FILINGS_HAS_ISSUER
+        ).select(
+            F.col("subject").alias("filing"),
+            F.col("object").alias("issuer_uri"),
+        )
+
+        # SIC major group -> economic sector, expanded to one row per group so
+        # the join is an equality rather than a range. Ninety-nine rows at
+        # most, and it keeps the division boundaries stated once, in the
+        # crosswalk module.
+        division_rows = [
+            (f"{group:02d}", division, sector)
+            for low, high, division, sector in SIC_DIVISIONS
+            for group in range(low, high + 1)
+        ]
+        divisions = self.spark.createDataFrame(
+            division_rows, schema=["major_group", "division", "economic_sector"]
+        )
+
+        companies = (
+            sic
+            .join(filing_issuers, "filing", "inner")
+            .join(self._issuer_ciks(), "issuer_uri", "inner")
+            # Normalise to the 4-digit form before slicing. A SIC code typed
+            # numeric upstream loses its leading zero, and "100" sliced at two
+            # is "10" -- right only by accident -- while "755" sliced at two is
+            # "75", which is a different division entirely.
+            .withColumn(
+                "major_group",
+                F.substring(F.lpad(F.col("sic"), 4, "0"), 1, 2),
+            )
+            .filter(F.length(F.col("sic")) <= 4)
+            .join(F.broadcast(divisions), "major_group", "inner")
+            .select("cik", "economic_sector")
+            .distinct()
+        )
+
+        company_uri = F.concat(F.lit(_UNIFIED_COMPANY_PREFIX), F.col("cik"))
+
+        belongs = companies.select(
+            company_uri.alias("subject"),
+            F.lit(str(BLS_ENRICHMENT.belongsToSector)).alias("predicate"),
+            F.col("economic_sector").alias("object"),
+        )
+
+        sector_types = companies.select("economic_sector").distinct().select(
+            F.col("economic_sector").alias("subject"),
+            F.lit(_RDF_TYPE).alias("predicate"),
+            F.lit(str(BLS_ENRICHMENT.EconomicSector)).alias("object"),
+        )
+
+        logger.info("  SIC sector triples prepared (lazy)")
+        return belongs.unionByName(sector_types)
 
     # ================================================================
     # Step 3b: Sub-industry peer edges
