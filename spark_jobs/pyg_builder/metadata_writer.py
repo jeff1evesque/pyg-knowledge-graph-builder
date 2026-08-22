@@ -977,6 +977,58 @@ def write_metadata_to_local(
         logger.info(f"  Saved {filename} ({size_kb:.1f} KB) to {path}")
 
 
+# The partition segment standing in for `year=YYYY/month=MM` on the alias copy.
+#
+# The period layout is addressable only by someone who already knows which
+# period is newest. A consumer fetching one fixed URL over HTTP cannot list the
+# bucket to find out -- and should not be able to -- so every build also writes
+# the schema to this fixed segment, which always names the most recent build.
+LATEST_PARTITION = "latest"
+
+# Only the schema is aliased. The alias exists for consumers reading the graph's
+# SHAPE; the .pt, the node index and the other five metadata files have no such
+# reader, and copying them would advertise the whole build as addressable at
+# `latest/` when only this one file is kept current there.
+LATEST_ALIAS_FILES = frozenset({"graph_schema.json"})
+
+
+def write_latest_alias(
+    metadata_files: Dict[str, Dict[str, Any]],
+    latest_metadata_dir: str,
+    spark=None,
+) -> None:
+    """
+    Write the consumer-facing subset of the metadata to the `latest` alias.
+
+    Delegates to write_metadata_to_local() rather than serializing again, which
+    is what makes the alias byte-identical to the period-partitioned copy: one
+    json.dumps() call site, one set of separators and indentation. It also means
+    the alias inherits the scheme-aware write, so an unreachable URI raises here
+    exactly as it does for the period copy instead of quietly landing on the
+    driver's disk.
+
+    A metadata_files dict carrying none of LATEST_ALIAS_FILES is a no-op, not an
+    error: partial metadata is a legitimate state for a build that did not
+    register every collector, and failing here would take down a build over an
+    artifact that has no consumer yet.
+
+    Args:
+        metadata_files: Dict[filename -> content_dict], the full set
+        latest_metadata_dir: Directory for the alias — bare path or URI
+        spark: Active SparkSession; required when the directory is a non-local URI
+    """
+    alias_files = {
+        name: content
+        for name, content in metadata_files.items()
+        if name in LATEST_ALIAS_FILES
+    }
+    if not alias_files:
+        logger.info("  No aliasable metadata for the latest pointer; skipping")
+        return
+
+    write_metadata_to_local(alias_files, latest_metadata_dir, spark=spark)
+
+
 def derive_metadata_prefix(pyg_output_key: str) -> str:
     """
     Derive the metadata S3 prefix from the PyG output key.
