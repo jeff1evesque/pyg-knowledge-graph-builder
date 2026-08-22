@@ -19,6 +19,17 @@ sampling artifacts — a BLS class that no sampled row happens to use is absent
 without being dead. Pinning them is still worth it: the guard is not "the
 baseline is all defects", it is "the set does not GROW without someone looking".
 
+A THIRD KIND OF ENTRY, which the JSON cannot annotate itself. `JOLTS
+hasCensusRegionCode` is not unsampled and not dead — it is NOT YET EMITTED
+ANYWHERE. The region work binds it deliberately ahead of upstream, because the
+failure it guards is silent: the codes are to arrive as zero-padded
+`xsd:string`, and a numeric 1 that never matches a string "01" produces an
+empty join and no error. Writing the reader against the agreed shape now is
+cheaper than discovering the mismatch after the term lands. The census-region
+bridge does not depend on it — a name-keyed path carries it today — so this
+entry is a pending confirmation, not a dead reference to repair. See
+enrichment/region_crosswalk.py.
+
 An entry leaving the baseline is also a failure. A term that starts being
 emitted means either a fixture regeneration covered it or a defect was fixed,
 and both should update the file rather than leave it overstating the damage.
