@@ -9,7 +9,7 @@ All methods:
 2. Return new triples DataFrames
 3. Never call .collect(), .toPandas(), or .toLocalIterator()
 """
-from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import Column, DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 from rdflib.namespace import RDF, RDFS, OWL
@@ -28,6 +28,15 @@ from spark_jobs.enrichment.intra_source.market.patterns import (
     assert_ciks_are_padded, _gics_sector_to_pascal,
 )
 from spark_jobs.enrichment.intra_source.market.symbols import equity_symbol
+from spark_jobs.enrichment.region_crosswalk import (
+    CENSUS_REGION_CODES,
+    STATE_ABBREVIATIONS,
+    STATE_FIPS_TO_NAME,
+    STATE_TO_CENSUS_REGION,
+    US_STATES,
+    normalized_state_fips,
+    state_key,
+)
 from spark_jobs.enrichment.sector_crosswalk import (
     EQUITY_SECTOR_TYPE as _EQUITY_SECTOR_TYPE,
     EQUITY_TO_ECONOMIC_SECTORS,
@@ -42,6 +51,22 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _delimited_local_name(subject: Column) -> Column:
+    """The URI's local name with every run of non-letters as one "_", wrapped.
+
+    "…/id/laus/Arkansas_June2026_HiresLevel" -> "_Arkansas_June_HiresLevel_"
+
+    Wrapping in the separator is what turns a substring test into a WORD test:
+    "_Arkansas_June_" does not contain "_Kansas_", while the raw URI does
+    contain "Kansas". Collapsing digit runs too, so a year between two names
+    still reads as one boundary rather than gluing them together.
+    """
+    local = F.regexp_extract(subject, r"[/#]([^/#]+)$", 1)
+    return F.concat(
+        F.lit("_"), F.regexp_replace(local, r"[^A-Za-z]+", "_"), F.lit("_")
+    )
 
 
 def _entity_prefixes(*namespaces) -> List[str]:
@@ -82,29 +107,11 @@ _MARKET_SYMBOL_TYPES = (
     (str(MARKET_QUOTES.OptionSnapshot), str(MARKET_QUOTES.symbol)),
 )
 
-# Two-letter postal abbreviations, for matching NWS area descriptions.
-#
-# NWS writes them as "Lincoln, KS; Russell, KS" and never spells the state out,
-# so the full-name list alone matched nothing. Kept beside the state list the
-# geographic step already carries rather than derived, because the postal code
-# is not a function of the name.
-_STATE_ABBREVIATIONS = {
-    'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR',
-    'California': 'CA', 'Colorado': 'CO', 'Connecticut': 'CT',
-    'Delaware': 'DE', 'Florida': 'FL', 'Georgia': 'GA', 'Hawaii': 'HI',
-    'Idaho': 'ID', 'Illinois': 'IL', 'Indiana': 'IN', 'Iowa': 'IA',
-    'Kansas': 'KS', 'Kentucky': 'KY', 'Louisiana': 'LA', 'Maine': 'ME',
-    'Maryland': 'MD', 'Massachusetts': 'MA', 'Michigan': 'MI',
-    'Minnesota': 'MN', 'Mississippi': 'MS', 'Missouri': 'MO',
-    'Montana': 'MT', 'Nebraska': 'NE', 'Nevada': 'NV',
-    'New Hampshire': 'NH', 'New Jersey': 'NJ', 'New Mexico': 'NM',
-    'New York': 'NY', 'North Carolina': 'NC', 'North Dakota': 'ND',
-    'Ohio': 'OH', 'Oklahoma': 'OK', 'Oregon': 'OR', 'Pennsylvania': 'PA',
-    'Rhode Island': 'RI', 'South Carolina': 'SC', 'South Dakota': 'SD',
-    'Tennessee': 'TN', 'Texas': 'TX', 'Utah': 'UT', 'Vermont': 'VT',
-    'Virginia': 'VA', 'Washington': 'WA', 'West Virginia': 'WV',
-    'Wisconsin': 'WI', 'Wyoming': 'WY',
-}
+# The state name, abbreviation, FIPS and census-region tables now live in
+# enrichment/region_crosswalk.py, imported above. They moved because three
+# different paths key on them -- the weather geocodes, the local-area economic
+# series, and the census-region bridge -- and a table copied into each is a
+# table that drifts between them.
 
 # URI constants
 _RDF_TYPE = str(RDF.type)
@@ -153,6 +160,29 @@ _CAP_HAS_AREA_DESC = str(CAP.hasAreaDescription)
 # SAME code against a county-FIPS lookup. Upstream is correcting the term; if a
 # county-level join is ever wanted here, bind it then, against the fixed shape.
 _NWS_HAS_STATE_FIPS = str(WEATHER.hasStateFIPS)
+
+# The economic side of the region join.
+#
+# NONE OF THESE THREE TERMS IS EMITTED YET. The regional series currently state
+# a name and a slug subject and no code at all; the codes exist in the upstream
+# catalogs unmapped, and are to be emitted as zero-padded xsd:string. Bound here
+# against the agreed shape so the readers are written and tested before the
+# terms land, rather than after a silent empty join is noticed in a build.
+_LAUS_HAS_STATE_FIPS = str(LAUS.hasStateFIPS)
+_METRO_HAS_STATE_FIPS = str(METRO.hasStateFIPS)
+_REGIONAL_STATE_FIPS_PREDS = (_LAUS_HAS_STATE_FIPS, _METRO_HAS_STATE_FIPS)
+
+# metro:hasCBSACode is deliberately NOT bound. Resolving a metro area to the
+# counties it spans needs a federal delineation file neither side holds, so a
+# CBSA code has nothing to join against here and binding it would imply
+# otherwise.
+
+_JOLTS_HAS_CENSUS_REGION_CODE = str(JOLTS.hasCensusRegionCode)
+_JOLTS_REGION_TYPE = str(JOLTS.Region)
+
+# state region -> census region. In BLS_ENRICHMENT because this pipeline infers
+# it from a table it maintains; see region_crosswalk.
+_WITHIN_CENSUS_REGION = str(BLS_ENRICHMENT.withinCensusRegion)
 
 # NOAA structural properties for traversal
 _CAP_HAS_INFO = str(CAP.hasInfo)
@@ -929,44 +959,27 @@ class CrossSourceLinker:
         Both approaches trace back to the Alert subject via the
         Alert → Info → Area → Geocode chain.
         """
-        us_states = [
-            'Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado',
-            'Connecticut', 'Delaware', 'Florida', 'Georgia', 'Hawaii', 'Idaho',
-            'Illinois', 'Indiana', 'Iowa', 'Kansas', 'Kentucky', 'Louisiana',
-            'Maine', 'Maryland', 'Massachusetts', 'Michigan', 'Minnesota',
-            'Mississippi', 'Missouri', 'Montana', 'Nebraska', 'Nevada',
-            'New Hampshire', 'New Jersey', 'New Mexico', 'New York',
-            'North Carolina', 'North Dakota', 'Ohio', 'Oklahoma', 'Oregon',
-            'Pennsylvania', 'Rhode Island', 'South Carolina', 'South Dakota',
-            'Tennessee', 'Texas', 'Utah', 'Vermont', 'Virginia', 'Washington',
-            'West Virginia', 'Wisconsin', 'Wyoming'
-        ]
+        us_states = US_STATES
+        state_fips_to_name = STATE_FIPS_TO_NAME
 
-        # State FIPS code → state name mapping (2-digit codes)
-        state_fips_to_name = {
-            '01': 'Alabama', '02': 'Alaska', '04': 'Arizona', '05': 'Arkansas',
-            '06': 'California', '08': 'Colorado', '09': 'Connecticut',
-            '10': 'Delaware', '12': 'Florida', '13': 'Georgia', '15': 'Hawaii',
-            '16': 'Idaho', '17': 'Illinois', '18': 'Indiana', '19': 'Iowa',
-            '20': 'Kansas', '21': 'Kentucky', '22': 'Louisiana', '23': 'Maine',
-            '24': 'Maryland', '25': 'Massachusetts', '26': 'Michigan',
-            '27': 'Minnesota', '28': 'Mississippi', '29': 'Missouri',
-            '30': 'Montana', '31': 'Nebraska', '32': 'Nevada',
-            '33': 'New Hampshire', '34': 'New Jersey', '35': 'New Mexico',
-            '36': 'New York', '37': 'North Carolina', '38': 'North Dakota',
-            '39': 'Ohio', '40': 'Oklahoma', '41': 'Oregon',
-            '42': 'Pennsylvania', '44': 'Rhode Island', '45': 'South Carolina',
-            '46': 'South Dakota', '47': 'Tennessee', '48': 'Texas',
-            '49': 'Utah', '50': 'Vermont', '51': 'Virginia',
-            '53': 'Washington', '54': 'West Virginia', '55': 'Wisconsin',
-            '56': 'Wyoming',
-        }
-
+        # state_slug is the state name with spaces replaced by the separator
+        # the source URIs use, wrapped in it. See _delimited_local_name.
         state_rows = [
-            (s, s.replace(' ', ''), _STATE_ABBREVIATIONS[s]) for s in us_states
+            (
+                name,
+                state_key(name),
+                STATE_ABBREVIATIONS[name],
+                "_" + name.replace(' ', '_') + "_",
+                "_" + state_key(name) + "_",
+            )
+            for name in us_states
         ]
         states_df = self.spark.createDataFrame(
-            state_rows, schema=["state_name", "state_key", "state_abbr"]
+            state_rows,
+            schema=[
+                "state_name", "state_key", "state_abbr",
+                "state_slug", "state_slug_nospace",
+            ],
         )
 
         # Create unified region entities
@@ -998,8 +1011,41 @@ class CrossSourceLinker:
                 .filter(laus_match)
             )
 
+            # The state name must be the DELIMITED HEAD of the local name, not
+            # a substring of the whole URI anywhere.
+            #
+            # `subject.contains(state_key)` linked every West Virginia series to
+            # VirginiaRegion as well as to its own, because "WestVirginia"
+            # contains "Virginia". That is the only such pair among the 51
+            # names -- see test_exactly_one_state_name_contains_another, which
+            # also records that Arkansas/Kansas is NOT one of them, the
+            # comparison being case-sensitive and the 'k' lowercase. One pair is
+            # enough: merging two genuinely distinct regions is worse than
+            # missing one, since the weather feed then reaches the wrong state's
+            # unemployment series with full confidence.
+            #
+            # It does NOT separate a metro area whose name BEGINS with a state
+            # name: "Kansas_City_MO" still lands on KansasRegion, though the
+            # metro straddles two states. That needs the federal delineation
+            # file which puts metro resolution out of scope, so this is the
+            # state-vs-state fix and not the metro one.
+            #
+            # Anchored at the HEAD because these URIs put the area first
+            # ("Midwest_June2026_HiresLevel"). An unanchored delimited match
+            # does not separate the Virginia pair either -- "_West_Virginia_"
+            # contains "_Virginia_" as a substring -- so the anchor is doing
+            # real work rather than being a convenience.
+            #
+            # Both separator spellings are accepted because the two are minted
+            # differently across sources: "New_York" from a label slug,
+            # "NewYork" from a URI-safe key.
             laus_matched = laus_entities.crossJoin(F.broadcast(states_df)).filter(
-                F.col("subject").contains(F.col("state_key"))
+                _delimited_local_name(F.col("subject")).startswith(
+                    F.col("state_slug")
+                )
+                | _delimited_local_name(F.col("subject")).startswith(
+                    F.col("state_slug_nospace")
+                )
             )
 
             laus_links = laus_matched.select(
@@ -1102,26 +1148,16 @@ class CrossSourceLinker:
             # the state. Compared as strings those never match, so this whole
             # strategy linked nothing on every alert ever ingested.
             #
-            # Taking the LAST two digits rather than stripping a leading zero:
-            # the part-digit is not always 0 (it marks a partial-county code),
-            # so trimming zeros would silently mangle those.
-            #
-            # substring(-2, 2) alone, NOT lpad(...,2,"0") first. Spark's lpad
-            # truncates when the input is LONGER than the target width, and it
-            # truncates from the right -- lpad("040",2,"0") is "04", not "40".
-            # That destroyed the state digit and silently produced the WRONG
-            # state: every "0NN" head resolved to state "0N", so Oklahoma (040)
-            # and Texas (048) both linked to Arizona (04), and the unmapped 099
-            # linked to Connecticut (09) instead of dropping. This failed
-            # louder than a dead join -- it emitted confident, wrong edges.
-            #
-            # substring with a negative start already reads from the end and is
-            # safe on short input, so no padding is needed at all.
+            # normalized_state_fips reads the LAST two digits, which is correct
+            # for the current 3-character form AND for the 2-character form
+            # upstream is moving to -- see the note on that function for why it
+            # must stay tolerant of both permanently, and for the lpad trap it
+            # exists to avoid.
             state_fips_triples = self.triples_df.filter(
                 F.col("predicate") == _NWS_HAS_STATE_FIPS
             ).select(
                 F.col("subject").alias("geocode"),
-                F.substring(F.trim(F.col("object")), -2, 2).alias("state_fips"),
+                normalized_state_fips(F.col("object")).alias("state_fips"),
             )
 
             if state_fips_triples.head(1):
@@ -1161,6 +1197,50 @@ class CrossSourceLinker:
                     noaa_links = noaa_links.unionByName(df)
                 noaa_links = noaa_links.dropDuplicates()
 
+        # The economic side, keyed on the state FIPS upstream is adding.
+        #
+        # The local-area series are STATE-LEVEL ONLY -- 53 areas, no counties --
+        # so a weather county FIPS reaches them by taking its first two digits,
+        # with no crosswalk file on either side. That is what makes this the
+        # fastest path to a connected graph and why it is worth writing before
+        # the term exists.
+        #
+        # It matches nothing today: the regional series emit a name and a slug
+        # subject and NO CODE AT ALL, and laus:hasStateFIPS / metro:hasStateFIPS
+        # are still unmapped in the upstream catalogs. Written now, against the
+        # agreed shape (zero-padded xsd:string), because the datatype matters
+        # more than the name -- a numeric 1 never matches a string "01", and
+        # that mismatch produces an empty join and no error. The name-keyed
+        # path above keeps working in the meantime.
+        regional_fips_links = None
+        if 'bls' in self.available_sources:
+            fips_stated = self.triples_df.filter(
+                F.col("predicate").isin(list(_REGIONAL_STATE_FIPS_PREDS))
+            ).select(
+                F.col("subject"),
+                normalized_state_fips(F.col("object")).alias("state_fips"),
+            )
+
+            if fips_stated.head(1):
+                state_fips_lookup = self.spark.createDataFrame(
+                    [
+                        (fips, name, state_key(name))
+                        for fips, name in state_fips_to_name.items()
+                    ],
+                    schema=["fips_code", "state_name", "state_key"],
+                )
+                regional_fips_links = fips_stated.join(
+                    F.broadcast(state_fips_lookup),
+                    fips_stated.state_fips == state_fips_lookup.fips_code,
+                    "inner",
+                ).select(
+                    F.col("subject"),
+                    F.lit(str(BLS_ENRICHMENT.hasRegion)).alias("predicate"),
+                    F.concat(
+                        F.lit(str(UNIFIED)), F.col("state_key"), F.lit("Region")
+                    ).alias("object"),
+                )
+
         # Only the regions something actually points at.
         #
         # All 50 states used to be typed and labelled unconditionally, while the
@@ -1173,7 +1253,10 @@ class CrossSourceLinker:
         # consequence of the data rather than of the state list. Nothing else
         # changes: a region that IS linked gets exactly the type and label it
         # got before.
-        links = [df for df in (laus_links, noaa_links) if df is not None]
+        links = [
+            df for df in (laus_links, noaa_links, regional_fips_links)
+            if df is not None
+        ]
         if not links:
             logger.info("  No geographic links matched — no region entities minted")
             return None
@@ -1191,8 +1274,146 @@ class CrossSourceLinker:
             .unionByName(all_links)
         )
 
+        census = self._link_census_regions(linked_regions)
+        if census is not None:
+            result = result.unionByName(census)
+
         logger.info("  Geographic linking triples prepared (lazy)")
         return result
+
+    def _link_census_regions(
+        self, linked_state_regions: DataFrame
+    ) -> Optional[DataFrame]:
+        """The rung that gets the weather feed to the job-openings series.
+
+        The job-openings regions are NOT states -- they are the four census
+        regions -- so the state-level path cannot reach them and they were the
+        second, unjoined region vocabulary (`jolts_Region`). This adds the
+        census region as a shared node and hangs the state regions off it:
+
+            WeatherAlert -> KansasRegion -> MidwestCensusRegion
+                                              ^
+                            jolts:Midwest_Region (owl:sameAs)
+                                              ^
+                            jolts HiresLevel -hasRegion-
+
+        so the path a weather alert has to a regional economic series exists
+        through geography, and through nothing else. Sector is a different axis
+        and must not be used for this: a sector is not located in a region.
+
+        owl:sameAs to the source region entity, matching how TemporalUnifier
+        joins the same period stated in two source vocabularies. It is the right
+        claim here -- the jolts Midwest region and the census Midwest region are
+        one region, not two that resemble each other.
+
+        Keyed on the census-region CODE where upstream states it, and on the
+        region NAME otherwise. The code is what upstream is adding
+        (jolts:hasCensusRegionCode); the name path works today, so the bridge
+        does not have to wait for a term that will merely confirm it.
+        """
+        census_rows = [
+            (name, code, state_key(name))
+            for name, code in CENSUS_REGION_CODES.items()
+        ]
+        census_df = self.spark.createDataFrame(
+            census_rows, schema=["census_name", "census_code", "census_key"]
+        )
+
+        census_uri = F.concat(
+            F.lit(str(UNIFIED)), F.col("census_key"), F.lit("CensusRegion")
+        )
+
+        # state region -> census region, from the 51-row table. Restricted to
+        # the state regions something already points at, so the census node is
+        # a consequence of the data rather than of the table.
+        membership_rows = [
+            (state_key(state), region, state)
+            for state, region in STATE_TO_CENSUS_REGION.items()
+        ]
+        membership_df = self.spark.createDataFrame(
+            membership_rows, schema=["member_key", "census_name", "state_name"]
+        ).withColumn(
+            "region_uri",
+            F.concat(F.lit(str(UNIFIED)), F.col("member_key"), F.lit("Region")),
+        )
+
+        within = (
+            membership_df.join(
+                linked_state_regions.withColumnRenamed("subject", "region_uri"),
+                "region_uri",
+                "left_semi",
+            )
+            .join(F.broadcast(census_df), "census_name", "inner")
+            .select(
+                F.col("region_uri").alias("subject"),
+                F.lit(_WITHIN_CENSUS_REGION).alias("predicate"),
+                census_uri.alias("object"),
+            )
+        )
+
+        # The source-side region entities, by stated code then by name.
+        coded = self.triples_df.filter(
+            F.col("predicate") == _JOLTS_HAS_CENSUS_REGION_CODE
+        ).select(
+            F.col("subject").alias("entity"),
+            F.lpad(F.trim(F.col("object")), 2, "0").alias("census_code"),
+        ).join(F.broadcast(census_df), "census_code", "inner").select(
+            "entity", "census_name", "census_key"
+        )
+
+        named = self.triples_df.filter(
+            (F.col("predicate") == _RDF_TYPE)
+            & (F.col("object") == _JOLTS_REGION_TYPE)
+        ).select(F.col("subject").alias("entity")).crossJoin(
+            F.broadcast(census_df)
+        ).filter(
+            # The same delimited-head rule the state match uses. "Midwest_Region"
+            # reads as "_Midwest_Region_", which starts with "_Midwest_"; a
+            # region merely CONTAINING a census name does not match.
+            _delimited_local_name(F.col("entity")).startswith(
+                F.concat(F.lit("_"), F.col("census_name"), F.lit("_"))
+            )
+        ).select("entity", "census_name", "census_key")
+
+        source_regions = coded.unionByName(named).dropDuplicates()
+
+        same_as = source_regions.select(
+            F.concat(
+                F.lit(str(UNIFIED)), F.col("census_key"), F.lit("CensusRegion")
+            ).alias("subject"),
+            F.lit(_OWL_SAME_AS).alias("predicate"),
+            F.col("entity").alias("object"),
+        )
+
+        # Scaffolding for exactly the census regions something reaches, from
+        # either side.
+        reached = (
+            within.select(F.col("object").alias("subject"))
+            .unionByName(same_as.select("subject"))
+            .distinct()
+        )
+
+        if reached.head(1) == []:
+            return None
+
+        type_triples = reached.select(
+            F.col("subject"),
+            F.lit(_RDF_TYPE).alias("predicate"),
+            F.lit(str(BLS_ENRICHMENT.CensusRegion)).alias("object"),
+        )
+
+        label_triples = census_df.select(
+            census_uri.alias("subject"),
+            F.lit(_RDFS_LABEL).alias("predicate"),
+            F.col("census_name").alias("object"),
+        ).join(reached, "subject", "left_semi")
+
+        return (
+            type_triples
+            .unionByName(label_triples)
+            .unionByName(within)
+            .unionByName(same_as)
+        )
 
     # ================================================================
     # Step 5: Causal Links
