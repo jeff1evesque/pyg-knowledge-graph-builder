@@ -28,6 +28,9 @@
   "EMPSIT": [
     "AverageOvertimeHoursData"
   ],
+  "JOLTS": [
+    "hasCensusRegionCode"
+  ],
   "MARKET_QUOTES": [
     "expirationDate",
     "inTheMoney",
