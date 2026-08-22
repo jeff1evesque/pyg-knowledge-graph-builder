@@ -2078,91 +2078,30 @@ BLS_SECTOR_PATTERNS = {
         },
     },
 
-    'geographic_regions_sector': {
-        'description': 'Geographic regions and trading partners',
-        'sector_uri': BLS_ENRICHMENT.GeographicRegionsSector,
-        'keywords': {
-            'cpi': [],
-            'ppi': [],
-            'eci': [],
-            'jolts': ['Northeast', 'South', 'Midwest', 'West'],
-            'empsit': [],
-            'ximpim': [
-                # Industrialized countries
-                'Industrialized Countries',
-                # North America
-                'Canada',
-                # Europe
-                'European Union',
-                'Europe',
-                'France (Dec. 2003=100)',
-                'Germany (Dec. 2003=100)',
-                'Germany',
-                'United Kingdom (Dec. 2003=100)',
-                # Latin America
-                'Latin America',
-                'Latin America/Caribbean',
-                'Mexico (Dec. 2003=100)',
-                'Mexico',
-                # Asia Pacific
-                'Pacific Rim (Dec. 2003=100)',
-                'Pacific Rim',
-                'Asia',
-                'China (Dec. 2003=100)',
-                'China',
-                'Japan',
-                'Taiwan (Dec. 2018=100)',
-                'Asian NICs',
-                'ASEAN (Dec. 2003=100)',
-                'Asia Near East (Dec. 2003=100)',
-            ],
-            'laus': [],
-            'metro': [
-                # Metropolitan Statistical Areas (MSAs)
-                'Metropolitan',
-                'Metro',
-                'MSA',
-                'State, area, and division',
-                'State and area',
-
-                # All US States
-                'Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado',
-                'Connecticut', 'Delaware', 'District of Columbia', 'Florida', 'Georgia',
-                'Hawaii', 'Idaho', 'Illinois', 'Indiana', 'Iowa', 'Kansas', 'Kentucky',
-                'Louisiana', 'Maine', 'Maryland', 'Massachusetts', 'Michigan', 'Minnesota',
-                'Mississippi', 'Missouri', 'Montana', 'Nebraska', 'Nevada', 'New Hampshire',
-                'New Jersey', 'New Mexico', 'New York', 'North Carolina', 'North Dakota',
-                'Ohio', 'Oklahoma', 'Oregon', 'Pennsylvania', 'Rhode Island', 'South Carolina',
-                'South Dakota', 'Tennessee', 'Texas', 'Utah', 'Vermont', 'Virginia',
-                'Washington', 'West Virginia', 'Wisconsin', 'Wyoming', 'Puerto Rico',
-                'Virgin Islands',
-
-                # Major Metropolitan Areas (sample - full list in metro_enricher.py)
-                'New York-Newark-Jersey City',
-                'Los Angeles-Long Beach-Anaheim',
-                'Chicago-Naperville-Elgin',
-                'Dallas-Fort Worth-Arlington',
-                'Houston-Pasadena-The Woodlands',
-                'Washington-Arlington-Alexandria',
-                'Miami-Fort Lauderdale-West Palm Beach',
-                'Philadelphia-Camden-Wilmington',
-                'Atlanta-Sandy Springs-Roswell',
-                'Phoenix-Mesa-Chandler',
-                'Boston-Cambridge-Newton',
-                'San Francisco-Oakland-Fremont',
-                'Detroit-Warren-Dearborn',
-                'Seattle-Tacoma-Bellevue',
-                'Minneapolis-St. Paul-Bloomington',
-                'San Diego-Chula Vista-Carlsbad',
-                'Tampa-St. Petersburg-Clearwater',
-                'Denver-Aurora-Centennial',
-                'St. Louis',
-                'Baltimore-Columbia-Towson',
-            ],
-            'realer': [],
-            'wkyeng': [],
-        },
-    },
+    # 'geographic_regions_sector' was removed here.
+    #
+    # It asserted `<region> bls:belongsToSector bls:GeographicRegionsSector`,
+    # which is a category error: a sector is an industry and a region is a
+    # place, and a place does not belong to an industry. The visible symptom
+    # was `jolts_Region --belongsToSector--> EconomicSector` in the graph
+    # schema, which read as the keyword classifier misfiring on a region label
+    # -- it was not misfiring. The four census-region names ('Northeast',
+    # 'South', 'Midwest', 'West') were listed as jolts keywords ON PURPOSE, so
+    # the classifier was doing exactly what this table told it to.
+    #
+    # The entry also carried every US state and the major MSA names under
+    # 'metro', and the trading-partner countries under 'ximpim'. Those are the
+    # same error at a different scale: they sorted geography into a pseudo
+    # -sector rather than into the region vocabulary that already exists for
+    # it, and they gave a genuinely useful axis (where a series is measured) a
+    # home on the wrong relation, where nothing looking for geography would
+    # find it.
+    #
+    # Region membership belongs on the region relations that CrossSourceLinker
+    # ._link_by_geography emits (hasRegion / affectsRegion), against the
+    # unified region nodes -- which is where the weather feed and the regional
+    # economic series meet. Nothing is lost by removing this; the geography it
+    # described was never reachable as geography.
 
     'employment_size_sector': {
         'description': 'Employment by establishment size',
