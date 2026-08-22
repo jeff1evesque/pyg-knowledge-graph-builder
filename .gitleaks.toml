@@ -357,3 +357,28 @@ regexes = [
   '''(?i)^(?:bucket|my-bucket|my-archive|my-data|my-data-lake|example|example-bucket|test|test-bucket|placeholder|your-bucket|some-bucket|sample|demo)\.''',
   '''(?i)(?:^|\.)(?:example\.(?:com|org|net|edu)|localhost|invalid)$''',
 ]
+
+# --------------------------------------------------------------------------- #
+# The deleted deployment tree
+# --------------------------------------------------------------------------- #
+#
+# `deployment/` held the CDK and Glue stack and was removed when the pipeline
+# moved to Spark/RAPIDS (#171). It exists only in history now, and CI scans full
+# history (fetch-depth: 0, deliberately -- see gitleaks.yml), so its bucket
+# names are reported on every run of every branch forever.
+#
+# Allowlisted by PATH rather than by fingerprint: fingerprints are per commit
+# per line, so a list of them would need an entry for each of the 32 commits
+# that touched this tree, and would silently stop matching if history is ever
+# rewritten again.
+#
+# THIS SUPPRESSES, IT DOES NOT REMOVE. Two real bucket names remain reachable in
+# history at these paths. Removing them needs a history rewrite covering those
+# two values; this entry only stops them failing the build. If the tree is ever
+# reinstated, delete this entry first -- it would blind the scanner to a live
+# directory.
+[[allowlists]]
+description = "deployment tree, deleted in #171, retained only in git history"
+paths = [
+  '''(?i)(^|/)deployment/''',
+]
