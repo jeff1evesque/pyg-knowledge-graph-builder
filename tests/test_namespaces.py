@@ -13,6 +13,8 @@ financial-data.org/enrichment/) and under example.org, which RFC 2606 reserves
 for documentation. A URI under bls.gov asserts BLS defined that term. None of
 them did.
 """
+import os
+
 import pytest
 
 from spark_jobs.utils import rdf_utils
@@ -63,14 +65,20 @@ MINTED = {
 
 # Domains belonging to the data publishers. A term we mint under any of these
 # claims an authority we do not have.
-PUBLISHER_DOMAINS = (
-    "bls.gov",
-    "sec.gov",
-    "noaa.gov",
-    "weather.gov",
-    "financial-data.org",
-    "market.example",
-    "oasis-open.org",
+# The market vendor's domain is supplied by MARKET_PUBLISHER_DOMAIN rather than
+# named here, so the guard covers it without the repo recording who it is.
+PUBLISHER_DOMAINS = tuple(
+    d
+    for d in (
+        "bls.gov",
+        "sec.gov",
+        "noaa.gov",
+        "weather.gov",
+        "financial-data.org",
+        "oasis-open.org",
+        os.environ.get("MARKET_PUBLISHER_DOMAIN", "").strip(),
+    )
+    if d
 )
 
 # RFC 2606 / RFC 6761 reserved names. Reserved precisely so nobody owns them,

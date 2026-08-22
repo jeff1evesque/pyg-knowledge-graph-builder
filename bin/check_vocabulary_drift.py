@@ -223,7 +223,13 @@ def emitted_from_s3(archive_bucket: str, market_bucket: str, rows: int) -> set[s
             current = subdirs[-1]
         return None, None
 
-    targets = [(market_bucket, "market/intraday/quotes/")] if market_bucket else []
+    import os
+
+    quotes_prefix = os.environ.get("MARKET_QUOTES_PREFIX", "")
+    if market_bucket and not quotes_prefix:
+        raise SystemExit("MARKET_QUOTES_PREFIX is required to sample the market bucket")
+
+    targets = [(market_bucket, quotes_prefix)] if market_bucket else []
     if archive_bucket:
         # Paths that do NOT follow the raw/source=<name>/feed=<name>/ convention
         # and would be missed by the discovery below.
