@@ -30,6 +30,10 @@ from pathlib import Path
 import pytest
 
 from spark_jobs.utils.rdf_utils import classify_edge_origin
+from spark_jobs.pyg_builder.metadata_writer import (
+    LATEST_PARTITION,
+    derive_metadata_prefix,
+)
 
 pytestmark = pytest.mark.e2e
 
@@ -146,13 +150,33 @@ def _assert_valid_graph_and_metadata(config, work_dir):
             EdgeVectorLayout(int(store.edge_attr.shape[1]))
 
     # --- all six metadata JSONs present, non-empty, valid JSON ---
-    found = {p.name: p for p in Path(work_dir).rglob("*.json") if p.name in METADATA_FILES}
+    #
+    # The `latest` alias holds a second copy of graph_schema.json, so the scan
+    # excludes it: without that, `found["graph_schema.json"]` would be whichever
+    # of the two rglob happened to yield last, and every assertion below would
+    # be reading a nondeterministically chosen file.
+    found = {
+        p.name: p
+        for p in Path(work_dir).rglob("*.json")
+        if p.name in METADATA_FILES and LATEST_PARTITION not in p.parts
+    }
     missing = METADATA_FILES - set(found)
     assert not missing, f"missing metadata files: {sorted(missing)}"
     for name, path in found.items():
         with open(path) as fh:
             content = json.load(fh)
         assert content, f"{name} is empty"
+
+    # --- the `latest` alias is written, and matches the period copy ---
+    # Asserted here rather than only in unit tests because the unit tests
+    # exercise write_latest_alias() directly; this is the only thing that proves
+    # save_final_artifacts() actually calls it. Dropping the call would leave
+    # every unit test passing and the consumer's fixed key permanently stale.
+    alias = Path(derive_metadata_prefix(config.latest_pyg_path)) / "graph_schema.json"
+    assert alias.is_file(), f"latest alias not written: {alias}"
+    assert alias.read_bytes() == found["graph_schema.json"].read_bytes(), (
+        "latest alias differs from the period copy it should mirror"
+    )
 
     # --- owl:sameAs only ever links temporal entities to temporal entities ---
     # cross_source_linker used to match subjects with "(January|...)$" -- anchored
