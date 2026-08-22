@@ -51,6 +51,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -88,6 +89,10 @@ _NOT_TERMS = frozenset({"value", "title", "n3", "toPython", "encode", "strip"})
 # one that is merely quiet.
 STALE_AFTER_DAYS = 60
 
+
+# The prefix the market quote snapshots live under, supplied at run time.
+# Not hardcoded: this repository is public and the storage layout is not.
+MARKET_QUOTES_PREFIX = os.environ.get("MARKET_QUOTES_PREFIX", "")
 
 def _log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)

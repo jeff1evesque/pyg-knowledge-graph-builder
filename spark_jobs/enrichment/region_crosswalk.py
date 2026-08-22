@@ -36,22 +36,24 @@ THE TWO GRAINS, AND WHY THEY ARE DIFFERENT
 Metro-to-county resolution needs a federal delineation file neither side holds,
 and is deliberately out of scope.
 
-ON THE UPSTREAM HALF
---------------------
-The weather side works today. The economic side does not yet: the regional
-series emit a name and a slug subject and NO CODE AT ALL, and the codes exist in
-the upstream catalogs unmapped. They are to be emitted as `laus:hasStateFIPS`,
-`metro:hasStateFIPS` and `metro:hasCBSACode`, all zero-padded `xsd:string`.
+EVERYTHING HERE JOINS ON NAMES, NOT CODES
+-----------------------------------------
+Both halves work today and neither waits on anything. The weather side arrives
+with a state FIPS on its geocodes; the economic side names its geography as
+node URIs -- `laus:hasState -> id/laus/Alabama`,
+`jolts:hasRegion -> id/jolts/Midwest_Region` -- and the name is the join key.
 
-The readers keyed on those terms are written and tested here anyway, against
-synthetic triples, and they match nothing until upstream lands. That is
-deliberate: the alternative is discovering the shape mismatch after the fact.
-THE DATATYPE MATTERS MORE THAN THE NAME -- a numeric 1 never matches a string
-"01", and that failure is silent.
+An earlier version of this module also read `laus:hasStateFIPS`,
+`metro:hasStateFIPS` and `jolts:hasCensusRegionCode`, because an issue said
+those terms were coming. They were checked against the mapper: none exists,
+none is emitted, and none is planned on any of its 193 branches. The readers
+were deleted. Do not re-add them on the strength of a written plan alone --
+the same issue was also wrong three times about `filings:hasSic`.
 
-The name-keyed path for the job-openings regions works today, because those
-entities already state a label and a slug, so the census-region bridge does not
-have to wait for a code it will merely be confirmed by.
+If someone does add codes later, two traps are already known. The job-openings
+region identifier upstream is `"MW"`, not a census number 1-4, so a numeric
+reader would match nothing. And the metro catalog holds no FIPS column at all,
+so those codes would have to be sourced before they could be mapped.
 """
 from typing import Dict, Tuple
 
@@ -178,13 +180,20 @@ STATE_TO_CENSUS_REGION: Dict[str, str] = {
 def normalized_state_fips(column: Column) -> Column:
     """The 2-digit state FIPS, from whatever width upstream states.
 
-    TOLERANT ON PURPOSE, AND PERMANENTLY SO. The weather geocodes currently emit
-    nws:hasStateFIPS as the 3-character head of a SAME code -- "020", "024" --
-    because upstream slices it as value[:3] and keeps the leading part-digit.
-    That is being corrected upstream to a bare 2-digit FIPS. Reading the LAST
-    two digits is correct for BOTH the current and the fixed form, so the
-    upstream fix is non-breaking and needs no backfill, and this reader should
-    stay tolerant permanently rather than being tightened once the fix lands.
+    THE 3-CHARACTER FORM IS WHAT ARRIVES, AND NOTHING IS CHANGING IT. The
+    weather geocodes emit nws:hasStateFIPS as the 3-character head of a SAME
+    code -- "024" for Montgomery County MD, whose state FIPS is 24, the leading
+    0 being the part-of-county digit. Verified against the mapper and across
+    every branch: the derivation is value[:3] everywhere, no exceptions, no
+    pending change.
+
+    An earlier version of this docstring said a correction to a bare 2-digit
+    code was in flight. It is not. That came from an issue whose claims did not
+    survive checking, and nobody should wait on it.
+
+    Reading the LAST two digits is kept regardless, because it costs nothing
+    and is right for either width -- but treat it as cheap insurance, not as a
+    migration being managed.
 
     Taking the last two digits rather than stripping a leading zero: the
     part-digit is not always 0 -- it marks a partial-county code -- so trimming

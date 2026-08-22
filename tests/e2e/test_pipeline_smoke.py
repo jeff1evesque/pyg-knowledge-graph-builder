@@ -1408,9 +1408,12 @@ REQUIRED_BRIDGE_RELATIONS = {
         "market_quotes_EquitySnapshot",
         "market_quotes_OptionSnapshot",
     ),
-    # Entity -> its economic sector, and the per-sector correlation edge.
+    # Entity -> its economic sector. There is no longer a correlation twin;
+    # hasSectorCorrelation was emitted over identical (subject, object) pairs
+    # from the same frame, read by nothing, and was removed. See
+    # test_no_sector_relation_has_a_duplicate_twin below, which now guards
+    # against it coming back.
     "belongsToSector": ("cpi_Index",),
-    "hasSectorCorrelation": ("cpi_Index",),
     # Chronological ordering within a source.
     "precedes": ("cpi_Index",),
     # Alert -> the state it affects. Both of its strategies were dead: the

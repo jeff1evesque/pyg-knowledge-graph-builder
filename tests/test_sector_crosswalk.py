@@ -218,3 +218,52 @@ def test_sic_divisions_do_not_overlap():
                 f"{seen[group]!r} and {division!r}"
             )
             seen[group] = division
+
+
+# ======================================================================
+# No sector relation may have a duplicate twin
+# ======================================================================
+
+def test_no_sector_relation_has_a_duplicate_twin():
+    """The duplicated sector edge must not come back, in any of its four homes.
+
+    Four separate paths used to emit a second edge over the identical
+    (subject, sector) pair that `belongsToSector` already covered:
+
+        bls_linker            bls:hasSectorCorrelation
+        cross_source_linker   bls:hasSectorCorrelation
+        sec_linker            sec:<name>SectorCorrelation   (per sector)
+        market_linker         market:<name>SectorCorrelation (per sector, x11)
+
+    Every one was built from the same frame as the membership edge in the same
+    breath, so the two could not disagree, and nothing read the second. On a
+    fixture build that was 1,718 edges — 16.8% of the graph — and for a GNN it
+    is parallel edge types over identical node pairs: a weight matrix each,
+    double the message passing, nothing learned.
+
+    Guarded by SOURCE INSPECTION rather than by running the pipeline, so it
+    fails at the point someone adds the emit line, in the fast suite, rather
+    than in a 30-minute end-to-end run.
+
+    If a genuine correlation is ever DERIVED — actual co-movement between a
+    series and a sector index — it needs its own predicate name and its own
+    test. It must not reuse a name that spent this long meaning "copy of the
+    line above".
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "spark_jobs"
+    offenders = []
+    for path in root.rglob("*.py"):
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            code = line.split("#", 1)[0]
+            if re.search(r"SectorCorrelation|hasSectorCorrelation", code):
+                offenders.append(f"{path.relative_to(root.parent)}:{n}: {line.strip()}")
+
+    assert not offenders, (
+        "a sector-correlation predicate is referenced in code again:\n  "
+        + "\n  ".join(offenders)
+        + "\n\nThese duplicate belongsToSector exactly. See this test's "
+        "docstring before re-adding one."
+    )

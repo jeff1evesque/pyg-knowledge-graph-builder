@@ -22,7 +22,7 @@ from spark_jobs.utils.rdf_utils import (
     identifier_namespace,
 )
 from spark_jobs.enrichment.intra_source.bls.patterns import (
-    BLS_SECTOR_CORRELATION, BLS_SECTOR_PATTERNS,
+    BLS_SECTOR_PATTERNS,
 )
 from spark_jobs.enrichment.intra_source.market.patterns import (
     assert_ciks_are_padded, _gics_sector_to_pascal,
@@ -117,7 +117,6 @@ _MARKET_SYMBOL_TYPES = (
 _RDF_TYPE = str(RDF.type)
 _OWL_SAME_AS = str(OWL.sameAs)
 _RDFS_LABEL = str(RDFS.label)
-_SECTOR_CORRELATION = str(BLS_SECTOR_CORRELATION)
 
 # The unified company node, as sec_linker._unify_company_entities already mints
 # it: keyed on the padded CIK, typed sec:UnifiedCompany, stating sec:hasCik.
@@ -154,30 +153,38 @@ _CAP_HAS_AREA_DESC = str(CAP.hasAreaDescription)
 #
 # nws:hasFIPSCode is deliberately NOT bound here. It was, and was never
 # referenced -- the FIPS strategy below reads hasStateFIPS only. Worse than
-# unused: the name reads as "the county FIPS is available", when upstream
-# populates that column from properties.geocode.SAME and it carries the SAME
-# code unchanged. Anyone reaching for the dead constant would have joined a
-# SAME code against a county-FIPS lookup. Upstream is correcting the term; if a
-# county-level join is ever wanted here, bind it then, against the fixed shape.
+# unused: the name reads as "the county FIPS is available", when it is not.
+# Verified against the mapper -- hasFIPSCode and hasSAMECode are both mapped
+# from the same fips_code column and render byte-identical ("024031" for a
+# geocode whose county FIPS is "24031"). Anyone reaching for the dead constant
+# would have joined a 6-character SAME code against a 5-character county-FIPS
+# lookup. Nothing on any branch changes this, so a county-level join here would
+# have to derive the county FIPS itself rather than wait for a corrected term.
 _NWS_HAS_STATE_FIPS = str(WEATHER.hasStateFIPS)
 
-# The economic side of the region join.
+# The economic side of the region join is keyed on NAMES, not codes.
 #
-# NONE OF THESE THREE TERMS IS EMITTED YET. The regional series currently state
-# a name and a slug subject and no code at all; the codes exist in the upstream
-# catalogs unmapped, and are to be emitted as zero-padded xsd:string. Bound here
-# against the agreed shape so the readers are written and tested before the
-# terms land, rather than after a silent empty join is noticed in a build.
-_LAUS_HAS_STATE_FIPS = str(LAUS.hasStateFIPS)
-_METRO_HAS_STATE_FIPS = str(METRO.hasStateFIPS)
-_REGIONAL_STATE_FIPS_PREDS = (_LAUS_HAS_STATE_FIPS, _METRO_HAS_STATE_FIPS)
-
-# metro:hasCBSACode is deliberately NOT bound. Resolving a metro area to the
-# counties it spans needs a federal delineation file neither side holds, so a
-# CBSA code has nothing to join against here and binding it would imply
-# otherwise.
-
-_JOLTS_HAS_CENSUS_REGION_CODE = str(JOLTS.hasCensusRegionCode)
+# An earlier version of this file also read laus:hasStateFIPS,
+# metro:hasStateFIPS and jolts:hasCensusRegionCode, on the strength of an issue
+# saying those terms were coming. They were checked against the mapper and none
+# of the three exists, is emitted, or is planned on any branch -- the same issue
+# was wrong three times about filings:hasSic, so its claims are not a source.
+# The readers were deleted rather than left matching zero rows and looking like
+# working code.
+#
+# Nothing is lost by that. Every one of those surveys already exposes its
+# geography as a NAMED node -- laus:hasState -> id/laus/Alabama,
+# jolts:hasRegion -> id/jolts/Midwest_Region -- and the name is what this module
+# joins on. The full path weather alert -> state region -> census region ->
+# jolts region is live on the fixtures today.
+#
+# Two further notes for anyone tempted to add a code reader later:
+#
+#   * The JOLTS region identifier upstream is NOT numeric. Its catalog carries
+#     "state_code": "MW" for "Midwest region", so a reader expecting census
+#     regions 1-4 would match nothing even if the term shipped.
+#   * The metro catalog holds no FIPS column at all, so that term would need
+#     the codes sourced first, not merely mapped.
 _JOLTS_REGION_TYPE = str(JOLTS.Region)
 
 # state region -> census region. In BLS_ENRICHMENT because this pipeline infers
@@ -433,15 +440,24 @@ class CrossSourceLinker:
             F.col("sector_uri").alias("object")
         )
 
-        # Sector correlation triples — one predicate for every sector, the
-        # sector itself carried by the object (see BLS_SECTOR_CORRELATION).
-        correlation_triples = matched.select(
-            F.col("subject").alias("subject"),
-            F.lit(_SECTOR_CORRELATION).alias("predicate"),
-            F.col("sector_uri").alias("object")
-        )
-
-        result = sector_type_triples.unionByName(belongs_triples).unionByName(correlation_triples)
+        # NO CORRELATION TWIN. This used to also emit
+        # bls:hasSectorCorrelation over the identical (subject, object) pairs,
+        # built from the same `matched` frame in the same breath -- so the two
+        # relations could not disagree, and the second carried no information
+        # the first did not. On a fixture build that was 1,718 edges, 16.8% of
+        # the graph, and for a GNN it is two parallel edge types over identical
+        # node pairs: double the message passing, nothing learned.
+        #
+        # belongsToSector is the one that survives because it is the one
+        # anything reads -- _create_causal_links joins on it, and
+        # edge_feature_extractor lists it among the relations whose type alone
+        # carries the signal. hasSectorCorrelation was read by nothing.
+        #
+        # The name promised something real -- a correlation DERIVED between a
+        # series and a sector -- and no path ever computed one. If that is
+        # wanted later it is new work, and it should not reuse a predicate that
+        # spent this long meaning "copy of the line above".
+        result = sector_type_triples.unionByName(belongs_triples)
 
         logger.info("  Sector linking triples prepared (lazy)")
         return result
@@ -771,11 +787,20 @@ class CrossSourceLinker:
     def _link_filings_by_sic(self) -> Optional[DataFrame]:
         """The filings' own industry code, instead of a keyword match.
 
-        filings:hasSic is stated by upstream on every filing, and this repo
-        read it nowhere -- so the filings side reached the economic sector hub
-        only through _link_by_sector's keyword classifier, which matches
-        substrings of a URI's local name and for a filing is matching an
-        accession number.
+        filings:hasSic is emitted by the mapper and this repo read it nowhere,
+        so the filings side reached the economic sector hub only through
+        _link_by_sector's keyword classifier, which matches substrings of a
+        URI's local name and for a filing is matching an accession number.
+
+        IT IS NOT ON EVERY FILING, and do not read a partial result here as a
+        defect. The term comes from EDGAR's ``_source.sics`` array, which is
+        routinely empty, and the mapper omits a triple rather than asserting a
+        blank literal -- so a filing EDGAR left unclassified says nothing about
+        its SIC. Measured on the e2e fixtures: 15 of 40 filings, 38%, giving
+        14 of 39 companies a sector.
+
+        That ceiling is EDGAR's, not this join's. Widening it means finding a
+        second source for the classification, not fixing anything here.
 
         The sector lands on the COMPANY, not on the filing, and that is what
         makes it worth doing here rather than as a SEC intra-source step: a
@@ -1197,50 +1222,6 @@ class CrossSourceLinker:
                     noaa_links = noaa_links.unionByName(df)
                 noaa_links = noaa_links.dropDuplicates()
 
-        # The economic side, keyed on the state FIPS upstream is adding.
-        #
-        # The local-area series are STATE-LEVEL ONLY -- 53 areas, no counties --
-        # so a weather county FIPS reaches them by taking its first two digits,
-        # with no crosswalk file on either side. That is what makes this the
-        # fastest path to a connected graph and why it is worth writing before
-        # the term exists.
-        #
-        # It matches nothing today: the regional series emit a name and a slug
-        # subject and NO CODE AT ALL, and laus:hasStateFIPS / metro:hasStateFIPS
-        # are still unmapped in the upstream catalogs. Written now, against the
-        # agreed shape (zero-padded xsd:string), because the datatype matters
-        # more than the name -- a numeric 1 never matches a string "01", and
-        # that mismatch produces an empty join and no error. The name-keyed
-        # path above keeps working in the meantime.
-        regional_fips_links = None
-        if 'bls' in self.available_sources:
-            fips_stated = self.triples_df.filter(
-                F.col("predicate").isin(list(_REGIONAL_STATE_FIPS_PREDS))
-            ).select(
-                F.col("subject"),
-                normalized_state_fips(F.col("object")).alias("state_fips"),
-            )
-
-            if fips_stated.head(1):
-                state_fips_lookup = self.spark.createDataFrame(
-                    [
-                        (fips, name, state_key(name))
-                        for fips, name in state_fips_to_name.items()
-                    ],
-                    schema=["fips_code", "state_name", "state_key"],
-                )
-                regional_fips_links = fips_stated.join(
-                    F.broadcast(state_fips_lookup),
-                    fips_stated.state_fips == state_fips_lookup.fips_code,
-                    "inner",
-                ).select(
-                    F.col("subject"),
-                    F.lit(str(BLS_ENRICHMENT.hasRegion)).alias("predicate"),
-                    F.concat(
-                        F.lit(str(UNIFIED)), F.col("state_key"), F.lit("Region")
-                    ).alias("object"),
-                )
-
         # Only the regions something actually points at.
         #
         # All 50 states used to be typed and labelled unconditionally, while the
@@ -1253,10 +1234,7 @@ class CrossSourceLinker:
         # consequence of the data rather than of the state list. Nothing else
         # changes: a region that IS linked gets exactly the type and label it
         # got before.
-        links = [
-            df for df in (laus_links, noaa_links, regional_fips_links)
-            if df is not None
-        ]
+        links = [df for df in (laus_links, noaa_links) if df is not None]
         if not links:
             logger.info("  No geographic links matched — no region entities minted")
             return None
@@ -1351,17 +1329,16 @@ class CrossSourceLinker:
             )
         )
 
-        # The source-side region entities, by stated code then by name.
-        coded = self.triples_df.filter(
-            F.col("predicate") == _JOLTS_HAS_CENSUS_REGION_CODE
-        ).select(
-            F.col("subject").alias("entity"),
-            F.lpad(F.trim(F.col("object")), 2, "0").alias("census_code"),
-        ).join(F.broadcast(census_df), "census_code", "inner").select(
-            "entity", "census_name", "census_key"
-        )
-
-        named = self.triples_df.filter(
+        # The source-side region entities, matched by NAME.
+        #
+        # This is the only path, and it is sufficient: the job-openings survey
+        # states its region as a named node (id/jolts/Midwest_Region) and never
+        # as a code. A code-keyed path was written here first, on the strength
+        # of an issue claiming jolts:hasCensusRegionCode was coming; it is not,
+        # and the upstream region identifier is "MW" rather than a census
+        # number anyway, so a numeric reader would have matched nothing even
+        # if it had shipped.
+        source_regions = self.triples_df.filter(
             (F.col("predicate") == _RDF_TYPE)
             & (F.col("object") == _JOLTS_REGION_TYPE)
         ).select(F.col("subject").alias("entity")).crossJoin(
@@ -1373,9 +1350,7 @@ class CrossSourceLinker:
             _delimited_local_name(F.col("entity")).startswith(
                 F.concat(F.lit("_"), F.col("census_name"), F.lit("_"))
             )
-        ).select("entity", "census_name", "census_key")
-
-        source_regions = coded.unionByName(named).dropDuplicates()
+        ).select("entity", "census_name", "census_key").dropDuplicates()
 
         same_as = source_regions.select(
             F.concat(
@@ -1421,17 +1396,79 @@ class CrossSourceLinker:
 
     def _create_causal_links(self) -> Optional[DataFrame]:
         """
-        Create causal relationships by joining entities that share
-        the same sector across different source families.
+        Link a BLS indicator to a market entity in the same economic sector.
+
+        WHY THIS NEVER FIRED. Both sides were selected by filtering for
+        bls:belongsToSector -- but only the BLS side emits that. The market
+        enricher writes market:belongsToSector, a DIFFERENT predicate, because
+        its sector is a GICS sector and lives in its own vocabulary. So the
+        market half of the filter matched nothing on every graph ever built,
+        the inner join had one empty side, and the step returned None while
+        logging that it ran. The e2e suite recorded the absence and blamed the
+        missing constituents CSV; that was only half the reason, and the join
+        would have stayed dead with the CSV configured.
+
+        The fix is NOT to make market emit the BLS predicate. A GICS sector and
+        an economic sector are different classifications of different things --
+        that is the whole premise of enrichment/sector_crosswalk.py -- and
+        collapsing them onto one predicate would assert the equivalence that
+        module exists to deny.
+
+        Instead the market side is carried to the economic sector THROUGH the
+        crosswalk, which is what it is for:
+
+            BLS series  -belongsToSector->  EconomicSector
+                                                  ^
+                                    -relatedToEconomicSector-
+                                                  |
+            snapshot -market:belongsToSector-> GICS sector
+
+        so both sides end up keyed on the same economic sector and the join has
+        something to match. Note this makes the link only as good as the
+        curated table -- a GICS sector deliberately mapped to nothing (see the
+        three gaps) contributes no causal edge, which is correct.
         """
-        belongs_to_sector = (
+        bls_sector = (
             self.triples_df
             .filter(F.col("predicate") == str(BLS_ENRICHMENT.belongsToSector))
             .select(
                 F.col("subject").alias("entity"),
-                F.col("object").alias("sector")
+                F.col("object").alias("sector"),
             )
         )
+
+        # The market side, resolved to an ECONOMIC sector via the crosswalk.
+        market_gics = (
+            self.triples_df
+            .filter(F.col("predicate") == str(MARKET_ENRICHMENT.belongsToSector))
+            .select(
+                F.col("subject").alias("entity"),
+                F.col("object").alias("equity_sector"),
+            )
+        )
+
+        # Built from the TABLE, not from the relatedToEconomicSector triples.
+        #
+        # Those triples are minted by _link_equity_to_economic_sectors in this
+        # same enrich() call and are not unioned into triples_df until every
+        # step has run -- so reading them here finds nothing, and the join dies
+        # exactly the way the predicate mismatch used to. Every step in this
+        # module reads the INPUT frame; none can see another's output.
+        crosswalk = self.spark.createDataFrame(
+            sorted({
+                (
+                    str(MARKET_ENRICHMENT[f"{_gics_sector_to_pascal(gics)}Sector"]),
+                    sector_uri,
+                )
+                for gics, mapped in EQUITY_TO_ECONOMIC_SECTORS.items()
+                for sector_uri, _confidence in mapped
+            }),
+            schema=["equity_sector", "sector"],
+        )
+
+        market_resolved = market_gics.join(
+            crosswalk, "equity_sector", "inner"
+        ).select("entity", "sector")
 
         bls_prefixes = _BLS_ENTITY_PREFIXES
         market_prefixes = _MARKET_ENTITY_PREFIXES
@@ -1441,7 +1478,7 @@ class CrossSourceLinker:
         for p in bls_prefixes[1:]:
             bls_filter = bls_filter | F.col("entity").startswith(p)
 
-        bls_sector = belongs_to_sector.filter(bls_filter).select(
+        bls_sector = bls_sector.filter(bls_filter).select(
             F.col("entity").alias("bls_entity"), F.col("sector").alias("bls_sector")
         )
 
@@ -1450,7 +1487,7 @@ class CrossSourceLinker:
         for p in market_prefixes[1:]:
             market_filter = market_filter | F.col("entity").startswith(p)
 
-        market_sector = belongs_to_sector.filter(market_filter).select(
+        market_sector = market_resolved.filter(market_filter).select(
             F.col("entity").alias("market_entity"), F.col("sector").alias("market_sector")
         )
 

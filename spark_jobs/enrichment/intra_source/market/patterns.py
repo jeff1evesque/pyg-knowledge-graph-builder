@@ -5,8 +5,10 @@ Sector definitions are loaded dynamically from the S&P 500 tickers CSV
 at runtime (preferred), falling back to hardcoded defaults if the CSV
 is unavailable.
 
-The tickers CSV is produced by the market-morning pipeline and stored at:
-    s3://{bucket}/{tickers_latest_key}
+The tickers CSV is produced upstream and its location is supplied at run
+time by --market_sector_definitions_bucket / --market_sector_definitions_key.
+Neither the bucket nor its prefix is named in this repository: the code is
+public and the storage layout is not.
 
 Expected CSV format (GitHub S&P 500 constituents):
     Symbol,Security,GICS Sector,GICS Sub-Industry,Headquarters Location,Date added,CIK,Founded
@@ -18,7 +20,9 @@ Tickers are grouped by GICS Sector to build sector patterns. The GICS
 sector name is converted to a snake_case key and PascalCase URI suffix:
     "Information Technology" → key: "information_technology_sector"
                             → URI: MARKET_ENRICHMENT.InformationTechnologySector
-                            → relationship: MARKET_ENRICHMENT.informationTechnologySectorCorrelation
+
+(There is no per-sector correlation predicate. One used to be derived here and
+emitted alongside belongsToSector over the identical pair; it was removed.)
 
 Aligned with the flat snapshot model. Sector classification is
 based on the equity ticker symbol (the `symbol` property on
@@ -260,13 +264,15 @@ def load_sector_patterns_from_s3(
     """
     Load market sector patterns from the S&P 500 tickers CSV in S3.
 
-    Reads the CSV produced by the market-morning pipeline's
-    tickers handler (same file as latest.json). Groups tickers
-    by GICS Sector column to build sector patterns.
+    Reads the constituents CSV produced upstream. Groups tickers by
+    GICS Sector column to build sector patterns.
 
     Args:
-        bucket: S3 bucket name (e.g., "market-data-bucket")
-        key: S3 object key (e.g., "market/sp500/tickers/latest.json")
+        bucket: S3 bucket holding the constituents CSV. Supplied by the
+            caller via --market_sector_definitions_bucket; deliberately
+            not named here, because this repository is public and the
+            storage layout is not.
+        key: S3 key of that CSV, likewise caller-supplied.
         s3_client: Optional pre-built S3 client (for testability)
 
     Returns:
@@ -305,15 +311,11 @@ def load_sector_patterns_from_s3(
         pascal_name = _gics_sector_to_pascal(gics_sector)
 
         sector_uri = MARKET_ENRICHMENT[f"{pascal_name}Sector"]
-        relationship = MARKET_ENRICHMENT[
-            f"{pascal_name[0].lower()}{pascal_name[1:]}SectorCorrelation"
-        ]
 
         patterns[sector_key] = {
             "description": f"{gics_sector} companies (from S&P 500)",
             "sector_uri": sector_uri,
             "tickers": sorted(set(tickers)),
-            "relationship": relationship,
         }
 
     logger.info(
@@ -509,7 +511,6 @@ DEFAULT_MARKET_SECTOR_PATTERNS: Dict[str, Any] = {
         'sector_uri': MARKET_ENRICHMENT.InformationTechnologySector,
         'tickers': ['AAPL', 'MSFT', 'GOOGL', 'META', 'NVDA', 'TSLA', 'AMZN',
                     'AVGO', 'ORCL', 'CRM', 'ADBE', 'AMD', 'INTC', 'QCOM'],
-        'relationship': MARKET_ENRICHMENT.informationTechnologySectorCorrelation,
     },
 
     'financials_sector': {
@@ -517,7 +518,6 @@ DEFAULT_MARKET_SECTOR_PATTERNS: Dict[str, Any] = {
         'sector_uri': MARKET_ENRICHMENT.FinancialsSector,
         'tickers': ['JPM', 'BAC', 'WFC', 'GS', 'MS', 'C', 'BLK', 'SCHW',
                     'AXP', 'V', 'MA', 'COF'],
-        'relationship': MARKET_ENRICHMENT.financialsSectorCorrelation,
     },
 
     'health_care_sector': {
@@ -525,7 +525,6 @@ DEFAULT_MARKET_SECTOR_PATTERNS: Dict[str, Any] = {
         'sector_uri': MARKET_ENRICHMENT.HealthCareSector,
         'tickers': ['JNJ', 'UNH', 'PFE', 'ABBV', 'TMO', 'ABT', 'DHR', 'MRK',
                     'LLY', 'BMY', 'AMGN', 'GILD'],
-        'relationship': MARKET_ENRICHMENT.healthCareSectorCorrelation,
     },
 
     'energy_sector': {
@@ -533,7 +532,6 @@ DEFAULT_MARKET_SECTOR_PATTERNS: Dict[str, Any] = {
         'sector_uri': MARKET_ENRICHMENT.EnergySector,
         'tickers': ['XOM', 'CVX', 'COP', 'SLB', 'EOG', 'MPC', 'PSX', 'VLO',
                     'OXY', 'HAL', 'DVN', 'FANG'],
-        'relationship': MARKET_ENRICHMENT.energySectorCorrelation,
     },
 
     'consumer_discretionary_sector': {
@@ -541,7 +539,6 @@ DEFAULT_MARKET_SECTOR_PATTERNS: Dict[str, Any] = {
         'sector_uri': MARKET_ENRICHMENT.ConsumerDiscretionarySector,
         'tickers': ['AMZN', 'TSLA', 'HD', 'MCD', 'NKE', 'SBUX', 'TGT', 'LOW',
                     'BKNG', 'TJX', 'CMG', 'LULU'],
-        'relationship': MARKET_ENRICHMENT.consumerDiscretionarySectorCorrelation,
     },
 
     'consumer_staples_sector': {
@@ -549,7 +546,6 @@ DEFAULT_MARKET_SECTOR_PATTERNS: Dict[str, Any] = {
         'sector_uri': MARKET_ENRICHMENT.ConsumerStaplesSector,
         'tickers': ['WMT', 'PG', 'KO', 'PEP', 'COST', 'PM', 'MO', 'CL',
                     'MDLZ', 'KHC', 'GIS', 'SYY'],
-        'relationship': MARKET_ENRICHMENT.consumerStaplesSectorCorrelation,
     },
 
     'industrials_sector': {
@@ -557,7 +553,6 @@ DEFAULT_MARKET_SECTOR_PATTERNS: Dict[str, Any] = {
         'sector_uri': MARKET_ENRICHMENT.IndustrialsSector,
         'tickers': ['BA', 'CAT', 'GE', 'MMM', 'HON', 'UPS', 'RTX', 'LMT',
                     'DE', 'UNP', 'FDX', 'WM'],
-        'relationship': MARKET_ENRICHMENT.industrialsSectorCorrelation,
     },
 
     'real_estate_sector': {
@@ -565,7 +560,6 @@ DEFAULT_MARKET_SECTOR_PATTERNS: Dict[str, Any] = {
         'sector_uri': MARKET_ENRICHMENT.RealEstateSector,
         'tickers': ['AMT', 'PLD', 'CCI', 'EQIX', 'PSA', 'SPG', 'O', 'WELL',
                     'DLR', 'AVB', 'EQR', 'VTR'],
-        'relationship': MARKET_ENRICHMENT.realEstateSectorCorrelation,
     },
 
     'utilities_sector': {
@@ -573,7 +567,6 @@ DEFAULT_MARKET_SECTOR_PATTERNS: Dict[str, Any] = {
         'sector_uri': MARKET_ENRICHMENT.UtilitiesSector,
         'tickers': ['NEE', 'DUK', 'SO', 'D', 'AEP', 'EXC', 'SRE', 'XEL',
                     'WEC', 'ED', 'ES', 'AWK'],
-        'relationship': MARKET_ENRICHMENT.utilitiesSectorCorrelation,
     },
 
     'materials_sector': {
@@ -581,7 +574,6 @@ DEFAULT_MARKET_SECTOR_PATTERNS: Dict[str, Any] = {
         'sector_uri': MARKET_ENRICHMENT.MaterialsSector,
         'tickers': ['LIN', 'APD', 'SHW', 'FCX', 'NEM', 'ECL', 'DD', 'DOW',
                     'NUE', 'VMC', 'MLM', 'PPG'],
-        'relationship': MARKET_ENRICHMENT.materialsSectorCorrelation,
     },
 
     'communication_services_sector': {
@@ -589,7 +581,6 @@ DEFAULT_MARKET_SECTOR_PATTERNS: Dict[str, Any] = {
         'sector_uri': MARKET_ENRICHMENT.CommunicationServicesSector,
         'tickers': ['META', 'GOOGL', 'GOOG', 'DIS', 'NFLX', 'CMCSA', 'VZ', 'T',
                     'TMUS', 'CHTR', 'EA', 'TTWO'],
-        'relationship': MARKET_ENRICHMENT.communicationServicesSectorCorrelation,
     },
 }
 

@@ -262,8 +262,11 @@ def test_market_known_correlations_well_formed():
 # SEC
 # ======================================================================
 
+# SEC_SECTOR_PATTERNS was deleted -- it matched nothing on real data and sorted
+# filings into a third, unreconciled sector vocabulary. Filings now get their
+# sector from filings:hasSic. Violations keep their keyword table, which does
+# match.
 @pytest.mark.parametrize("table,uri_key", [
-    ("SEC_SECTOR_PATTERNS", "sector_uri"),
     ("SEC_VIOLATION_PATTERNS", "violation_uri"),
 ])
 def test_sec_pattern_tables_well_formed(table, uri_key):

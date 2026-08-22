@@ -159,11 +159,23 @@ DELIBERATELY_UNMAPPED_EQUITY_SECTORS: Tuple[str, ...] = (
 # SIC division -> economic sector
 # ============================================
 #
-# filings:hasSic is stated on the filing by upstream, and is moving to the
-# issuer node. Consuming it is what lets a filing reach a sector through real
-# data rather than through a keyword match on its URI -- see
-# CrossSourceLinker._link_by_sector for what that keyword classifier was doing
-# and why the filings half of it is now gone.
+# filings:hasSic is stated ON THE FILING, and is declared
+# `rdfs:domain filings:SECFiling` by the mapper's ontology. Consuming it is what
+# lets a filing reach a sector through real data rather than through a keyword
+# match on its URI -- see CrossSourceLinker._link_by_sector for what that
+# keyword classifier was doing and why the filings half of it is now gone.
+#
+# Coverage is PARTIAL and that is EDGAR's doing, not this table's: the term maps
+# from `_source.sics`, an array EDGAR routinely returns empty, and the mapper
+# omits the triple rather than asserting a blank literal. 38% of filings on the
+# e2e fixtures.
+#
+# There is no plan to move this term to the issuer node. An earlier draft of
+# this comment said there was, sourced from an issue that also claimed the term
+# was on every filing; both were checked against the mapper and neither held.
+# SIC arguably describes the company rather than the document, so moving it is a
+# defensible design opinion -- but it is nobody's work in progress, and this
+# reader must not be written as though it were.
 #
 # Keyed on the SIC MAJOR GROUP (the leading two digits), grouped into the
 # standard SIC divisions, because a 4-digit industry code is finer than the

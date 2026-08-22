@@ -19,7 +19,9 @@ from spark_jobs.utils.rdf_utils import BLS_ENRICHMENT
 #
 # A single constant rather than 26 identical values, so the per-sector split
 # cannot creep back one pattern at a time.
-BLS_SECTOR_CORRELATION = BLS_ENRICHMENT.hasSectorCorrelation
+# BLS_SECTOR_CORRELATION was removed. It named bls:hasSectorCorrelation,
+# emitted over the same (subject, sector) pairs as belongsToSector and read
+# by nothing. See test_no_sector_relation_has_a_duplicate_twin.
 
 BLS_SECTOR_PATTERNS = {
     'food_sector': {

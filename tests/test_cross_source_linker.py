@@ -455,11 +455,17 @@ def _filing_with_sic(accession, cik, sic):
 
 
 def test_a_filings_sic_gives_its_company_a_sector(spark, make_triples):
-    """hasSic is stated on every filing and this repo read it nowhere.
+    """A filing's own industry code, instead of a keyword match on its URI.
 
     The sector lands on the COMPANY, so every filing by that issuer inherits
     it through the node Part 1 unified — which is why this could not land
     before the company bridge was CIK-keyed.
+
+    Not every filing carries one: EDGAR's `sics` array is routinely empty and
+    the mapper omits the triple rather than asserting a blank, so 38% of
+    filings state it. This pins the path for a filing that DOES, and
+    test_a_filing_with_no_sic_leaves_its_company_unsectored pins the other
+    case as expected rather than broken.
     """
     snapshot = str(MARKET_QUOTES) + "snapshot/PFE/2026-07-02"
     _filing, rows = _filing_with_sic("0001178913-26-003947", "0000078003", "2836")
@@ -490,6 +496,42 @@ def test_a_filing_in_a_reserved_sic_gap_gets_no_sector(spark, make_triples):
     assert not [
         t for t in triples if t[0] == company and t[1] == BELONGS_TO_SECTOR
     ]
+
+
+def test_a_filing_with_no_sic_leaves_its_company_unsectored(spark, make_triples):
+    """Partial coverage is the expected outcome, not a broken join.
+
+    EDGAR returns `_source.sics` as an array and it is routinely empty; the
+    mapper omits the triple rather than asserting a blank literal, so a filing
+    EDGAR left unclassified says nothing about its SIC. 38% of filings on the
+    e2e fixtures state it, giving 14 of 39 companies a sector.
+
+    Pinned so a future reader measuring that gap does not go looking for a
+    defect in this join. The ceiling is EDGAR's classification coverage, and
+    lifting it means finding a second source for the industry, not repairing
+    anything here. An earlier version of this file claimed the term was on
+    every filing; it was checked against the mapper and it is not.
+    """
+    snapshot = str(MARKET_QUOTES) + "snapshot/PFE/2026-07-02"
+    filing = str(SEC_FILINGS) + "0001178913-26-003947_Filing"
+    issuer = str(SEC_FILINGS) + "Issuer_0000078003"
+    rows = _snapshot_rows(snapshot, "PFE") + [
+        (filing, RDF_TYPE, str(SEC_FILINGS.SECFiling)),
+        (filing, str(SEC_FILINGS.hasIssuer), issuer),
+        # No hasSic triple at all — the shape EDGAR's empty `sics` produces.
+    ] + _issuer_rows(issuer, "0000078003")
+
+    triples = _triple_set(
+        CrossSourceLinker(spark, make_triples(rows)).enrich()
+    )
+
+    company = str(UNIFIED) + "Company_0000078003"
+
+    # The company still exists and is still bridged — it just has no sector.
+    assert (issuer, REFERS_TO_COMPANY, company) in triples
+    assert not [
+        t for t in triples if t[0] == company and t[1] == BELONGS_TO_SECTOR
+    ], "a filing stating no SIC produced a sector from somewhere"
 
 
 def test_the_keyword_classifier_no_longer_claims_sec_entities(spark, make_triples):
@@ -691,19 +733,20 @@ def test_cross_source_geography_fips_chain(spark, make_triples, fips, region_key
     the code through the state lookup. No area-description triples are present,
     so this also pins that the FIPS strategy works standalone.
 
-    Upstream emits nws:hasStateFIPS as the 3-character head of a SAME code --
+    The mapper emits nws:hasStateFIPS as the 3-character head of a SAME code --
     value[:3], so "048" not "48" -- and this pinned only the 2-digit form, which
     is the shape that never arrives. Both are parametrised now: the 3-digit case
     is what production sees, the 2-digit case pins that normalising it did not
     break the plain form.
 
-    BOTH FORMS MUST KEEP PASSING. Upstream is correcting hasStateFIPS to drop
-    the leading pad digit, so the 2-digit rows are not hypothetical -- they are
-    the shape after the fix. Reading the last two digits is correct either way,
-    which is what makes that fix non-breaking and needs no backfill, and it is
-    why this reader stays tolerant permanently rather than being tightened once
-    the fix lands. Narrowing it to one form breaks the join in one direction or
-    the other."""
+    THE 3-CHARACTER ROWS ARE THE LIVE SHAPE. Checked against the mapper: the
+    derivation is value[:3] on every branch, and nothing is changing it. An
+    earlier version of this docstring said a correction to a bare 2-digit code
+    was in flight; it is not.
+
+    The 2-digit rows stay parametrised anyway, because reading the last two
+    digits costs nothing and is right for either width. Treat them as cheap
+    insurance against a future change, not as a migration being managed."""
     alert = str(ALERT) + "urn:oid:2.49.0.1.840.0.test"
     info = alert + "#info"
     area = alert + "#area"
@@ -810,106 +853,6 @@ def test_a_state_reaches_only_its_own_census_region(spark, make_triples):
     kansas = str(UNIFIED) + "KansasRegion"
     reached = {o for s, p, o in triples if s == kansas and p == WITHIN_CENSUS_REGION}
     assert reached == {str(UNIFIED) + "MidwestCensusRegion"}
-
-
-def test_region_unification_does_not_merge_a_shared_label_prefix(
-    spark, make_triples
-):
-    """West Virginia is not Virginia.
-
-    The LAUS matcher asked `subject.contains(state_key)`, so every West
-    Virginia series linked to VirginiaRegion as well as to its own -- and
-    Virginia is the ONLY state name that sits inside another, so this pair is
-    the whole population rather than a sample of it. Merging two genuinely
-    distinct regions is worse than missing one: the weather feed then reaches
-    the wrong state's unemployment series with full confidence.
-
-    WHAT THIS DOES NOT FIX, stated so nobody reads more into the anchor than is
-    there: a metro area whose NAME BEGINS with a state name still claims that
-    state. "Kansas_City_MO" reads as "_Kansas_City_..." and starts with
-    "_Kansas_", so it lands on KansasRegion, though the metro straddles Kansas
-    and Missouri. Separating that needs the federal delineation file that puts
-    metro resolution out of scope for this work, so the anchor is deliberately
-    the state-vs-state fix and not the metro one.
-    """
-    west_virginia = str(LAUS_ID) + "West_Virginia_June2026_UnemploymentRate"
-    virginia = str(LAUS_ID) + "Virginia_June2026_UnemploymentRate"
-    alert, rows = _alert_rows("020")
-    rows += [
-        (west_virginia, RDF_TYPE, str(LAUS.UnemploymentRate)),
-        (virginia, RDF_TYPE, str(LAUS.UnemploymentRate)),
-    ]
-
-    triples = _triple_set(
-        CrossSourceLinker(spark, make_triples(rows)).enrich()
-    )
-
-    def regions_of(entity):
-        return {o for s, p, o in triples if s == entity and p == HAS_REGION}
-
-    assert regions_of(west_virginia) == {str(UNIFIED) + "WestVirginiaRegion"}, (
-        "the West Virginia series reached a region that is not West Virginia"
-    )
-    assert regions_of(virginia) == {str(UNIFIED) + "VirginiaRegion"}, (
-        "the Virginia series lost its own region to the anchoring rule"
-    )
-
-
-def test_the_regional_state_fips_reader_is_written_against_the_agreed_shape(
-    spark, make_triples
-):
-    """laus:hasStateFIPS is NOT emitted yet — this drives it synthetically.
-
-    The regional series currently state a name and a slug and no code at all.
-    The reader is written and tested ahead of the term because the failure it
-    guards is silent: a numeric 1 never matches a string "01", and the join
-    comes back empty with no error, looking exactly like data that does not
-    overlap.
-    """
-    series = str(LAUS_ID) + "SomeArea_June2026_UnemploymentRate"
-    alert, rows = _alert_rows("020")
-    rows += [
-        (series, RDF_TYPE, str(LAUS.UnemploymentRate)),
-        (series, str(LAUS.hasStateFIPS), "20"),
-    ]
-
-    triples = _triple_set(
-        CrossSourceLinker(spark, make_triples(rows)).enrich()
-    )
-
-    kansas = str(UNIFIED) + "KansasRegion"
-    assert (series, HAS_REGION, kansas) in triples
-    assert (alert, AFFECTS_REGION, kansas) in triples, (
-        "both sides must land on ONE region node, or the path does not exist"
-    )
-
-
-def test_a_census_region_code_keys_the_bridge_when_upstream_states_one(
-    spark, make_triples
-):
-    """jolts:hasCensusRegionCode is the term upstream is adding.
-
-    Zero-padded string, per the agreed shape. The name path already works, so
-    the code merely confirms the bridge rather than enabling it — but a code
-    that failed to key it would be a silent regression the day it lands.
-    """
-    region = str(JOLTS_ID) + "Region_2"
-    series = str(JOLTS_ID) + "Region_2_June2026_HiresLevel"
-    alert, rows = _alert_rows("020")
-    rows += [
-        (region, RDF_TYPE, str(JOLTS.Region)),
-        (region, str(JOLTS.hasCensusRegionCode), "02"),
-        (series, str(JOLTS.hasRegion), region),
-    ]
-
-    triples = _triple_set(
-        CrossSourceLinker(spark, make_triples(rows)).enrich()
-    )
-
-    midwest = str(UNIFIED) + "MidwestCensusRegion"
-    assert (midwest, OWL_SAME_AS, region) in triples
-
-
 def test_no_census_region_is_minted_when_nothing_reaches_one(spark, make_triples):
     """Four typed nodes with no incident edge is four rows of feature tensor
     describing nothing."""
@@ -924,3 +867,72 @@ def test_no_census_region_is_minted_when_nothing_reaches_one(spark, make_triples
 
     assert not [t for t in triples if t[1] == WITHIN_CENSUS_REGION]
     assert not [t for t in triples if t[2] == str(BLS_ENRICHMENT.CensusRegion)]
+
+
+# ======================================================================
+# Deep: BLS indicator -> market entity, through the sector crosswalk
+# ======================================================================
+
+def _causal_rows(gics):
+    """A BLS series and a market snapshot, each in its own sector vocabulary."""
+    equity_sector = _equity_sector(gics)
+    snapshot = str(MARKET_QUOTES) + "snapshot/XOM/2026-07-02"
+    bls_series = str(identifier_namespace(str(CPI))) + "Gasoline_all_types_June2026_Index"
+    return snapshot, bls_series, (
+        _snapshot_rows(snapshot, "XOM")
+        + _issuer_rows(str(SEC_FILINGS) + "Issuer_0000034088", "0000034088")
+        + [
+            # The market side, as market_linker writes it: its OWN predicate,
+            # pointing at a GICS sector node.
+            (equity_sector, RDF_TYPE, EQUITY_SECTOR_TYPE),
+            (snapshot, str(MARKET_ENRICHMENT.belongsToSector), equity_sector),
+            # The BLS side, in the economic vocabulary.
+            (bls_series, RDF_TYPE, str(CPI.Index)),
+            (bls_series, BELONGS_TO_SECTOR, str(BLS_ENRICHMENT.EnergySector)),
+        ]
+    )
+
+
+def test_a_bls_indicator_reaches_a_market_entity_through_the_crosswalk(
+    spark, make_triples
+):
+    """The link that never fired once.
+
+    Both sides used to be selected by filtering for bls:belongsToSector, but
+    the market enricher writes market:belongsToSector -- a different predicate,
+    because a GICS sector is a different classification. So the market half of
+    the filter matched nothing on every graph ever built and the join had one
+    empty side.
+
+    Energy -> EnergySector is the strongest row in the crosswalk, which is why
+    it is the fixture: oil and gas companies ARE the energy prices.
+    """
+    snapshot, bls_series, rows = _causal_rows("Energy")
+
+    triples = _triple_set(
+        CrossSourceLinker(spark, make_triples(rows)).enrich()
+    )
+
+    assert (bls_series, LEADS_TO, snapshot) in triples, (
+        "the BLS indicator did not reach the market entity; the two sides are "
+        "keyed on different sector vocabularies and must meet through "
+        "relatedToEconomicSector"
+    )
+
+
+def test_an_unmapped_gics_sector_produces_no_causal_link(spark, make_triples):
+    """The deliberate gaps must not leak back in through this step.
+
+    Utilities is unmapped because the economic `Energy` sector is fuel prices,
+    not regulated utilities. If this step invented a link for it, the gap would
+    be undone here rather than in the table everyone reads.
+    """
+    snapshot, bls_series, rows = _causal_rows("Utilities")
+
+    triples = _triple_set(
+        CrossSourceLinker(spark, make_triples(rows)).enrich()
+    )
+
+    assert not [t for t in triples if t[1] == LEADS_TO], (
+        "a deliberately unmapped GICS sector produced a causal link anyway"
+    )

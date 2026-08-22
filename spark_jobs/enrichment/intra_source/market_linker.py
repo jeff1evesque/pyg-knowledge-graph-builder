@@ -677,15 +677,14 @@ class MarketIntraSourceLinker:
         sector_rows = []
         for sector_name, pattern in sector_patterns.items():
             sector_uri = str(pattern["sector_uri"])
-            relationship = str(pattern["relationship"])
             for ticker in pattern["tickers"]:
-                sector_rows.append((ticker, sector_uri, relationship))
+                sector_rows.append((ticker, sector_uri))
 
         if not sector_rows:
             return None
 
         sector_df = self.spark.createDataFrame(
-            sector_rows, ["ticker", "sector_uri", "relationship_uri"]
+            sector_rows, ["ticker", "sector_uri"]
         )
 
         # Equity snapshots: match by symbol
@@ -723,11 +722,18 @@ class MarketIntraSourceLinker:
             F.col("sector_uri").alias("object"),
         )
 
-        correlation_triples = joined.select(
-            F.col("snapshot").alias("subject"),
-            F.col("relationship_uri").alias("predicate"),
-            F.col("sector_uri").alias("object"),
-        )
+        # NO CORRELATION TWIN, and here that removed ELEVEN relation types
+        # rather than one. This used to also emit a per-sector predicate --
+        # market:energySectorCorrelation, market:healthCareSectorCorrelation,
+        # one per GICS sector -- over the identical (snapshot, sector) pair
+        # belongsToSector already covered. So the sector was encoded twice in
+        # the same edge, once in the predicate name and once in the object,
+        # and the pair could not disagree because both came from this one join.
+        #
+        # A GNN allocates a weight matrix per edge type, so eleven near-empty
+        # duplicate relations is eleven sets of parameters learning what
+        # belongsToSector already carries. See the fuller note in
+        # CrossSourceLinker._link_by_sector.
 
         # Type the sector URIs this step points AT.
         #
@@ -754,7 +760,6 @@ class MarketIntraSourceLinker:
 
         return (
             belongs_triples
-            .unionAll(correlation_triples)
             .unionAll(sector_type_triples)
         )
 

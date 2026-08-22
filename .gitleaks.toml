@@ -282,7 +282,25 @@ description = "Real S3 bucket name in code or documentation"
 # also the RDF namespace authority for this whole ecosystem
 # (https://<domain>/ontology/...), so a rule keyed on the domain flags every
 # ontology term, including inside binary parquet fixtures.
-regex = '''(?i)(?:s3://|s3a://|arn:aws:s3:::|Bucket\s*=\s*["']|bucket_name\s*=\s*["']|https?://[a-z0-9.-]+\.s3[.-])([a-z0-9][a-z0-9.-]{2,62})'''
+#
+# THE PROSE ANCHOR, and why it was added. Every anchor here used to be an
+# ASSIGNMENT -- `Bucket = "..."`, `bucket_name = "..."`, a URI scheme. A real
+# bucket name sat in this repository for months, and on the default branch,
+# because it was written as documentation rather than as code:
+#
+#     bucket: S3 bucket name (e.g., "<a real bucket>")
+#
+# An Args: line in a docstring. No assignment, so no anchor, so no finding --
+# from the local hook or from CI. A README sentence would have slipped through
+# the same way, which is the case this rule was written to stop.
+#
+# The prose branch requires the quoted value to be HOSTNAME-SHAPED (dot-joined
+# labels) before it fires. Without that lookahead it matched the `["Body"]` in
+# `s3.get_object(Bucket=bucket, Key=key)["Body"]` and 68 other lines of ordinary
+# code -- a rule that noisy gets switched off within a week, which would cost
+# more than the hole it closed. Measured at zero false positives across authored
+# source with the lookahead in place.
+regex = '''(?i)(?:s3://|s3a://|arn:aws:s3:::|Bucket\s*=\s*["']|bucket_name\s*=\s*["']|bucket[^"'\n]{0,40}["'](?=[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)+["'])|https?://[a-z0-9.-]+\.s3[.-])([a-z0-9][a-z0-9.-]{2,62})'''
 path = '''(?i)\.(py|md|ipynb|ya?ml|json|tf|sh|cfg|toml)$'''
 secretGroup = 1
 tags = ["aws", "s3", "portability"]
