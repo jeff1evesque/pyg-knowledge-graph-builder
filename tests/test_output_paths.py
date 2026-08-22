@@ -108,6 +108,47 @@ def test_non_monthly_period_still_yields_usable_paths():
 
 
 # ======================================================================
+# JobConfig — the `latest` alias path
+# ======================================================================
+
+def test_latest_pyg_path_replaces_only_the_partition_segment():
+    """The alias sits at the same depth as the period copy.
+
+    A consumer's URL then differs from a period URL by exactly one segment,
+    which is what makes the layout documentable as a contract.
+    """
+    c = _config()
+    assert c.pyg_output_path == "/work/pyg/year=2024/month=12/hetero_data.pt"
+    assert c.latest_pyg_path == "/work/pyg/latest/hetero_data.pt"
+
+
+def test_latest_pyg_path_is_period_independent():
+    """Two periods produce one alias path — that is the point of it."""
+    assert (
+        _config(time_period="2024-12").latest_pyg_path
+        == _config(time_period="2025-06").latest_pyg_path
+    )
+
+
+def test_latest_pyg_path_follows_the_experiment_variant_filename():
+    """Variants must stay separable at the alias, as they are per period."""
+    c = _config(pyg_filename="hetero_data_512d.pt")
+    assert c.latest_pyg_path == "/work/pyg/latest/hetero_data_512d.pt"
+
+
+def test_time_period_latest_collides_with_the_alias_path():
+    """`--time_period latest` renders to the alias directory itself.
+
+    Pinned rather than forbidden: the collision is benign — the period copy
+    already *is* the newest build — and save_final_artifacts() skips the
+    redundant alias write on this equality. If the alias segment is ever
+    renamed, this test is what says the guard is now dead code.
+    """
+    c = _config(time_period="latest")
+    assert c.pyg_output_path == c.latest_pyg_path
+
+
+# ======================================================================
 # JobConfig — ontology mapping default
 # ======================================================================
 
