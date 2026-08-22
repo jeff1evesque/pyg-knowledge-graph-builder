@@ -20,6 +20,12 @@ import pytest
 from rdflib.namespace import OWL, RDF, RDFS
 
 from spark_jobs.enrichment.cross_source_linker import CrossSourceLinker
+from spark_jobs.enrichment.intra_source.market.patterns import (
+    _gics_sector_to_pascal,
+)
+from spark_jobs.enrichment.sector_crosswalk import (
+    EQUITY_SECTOR_TYPE, RELATED_TO_ECONOMIC_SECTOR,
+)
 from spark_jobs.utils.rdf_utils import (
     ALERT, BLS_ENRICHMENT, CAP, CPI, MARKET_ENRICHMENT, MARKET_QUOTES,
     SEC_ENRICHMENT, WEATHER, SEC_FILINGS, UNIFIED,
@@ -37,6 +43,7 @@ REFERS_TO_COMPANY = str(BLS_ENRICHMENT.refersToCompany)
 UNIFIED_COMPANY_TYPE = str(SEC_ENRICHMENT.UnifiedCompany)
 HAS_CIK_PRED = str(SEC_ENRICHMENT.hasCik)
 SHARES_SUB_INDUSTRY = str(MARKET_ENRICHMENT.sharesSubIndustryWith)
+BELONGS_TO_SECTOR = str(BLS_ENRICHMENT.belongsToSector)
 UNIFIED_MONTH_TYPE = str(BLS_ENRICHMENT.UnifiedMonth)
 AFFECTS_REGION = str(BLS_ENRICHMENT.affectsRegion)
 LEADS_TO = str(BLS_ENRICHMENT.leadsTo)
@@ -323,6 +330,181 @@ def test_sub_industry_peers_are_not_minted_for_absent_companies(
         "a peer edge was minted to a company the graph does not carry"
     )
     assert str(UNIFIED) + "Company_0000002488" not in {s for s, _p, _o in triples}
+
+
+# ======================================================================
+# Equity sector -> economic sector (the curated crosswalk)
+# ======================================================================
+
+def _equity_sector(gics):
+    return str(MARKET_ENRICHMENT) + _gics_sector_to_pascal(gics) + "Sector"
+
+
+def _sector_rows(*gics_names):
+    """A market snapshot plus the equity sector nodes market_linker types."""
+    snapshot = str(MARKET_QUOTES) + "snapshot/XOM/2026-07-02"
+    rows = _snapshot_rows(snapshot, "XOM")
+    rows += _issuer_rows(str(SEC_FILINGS) + "Issuer_0000034088", "0000034088")
+    for gics in gics_names:
+        rows.append((_equity_sector(gics), RDF_TYPE, EQUITY_SECTOR_TYPE))
+    return rows
+
+
+def test_a_mapped_equity_sector_reaches_the_economic_hub(spark, make_triples):
+    """bls:EconomicSector is the best-connected hub and the market side had
+    zero edges to it. This is the edge that changes that."""
+    triples = _triple_set(
+        CrossSourceLinker(spark, make_triples(_sector_rows("Energy"))).enrich()
+    )
+
+    assert (
+        _equity_sector("Energy"),
+        RELATED_TO_ECONOMIC_SECTOR,
+        str(BLS_ENRICHMENT.EnergySector),
+    ) in triples
+
+    # The destination must be a node, or node_mapper drops the edge.
+    assert (
+        str(BLS_ENRICHMENT.EnergySector), RDF_TYPE,
+        str(BLS_ENRICHMENT.EconomicSector),
+    ) in triples
+
+
+def test_one_equity_sector_may_reach_several_economic_sectors(spark, make_triples):
+    """Many-to-many by design: Consumer Staples covers three consumption
+    categories and covers essentially all of each."""
+    triples = _triple_set(
+        CrossSourceLinker(
+            spark, make_triples(_sector_rows("Consumer Staples"))
+        ).enrich()
+    )
+
+    reached = {
+        o for s, p, o in triples
+        if p == RELATED_TO_ECONOMIC_SECTOR and s == _equity_sector("Consumer Staples")
+    }
+    assert reached == {
+        str(BLS_ENRICHMENT.FoodSector),
+        str(BLS_ENRICHMENT.TobaccoSector),
+        str(BLS_ENRICHMENT.PersonalCareSector),
+    }
+
+
+@pytest.mark.parametrize(
+    "gics", ["Information Technology", "Communication Services", "Utilities"]
+)
+def test_a_deliberately_unmapped_equity_sector_emits_no_edge(
+    spark, make_triples, gics
+):
+    """The gaps are the decision, asserted end to end rather than on the table.
+
+    A contributor could leave sector_crosswalk.py alone and re-add the mapping
+    in the linker — a name match, a fallback, a "reasonable default" — and the
+    table test would still pass. This one would not.
+    """
+    triples = _triple_set(
+        CrossSourceLinker(spark, make_triples(_sector_rows(gics))).enrich()
+    )
+
+    emitted = [
+        t for t in triples
+        if t[1] == RELATED_TO_ECONOMIC_SECTOR and t[0] == _equity_sector(gics)
+    ]
+    assert not emitted, (
+        f"{gics} is deliberately unmapped and emitted {emitted}. The economic "
+        "`Information` sector is publishing and telecom, not semiconductors; "
+        "`Utilities` has no economic counterpart at all."
+    )
+
+
+def test_an_equity_sector_absent_from_the_build_mints_nothing(spark, make_triples):
+    """The table covers eleven sectors; a build classifying into two should not
+    carry nine sector nodes with one edge each and no constituents."""
+    triples = _triple_set(
+        CrossSourceLinker(spark, make_triples(_sector_rows("Energy"))).enrich()
+    )
+
+    assert not [
+        t for t in triples
+        if t[1] == RELATED_TO_ECONOMIC_SECTOR
+        and t[0] != _equity_sector("Energy")
+    ]
+
+
+# ======================================================================
+# Filings -> economic sector, via SIC
+# ======================================================================
+
+def _filing_with_sic(accession, cik, sic):
+    filing = str(SEC_FILINGS) + f"{accession}_Filing"
+    issuer = str(SEC_FILINGS) + f"Issuer_{cik}"
+    return filing, [
+        (filing, RDF_TYPE, str(SEC_FILINGS.SECFiling)),
+        (filing, str(SEC_FILINGS.hasSic), sic),
+        (filing, str(SEC_FILINGS.hasIssuer), issuer),
+    ] + _issuer_rows(issuer, cik)
+
+
+def test_a_filings_sic_gives_its_company_a_sector(spark, make_triples):
+    """hasSic is stated on every filing and this repo read it nowhere.
+
+    The sector lands on the COMPANY, so every filing by that issuer inherits
+    it through the node Part 1 unified — which is why this could not land
+    before the company bridge was CIK-keyed.
+    """
+    snapshot = str(MARKET_QUOTES) + "snapshot/PFE/2026-07-02"
+    _filing, rows = _filing_with_sic("0001178913-26-003947", "0000078003", "2836")
+    rows += _snapshot_rows(snapshot, "PFE")
+
+    triples = _triple_set(
+        CrossSourceLinker(spark, make_triples(rows)).enrich()
+    )
+
+    company = str(UNIFIED) + "Company_0000078003"
+    assert (
+        company, BELONGS_TO_SECTOR, str(BLS_ENRICHMENT.ManufacturingSector)
+    ) in triples, "SIC 2836 (biological products) is SIC division D"
+
+
+def test_a_filing_in_a_reserved_sic_gap_gets_no_sector(spark, make_triples):
+    """SIC leaves 18-19, 68-69 and 90 unassigned. Snapping to the nearest
+    division would emit a confident, wrong membership claim."""
+    snapshot = str(MARKET_QUOTES) + "snapshot/PFE/2026-07-02"
+    _filing, rows = _filing_with_sic("0001178913-26-003947", "0000078003", "1850")
+    rows += _snapshot_rows(snapshot, "PFE")
+
+    triples = _triple_set(
+        CrossSourceLinker(spark, make_triples(rows)).enrich()
+    )
+
+    company = str(UNIFIED) + "Company_0000078003"
+    assert not [
+        t for t in triples if t[0] == company and t[1] == BELONGS_TO_SECTOR
+    ]
+
+
+def test_the_keyword_classifier_no_longer_claims_sec_entities(spark, make_triples):
+    """A filing's local name is an accession number, not a description.
+
+    The keyword classifier matched BLS sector fragments against it, so any
+    sector keyword appearing inside one produced a meaningless membership
+    claim on the same predicate the real classification uses.
+    """
+    snapshot = str(MARKET_QUOTES) + "snapshot/PFE/2026-07-02"
+    # A local name deliberately containing a live BLS sector keyword.
+    filing = str(SEC_FILINGS) + "0001178913-26-energy_Filing"
+    rows = _snapshot_rows(snapshot, "PFE") + [
+        (filing, RDF_TYPE, str(SEC_FILINGS.SECFiling)),
+    ] + _issuer_rows(str(SEC_FILINGS) + "Issuer_0000078003", "0000078003")
+
+    triples = _triple_set(
+        CrossSourceLinker(spark, make_triples(rows)).enrich()
+    )
+
+    assert not [
+        t for t in triples
+        if t[0].startswith(str(SEC_FILINGS)) and t[1] == BELONGS_TO_SECTOR
+    ], "the keyword classifier still assigns sectors to SEC entities"
 
 
 def test_cross_source_company_linking_resolves_occ_option_symbols(
