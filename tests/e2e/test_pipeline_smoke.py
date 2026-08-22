@@ -2027,6 +2027,13 @@ def _assert_sameas_links_only_temporal(config):
             or re.fullmatch(r"\d{4}", local)
             or re.fullmatch(r"Year\d{4}", local)
             or re.fullmatch(r"Q[1-4]", local)
+            # The day grain: id/temporal/{source}/2026-07-03 on the source
+            # side, unified/Day2026-07-03 on the unified side. Spelled out
+            # rather than loosened to "contains digits", because the defect
+            # this guard exists for was owl:sameAs pointing at a MEASUREMENT
+            # whose URI ends in a period name -- a laxer rule would readmit it.
+            or re.fullmatch(r"\d{4}-\d{2}-\d{2}", local)
+            or re.fullmatch(r"Day\d{4}-\d{2}-\d{2}", local)
         )
 
     bad = same_as[~same_as["object"].map(temporal)]
