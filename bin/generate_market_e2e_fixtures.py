@@ -42,6 +42,17 @@ Deterministic, and anchored so the fixture exercises the cross-source bridge:
      so the "quote with no counterpart" branch stays exercised and the fixture
      cannot silently become one where everything joins.
 
+  4. **A sub-industry peer.** One further equity, chosen because it shares a
+     GICS sub-industry with an equity already kept. The peer link joins company
+     to company through that shared classification, so it needs two
+     constituents in the same one — and every fixture before this held equities
+     from different sub-industries, which made the link impossible to produce
+     rather than merely absent. The e2e suite covered every other cross-source
+     join and skipped that one in silence, so it could have broken at any point
+     with nothing failing. The classification is read from the same
+     constituents CSV the pipeline itself uses, so the fixture is anchored on
+     the table the join will actually consult.
+
 NETWORK BOUNDARY
 ----------------
 S3 access is **generation-time only**. The fixtures stay committed and the e2e
@@ -55,6 +66,11 @@ upstream vocabulary changes, not per test run.
 USAGE
 -----
     export MARKET_FIXTURE_BUCKET=<market-bucket>    # or pass --bucket
+    export MARKET_QUOTES_PREFIX=<quotes-prefix>
+    # Optional, and only the peer equity needs them. Without both, the fixture
+    # is generated without a peer and the sub-industry link has nothing to join.
+    export MARKET_SECTOR_DEFINITIONS_BUCKET=<constituents-bucket>
+    export MARKET_SECTOR_DEFINITIONS_KEY=<constituents-key>
     .venv/bin/python bin/generate_market_e2e_fixtures.py
 
     # preview without writing
@@ -81,6 +97,28 @@ QUOTES_PREFIX = os.environ.get("MARKET_QUOTES_PREFIX", "")
 ANCHORED_EQUITIES = 1
 OPTIONS_PER_EQUITY = 2
 CONTROL_EQUITIES = 1
+
+# One extra equity, chosen because it shares a GICS sub-industry with an equity
+# already kept.
+#
+# WHY: the sub-industry peer link joins company to company through that shared
+# classification, so it needs TWO constituents in the same one. Every fixture
+# before this held equities from different sub-industries, which made the link
+# impossible to produce rather than merely absent -- the e2e suite exercised
+# every other cross-source join and silently skipped this one, so it could have
+# broken at any point with nothing failing.
+#
+# Costs one more equity snapshot (~33 triples) and no option chain.
+PEER_EQUITIES = 1
+
+# Where the sub-industry classification is read from. The same constituents CSV
+# the pipeline itself reads (--market_sector_definitions_bucket / _key), so the
+# fixture is anchored on exactly the table the join will use; a hardcoded pair
+# would drift the first time the index is rebalanced.
+SECTOR_DEFINITIONS_BUCKET_ENV = "MARKET_SECTOR_DEFINITIONS_BUCKET"
+SECTOR_DEFINITIONS_KEY_ENV = "MARKET_SECTOR_DEFINITIONS_KEY"
+SUB_INDUSTRY_COLUMN = "GICS Sub-Industry"
+SYMBOL_COLUMN = "Symbol"
 
 # How many crawl rows to spread the sample across, matching the other
 # generators: the production loader reads one Turtle document per row, so
@@ -135,6 +173,69 @@ def newest_snapshot_key(s3, bucket: str) -> str:
         prefix = subdirs[-1]
 
 
+def sub_industries(s3) -> dict[str, str]:
+    """Ticker -> GICS sub-industry from the constituents CSV, or {} if unset.
+
+    Returns empty rather than raising when the location is not configured: the
+    peer equity is an addition to the fixture, and a generator that refused to
+    run without it would make the whole market fixture depend on a table only
+    this one selection needs.
+    """
+    import csv
+    import os
+
+    bucket = os.environ.get(SECTOR_DEFINITIONS_BUCKET_ENV, "").strip()
+    key = os.environ.get(SECTOR_DEFINITIONS_KEY_ENV, "").strip()
+    if not (bucket and key):
+        _log(
+            f"  no {SECTOR_DEFINITIONS_BUCKET_ENV}/{SECTOR_DEFINITIONS_KEY_ENV} "
+            f"— skipping the peer equity, so the sub-industry link will have "
+            f"nothing to join"
+        )
+        return {}
+
+    body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+    rows = csv.DictReader(io.StringIO(body.decode("utf-8")))
+    table = {
+        (row.get(SYMBOL_COLUMN) or "").strip().upper():
+            (row.get(SUB_INDUSTRY_COLUMN) or "").strip()
+        for row in rows
+    }
+    table = {k: v for k, v in table.items() if k and v}
+    _log(f"  {len(table)} ticker -> sub-industry pairs")
+    return table
+
+
+def pick_peer(equities, already_kept: list[str], classification: dict[str, str]):
+    """A quoted ticker sharing a sub-industry with one already kept, or None.
+
+    Deterministic: candidates are considered in the order the snapshot was
+    sorted, and the first match wins, so regenerating against the same snapshot
+    reproduces the same fixture.
+    """
+    if not classification:
+        return None
+
+    wanted = {
+        classification[t] for t in already_kept if t in classification
+    }
+    if not wanted:
+        _log(
+            f"  none of {already_kept} is in the constituents CSV — no "
+            f"sub-industry to match a peer against"
+        )
+        return None
+
+    for ticker in equities["ticker"]:
+        if ticker in already_kept:
+            continue
+        if classification.get(ticker) in wanted:
+            return ticker
+
+    _log(f"  no quoted peer found for sub-industries {sorted(wanted)}")
+    return None
+
+
 def turtle_column(names) -> str | None:
     """Which Turtle column this vintage spells, or None."""
     for candidate in reversed(TURTLE_COLUMN_CANDIDATES):
@@ -174,8 +275,11 @@ def occ_root(symbol: str) -> str | None:
     return match.group(1).strip().upper() if match else None
 
 
-def select_snapshots(frame, anchors: set[str]) -> list[str]:
+def select_snapshots(
+    frame, anchors: set[str], classification: dict[str, str] | None = None
+) -> list[str]:
     """The Turtle documents to keep, anchored per SAMPLING above."""
+    classification = classification or {}
     column = turtle_column(frame.columns)
     if column is None:
         raise SystemExit(
@@ -205,16 +309,46 @@ def select_snapshots(frame, anchors: set[str]) -> list[str]:
     control = equities[~equities["ticker"].isin(anchors)]
     kept_control = list(control["ticker"].head(CONTROL_EQUITIES))
 
+    # Chosen after the other two, so it pairs with whatever they turned out to
+    # be rather than fixing a pair up front that a later snapshot may not quote.
+    kept_peer: list[str] = []
+    if PEER_EQUITIES:
+        peer = pick_peer(
+            equities, kept_equities + kept_control, classification
+        )
+        if peer is not None:
+            kept_peer = [peer]
+            partner = next(
+                t for t in kept_equities + kept_control
+                if classification.get(t) == classification[peer]
+            )
+            _log(
+                f"  {peer}: 1 equity [peer of {partner}, "
+                f"{classification[peer]}]"
+            )
+
+    roles = (
+        [(t, "anchored") for t in kept_equities]
+        + [(t, "unanchored control") for t in kept_control]
+        + [(t, "sub-industry peer") for t in kept_peer]
+    )
+
     docs: list[str] = []
-    for ticker in kept_equities + kept_control:
+    for ticker, role in roles:
         rows = equities[equities["ticker"] == ticker]
         docs += list(rows[column].head(1))
-        if ticker in kept_equities:
-            chain = options[options["ticker"] == ticker]
-            docs += list(chain[column].head(OPTIONS_PER_EQUITY))
-            _log(f"  {ticker}: 1 equity + {min(len(chain), OPTIONS_PER_EQUITY)} option(s) [anchored]")
-        else:
-            _log(f"  {ticker}: 1 equity [unanchored control]")
+
+        # Options follow whichever equity was kept, not only an anchored one.
+        # Gating them on anchoring meant a snapshot quoting none of the SEC
+        # fixture's issuers produced a sample with no OptionSnapshot at all --
+        # validate() then rejects the run, so the OCC-derivation path loses its
+        # coverage over a condition that has nothing to do with options.
+        chain = options[options["ticker"] == ticker]
+        kept_chain = list(chain[column].head(OPTIONS_PER_EQUITY))
+        docs += kept_chain
+
+        detail = f" + {len(kept_chain)} option(s)" if kept_chain else ""
+        _log(f"  {ticker}: 1 equity{detail} [{role}]")
 
     return docs
 
@@ -338,7 +472,8 @@ def main() -> int:
     anchors = sec_fixture_tickers()
     _log(f"  SEC fixture tickers: {sorted(anchors) or '(none)'}")
 
-    docs = select_snapshots(frame, anchors)
+    classification = sub_industries(s3)
+    docs = select_snapshots(frame, anchors, classification)
     if not docs:
         raise SystemExit("no snapshots selected")
 

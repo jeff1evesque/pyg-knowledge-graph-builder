@@ -276,6 +276,9 @@ def _assert_valid_graph_and_metadata(config, work_dir):
     # --- and exists at full strength, rather than resolving into one edge ---
     _assert_declared_bridges_are_not_degenerate(config)
 
+    # --- and points at the right company, not merely at some company ---
+    _assert_bridged_companies_agree(config)
+
     # --- a chain of N transactions is N-1 edges, not "some precedes present" ---
     _assert_transaction_chains_are_complete(config)
 
@@ -1593,19 +1596,23 @@ def _assert_declared_bridges_are_not_degenerate(config):
 
     See BRIDGE_COVERAGE.
 
-    A rule whose candidate population is empty HERE is skipped, because the
-    fixtures deliberately differ: the N-Triples fixture is a loader test
-    carrying a slice of each source, and its SEC half states no ticker at all,
-    so requiring the SEC rule against it would fail for a fixture-coverage
-    reason rather than a pipeline one -- the same trap KNOWN_ABSENT_BRIDGES and
-    the conditional entries in REQUIRED_BRIDGE_RELATIONS exist to avoid.
+    A rule whose candidate population is empty here FAILS. It used to be
+    skipped, on the reasoning that the fixtures deliberately differ and an
+    absent input is a fixture-coverage fact rather than a pipeline defect. That
+    reasoning is what let the market half of the company bridge go dark: the
+    SEC fixture was regenerated, its issuers stopped quoting in the market
+    fixture, the candidate population went to zero, and a rule with a floor of
+    1.0 went quiet in a green suite. A ratio of 0/0 is not coverage.
 
-    Skipping is only safe because a rule that measures nothing EVERYWHERE is
-    caught elsewhere: tests/test_bridge_coverage_guard.py asserts that every
-    rule has a candidate population somewhere in the committed fixtures. That
-    check belongs in the fast suite anyway -- it is a statement about the
-    fixtures, needs no pipeline run, and so runs constantly rather than only
-    when someone runs the heavy suite by hand.
+    A fixture that genuinely should not carry a bridge is declared, not
+    inferred from an empty count -- that is what KNOWN_ABSENT_BRIDGES and the
+    conditional entries in REQUIRED_BRIDGE_RELATIONS are for.
+
+    tests/test_bridge_coverage_guard.py still asserts that every rule has a
+    candidate population somewhere in the committed fixtures. That check
+    belongs in the fast suite anyway -- it is a statement about the fixtures,
+    needs no pipeline run, and so runs constantly rather than only when someone
+    runs the heavy suite by hand.
     """
     import pandas as pd
 
@@ -1637,13 +1644,29 @@ def _assert_declared_bridges_are_not_degenerate(config):
         return set(stated[matched.isin(available)]["subject"])
 
     thin = []
+    unverifiable = []
     for rule in BRIDGE_COVERAGE:
         if rule.resolved_against:
             candidates = resolvable_subjects(rule.candidates, rule.resolved_against)
         else:
             candidates = subjects_of(rule.candidates)
         if not candidates:
-            continue  # not verifiable on this fixture; see the docstring
+            # A rule with nothing to measure is NOT a rule that passed, and
+            # until this was collected the two were indistinguishable. The
+            # market half of the company bridge sat here for weeks: the SEC
+            # fixture was regenerated, its issuers stopped quoting in the
+            # market fixture, the candidate population went to zero and the
+            # rule went quiet -- on a floor of 1.0, in a green suite.
+            #
+            # Collected rather than raised on the spot: a fixture legitimately
+            # need not carry every bridge, so the report below is what decides,
+            # and it names which rule went dark rather than only that one did.
+            unverifiable.append(
+                f"{rule.label}: no subject states {rule.candidates}"
+                + (f" resolvable against {rule.resolved_against}"
+                   if rule.resolved_against else "")
+            )
+            continue
         covered = candidates & subjects_of(rule.relation)
         ratio = len(covered) / len(candidates)
         if ratio < rule.floor:
@@ -1652,6 +1675,16 @@ def _assert_declared_bridges_are_not_degenerate(config):
                 f"({ratio:.1%}) of subjects stating {rule.candidates} reach "
                 f"{rule.relation}, floor {rule.floor:.0%} — {rule.why}"
             )
+
+    assert not unverifiable, (
+        "bridge coverage rules that measured NOTHING:\n  "
+        + "\n  ".join(unverifiable)
+        + "\n\nThese did not pass -- they had no candidate population, so the "
+        "rule was skipped and the suite stayed green over an unexercised join. "
+        "The usual cause is fixture drift: one committed fixture regenerated "
+        "without the other, leaving nothing for the join to match. Regenerate "
+        "the pair together, or delete the rule if the bridge is genuinely gone."
+    )
 
     assert not thin, (
         "bridges that resolved but under-cover their endpoints:\n  "
@@ -1662,6 +1695,84 @@ def _assert_declared_bridges_are_not_degenerate(config):
         "datatype, which subject states the term) rather than whether the term "
         "is still emitted."
     )
+
+
+# Coverage asks whether a link FORMED. It cannot ask whether the link points
+# where it should: a market snapshot that reaches some company node satisfies a
+# floor of 1.0 whether or not that node is the company whose filing states the
+# same ticker. Both defects that would produce a wrong node are live risks --
+# the symbol-keyed fallback company this work replaced, and a ticker resolving
+# to a CIK other than the filing's.
+#
+# The two sides are checked against EACH OTHER rather than against a name,
+# because agreement is the strongest claim fixture data supports: nothing here
+# can confirm that a ticker is the company the outside world says it is. A
+# disagreement, though, is always a defect -- one ticker cannot be two companies
+# in one graph.
+#
+# Deliberately silent about absence. A ticker that reaches a company from only
+# one side is left to _assert_declared_bridges_are_not_degenerate's floor, so a
+# failure here always means "wrong", never "missing", and the two cannot be
+# confused when one fires.
+
+def _assert_bridged_companies_agree(config):
+    """A ticker must reach the SAME company from the market and SEC sides."""
+    import collections
+
+    import pandas as pd
+
+    files = sorted(Path(config.enriched_parquet_path).rglob("*.parquet"))
+    if not files:
+        return  # split-mode runs may not re-emit the enriched frame
+    df = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
+
+    def rows_of(local_name):
+        return df[df["predicate"].str.endswith(f"/{local_name}")]
+
+    refers = rows_of("refersToCompany")
+    company = collections.defaultdict(set)
+    for subject, obj in zip(refers["subject"], refers["object"]):
+        company[subject].add(obj)
+
+    def reached(local_name, fold_options):
+        """Companies each ticker reaches, keyed by ticker."""
+        out = collections.defaultdict(set)
+        rows = rows_of(local_name)
+        for subject, obj in zip(rows["subject"], rows["object"]):
+            ticker = str(obj).strip().upper()
+            if fold_options:
+                # An OCC option symbol carries its underlying in the first six
+                # characters, so a chain is checked against its own equity's
+                # company rather than being skipped for not looking like a
+                # ticker.
+                ticker = ticker[:6].strip()
+            if subject in company:
+                out[ticker] |= company[subject]
+        return out
+
+    market = reached("symbol", fold_options=True)
+    sec = reached("hasIssuerTradingSymbol", fold_options=False)
+
+    mismatched = [
+        f"{ticker}: market reaches "
+        f"{sorted(_local_name(c) for c in market[ticker])}, "
+        f"SEC reaches {sorted(_local_name(c) for c in sec[ticker])}"
+        for ticker in sorted(set(market) & set(sec))
+        if market[ticker] != sec[ticker]
+    ]
+
+    assert not mismatched, (
+        "the same ticker reaches DIFFERENT companies from each side:\n  "
+        + "\n  ".join(mismatched)
+        + "\n\nThe bridge formed, so coverage passes -- it points at the wrong "
+        "company. Check whether the market side fell back to a symbol-keyed "
+        "company node instead of the CIK-keyed one, or whether the ticker "
+        "resolved to a CIK other than the filing's."
+    )
+
+
+def _local_name(term) -> str:
+    return str(term).rsplit("/", 1)[-1].rsplit("#", 1)[-1]
 
 
 # The transaction chain, which the ratio rules above cannot express.

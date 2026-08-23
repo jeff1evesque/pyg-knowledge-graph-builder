@@ -33,6 +33,7 @@ from spark_jobs.pyg_builder.feature_extractor import (
     _compute_collision_report,
     ClassIdentityCapacityError,
     _check_class_identity_capacity,
+    _min_vector_dim_for_segment_one,
 )
 
 CPI_INDEX = "https://jefflevesque.com/ontology/cpi/Index"        # -> cpi_Index
@@ -762,6 +763,52 @@ def test_over_subscription_fails_the_build():
     # The message must name the levers, or it reports a wall with no door.
     assert "class_identity_dim" in str(exc.value)
     assert "vector_dim" in str(exc.value)
+
+
+def test_over_subscription_names_the_width_that_would_fit():
+    """Naming the lever is not enough; the message has to carry the number.
+
+    "Raise vector_dim" leaves the operator to work out a fixed share of a fixed
+    fraction by hand, and to find out from a SECOND failed build that the width
+    they picked was still short. The class count is known at the point of
+    failure, so the width that clears it is too.
+
+    The memory figure rides along because raising the width is not free: the
+    feature tensors are collected to the driver, so the cost is linear in the
+    width and lands in one process. A caller told only "raise it" cannot see
+    what they are agreeing to.
+    """
+    report = {"class_identity": {
+        "total_classes": 300,
+        "segment_dim": 64,
+        "classes_sharing_a_code": [],
+    }}
+    with pytest.raises(ClassIdentityCapacityError) as exc:
+        _check_class_identity_capacity(report, vector_dim=256)
+
+    message = str(exc.value)
+    assert str(_min_vector_dim_for_segment_one(300)) in message, (
+        f"the failure must name the width that fits 300 classes: {message}"
+    )
+    assert "GB" in message, "and what that width costs in driver memory"
+
+
+def test_the_width_is_omitted_when_the_caller_does_not_supply_one():
+    """vector_dim is optional, so the message degrades rather than lying.
+
+    _check_class_identity_capacity is called directly by tests and could be by
+    other callers. Without the width there is no arithmetic to do, and inventing
+    one from the segment dim would assume a share this function does not own.
+    """
+    report = {"class_identity": {
+        "total_classes": 70,
+        "segment_dim": 64,
+        "classes_sharing_a_code": [],
+    }}
+    with pytest.raises(ClassIdentityCapacityError) as exc:
+        _check_class_identity_capacity(report)
+
+    assert "smallest width" not in str(exc.value)
 
 
 def test_over_subscription_can_be_opted_into(caplog):

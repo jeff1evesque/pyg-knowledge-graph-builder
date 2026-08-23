@@ -353,7 +353,9 @@ Segment 1 is a quarter of the vector, so no split of it exceeds ~192 classes at 
 
 A build whose classes are **not separable** now **fails** with `ClassIdentityCapacityError` rather than logging a warning — over-subscribed, sharing an identical code, or linearly dependent. Set `feature_config.allow_class_identity_oversubscription=true` to build anyway. The build still only *warns* when the class count passes 85% of the segment, which is a nudge rather than a fault.
 
-> **Changing `class_identity_dim` or `vector_dim` invalidates trained models.** Slots are `hash % dim`, so a different width re-maps every class. This is why the width is a published tuning constant in `encoding_config.json` and not derived per build from the observed class count — a width that moved whenever a new class appeared would silently re-map every existing one.
+> **Changing `class_identity_dim` or `vector_dim` invalidates trained models.** Slots are `hash % dim`, so a different width re-maps every class. This is why the width is a published tuning constant in `encoding_config.json` rather than a figure recomputed on every build — one that moved whenever a class appeared would re-map every existing class for no benefit.
+>
+> Deriving the width per build was tried and removed. Widening `class_identity` means taking dims from `class_hierarchy` and `ontology_source`, and neither has a requirement to size against — `ontology_source` indexes a fixed 26-entry namespace table and is *expected* to collide, so "what it needs" is not a measurable quantity there. Any automatic split is therefore a guess about budgets nobody has established. The build fails instead, and the failure names the `vector_dim` that would fit along with what it costs in driver memory, so the arithmetic is not left to the reader.
 
 **Invocation example:**
 

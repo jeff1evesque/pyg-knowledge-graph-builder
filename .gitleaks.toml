@@ -359,6 +359,43 @@ regexes = [
 ]
 
 # --------------------------------------------------------------------------- #
+# Repository-specific: a bucket name handed to a command-line flag
+# --------------------------------------------------------------------------- #
+#
+# A THIRD rule, because this value carries neither anchor the other two key on.
+# `hardcoded-s3-bucket` needs a scheme or an assignment. The prose rule needs
+# the value QUOTED. A bucket handed to a flag has neither:
+#
+#     bin/submit_spark_job.sh --mode full --s3_archive_bucket <a real bucket>
+#
+# Not a hypothetical shape. notebook/multi_experiment.ipynb echoes the command
+# it is about to submit, and a notebook is committed WITH its cell outputs, so
+# that line lands in a tracked file verbatim. The notebook does redact what it
+# prints, but only values carrying an s3:// or s3a:// scheme -- which this one
+# does not -- and that redaction protects nothing outside that one notebook.
+#
+# The value must be HOSTNAME-SHAPED, same as the prose rule and for the same
+# reason: without it the rule fires on `--bucket_count 12` and every other
+# ordinary flag. Measured across the 122 tracked files this path matches: zero
+# false positives, and it still catches all four spellings of the leak
+# (`--flag value`, `--flag=value`, quoted, and mid-command-line).
+[[rules]]
+id = "hardcoded-s3-bucket-cli-arg"
+description = "Real S3 bucket name passed as a command-line argument"
+regex = '''(?i)--[a-z0-9_]*bucket[= ]["']?([a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)+)'''
+path = '''(?i)\.(py|md|ipynb|ya?ml|json|tf|sh|cfg|toml)$'''
+secretGroup = 1
+tags = ["aws", "s3", "portability"]
+
+[rules.allowlist]
+# The placeholders the other two rules already permit, so documentation can go
+# on writing a made-up bucket without tripping this.
+regexes = [
+  '''(?i)^(?:bucket|my-bucket|my-archive|my-data|my-data-lake|example|example-bucket|test|test-bucket|placeholder|your-bucket|some-bucket|sample|demo)\.''',
+  '''(?i)(?:^|\.)(?:example\.(?:com|org|net|edu)|localhost|invalid)$''',
+]
+
+# --------------------------------------------------------------------------- #
 # The deleted deployment tree
 # --------------------------------------------------------------------------- #
 #

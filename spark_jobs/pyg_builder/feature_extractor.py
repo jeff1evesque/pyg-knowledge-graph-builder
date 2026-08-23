@@ -141,9 +141,17 @@ _SEG3_FRAC = 0.375  # = 1.0 - 0.25 - 0.375
 #
 # Changing this width changes every class's slots (`hash % dim`), so it
 # invalidates models trained against a previous layout. That is why it is a
-# tuning constant with a published value in encoding_config.json and not
-# something derived per build from the class count -- a width that moved
-# whenever a new class appeared would silently re-map every existing one.
+# tuning constant with a published value in encoding_config.json rather than a
+# width recomputed per build -- one that moved whenever a class appeared would
+# re-map every existing class for no benefit.
+#
+# Deriving it per build was tried and removed. Sizing class_identity to the
+# class count means taking dims from class_hierarchy and ontology_source, and
+# neither has a stated requirement to size against -- ontology_source indexes a
+# fixed 26-entry namespace table and is EXPECTED to collide, so "what it needs"
+# is not a measurable quantity there. Any split that moves dims off them is a
+# guess. The build fails instead, naming the vector_dim that would fit; see
+# _check_class_identity_capacity.
 _SEG1_CLASS_IDENTITY_FRAC = 0.625
 _SEG1_CLASS_HIERARCHY_FRAC = 0.1875
 _SEG1_ONTOLOGY_SOURCE_FRAC = 0.1875
@@ -2365,6 +2373,7 @@ class FeatureExtractor:
         _check_class_identity_capacity(
             collision_report,
             allow_oversubscription=self._allow_class_oversubscription,
+            vector_dim=layout.vector_dim,
         )
 
         self._collected_slot_mapping = {
@@ -2850,9 +2859,27 @@ class ClassIdentityCapacityError(RuntimeError):
     """The class_identity segment cannot separate this build's classes."""
 
 
+def _min_vector_dim_for_segment_one(dims_needed: int) -> int:
+    """Smallest vector_dim whose segment 1 carries ``dims_needed`` dims."""
+    import math
+
+    return int(math.ceil(dims_needed / _SEG1_FRAC))
+
+
+def _driver_gb_per_million_nodes(vector_dim: int) -> float:
+    """Dense feature memory on the driver, per million nodes, at this width.
+
+    Quoted in the capacity error because "raise vector_dim" reads as free and
+    is not: the tensors are collected to the driver, so the cost is linear in
+    the width and lands in one process.
+    """
+    return vector_dim * 1_000_000 * 4 / 1024 ** 3
+
+
 def _check_class_identity_capacity(
     report: Dict[str, Any],
     allow_oversubscription: bool = False,
+    vector_dim: Optional[int] = None,
 ) -> None:
     """
     Fail when the class_identity segment can no longer carry class identity.
@@ -2923,11 +2950,29 @@ def _check_class_identity_capacity(
 
     if problems:
         detail = " ".join(problems)
+        # Quote the width that would actually fit rather than naming the
+        # setting. "Raise vector_dim" leaves the operator to work out the
+        # arithmetic behind a fixed share of a fixed fraction, and to discover
+        # by a second failed build that the number they picked was still short.
+        # The memory figure goes with it because raising the width is not free:
+        # the feature tensors are collected to the driver, so the cost is linear
+        # in the width and lands in one process.
+        sized = ""
+        if vector_dim and total:
+            needed = _min_vector_dim_for_segment_one(total)
+            if needed > vector_dim:
+                sized = (
+                    f" At vector_dim={vector_dim} no split of segment 1 carries "
+                    f"{total} classes; the smallest width that does is "
+                    f"{needed} (~"
+                    f"{_driver_gb_per_million_nodes(needed):.0f} GB of driver "
+                    f"memory per 1M nodes)."
+                )
         remedy = (
             "Raise feature_config.class_identity_dim (taken from within "
             "segment 1, so the vector width does not change) or "
-            "feature_config.vector_dim (scales every segment). To build "
-            "anyway, set feature_config."
+            "feature_config.vector_dim (scales every segment)." + sized
+            + " To build anyway, set feature_config."
             "allow_class_identity_oversubscription=true."
         )
         if allow_oversubscription:

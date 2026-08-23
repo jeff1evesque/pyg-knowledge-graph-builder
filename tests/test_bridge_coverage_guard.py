@@ -146,18 +146,28 @@ def test_one_side_thin_fails_even_when_the_other_is_complete(tmp_path):
         _smoke._assert_declared_bridges_are_not_degenerate(_write(tmp_path, rows))
 
 
-def test_a_rule_with_no_candidates_is_skipped_on_that_fixture(tmp_path):
-    """Fixtures differ, and a rule cannot be verified where its input is absent.
+def test_a_rule_with_no_candidates_fails_and_names_itself(tmp_path):
+    """A rule with nothing to measure did not pass, and must not look like it.
 
-    The N-Triples fixture is a loader test carrying a slice of each source; its
-    SEC half states no ticker at all. Failing there would report a
-    fixture-coverage fact as a pipeline defect.
+    Dropping every snapshot leaves the market rule with no subject stating a
+    symbol, so its ratio is 0/0. That used to be skipped as a fixture-coverage
+    fact rather than a pipeline one. It is now a failure: the skip is exactly
+    how the market half of this bridge stayed green for weeks over a join that
+    had quietly stopped matching anything.
 
-    This is only safe because a rule that measures nothing EVERYWHERE is caught
-    by test_every_rule_is_exercised_by_the_committed_fixtures below.
+    The message must name the rule that went dark, not merely report that one
+    did, or the reader is left to work out which of them measured nothing.
     """
     rows = [r for r in _healthy_rows() if r[0] not in _SNAPSHOTS]
-    _smoke._assert_declared_bridges_are_not_degenerate(_write(tmp_path, rows))
+
+    with pytest.raises(AssertionError) as caught:
+        _smoke._assert_declared_bridges_are_not_degenerate(_write(tmp_path, rows))
+
+    message = str(caught.value)
+    assert "measured NOTHING" in message
+    assert "market snapshot -> unified company" in message
+    # The SEC half still had its candidates and must not be swept in.
+    assert "SEC issuer -> unified company" not in message
 
 
 def test_every_rule_is_exercised_by_the_committed_fixtures():
@@ -165,8 +175,9 @@ def test_every_rule_is_exercised_by_the_committed_fixtures():
 
     A rule whose candidate predicate appears in NO fixture measures nothing
     wherever it runs, which is the precise shape of a check that looks like
-    protection and is not. Skipping per-fixture is only defensible with this
-    standing behind it.
+    protection and is not. The pipeline guard now fails on an empty candidate
+    population rather than skipping it, so this no longer backstops a skip; it
+    catches the same rot earlier, in the fast suite, without a pipeline run.
 
     Reads the emitted-term inventory the drift checker already builds from the
     committed fixtures, rather than re-parsing them here -- same source of
@@ -392,3 +403,104 @@ def test_positional_issuer_nodes_do_not_collide():
         f"{_ID}sec-filings/0001-26-1_Issuer_0",
         f"{_ID}sec-filings/0002-26-1_Issuer_0",
     ]))
+
+
+# --------------------------------------------------------------------------- #
+# The precondition the guard cannot check for itself
+# --------------------------------------------------------------------------- #
+#
+# BRIDGE_COVERAGE skips a rule whose candidate population is empty:
+#
+#     if not candidates:
+#         continue  # not verifiable on this fixture
+#
+# That is right in principle -- a fixture with nothing to join cannot be asked
+# to prove a join -- but it degrades to "passes, measures nothing", and nothing
+# says which of the two happened. The market half of the company bridge sat in
+# that state: the SEC fixture was regenerated, its issuers became micro-caps
+# that quote in no snapshot, and the overlap with the market fixture went to
+# zero. The rule kept passing and had stopped measuring, on a bridge whose
+# floor is 1.0.
+#
+# So the overlap itself is the thing to assert. It is a property of the two
+# committed files, needs no pipeline run, and fails the moment one is
+# regenerated without the other.
+
+def _fixture_graph(relative: str):
+    """The committed fixture at ``relative``, parsed by its own format.
+
+    Both formats are read here because both are committed and the e2e suite
+    loads each: the Parquet pair feeds test_full_turtle_parquet, the N-Triples
+    pair feeds test_full_ntriples.
+    """
+    import pandas as pd
+    import rdflib
+
+    path = Path(__file__).resolve().parent / "fixtures" / "e2e" / relative
+    graph = rdflib.Graph()
+    if path.suffix == ".nt":
+        graph.parse(path, format="nt")
+        return graph
+    for document in pd.read_parquet(path)["triples"]:
+        graph.parse(data=document, format="turtle")
+    return graph
+
+
+def _objects_of(graph, local_name: str) -> set[str]:
+    return {
+        str(o).strip().upper()
+        for _s, p, o in graph
+        if str(p).endswith(local_name)
+    }
+
+
+@pytest.mark.parametrize(
+    ("sec_fixture", "market_fixture"),
+    [
+        (
+            "turtle_parquet/sec/sec_sample.parquet",
+            "turtle_parquet/market/market_sample.parquet",
+        ),
+        ("ntriples/sec.nt", "ntriples/market.nt"),
+    ],
+    ids=("turtle_parquet", "ntriples"),
+)
+def test_the_two_fixtures_share_at_least_one_ticker(sec_fixture, market_fixture):
+    """A SEC issuer's ticker must also quote in the market fixture.
+
+    ONE shared ticker is the bar, not a matched pair of populations. Market data
+    covers an index and filings cover everyone who files, so the overlap is
+    small by nature and a filing with no quotes behind it is not a defect --
+    BRIDGE_COVERAGE filters to the intersection before it measures anything.
+    What this refuses is an intersection of *zero*, which leaves that rule no
+    candidates and turns the e2e suite green over an untested join.
+
+    Regenerate BOTH fixtures together -- generate_sec_e2e_fixtures.py keeps one
+    index constituent for exactly this reason, and
+    generate_market_e2e_fixtures.py anchors on the symbols this fixture states.
+
+    Checked per format because the pairs are sliced independently: sec.nt is a
+    slice of the same sample the Parquet rows come from, so the Parquet pair can
+    overlap while the N-Triples pair does not. That is not hypothetical -- the
+    slice took filings in URI order, left the one index constituent out, and
+    this test passed on the Parquet pair while test_full_ntriples failed on the
+    empty join.
+    """
+    sec_tickers = _objects_of(
+        _fixture_graph(sec_fixture),
+        "hasIssuerTradingSymbol",
+    )
+    market_symbols = _objects_of(
+        _fixture_graph(market_fixture),
+        "symbol",
+    )
+    # An option symbol carries its underlying in the first six characters.
+    market_roots = {s[:6].strip() for s in market_symbols} | market_symbols
+
+    assert sec_tickers & market_roots, (
+        f"no SEC fixture issuer quotes in the market fixture "
+        f"({sec_fixture} vs {market_fixture}). SEC states "
+        f"{sorted(sec_tickers)}; the market fixture carries "
+        f"{sorted(market_symbols)}. The company bridge has nothing to join, "
+        f"and BRIDGE_COVERAGE will skip its market half rather than fail."
+    )
