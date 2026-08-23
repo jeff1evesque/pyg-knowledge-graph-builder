@@ -1637,13 +1637,29 @@ def _assert_declared_bridges_are_not_degenerate(config):
         return set(stated[matched.isin(available)]["subject"])
 
     thin = []
+    unverifiable = []
     for rule in BRIDGE_COVERAGE:
         if rule.resolved_against:
             candidates = resolvable_subjects(rule.candidates, rule.resolved_against)
         else:
             candidates = subjects_of(rule.candidates)
         if not candidates:
-            continue  # not verifiable on this fixture; see the docstring
+            # A rule with nothing to measure is NOT a rule that passed, and
+            # until this was collected the two were indistinguishable. The
+            # market half of the company bridge sat here for weeks: the SEC
+            # fixture was regenerated, its issuers stopped quoting in the
+            # market fixture, the candidate population went to zero and the
+            # rule went quiet -- on a floor of 1.0, in a green suite.
+            #
+            # Collected rather than raised on the spot: a fixture legitimately
+            # need not carry every bridge, so the report below is what decides,
+            # and it names which rule went dark rather than only that one did.
+            unverifiable.append(
+                f"{rule.label}: no subject states {rule.candidates}"
+                + (f" resolvable against {rule.resolved_against}"
+                   if rule.resolved_against else "")
+            )
+            continue
         covered = candidates & subjects_of(rule.relation)
         ratio = len(covered) / len(candidates)
         if ratio < rule.floor:
@@ -1652,6 +1668,16 @@ def _assert_declared_bridges_are_not_degenerate(config):
                 f"({ratio:.1%}) of subjects stating {rule.candidates} reach "
                 f"{rule.relation}, floor {rule.floor:.0%} — {rule.why}"
             )
+
+    assert not unverifiable, (
+        "bridge coverage rules that measured NOTHING:\n  "
+        + "\n  ".join(unverifiable)
+        + "\n\nThese did not pass -- they had no candidate population, so the "
+        "rule was skipped and the suite stayed green over an unexercised join. "
+        "The usual cause is fixture drift: one committed fixture regenerated "
+        "without the other, leaving nothing for the join to match. Regenerate "
+        "the pair together, or delete the rule if the bridge is genuinely gone."
+    )
 
     assert not thin, (
         "bridges that resolved but under-cover their endpoints:\n  "
