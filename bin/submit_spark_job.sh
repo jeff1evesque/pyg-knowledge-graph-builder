@@ -29,6 +29,22 @@
 #                               operators run on GPU vs fall back to CPU)
 #   DRIVER_MEMORY               (optional, default 4g) driver heap. The pipeline fans
 #                               out into ~1,300 stages and OOMs Spark's 1g default.
+#   EXECUTOR_MEMORY             (optional, default 4g; cluster masters only) heap per
+#                               executor. The default is a FLOOR chosen to be safe on
+#                               any worker, not a size for real input -- Spark waits
+#                               forever on a request larger than a worker can offer,
+#                               so this errs small deliberately. Set it to what the
+#                               cluster actually has, e.g. 64g.
+#   EXECUTOR_CORES              (optional, unset; cluster masters only) cores per
+#                               executor. Unset means each executor takes every core
+#                               on its worker, which is usually what this job wants.
+#   RAPIDS_GPU_ALLOC_FRACTION   (optional, default 0.25) fraction of FREE GPU memory
+#                               the RMM pool takes. Must not exceed the max below;
+#                               the script refuses to submit if it does.
+#   RAPIDS_GPU_MAX_ALLOC_FRACTION
+#                               (optional, default 0.4) hard cap on the pool as a
+#                               fraction of TOTAL GPU memory. Raising the alloc
+#                               fraction alone cannot grow the pool past this.
 #   MAX_PLAN_STRING_LENGTH      (optional, default 16k) see note below
 #   PARQUET_NANOS_AS_LONG       (optional, default true) see note below
 #   SPARK_EXTRA_CONF            (optional) extra "--conf k=v" flags, space-separated
@@ -149,7 +165,70 @@ if [[ "$SPARK_MASTER_URL" != local* ]]; then
   )
 fi
 
+# EXECUTOR SIZING. Nothing set spark.executor.memory -- not this script, not the site
+# spark-defaults.conf -- so every executor took Spark's 1g default while the workers
+# advertised two orders of magnitude more. That survived because the cluster suite runs
+# on committed fixtures measured in kilobytes, where 1g is ample. Real input is not:
+# one day across four sources parses to ~19.8M triples and the market linker alone adds
+# ~2.4M. The failure mode is the expensive kind -- not a crash, but constant spilling
+# and a job that looks like it works while running many times slower than it should.
+#
+# The default is deliberately modest rather than sized to the workers. Spark treats an
+# executor-memory request larger than a worker can offer as UNSATISFIABLE, and its
+# response to an unsatisfiable request is to wait, not to fail -- the same hang class
+# this script already guards against for GPU resources. A default that assumed large
+# workers would turn a slow job into a silent one on a smaller cluster, which is worse.
+# So: 4g floor, and a warning that names the variable, on the principle that the person
+# running a real job is better placed to size it than a constant in here.
+#
+# Local mode has no executor process (the driver is the executor), so --driver-memory
+# already covers it and the flag is omitted rather than set to something misleading.
+executor_args=()
+if [[ "$SPARK_MASTER_URL" != local* ]]; then
+  executor_args=(--executor-memory "${EXECUTOR_MEMORY:-4g}")
+  if [[ -z "${EXECUTOR_MEMORY:-}" ]]; then
+    echo "WARNING: EXECUTOR_MEMORY is unset; defaulting each executor to 4g." >&2
+    echo "         That is a floor, not a size for real input. Set it to what the" >&2
+    echo "         cluster's workers can actually offer, e.g. EXECUTOR_MEMORY=64g." >&2
+  fi
+  # Left unset by default: standalone mode gives an executor every core on its worker,
+  # which is what this job wants. Named here so choosing otherwise is a decision rather
+  # than an accident, and because it interacts with GPU_PER_TASK -- task slots are
+  # min(cores/task.cpus, gpu/task.gpu), so cores beyond that ratio sit idle.
+  if [[ -n "${EXECUTOR_CORES:-}" ]]; then
+    executor_args+=(--executor-cores "$EXECUTOR_CORES")
+  fi
+fi
+
+# THE GPU POOL FRACTIONS MUST BE ORDERED, and RAPIDS enforces it after the JVM is up:
+# it computes pool = (gpu.free - reserve) * allocFraction, compares against
+# cap = gpu.total * maxAllocFraction, and refuses to start when pool exceeds cap. That
+# rejection arrives as an executor-plugin shutdown inside a py4j stack trace, after the
+# phase banner and before any progress line, so from the job's own log it reads as a
+# startup hang rather than a bad setting. Measured: ~25 minutes lost to allocFraction=0.5
+# against a site maxAllocFraction of 0.4.
+#
+# Checking it here costs nothing and fails in one line before any work is scheduled.
+#
+# The comparison is allocFraction > maxAllocFraction, which is STRICTER than what RAPIDS
+# itself rejects: because allocFraction scales gpu.FREE while the cap is a fraction of
+# gpu.TOTAL, a larger allocFraction is legal whenever enough memory is already in use.
+# That is not a property to depend on -- it means the same config starts on a busy GPU
+# and fails on an idle one. Requiring the ordering makes the setting deterministic; to
+# genuinely want a bigger pool, raise both.
+RAPIDS_GPU_ALLOC_FRACTION="${RAPIDS_GPU_ALLOC_FRACTION:-0.25}"
+RAPIDS_GPU_MAX_ALLOC_FRACTION="${RAPIDS_GPU_MAX_ALLOC_FRACTION:-0.4}"
+if awk "BEGIN{exit !($RAPIDS_GPU_ALLOC_FRACTION > $RAPIDS_GPU_MAX_ALLOC_FRACTION)}"; then
+  echo "ERROR: RAPIDS_GPU_ALLOC_FRACTION=${RAPIDS_GPU_ALLOC_FRACTION} exceeds" >&2
+  echo "       RAPIDS_GPU_MAX_ALLOC_FRACTION=${RAPIDS_GPU_MAX_ALLOC_FRACTION}." >&2
+  echo "       RAPIDS caps the pool at gpu.total * maxAllocFraction, so this either" >&2
+  echo "       fails at startup or succeeds only while the GPU is already partly in" >&2
+  echo "       use. Lower the alloc fraction, or raise both to widen the cap." >&2
+  exit 2
+fi
+
 "$SPARK_SUBMIT" \
+  "${executor_args[@]}" \
   "${venv_args[@]}" \
   "${gpu_args[@]}" \
   --master "$SPARK_MASTER_URL" \
@@ -161,8 +240,9 @@ fi
   --conf spark.rapids.sql.enabled=true \
   --conf spark.rapids.sql.concurrentGpuTasks="${RAPIDS_CONCURRENT_GPU_TASKS:-2}" \
   --conf spark.rapids.memory.pinnedPool.size="${RAPIDS_PINNED_POOL:-2G}" \
-  --conf spark.rapids.memory.gpu.allocFraction="${RAPIDS_GPU_ALLOC_FRACTION:-0.25}" \
+  --conf spark.rapids.memory.gpu.allocFraction="${RAPIDS_GPU_ALLOC_FRACTION}" \
   --conf spark.rapids.memory.gpu.minAllocFraction="${RAPIDS_GPU_MIN_ALLOC_FRACTION:-0}" \
+  --conf spark.rapids.memory.gpu.maxAllocFraction="${RAPIDS_GPU_MAX_ALLOC_FRACTION}" \
   --conf spark.rapids.sql.format.parquet.reader.type=MULTITHREADED \
   --conf spark.rapids.sql.explain="${RAPIDS_EXPLAIN:-NONE}" \
   --conf spark.sql.maxPlanStringLength="${MAX_PLAN_STRING_LENGTH:-16k}" \
