@@ -907,12 +907,148 @@ def load_turtle_parquet_to_dataframe(
 
 
 # ============================================
+# Per-source accounting
+# ============================================
+#
+# The triples frame is (subject, predicate, object) and nothing else, so two
+# identical triples are indistinguishable in every respect -- there is no fourth
+# column in which they COULD differ. That is why the manifest could report how
+# many rows were deduplicated but never which source contributed them, and why
+# the alternative was to guess: attribute a shared fact to whichever source was
+# listed later, or to neither, or to both. Every one of those is a convention
+# rather than an observation, and the first is not even stable, since it changes
+# when the source paths are passed in a different order.
+#
+# Stamping the source at load time removes the question instead of answering it.
+#
+# THE COLUMN DOES NOT SURVIVE THIS FUNCTION. It is attached per path, used to
+# compute the statistics below, and dropped before the frame is returned, so the
+# ~25 modules that construct or read the three-column shape are untouched and the
+# extra width is never carried through an enrichment shuffle.
+#
+# CARRYING IT FURTHER IS A REAL OPTION, DELIBERATELY NOT TAKEN.
+# If the source travelled with each row through enrichment, dropDuplicates would
+# become an aggregation that collects sources rather than discarding rows, and the
+# graph itself would know that N independent sources asserted a given fact --
+# available to a model as a corroboration signal rather than merely as a
+# statistic. The reason it is not done here is empirical, not aesthetic: measured
+# on real data, a three-source run removed 177,828 duplicate rows from 19.6M, and
+# roughly 107,619 of those were one source repeating ITSELF. Cross-source
+# agreement is therefore at most ~0.36% of rows and in reality lower. A feature
+# that reads "1 source" for better than 99.7% of edges has almost no variance for
+# a GNN to learn from, and the `origin` split (raw / enrichment / unification)
+# already separates reported facts from derived ones with far more of it.
+#
+# Revisit if genuinely overlapping sources are added -- a second market vendor, or
+# a provider restating company facts the filings already carry. Then agreement
+# becomes a real signal and the schema change earns its cost.
+
+SOURCE_COLUMN = "_source"
+
+# Path fragment -> short label. Keyed on fragments rather than whole paths so a
+# label survives a bucket or prefix change, which keeps counts comparable across
+# runs that read the same data from different locations.
+_SOURCE_LABEL_PATTERNS = (
+    ("source=sec", "sec"),
+    ("source=bls", "bls"),
+    ("/noaa/", "noaa"),
+    ("quotes", "market"),
+)
+
+# Recognised source names, matched against whole path SEGMENTS. Production paths
+# carry the partition fragments above; the committed fixtures are plain files
+# (ntriples/sec.nt), and without this every e2e run would label its sources
+# positionally -- correct but useless for reading a report.
+_SOURCE_NAMES = frozenset({"sec", "bls", "noaa", "market"})
+
+
+def source_label(source_path: str, index: int) -> str:
+    """A short, stable label for a source path.
+
+    Deliberately NOT the path itself. The manifest is copied to object storage
+    and pasted into issues, and a bucket-qualified URI used as a map key spreads
+    deployment detail through a structure people quote casually --
+    ``config.source_paths`` already records the paths once, in a field a reader
+    knows to treat as sensitive.
+
+    Falls back to a positional label rather than to any part of the path, so an
+    unrecognised source cannot leak one either.
+    """
+    lowered = source_path.lower()
+    for fragment, label in _SOURCE_LABEL_PATTERNS:
+        if fragment in lowered:
+            return label
+
+    # Whole segments only, never substrings: a bucket called "secure-data" or a
+    # directory named "marketing" contains a source name but is not one, and a
+    # mislabelled source is worse than an unlabelled one because it reads as
+    # authoritative.
+    for segment in lowered.replace("\\", "/").split("/"):
+        stem = segment.split(".", 1)[0]
+        if stem in _SOURCE_NAMES:
+            return stem
+
+    return f"source_{index}"
+
+
+def per_source_triple_stats(stamped_df: DataFrame) -> dict:
+    """Rows each source contributed, and how the duplicates among them arose.
+
+    Two kinds of duplicate are reported separately because they mean opposite
+    things. A source repeating ITSELF is a hygiene signal worth raising upstream.
+    Two sources independently stating the same fact is corroboration -- arguably
+    the point of a knowledge graph -- and reporting it against a source would make
+    a good outcome look like a defect.
+
+    Computed AFTER canonicalization, so the counts match what the enrichment
+    pipeline's dropDuplicates will actually collapse rather than what the raw
+    files happened to spell.
+    """
+    triple = ["subject", "predicate", "object"]
+
+    contributed = {
+        row[SOURCE_COLUMN]: row["n"]
+        for row in stamped_df.groupBy(SOURCE_COLUMN).count()
+        .withColumnRenamed("count", "n").collect()
+    }
+
+    # Rows a source would lose to dedup on its own, ignoring every other source.
+    distinct_within = {
+        row[SOURCE_COLUMN]: row["n"]
+        for row in stamped_df.select(*triple, SOURCE_COLUMN).distinct()
+        .groupBy(SOURCE_COLUMN).count()
+        .withColumnRenamed("count", "n").collect()
+    }
+
+    # Facts more than one source states. Counted per (triple, source) pair so a
+    # source repeating itself does not inflate the number of sources agreeing.
+    by_triple = (
+        stamped_df.select(*triple, SOURCE_COLUMN).distinct()
+        .groupBy(*triple).agg(F.countDistinct(SOURCE_COLUMN).alias("sources"))
+    )
+    shared = by_triple.filter(F.col("sources") > 1)
+
+    return {
+        "sources": {
+            label: {
+                "rows_contributed": contributed.get(label, 0),
+                "duplicates_within_source": (
+                    contributed.get(label, 0) - distinct_within.get(label, 0)
+                ),
+            }
+            for label in sorted(contributed)
+        },
+        "facts_stated_by_multiple_sources": shared.count(),
+    }
+
+
+# ============================================
 # Source loader dispatcher
 # ============================================
 def load_source_triples(
     spark: SparkSession,
     config: "JobConfig",
-) -> Tuple[DataFrame, int]:
+) -> Tuple[DataFrame, int, dict]:
     """
     Load raw source data into a triples DataFrame.
 
@@ -962,7 +1098,7 @@ def load_source_triples(
 
     loaded: List[DataFrame] = []
 
-    for source_path in source_paths:
+    for index, source_path in enumerate(source_paths):
         if config.source_format == "ntriples":
             df = load_ntriples_to_dataframe(spark, source_path)
         else:
@@ -971,6 +1107,14 @@ def load_source_triples(
                 source_path,
                 turtle_column=config.turtle_column,
             )
+        # Canonicalize per path rather than once after the union, so the source
+        # stamp survives. canonicalize_sec_identifiers ends in an explicit
+        # three-column select, which would drop any column added before it.
+        # Applying it here is equivalent: every rule inside is a row-wise column
+        # expression, so it does not matter whether rows from different paths are
+        # in the same frame yet.
+        df = canonicalize_source_triples(df)
+        df = df.withColumn(SOURCE_COLUMN, F.lit(source_label(source_path, index)))
         loaded.append(df)
         logger.info(f"  Parsed: {source_path}")
 
@@ -983,21 +1127,27 @@ def load_source_triples(
         for df in loaded[1:]:
             triples_df = triples_df.unionAll(df)
 
-    # Collapse identifiers upstream spells two ways onto one, before anything
-    # reads the frame. See canonicalization.py: this adds no triple and drops
-    # none, it only makes the two spellings of one entity the same URI. Done
-    # here rather than in a pipeline phase because the enriched Parquet is
-    # written from this frame, so a later repair would leave `pyg_only` runs
-    # reading the unrepaired shape.
-    triples_df = canonicalize_source_triples(triples_df)
+    # Identifier canonicalization already ran per path above — collapsing the two
+    # spellings upstream uses for one entity onto a single URI, before anything
+    # reads the frame. See canonicalization.py: it adds no triple and drops none.
+    # It happens inside this function rather than in a pipeline phase because the
+    # enriched Parquet is written from this frame, so a later repair would leave
+    # `pyg_only` runs reading the unrepaired shape.
 
     # Cache and materialize once — all downstream steps read from cache.
     # For turtle_parquet, this also ensures the rdflib UDF runs exactly
     # once across all prefixes rather than being re-triggered by each
     # downstream action.
+    #
+    # The stamped frame is what gets cached, so the per-source statistics below
+    # read from cache rather than re-triggering the parse. That ordering is the
+    # whole reason this costs an aggregation instead of a second parse: on real
+    # input the parse is ~176s and the aggregation is seconds.
     triples_df = triples_df.cache()
     count = triples_df.count()
 
+    # Checked before the statistics below, which would otherwise aggregate an
+    # empty frame on the way to raising anyway.
     if count == 0:
         raise FileNotFoundError(
             f"No triples parsed from {config.source_format} source(s): "
@@ -1010,11 +1160,26 @@ def load_source_triples(
             )
         )
 
+    source_stats = per_source_triple_stats(triples_df)
+    for label, stats in source_stats["sources"].items():
+        logger.info(
+            f"  {label}: {stats['rows_contributed']:,} rows"
+            f" ({stats['duplicates_within_source']:,} repeated within the source)"
+        )
+    logger.info(
+        f"  facts stated by more than one source: "
+        f"{source_stats['facts_stated_by_multiple_sources']:,}"
+    )
+
+    # Drop the stamp: everything downstream expects (subject, predicate, object).
+    # A projection off a cached frame does not re-read the source.
+    triples_df = triples_df.drop(SOURCE_COLUMN)
+
     logger.info(
         f"Loaded {count:,} triples total across "
         f"{len(source_paths)} path(s)"
     )
-    return triples_df, count
+    return triples_df, count, source_stats
 
 
 # ============================================
@@ -1477,7 +1642,7 @@ def execute_full_pipeline(
     logger.info("=" * 80)
     start_time = time.time()
 
-    triples_df, initial_count = load_source_triples(spark, config)
+    triples_df, initial_count, source_stats = load_source_triples(spark, config)
 
     load_elapsed = time.time() - start_time
     logger.info(f"Loaded {initial_count:,} triples in {load_elapsed:.1f}s")
@@ -1520,6 +1685,11 @@ def execute_full_pipeline(
         "mode": "full",
         "source_format": config.source_format,
         "initial_triples": initial_count,
+        # Per-source breakdown of what went IN, alongside the enrichment
+        # block's account of what happened during the run. Kept separate
+        # because they answer different questions: this one is about the
+        # inputs, that one about the pipeline.
+        "sources": source_stats,
         "enrichment": enrichment_stats,
         "enriched_parquet_location": config.enriched_parquet_path,
         **locations,
@@ -1546,7 +1716,7 @@ def execute_enrichment_only(
     logger.info("=" * 80)
     start_time = time.time()
 
-    triples_df, initial_count = load_source_triples(spark, config)
+    triples_df, initial_count, source_stats = load_source_triples(spark, config)
 
     load_elapsed = time.time() - start_time
     logger.info(f"Loaded {initial_count:,} triples in {load_elapsed:.1f}s")
@@ -1578,6 +1748,11 @@ def execute_enrichment_only(
         "mode": "enrichment_only",
         "source_format": config.source_format,
         "initial_triples": initial_count,
+        # Per-source breakdown of what went IN, alongside the enrichment
+        # block's account of what happened during the run. Kept separate
+        # because they answer different questions: this one is about the
+        # inputs, that one about the pipeline.
+        "sources": source_stats,
         "enrichment": enrichment_stats,
         "enriched_parquet_location": config.enriched_parquet_path,
     }
