@@ -1593,19 +1593,23 @@ def _assert_declared_bridges_are_not_degenerate(config):
 
     See BRIDGE_COVERAGE.
 
-    A rule whose candidate population is empty HERE is skipped, because the
-    fixtures deliberately differ: the N-Triples fixture is a loader test
-    carrying a slice of each source, and its SEC half states no ticker at all,
-    so requiring the SEC rule against it would fail for a fixture-coverage
-    reason rather than a pipeline one -- the same trap KNOWN_ABSENT_BRIDGES and
-    the conditional entries in REQUIRED_BRIDGE_RELATIONS exist to avoid.
+    A rule whose candidate population is empty here FAILS. It used to be
+    skipped, on the reasoning that the fixtures deliberately differ and an
+    absent input is a fixture-coverage fact rather than a pipeline defect. That
+    reasoning is what let the market half of the company bridge go dark: the
+    SEC fixture was regenerated, its issuers stopped quoting in the market
+    fixture, the candidate population went to zero, and a rule with a floor of
+    1.0 went quiet in a green suite. A ratio of 0/0 is not coverage.
 
-    Skipping is only safe because a rule that measures nothing EVERYWHERE is
-    caught elsewhere: tests/test_bridge_coverage_guard.py asserts that every
-    rule has a candidate population somewhere in the committed fixtures. That
-    check belongs in the fast suite anyway -- it is a statement about the
-    fixtures, needs no pipeline run, and so runs constantly rather than only
-    when someone runs the heavy suite by hand.
+    A fixture that genuinely should not carry a bridge is declared, not
+    inferred from an empty count -- that is what KNOWN_ABSENT_BRIDGES and the
+    conditional entries in REQUIRED_BRIDGE_RELATIONS are for.
+
+    tests/test_bridge_coverage_guard.py still asserts that every rule has a
+    candidate population somewhere in the committed fixtures. That check
+    belongs in the fast suite anyway -- it is a statement about the fixtures,
+    needs no pipeline run, and so runs constantly rather than only when someone
+    runs the heavy suite by hand.
     """
     import pandas as pd
 
