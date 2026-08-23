@@ -117,8 +117,41 @@ if [[ "$SPARK_MASTER_URL" != local* ]]; then
   fi
 fi
 
+# GPU RESOURCE SCHEDULING IS A CLUSTER CONCERN, and requesting it in local mode hangs
+# the job with no error.
+#
+# These three tell the MASTER which workers own a GPU so it can place executors on
+# them. local[*] has no master and no separate executor: the driver is the executor,
+# and it advertises no custom resources ("No custom resources configured for
+# spark.driver"). spark.task.resource.gpu.amount then makes every task require a GPU
+# that nothing offers, so the task set is submitted and never scheduled -- no error, no
+# timeout, no progress. Measured: a local run sat on task set 0.0 for 10 minutes and
+# would have sat there forever; with these three omitted the same run finished in 59s.
+#
+# Dropping them costs no GPU acceleration. RAPIDS talks to CUDA directly and is
+# unaffected by Spark's resource scheduler -- the same local run still placed 63,002
+# operators on the GPU.
+#
+# Local mode OVERRIDES them to 0 rather than omitting them, and the difference matters:
+# a site spark-defaults.conf commonly sets spark.task.resource.gpu.amount for the
+# cluster's benefit, and spark-submit reads that file whether or not this script names
+# the same key. Omitting the flag therefore leaves the requirement in force and the job
+# still hangs -- measured on a host whose spark-defaults.conf sets it to 1.
+gpu_args=(
+  --conf spark.executor.resource.gpu.amount=0
+  --conf spark.task.resource.gpu.amount=0
+)
+if [[ "$SPARK_MASTER_URL" != local* ]]; then
+  gpu_args=(
+    --conf spark.executor.resource.gpu.amount="${GPU_PER_EXECUTOR:-1}"
+    --conf spark.task.resource.gpu.amount="${GPU_PER_TASK:-0.125}"
+    --conf spark.executor.resource.gpu.discoveryScript="$GPU_DISCOVERY_SCRIPT"
+  )
+fi
+
 "$SPARK_SUBMIT" \
   "${venv_args[@]}" \
+  "${gpu_args[@]}" \
   --master "$SPARK_MASTER_URL" \
   --driver-memory "${DRIVER_MEMORY:-4g}" \
   ${SPARK_DRIVER_HOST:+--conf spark.driver.host="$SPARK_DRIVER_HOST"} \
@@ -127,9 +160,6 @@ fi
   --conf spark.plugins=com.nvidia.spark.SQLPlugin \
   --conf spark.rapids.sql.enabled=true \
   --conf spark.rapids.sql.concurrentGpuTasks="${RAPIDS_CONCURRENT_GPU_TASKS:-2}" \
-  --conf spark.executor.resource.gpu.amount="${GPU_PER_EXECUTOR:-1}" \
-  --conf spark.task.resource.gpu.amount="${GPU_PER_TASK:-0.125}" \
-  --conf spark.executor.resource.gpu.discoveryScript="$GPU_DISCOVERY_SCRIPT" \
   --conf spark.rapids.memory.pinnedPool.size="${RAPIDS_PINNED_POOL:-2G}" \
   --conf spark.rapids.memory.gpu.allocFraction="${RAPIDS_GPU_ALLOC_FRACTION:-0.25}" \
   --conf spark.rapids.memory.gpu.minAllocFraction="${RAPIDS_GPU_MIN_ALLOC_FRACTION:-0}" \
