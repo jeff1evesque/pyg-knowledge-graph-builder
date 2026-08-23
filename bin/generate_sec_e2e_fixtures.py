@@ -50,7 +50,7 @@ filing whose document WAS fetched has its full contents, on every day sampled
 
 SAMPLING
 --------
-Three passes over one day's filings, all deterministic:
+Four passes over one day's filings, all deterministic:
 
   1. **Type coverage.** The rare classes are genuinely rare — on a typical day
      ``XbrlFact`` and ``XbrlDimension`` appear in 2 documents of ~11,000,
@@ -65,7 +65,17 @@ Three passes over one day's filings, all deterministic:
      guard measured nothing. This pass adds the cheapest ownership filing that
      reports two or more transactions of one class.
 
-  3. **Period anchoring.** The remainder goes to filings whose reporting period
+  3. **A tradeable issuer.** One filing whose issuer is an index
+     constituent, if the passes above did not already pick one. The market
+     fixture anchors its equities on the trading symbols THIS fixture states,
+     so the SEC-to-market company bridge is only covered when the two overlap —
+     and they had drifted apart, leaving five micro-cap issuers that quote in
+     no snapshot. Constituents are also the only issuers the constituents CSV
+     can classify, so this is what makes a sub-industry peer pair possible on
+     the market side. Scarce enough to need its own pass: one sampled day
+     carried 21 trading symbols across 4,789 filings, 3 of them constituents.
+
+  4. **Period anchoring.** The remainder goes to filings whose reporting period
      falls in a month the *committed BLS fixtures* also carry, so the
      cross-source temporal bridge has something to join on. This is read out of
      the BLS fixtures on disk, not assumed — regenerate BLS first if both are
@@ -319,6 +329,51 @@ def sequenceable_transactions(doc: str) -> int:
     return max((len(v) for v in per_class.values()), default=0)
 
 
+_TRADING_SYMBOL_RE = re.compile(r'hasIssuerTradingSymbol\s+"([A-Za-z.\-]{1,6})"')
+
+# Where the index constituents are listed. Same table the pipeline reads for
+# sector and company resolution, and the same one the market fixture generator
+# anchors its peer selection on.
+SECTOR_DEFINITIONS_BUCKET_ENV = "MARKET_SECTOR_DEFINITIONS_BUCKET"
+SECTOR_DEFINITIONS_KEY_ENV = "MARKET_SECTOR_DEFINITIONS_KEY"
+SYMBOL_COLUMN = "Symbol"
+
+
+def document_trading_symbols(doc: str) -> set[str]:
+    """Trading symbols the document's issuer states, upper-cased."""
+    return {s.strip().upper() for s in _TRADING_SYMBOL_RE.findall(doc)}
+
+
+def index_constituents(s3) -> set[str]:
+    """Tickers in the constituents CSV, or an empty set when unconfigured.
+
+    Empty is a soft outcome for the same reason pass 2's is: this anchors a
+    preference, and a generator that refused to sample without the table would
+    make every SEC fixture depend on a market-side file.
+    """
+    import csv
+    import os
+
+    bucket = os.environ.get(SECTOR_DEFINITIONS_BUCKET_ENV, "").strip()
+    key = os.environ.get(SECTOR_DEFINITIONS_KEY_ENV, "").strip()
+    if not (bucket and key):
+        _log(
+            f"  no {SECTOR_DEFINITIONS_BUCKET_ENV}/{SECTOR_DEFINITIONS_KEY_ENV} "
+            f"— cannot anchor on a tradeable issuer, so the market fixture will "
+            f"have nothing to anchor against"
+        )
+        return set()
+
+    body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+    rows = csv.DictReader(io.StringIO(body.decode("utf-8")))
+    tickers = {
+        (row.get(SYMBOL_COLUMN) or "").strip().upper() for row in rows
+    }
+    tickers.discard("")
+    _log(f"  {len(tickers)} index constituents")
+    return tickers
+
+
 def bls_fixture_periods() -> set[tuple[str, str]]:
     """(month, year) pairs the committed BLS fixtures carry.
 
@@ -348,7 +403,8 @@ def bls_fixture_periods() -> set[tuple[str, str]]:
 
 
 def select_documents(
-    docs: list[str], anchors: set[tuple[str, str]], limit: int
+    docs: list[str], anchors: set[tuple[str, str]], limit: int,
+    constituents: set[str] | None = None,
 ) -> list[int]:
     """Pick document indices: type coverage, then sequence coverage, then
     period anchoring.
@@ -360,6 +416,7 @@ def select_documents(
 
     Sorted by document index throughout, so the selection is deterministic.
     """
+    constituents = constituents or set()
     profiles = [document_profile(doc) for doc in docs]
 
     chosen: list[int] = []
@@ -390,6 +447,39 @@ def select_documents(
             if len(chosen) >= limit:
                 break
             if index not in picked and sequenceable_transactions(docs[index]) > 1:
+                chosen.append(index)
+                picked.add(index)
+                covered |= profiles[index][0]
+                break
+
+    # Pass 2b — one filing whose issuer is an index constituent, if none of the
+    # above happened to pick one.
+    #
+    # WHY: the market fixture anchors its equities on the trading symbols THIS
+    # fixture states, so the SEC-to-market company bridge only has something to
+    # join when the two overlap. They had drifted apart -- this fixture's five
+    # issuers were micro-caps that quote in no snapshot, so the market generator
+    # found no anchor and the bridge went uncovered on both sides. Constituents
+    # are also the only issuers the constituents CSV can classify, so this is
+    # what makes a sub-industry peer pair possible over there as well.
+    #
+    # Scarce: on a sampled day, 4,789 filings carried 21 distinct trading
+    # symbols and 3 of those were constituents. Head-of-file sampling reaches
+    # one about as often as it reaches an XbrlFact, which is why this is a pass
+    # rather than a hope.
+    #
+    # A preference, not a requirement, exactly like pass 2: a day on which no
+    # constituent filed still yields a sample, and validate() is where the
+    # outcome is asserted.
+    if constituents and not any(
+        document_trading_symbols(docs[i]) & constituents for i in chosen
+    ):
+        for index in by_cost:
+            if len(chosen) >= limit:
+                break
+            if index in picked:
+                continue
+            if document_trading_symbols(docs[index]) & constituents:
                 chosen.append(index)
                 picked.add(index)
                 covered |= profiles[index][0]
@@ -765,7 +855,9 @@ def main() -> int:
     anchors = bls_fixture_periods()
     _log(f"  BLS fixture periods: {sorted(anchors)}")
 
-    selected = select_documents(docs, anchors, args.filings)
+    constituents = index_constituents(s3)
+
+    selected = select_documents(docs, anchors, args.filings, constituents)
     graph = load_graph([docs[i] for i in selected])
     selected_types = {
         cls for i in selected for cls in document_profile(docs[i])[0]
