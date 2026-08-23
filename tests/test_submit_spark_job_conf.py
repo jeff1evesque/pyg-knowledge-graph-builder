@@ -59,13 +59,43 @@ def test_rapids_gpu_pool_is_capped(conf):
 
     On a unified-memory / integrated GPU that memory is the host's RAM, so the
     default starves the OS and the JVM and the node thrashes to a standstill.
+
+    The default is asserted from the launcher's text rather than from the --conf
+    line, because it is no longer expanded inline there: allocFraction is now
+    resolved into a variable first so it can be compared against
+    maxAllocFraction before submitting. What matters is that a safe default
+    exists, not where it is written. The emitted VALUE is asserted separately in
+    test_submit_spark_job_resources.py, which runs the launcher rather than
+    reading it.
     """
     raw = conf.get("spark.rapids.memory.gpu.allocFraction")
     assert raw is not None, "launcher must cap spark.rapids.memory.gpu.allocFraction"
 
-    default = re.search(r":-([0-9.]+)\}", raw)
-    assert default, f"allocFraction must carry a safe default, got {raw!r}"
+    text = LAUNCHER.read_text()
+    default = re.search(r"RAPIDS_GPU_ALLOC_FRACTION:-([0-9.]+)\}", text)
+    assert default, "allocFraction must carry a safe default somewhere in the launcher"
     assert 0 < float(default.group(1)) < 1.0, "allocFraction must be capped below 1.0"
+
+
+def test_rapids_gpu_pool_has_a_hard_cap(conf):
+    """maxAllocFraction must be emitted, not left to the site defaults.
+
+    The launcher refuses to submit when allocFraction exceeds it, and that check
+    is only meaningful if the cap it compares against is the one the job will
+    actually run under. Inheriting the cap from spark-defaults.conf would let the
+    two disagree silently.
+    """
+    raw = conf.get("spark.rapids.memory.gpu.maxAllocFraction")
+    assert raw is not None, (
+        "launcher must set spark.rapids.memory.gpu.maxAllocFraction; without it "
+        "the pool ceiling comes from the site config and the pre-submit check "
+        "validates a number the job never used"
+    )
+
+    text = LAUNCHER.read_text()
+    default = re.search(r"RAPIDS_GPU_MAX_ALLOC_FRACTION:-([0-9.]+)\}", text)
+    assert default, "maxAllocFraction must carry a default"
+    assert 0 < float(default.group(1)) <= 1.0
 
 
 def test_executor_requests_a_gpu(conf):

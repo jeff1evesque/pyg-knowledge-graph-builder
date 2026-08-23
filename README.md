@@ -1478,11 +1478,11 @@ SPARK_MASTER_URL=spark://<host>:7077 \
 
 ### Cluster prerequisites for GPU runs
 
-Four cluster-side settings decide whether this job runs at all — or whether it
+Five cluster-side settings decide whether this job runs at all — or whether it
 merely *appears* to. They share an unpleasant property: when any of them is wrong,
 the job **hangs indefinitely with no error message** (or, for the fourth, silently
-runs on one node) rather than failing, so they are worth checking before you
-conclude the job itself is slow.
+runs on one node; for the fifth, silently runs many times slower) rather than
+failing, so they are worth checking before you conclude the job itself is slow.
 
 **1. Workers must advertise their GPUs.** The RAPIDS configuration makes every
 executor request a GPU (`spark.executor.resource.gpu.amount`). On a standalone
@@ -1520,6 +1520,22 @@ OS and the JVM, and drive the machine into swap:
 spark.rapids.memory.gpu.allocFraction    0.25
 ```
 
+The pool has a second, harder bound. RAPIDS sizes it as
+`(gpu.free - reserve) * allocFraction` but caps it at `gpu.total * maxAllocFraction`,
+and refuses to start when the first exceeds the second — so **raising
+`allocFraction` alone cannot grow the pool past the cap**. To genuinely want a
+bigger pool, raise both.
+
+Note the two fractions are taken against *different* quantities: `allocFraction`
+scales free memory, the cap scales total. An `allocFraction` above
+`maxAllocFraction` is therefore legal whenever enough memory is already in use —
+which means the same configuration **starts on a busy GPU and fails on an idle
+one**. `bin/submit_spark_job.sh` refuses to submit when
+`RAPIDS_GPU_ALLOC_FRACTION` exceeds `RAPIDS_GPU_MAX_ALLOC_FRACTION`, because
+RAPIDS' own rejection surfaces as an executor-plugin shutdown inside a py4j stack
+trace — after the phase banner, before any progress line — which reads as a
+startup hang rather than a bad setting.
+
 **4. On a multi-homed node, bind Spark to the interface the cluster actually uses.**
 If the nodes have more than one network — say a management LAN plus a dedicated
 fabric — every Spark process advertises whichever non-loopback interface it finds
@@ -1542,6 +1558,33 @@ at the capacity of a single node. If those executors do survive long enough to
 shuffle, peer block fetches hang instead, and the job stops making progress with no
 error at all. Confirm the fix by checking that the master's worker list shows fabric
 addresses, not LAN ones.
+
+**5. Size the executors — Spark's default is 1 GB.** Nothing in this repository
+or in a stock `spark-defaults.conf` sets `spark.executor.memory`, so without
+`EXECUTOR_MEMORY` every executor takes Spark's 1 GB default no matter what the
+workers advertise. This is the quietest failure of the five: the job does not
+crash, it spills, and it succeeds while running many times slower than it should.
+It stayed hidden because the cluster smoke test runs on committed fixtures
+measured in kilobytes, where 1 GB is ample — real input is not, at roughly 20
+million triples for a single day across four sources.
+
+```bash
+EXECUTOR_MEMORY=64g bin/submit_spark_job.sh --mode full ...
+```
+
+The launcher's default is deliberately a low floor rather than a value sized to
+any particular cluster, because Spark treats an executor-memory request larger
+than a worker can offer as *unsatisfiable* and waits on it rather than failing —
+the same hang class as prerequisite 1. Erring small costs speed; erring large
+costs the whole run.
+
+| Variable | Default | Applies to |
+|---|---|---|
+| `EXECUTOR_MEMORY` | `4g` | cluster masters only; local mode uses `DRIVER_MEMORY` |
+| `EXECUTOR_CORES` | unset — each executor takes every core on its worker | cluster masters only |
+| `DRIVER_MEMORY` | `4g` | all masters |
+| `RAPIDS_GPU_ALLOC_FRACTION` | `0.25` | pool as a fraction of **free** GPU memory |
+| `RAPIDS_GPU_MAX_ALLOC_FRACTION` | `0.4` | hard cap as a fraction of **total** GPU memory |
 
 **Verify GPU execution; don't assume it.** A `count()` on Parquet can be answered
 from file metadata without touching the GPU. Set `spark.rapids.sql.explain=ALL`,
