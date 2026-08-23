@@ -276,6 +276,9 @@ def _assert_valid_graph_and_metadata(config, work_dir):
     # --- and exists at full strength, rather than resolving into one edge ---
     _assert_declared_bridges_are_not_degenerate(config)
 
+    # --- and points at the right company, not merely at some company ---
+    _assert_bridged_companies_agree(config)
+
     # --- a chain of N transactions is N-1 edges, not "some precedes present" ---
     _assert_transaction_chains_are_complete(config)
 
@@ -1692,6 +1695,84 @@ def _assert_declared_bridges_are_not_degenerate(config):
         "datatype, which subject states the term) rather than whether the term "
         "is still emitted."
     )
+
+
+# Coverage asks whether a link FORMED. It cannot ask whether the link points
+# where it should: a market snapshot that reaches some company node satisfies a
+# floor of 1.0 whether or not that node is the company whose filing states the
+# same ticker. Both defects that would produce a wrong node are live risks --
+# the symbol-keyed fallback company this work replaced, and a ticker resolving
+# to a CIK other than the filing's.
+#
+# The two sides are checked against EACH OTHER rather than against a name,
+# because agreement is the strongest claim fixture data supports: nothing here
+# can confirm that a ticker is the company the outside world says it is. A
+# disagreement, though, is always a defect -- one ticker cannot be two companies
+# in one graph.
+#
+# Deliberately silent about absence. A ticker that reaches a company from only
+# one side is left to _assert_declared_bridges_are_not_degenerate's floor, so a
+# failure here always means "wrong", never "missing", and the two cannot be
+# confused when one fires.
+
+def _assert_bridged_companies_agree(config):
+    """A ticker must reach the SAME company from the market and SEC sides."""
+    import collections
+
+    import pandas as pd
+
+    files = sorted(Path(config.enriched_parquet_path).rglob("*.parquet"))
+    if not files:
+        return  # split-mode runs may not re-emit the enriched frame
+    df = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
+
+    def rows_of(local_name):
+        return df[df["predicate"].str.endswith(f"/{local_name}")]
+
+    refers = rows_of("refersToCompany")
+    company = collections.defaultdict(set)
+    for subject, obj in zip(refers["subject"], refers["object"]):
+        company[subject].add(obj)
+
+    def reached(local_name, fold_options):
+        """Companies each ticker reaches, keyed by ticker."""
+        out = collections.defaultdict(set)
+        rows = rows_of(local_name)
+        for subject, obj in zip(rows["subject"], rows["object"]):
+            ticker = str(obj).strip().upper()
+            if fold_options:
+                # An OCC option symbol carries its underlying in the first six
+                # characters, so a chain is checked against its own equity's
+                # company rather than being skipped for not looking like a
+                # ticker.
+                ticker = ticker[:6].strip()
+            if subject in company:
+                out[ticker] |= company[subject]
+        return out
+
+    market = reached("symbol", fold_options=True)
+    sec = reached("hasIssuerTradingSymbol", fold_options=False)
+
+    mismatched = [
+        f"{ticker}: market reaches "
+        f"{sorted(_local_name(c) for c in market[ticker])}, "
+        f"SEC reaches {sorted(_local_name(c) for c in sec[ticker])}"
+        for ticker in sorted(set(market) & set(sec))
+        if market[ticker] != sec[ticker]
+    ]
+
+    assert not mismatched, (
+        "the same ticker reaches DIFFERENT companies from each side:\n  "
+        + "\n  ".join(mismatched)
+        + "\n\nThe bridge formed, so coverage passes -- it points at the wrong "
+        "company. Check whether the market side fell back to a symbol-keyed "
+        "company node instead of the CIK-keyed one, or whether the ticker "
+        "resolved to a CIK other than the filing's."
+    )
+
+
+def _local_name(term) -> str:
+    return str(term).rsplit("/", 1)[-1].rsplit("#", 1)[-1]
 
 
 # The transaction chain, which the ratio rules above cannot express.
