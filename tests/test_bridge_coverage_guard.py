@@ -392,3 +392,72 @@ def test_positional_issuer_nodes_do_not_collide():
         f"{_ID}sec-filings/0001-26-1_Issuer_0",
         f"{_ID}sec-filings/0002-26-1_Issuer_0",
     ]))
+
+
+# --------------------------------------------------------------------------- #
+# The precondition the guard cannot check for itself
+# --------------------------------------------------------------------------- #
+#
+# BRIDGE_COVERAGE skips a rule whose candidate population is empty:
+#
+#     if not candidates:
+#         continue  # not verifiable on this fixture
+#
+# That is right in principle -- a fixture with nothing to join cannot be asked
+# to prove a join -- but it degrades to "passes, measures nothing", and nothing
+# says which of the two happened. The market half of the company bridge sat in
+# that state: the SEC fixture was regenerated, its issuers became micro-caps
+# that quote in no snapshot, and the overlap with the market fixture went to
+# zero. The rule kept passing and had stopped measuring, on a bridge whose
+# floor is 1.0.
+#
+# So the overlap itself is the thing to assert. It is a property of the two
+# committed files, needs no pipeline run, and fails the moment one is
+# regenerated without the other.
+
+def _fixture_graph(relative: str):
+    import pandas as pd
+    import rdflib
+
+    path = Path(__file__).resolve().parent / "fixtures" / "e2e" / relative
+    graph = rdflib.Graph()
+    for document in pd.read_parquet(path)["triples"]:
+        graph.parse(data=document, format="turtle")
+    return graph
+
+
+def _objects_of(graph, local_name: str) -> set[str]:
+    return {
+        str(o).strip().upper()
+        for _s, p, o in graph
+        if str(p).endswith(local_name)
+    }
+
+
+def test_the_two_fixtures_share_at_least_one_ticker():
+    """A SEC issuer's ticker must also quote in the market fixture.
+
+    Without an overlap the market half of the company bridge has an empty
+    candidate population, so BRIDGE_COVERAGE skips it and the e2e suite reports
+    success for a join it never exercised. Regenerate BOTH fixtures together --
+    generate_sec_e2e_fixtures.py keeps one index constituent for exactly this
+    reason, and generate_market_e2e_fixtures.py anchors on the symbols this
+    fixture states.
+    """
+    sec_tickers = _objects_of(
+        _fixture_graph("turtle_parquet/sec/sec_sample.parquet"),
+        "hasIssuerTradingSymbol",
+    )
+    market_symbols = _objects_of(
+        _fixture_graph("turtle_parquet/market/market_sample.parquet"),
+        "symbol",
+    )
+    # An option symbol carries its underlying in the first six characters.
+    market_roots = {s[:6].strip() for s in market_symbols} | market_symbols
+
+    assert sec_tickers & market_roots, (
+        f"no SEC fixture issuer quotes in the market fixture. SEC states "
+        f"{sorted(sec_tickers)}; the market fixture carries "
+        f"{sorted(market_symbols)}. The company bridge has nothing to join, "
+        f"and BRIDGE_COVERAGE will skip its market half rather than fail."
+    )
