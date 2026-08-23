@@ -633,8 +633,36 @@ def split_rows(graph, rows: int) -> list[str]:
     return [emit(bucket) for bucket in buckets if bucket]
 
 
+def filing_states_trading_symbol(graph, subj) -> bool:
+    """Whether ``subj``'s issuer states a trading symbol.
+
+    Two hops, matching where the ticker actually sits: a filing points at an
+    Issuer through hasIssuer, and the Issuer -- not the filing -- carries
+    hasIssuerTradingSymbol.
+    """
+    for pred, issuer in graph.predicate_objects(subj):
+        if _local(pred) != "hasIssuer":
+            continue
+        if any(
+            _local(p) == "hasIssuerTradingSymbol"
+            for p, _o in graph.predicate_objects(issuer)
+        ):
+            return True
+    return False
+
+
 def ntriples_slice(graph, filings: list, count: int) -> str:
-    """N-Triples serialization of the first ``count`` filings' closures.
+    """N-Triples serialization of ``count`` filings' closures.
+
+    Filings whose issuer states a trading symbol come FIRST, the rest follow by
+    URI. Pass 3 spends a whole sampling pass finding one filing whose issuer is
+    an index constituent, because the market fixture anchors its equities on the
+    trading symbols THIS fixture states. Slicing by ``sorted(filings, key=str)``
+    threw that filing away whenever its URI happened to sort late: the Parquet
+    sample kept the anchor, sec.nt lost it, and the two committed fixtures
+    stopped sharing a ticker -- so the market-to-company bridge had nothing to
+    join. Neither file looks wrong on its own, which is why this survived until
+    a coverage rule was taught to fail on measuring nothing.
 
     Lines are sorted before joining. rdflib's N-Triples serializer emits in set
     order, so the same sample otherwise produces a different file on every run
@@ -644,8 +672,16 @@ def ntriples_slice(graph, filings: list, count: int) -> str:
     """
     import rdflib
 
+    # str() as the secondary key keeps the order total, so the same sample still
+    # serializes to the same bytes -- the anchor moves to the front, it does not
+    # make the slice arbitrary.
+    ordered = sorted(
+        filings,
+        key=lambda s: (not filing_states_trading_symbol(graph, s), str(s)),
+    )
+
     part = rdflib.Graph()
-    for subj in sorted(filings, key=str)[:count]:
+    for subj in ordered[:count]:
         pending = [subj]
         seen = set()
         while pending:
@@ -894,9 +930,17 @@ def main() -> int:
     nt = ntriples_slice(sample, filings, args.ntriples_filings)
     NTRIPLES_TARGET.parent.mkdir(parents=True, exist_ok=True)
     NTRIPLES_TARGET.write_text(nt)
+    # The tickers are reported because they are the half of the fixture pair that
+    # drifted silently: the market generator anchors on them, and a slice that
+    # carries none leaves the company bridge with nothing to join.
+    nt_symbols = sorted(set(re.findall(r'hasIssuerTradingSymbol>\s+"([^"]+)"', nt)))
     _log(f"  wrote {NTRIPLES_TARGET.relative_to(REPO_ROOT)} "
          f"({nt.count(chr(10))} triples, "
-         f"{NTRIPLES_TARGET.stat().st_size / 1024:.0f} KiB)")
+         f"{NTRIPLES_TARGET.stat().st_size / 1024:.0f} KiB, "
+         f"tickers: {', '.join(nt_symbols) or 'NONE'})")
+    if not nt_symbols:
+        _log("  WARNING: no issuer in the N-Triples slice states a trading "
+             "symbol — the market fixture has nothing to anchor against")
 
     return 0
 
