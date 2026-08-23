@@ -1875,6 +1875,16 @@ jolts:Industry_LeisureAndHospitality_FoodServices_Industry
 | Hierarchical Enrichment | ~15,000 | Parent-child relationships across sources |
 | **Total Enrichment** | **~91,000** | Added to ~500,000 raw triples |
 
+These are triples **added**, which is the `enrichment_added` figure in the job
+manifest and the enrichment summary. The final triple count is not raw + added:
+each enrichment phase runs `dropDuplicates` over the whole frame, so duplicates
+the source already contained are collapsed at the same time. Real sources carry
+them — one day of SEC filings measured ~8.7% duplicate triples — so a run can
+legitimately finish with *fewer* triples than it started with while enrichment
+added tens of thousands. The manifest reports `enrichment_added` and
+`duplicates_removed` separately for that reason; `total_enrichment` is their sum
+(the net change), not a measure of enrichment on its own.
+
 ### Benefits for GNN Training
 
 This enriched structure combined with ontology-aware node feature vectors, derived edge feature vectors, and the six metadata files enables GNNs to learn:

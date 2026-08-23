@@ -923,9 +923,19 @@ def load_source_triples(
     Supports multiple source paths (local directories or s3a:// URIs).
     When more than one path is provided, each is loaded independently
     and the results are unioned into a single triples DataFrame before
-    caching. Duplicates across paths are not deduplicated here —
-    the enrichment pipeline's left_anti join pattern handles any
-    duplicate triples naturally.
+    caching. Duplicates are not deduplicated here — neither those across
+    paths nor those a single source already contains.
+
+    What removes them is EnrichmentPipeline's per-phase
+    ``dropDuplicates(["subject", "predicate", "object"])`` over the whole
+    frame, NOT the left_anti pattern this docstring used to name.
+    ``deduplicate_against_existing()`` is a real helper and the linkers do use
+    it, but it only drops NEW triples that already exist — the source is its
+    "existing" side, so it can never remove a duplicate the source arrived
+    with. The distinction matters to anyone reading the triple counts: a real
+    source carries duplicates (one SEC day: ~8.7%), and they are collapsed
+    during enrichment rather than at load, which is why ``initial_triples`` is
+    a pre-dedup count while ``final_triples`` is post-dedup.
 
     Caches the resulting DataFrame and forces materialization so that
     downstream steps do not re-trigger the parse UDF.
@@ -1767,13 +1777,26 @@ def print_final_banner(config: JobConfig, result: Dict, elapsed: float):
             f"  Initial triples:  "
             f"{stats.get('initial_triples', 'N/A'):>12,}"
         )
+        # Added and removed are reported separately for the reason given on
+        # EnrichmentPipeline.stats: their sum is dominated by source duplicate
+        # removal, so the net alone says nothing about what enrichment did.
+        # .get() with a default keeps a manifest written before these existed
+        # readable rather than raising here.
+        logger.info(
+            f"  Enrichment added: "
+            f"{stats.get('enrichment_added', 'N/A'):>+12,}"
+        )
+        logger.info(
+            f"  Duplicates gone:  "
+            f"{-stats.get('duplicates_removed', 0):>+12,}"
+        )
         logger.info(
             f"  Final triples:    "
             f"{stats.get('final_triples', 'N/A'):>12,}"
         )
         logger.info(
-            f"  Total enrichment: "
-            f"{stats.get('total_enrichment', 'N/A'):>12,}"
+            f"  Net change:       "
+            f"{stats.get('total_enrichment', 'N/A'):>+12,}"
         )
 
     logger.info("")

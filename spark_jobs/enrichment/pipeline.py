@@ -47,6 +47,19 @@ class EnrichmentPipeline:
             'cross_source_triples': 0,
             'ontology_mapping_triples': 0,
             'final_triples': 0,
+            # Two independent movements, kept apart because their sum is not
+            # interpretable. Every phase unions its output and dropDuplicates
+            # over the WHOLE frame, so duplicates already present in the source
+            # are collapsed alongside any the phases produced. On the committed
+            # fixtures that is zero -- the samples are small and clean -- but a
+            # real source carries them (one SEC day: ~8.7%), and folding the two
+            # into one net made a healthy run report NEGATIVE enrichment, which
+            # reads as data loss and is not.
+            'enrichment_added': 0,
+            'duplicates_removed': 0,
+            # Retained: the true net change, and the key the job manifest has
+            # always carried. It is the sum of the two above, not a measure of
+            # enrichment on its own.
             'total_enrichment': 0
         }
 
@@ -219,6 +232,28 @@ class EnrichmentPipeline:
             self.stats['final_triples'] - self.stats['initial_triples']
         )
 
+        # What the phases actually produced, summed from what each reported
+        # rather than derived from the total -- the whole point is that the
+        # total cannot tell these apart.
+        self.stats['enrichment_added'] = (
+            sum(
+                source.get('total_triples_added', 0)
+                for source in self.stats['intra_source'].values()
+            )
+            + self.stats['temporal_triples']
+            + self.stats['cross_source_triples']
+            + self.stats['ontology_mapping_triples']
+        )
+
+        # The remainder is what dropDuplicates collapsed. Reported as a positive
+        # count of rows removed, so the arithmetic reads
+        # initial + added - removed = final.
+        self.stats['duplicates_removed'] = (
+            self.stats['initial_triples']
+            + self.stats['enrichment_added']
+            - self.stats['final_triples']
+        )
+
         self._print_summary()
         return self.stats
 
@@ -227,15 +262,35 @@ class EnrichmentPipeline:
         return self.triples_df
 
     def _print_summary(self):
+        """The triple accounting, with the two movements kept apart.
+
+        Reads as arithmetic that closes: initial + added - removed = final.
+        The previous form printed only the net, which on any real source is
+        dominated by duplicate removal and therefore goes negative -- a healthy
+        run reporting what looks like a six-figure loss. It also omitted the
+        intra-source phase entirely, so the lines did not sum to the total they
+        sat above.
+        """
+        intra = sum(
+            source.get('total_triples_added', 0)
+            for source in self.stats['intra_source'].values()
+        )
         logger.info("\n" + "=" * 80)
         logger.info("ENRICHMENT PIPELINE COMPLETE")
         logger.info("=" * 80)
         logger.info(f"  Initial triples:         {self.stats['initial_triples']:>10,}")
-        logger.info(f"  Temporal triples:        {self.stats['temporal_triples']:>10,}")
-        logger.info(f"  Cross-source triples:    {self.stats['cross_source_triples']:>10,}")
-        logger.info(f"  Ontology mapping triples:{self.stats['ontology_mapping_triples']:>10,}")
+        logger.info("")
+        logger.info(f"    Intra-source triples:  {intra:>10,}")
+        logger.info(f"    Temporal triples:      {self.stats['temporal_triples']:>10,}")
+        logger.info(f"    Cross-source triples:  {self.stats['cross_source_triples']:>10,}")
+        logger.info(f"    Ontology mapping:      {self.stats['ontology_mapping_triples']:>10,}")
+        logger.info(f"  Enrichment added:        {self.stats['enrichment_added']:>+10,}")
+        logger.info("")
+        # Source duplicates, not anything enrichment did -- see the stats dict.
+        logger.info(f"  Duplicates removed:      {-self.stats['duplicates_removed']:>+10,}")
+        logger.info("")
         logger.info(f"  Final triples:           {self.stats['final_triples']:>10,}")
-        logger.info(f"  Total enrichment:        {self.stats['total_enrichment']:>10,}")
+        logger.info(f"  Net change:              {self.stats['total_enrichment']:>+10,}")
         logger.info("=" * 80)
 
 
