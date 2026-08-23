@@ -19,6 +19,14 @@ sampling artifacts — a BLS class that no sampled row happens to use is absent
 without being dead. Pinning them is still worth it: the guard is not "the
 baseline is all defects", it is "the set does not GROW without someone looking".
 
+DO NOT ADD AN ENTRY FOR A TERM NOBODY EMITS YET. One was added here for
+`JOLTS hasCensusRegionCode`, to let a reader be written ahead of a term an
+issue said was coming. The term did not exist, was not planned, and the reader
+matched nothing — so the baseline entry was silencing this guard on behalf of
+dead code, which is the opposite of its job. Both were removed. If a reader
+needs a term the data does not emit, that is the guard working; check the
+claim against the mapper before quieting it.
+
 An entry leaving the baseline is also a failure. A term that starts being
 emitted means either a fixture regeneration covered it or a defect was fixed,
 and both should update the file rather than leave it overstating the damage.

@@ -106,6 +106,120 @@ def test_market_default_sector_keys_follow_convention():
         assert key.endswith("_sector"), f"sector key {key!r} missing _sector suffix"
 
 
+@pytest.mark.parametrize("raw,expected", [
+    ("320193", "0000320193"),      # the CSV's form
+    ("0000320193", "0000320193"),  # the filings' form, unchanged
+    (" 320193 ", "0000320193"),    # a stray cell space
+])
+def test_constituent_cik_is_padded_to_the_filed_width(raw, expected):
+    """The join key the whole company bridge rests on.
+
+    The CSV states the CIK unpadded and the filings state it padded to ten;
+    compared as strings those are different keys, so the unpadded form joins
+    against nothing and reports no error.
+    """
+    assert market.padded_cik(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "abc", "12a45", "00003201930"])
+def test_a_value_that_is_not_a_cik_is_dropped_not_guessed(raw):
+    """One malformed row drops that constituent; it does not fail the build.
+
+    The over-long case is the one that matters: Spark's lpad would TRUNCATE it
+    from the right into a shorter, entirely plausible, WRONG filer. zfill plus
+    this guard rejects it instead.
+    """
+    assert market.padded_cik(raw) is None
+
+
+def test_an_unpadded_cik_map_is_rejected_loudly():
+    """An empty bridge is indistinguishable from a fixture with no overlap.
+
+    That is why this raises rather than logging: the silent version of this
+    bug survives review, because a join matching zero rows looks exactly like
+    data that genuinely does not intersect.
+    """
+    with pytest.raises(ValueError, match="zero-padded"):
+        market.assert_ciks_are_padded({"AAPL": "320193"})
+
+    with pytest.raises(ValueError, match="zero-padded"):
+        market.assert_ciks_are_padded({"AAPL": 320193})
+
+    market.assert_ciks_are_padded({"AAPL": "0000320193"})
+    market.assert_ciks_are_padded({})
+
+
+def _constituents_csv(rows, header=None):
+    """A stub S3 client serving one constituents CSV."""
+    header = header or "Symbol,Security,GICS Sector,GICS Sub-Industry,CIK"
+    body = "\n".join([header, *rows]).encode("utf-8")
+
+    class _Body:
+        @staticmethod
+        def read():
+            return body
+
+    class _Client:
+        @staticmethod
+        def get_object(Bucket, Key):
+            return {"Body": _Body}
+
+    return _Client
+
+
+def test_the_constituents_csv_yields_a_padded_ticker_cik_map():
+    client = _constituents_csv([
+        "AAPL,Apple Inc.,Information Technology,Technology Hardware,320193",
+        "MSFT,Microsoft,Information Technology,Application Software,0000789019",
+    ])
+
+    assert market.load_ticker_cik_map_from_s3("b", "k", client) == {
+        "AAPL": "0000320193",
+        "MSFT": "0000789019",
+    }
+
+
+def test_the_constituents_csv_yields_sub_industry_pairs():
+    client = _constituents_csv([
+        "NVDA,NVIDIA,Information Technology,Semiconductors,1045810",
+        "AMD,AMD,Information Technology,Semiconductors,2488",
+    ])
+
+    assert market.load_sub_industries_from_s3("b", "k", client) == [
+        ("NVDA", "Semiconductors"),
+        ("AMD", "Semiconductors"),
+    ]
+
+
+def test_each_reader_requires_only_the_columns_it_uses():
+    """A CSV vintage missing one column must not disable the other readers.
+
+    The three readers share one file and one fetch, so a single required-column
+    set would couple them: an older export without GICS Sub-Industry would take
+    the company bridge down with the peer edges.
+    """
+    no_cik = _constituents_csv(
+        ["AAPL,Apple Inc.,Information Technology,Technology Hardware"],
+        header="Symbol,Security,GICS Sector,GICS Sub-Industry",
+    )
+
+    assert market.load_ticker_cik_map_from_s3("b", "k", no_cik) is None
+    assert market.load_sector_patterns_from_s3("b", "k", no_cik) is not None
+    assert market.load_sub_industries_from_s3("b", "k", no_cik) is not None
+
+
+def test_no_csv_means_no_map_rather_than_a_guessed_one():
+    """get_sector_patterns falls back to defaults; these two must not.
+
+    A stale sector assignment is still roughly true. A CIK is a regulator's
+    primary key, and a wrong one silently merges two unrelated companies into
+    one node — so the absence of the file is reported as an absence.
+    """
+    assert market.get_ticker_cik_map() == {}
+    assert market.get_sub_industries() == []
+    assert market.get_sector_patterns() is market.DEFAULT_MARKET_SECTOR_PATTERNS
+
+
 def test_market_option_strategy_patterns_well_formed():
     assert market.MARKET_OPTION_STRATEGY_PATTERNS
     for key, entry in market.MARKET_OPTION_STRATEGY_PATTERNS.items():
@@ -148,8 +262,11 @@ def test_market_known_correlations_well_formed():
 # SEC
 # ======================================================================
 
+# SEC_SECTOR_PATTERNS was deleted -- it matched nothing on real data and sorted
+# filings into a third, unreconciled sector vocabulary. Filings now get their
+# sector from filings:hasSic. Violations keep their keyword table, which does
+# match.
 @pytest.mark.parametrize("table,uri_key", [
-    ("SEC_SECTOR_PATTERNS", "sector_uri"),
     ("SEC_VIOLATION_PATTERNS", "violation_uri"),
 ])
 def test_sec_pattern_tables_well_formed(table, uri_key):

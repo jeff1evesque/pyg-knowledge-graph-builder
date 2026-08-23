@@ -185,7 +185,7 @@ def _assert_valid_graph_and_metadata(config, work_dir):
     # _September). owl:sameAs is RDF's strongest claim, so those became real
     # graph edges. Guarded here as well as in the unit tests because this asserts
     # the property of the WHOLE pipeline -- any enricher reintroducing it fails.
-    _assert_sameas_links_only_temporal(config)
+    _assert_sameas_links_only_unified_vocabularies(config)
 
     # --- every edge type records where it came from ---
     # "unknown" is the not-supplied fallback, so seeing it in a real build means
@@ -1408,9 +1408,12 @@ REQUIRED_BRIDGE_RELATIONS = {
         "market_quotes_EquitySnapshot",
         "market_quotes_OptionSnapshot",
     ),
-    # Entity -> its economic sector, and the per-sector correlation edge.
+    # Entity -> its economic sector. There is no longer a correlation twin;
+    # hasSectorCorrelation was emitted over identical (subject, object) pairs
+    # from the same frame, read by nothing, and was removed. See
+    # test_no_sector_relation_has_a_duplicate_twin below, which now guards
+    # against it coming back.
     "belongsToSector": ("cpi_Index",),
-    "hasSectorCorrelation": ("cpi_Index",),
     # Chronological ordering within a source.
     "precedes": ("cpi_Index",),
     # Alert -> the state it affects. Both of its strategies were dead: the
@@ -1531,38 +1534,56 @@ def _assert_declared_bridges_resolve(data):
 # Matched on the predicate's LOCAL NAME for the same reason the required list
 # is: the namespace is exactly what this class of defect gets wrong, and a check
 # spelling the full URI would have to be edited by the same hand that broke it.
+#
+# `resolved_against` narrows the candidate population to the subjects whose
+# OBJECT value also appears as an object of that predicate. It exists for the
+# market half of the company bridge: since that bridge was re-keyed onto the
+# CIK, a snapshot reaches a company only if its ticker RESOLVES to one, so the
+# population that must be fully covered is "snapshots whose symbol matches an
+# ingested issuer's ticker" rather than "snapshots stating a symbol". Without
+# it the rule would demand coverage the join cannot supply and would report a
+# fixture-overlap fact as a pipeline defect.
 _BridgeCoverage = collections.namedtuple(
-    "_BridgeCoverage", "relation candidates label floor why"
+    "_BridgeCoverage", "relation candidates label floor why resolved_against",
+    defaults=(None,),
 )
 
 BRIDGE_COVERAGE = (
     _BridgeCoverage(
         relation="refersToCompany",
-        candidates="hasIssuerTradingSymbol",
+        candidates="hasIssuerCik",
         label="SEC issuer -> unified company",
         floor=1.0,
-        # The ticker is the ONLY path from a filing to a market quote, and the
-        # SEC half of the join reads it straight off the issuer. Every issuer
-        # stating one must therefore reach a company; there is no filtering
-        # step between the two that could legitimately drop any.
+        # Keyed on the CIK, not the ticker, and that IS the coverage story.
+        # The ticker has one upstream emitter (the ownership-form document
+        # parser), so keying on it capped this half of the bridge at the Form
+        # 3/4/5 share of filings -- a measured 24.57%. hasIssuerCik is stated
+        # by every issuer on every filing, from both the metadata and document
+        # paths, so the candidate population here is now every issuer in the
+        # graph rather than a quarter of them.
         #
-        # 1.0 rather than a measured fraction because this is a conditional
-        # rate: the term's overall sparsity (24.57% of filings, being 100% of
-        # ownership Forms 3/4/5 and 0% of everything else) is about which
-        # filings HAVE a ticker, not about how many of those get linked.
-        why="every issuer stating a ticker is linked; no step filters them",
+        # 1.0 because there is no filtering step between stating a CIK and
+        # reaching the company node it keys.
+        why="every issuer states a CIK and none is filtered before the join",
     ),
     _BridgeCoverage(
         relation="refersToCompany",
         candidates="symbol",
+        resolved_against="hasIssuerTradingSymbol",
         label="market snapshot -> unified company",
         floor=1.0,
-        # The market half, which reads market-quotes:symbol off equity and
-        # option snapshots alike. equity_symbol() resolves an OCC option symbol
-        # to its underlying and falls through to the trimmed original for
-        # anything else, so it never returns null for a well-formed input --
-        # meaning every symbol-bearing snapshot has a company to reach.
-        why="equity_symbol() never drops a well-formed symbol",
+        # The market half reads market-quotes:symbol off equity and option
+        # snapshots alike, and equity_symbol() resolves an OCC option symbol to
+        # its underlying, so no well-formed symbol is dropped on the way in.
+        #
+        # What CAN drop a snapshot is the ticker -> CIK step: an inner join,
+        # deliberately, because falling back to a symbol-keyed company node is
+        # exactly the split this work removed. So the rule measures the
+        # snapshots whose symbol an ingested filing also states -- for those,
+        # the resolution exists and full coverage is required. A snapshot for a
+        # company with no filings here is not a defect, and the e2e run
+        # configures no constituents CSV to widen it.
+        why="a symbol an ingested issuer also states must resolve to its CIK",
     ),
 )
 
@@ -1593,13 +1614,34 @@ def _assert_declared_bridges_are_not_degenerate(config):
         return  # split-mode runs may not re-emit the enriched frame
     df = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
 
-    def subjects_of(local_name):
+    def rows_of(local_name):
         suffix = f"/{local_name}"
-        return set(df[df["predicate"].str.endswith(suffix)]["subject"])
+        return df[df["predicate"].str.endswith(suffix)]
+
+    def subjects_of(local_name):
+        return set(rows_of(local_name)["subject"])
+
+    def resolvable_subjects(local_name, against):
+        """Subjects whose stated value also appears as a value of `against`.
+
+        The two sides are compared case-insensitively and trimmed, matching
+        equity_symbol()'s normalisation -- a fixture stating "aapl" against
+        "AAPL" is the same ticker, and treating it as a miss would report a
+        formatting difference as missing coverage.
+        """
+        available = {
+            str(v).strip().upper() for v in rows_of(against)["object"]
+        }
+        stated = rows_of(local_name)
+        matched = stated["object"].astype(str).str.strip().str.upper()
+        return set(stated[matched.isin(available)]["subject"])
 
     thin = []
     for rule in BRIDGE_COVERAGE:
-        candidates = subjects_of(rule.candidates)
+        if rule.resolved_against:
+            candidates = resolvable_subjects(rule.candidates, rule.resolved_against)
+        else:
+            candidates = subjects_of(rule.candidates)
         if not candidates:
             continue  # not verifiable on this fixture; see the docstring
         covered = candidates & subjects_of(rule.relation)
@@ -1960,11 +2002,38 @@ def _assert_cross_source_temporal_bridge(data):
     )
 
 
-def _assert_sameas_links_only_temporal(config):
-    """Every owl:sameAs in the enriched output must link two temporal entities."""
+def _assert_sameas_links_only_unified_vocabularies(config):
+    """Every owl:sameAs must point at a PERIOD or a REGION, never a measurement.
+
+    THE DEFECT THIS GUARDS. A deleted cross-source matcher was anchored only at
+    the end of the subject, so it matched any URI merely ENDING with a month
+    name and asserted `unified:September owl:sameAs cpi:...PercentChange_...
+    _September` -- that a measurement IS the month. owl:sameAs is RDF's
+    strongest claim, so those became real edges and licensed a reasoner to
+    merge the two. What makes that shape detectable is the OBJECT: a
+    measurement URI carries its period inside a longer name, and a period URI
+    is the period and nothing else.
+
+    WHY REGIONS ARE HERE TOO. The unifier now has a second axis. Aligning
+    `unified:MidwestCensusRegion` with `jolts:Midwest_Region` is the same
+    operation as aligning `unified:February` with `cpi:February` -- one
+    real-world thing named by two source vocabularies -- and
+    classify_edge_origin already reports both as `unification`. So the rule is
+    not "sameAs is temporal", which was only ever true because the temporal
+    unifier was its sole producer; it is "sameAs relates two names for one
+    entity in a vocabulary this pipeline unifies".
+
+    The admitted shapes stay ENUMERATED rather than loosened to something like
+    "contains no measurement keyword". A laxer rule would readmit the original
+    defect, which is the one thing this must not do.
+    """
     import re
 
     import pandas as pd
+
+    from spark_jobs.enrichment.region_crosswalk import (
+        CENSUS_REGIONS, US_STATES, state_key,
+    )
 
     files = sorted(
         Path(config.enriched_parquet_path).rglob("*.parquet")
@@ -1981,19 +2050,43 @@ def _assert_sameas_links_only_temporal(config):
         "|October|November|December"
     )
 
-    def temporal(uri):
-        local = str(uri).rsplit("/", 1)[-1]
+    def temporal(local):
         return bool(
             re.fullmatch(months, local)
             or re.fullmatch(r"\d{4}", local)
             or re.fullmatch(r"Year\d{4}", local)
             or re.fullmatch(r"Q[1-4]", local)
+            # The day grain: id/temporal/{source}/2026-07-03 on the source
+            # side, unified/Day2026-07-03 on the unified side.
+            or re.fullmatch(r"\d{4}-\d{2}-\d{2}", local)
+            or re.fullmatch(r"Day\d{4}-\d{2}-\d{2}", local)
         )
 
-    bad = same_as[~same_as["object"].map(temporal)]
+    # The unified region nodes, spelled from the crosswalk rather than by
+    # pattern, so a region node this pipeline does not actually mint cannot
+    # sneak through as "looks region-shaped".
+    unified_regions = {f"{state_key(s)}Region" for s in US_STATES} | {
+        f"{state_key(c)}CensusRegion" for c in CENSUS_REGIONS
+    }
+
+    def region(local):
+        # Source-side region entities are "{Name}_Region" -- the shape jolts
+        # mints. Digits are excluded because that is exactly what separates a
+        # region entity from a measurement ABOUT a region:
+        # "Midwest_Region" is the place, "Midwest_June2026_HiresLevel" is a
+        # number, and only the first may ever be a sameAs object.
+        return local in unified_regions or bool(
+            re.fullmatch(r"[A-Za-z]+(?:_[A-Za-z]+)*_Region", local)
+        )
+
+    def unifiable(uri):
+        local = str(uri).rsplit("/", 1)[-1]
+        return temporal(local) or region(local)
+
+    bad = same_as[~same_as["object"].map(unifiable)]
     assert bad.empty, (
-        f"{len(bad)} owl:sameAs triples point at a NON-temporal entity, e.g. "
-        f"{bad['object'].iloc[0]}"
+        f"{len(bad)} owl:sameAs triples point at an entity that is neither a "
+        f"period nor a region, e.g. {bad['object'].iloc[0]}"
     )
 
 def _load_node_index(pyg_output_path):

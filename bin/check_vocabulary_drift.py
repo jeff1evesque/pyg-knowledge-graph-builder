@@ -51,6 +51,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -88,6 +89,10 @@ _NOT_TERMS = frozenset({"value", "title", "n3", "toPython", "encode", "strip"})
 # one that is merely quiet.
 STALE_AFTER_DAYS = 60
 
+
+# The prefix the market quote snapshots live under, supplied at run time.
+# Not hardcoded: this repository is public and the storage layout is not.
+MARKET_QUOTES_PREFIX = os.environ.get("MARKET_QUOTES_PREFIX", "")
 
 def _log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
@@ -223,7 +228,13 @@ def emitted_from_s3(archive_bucket: str, market_bucket: str, rows: int) -> set[s
             current = subdirs[-1]
         return None, None
 
-    targets = [(market_bucket, "market/intraday/quotes/")] if market_bucket else []
+    import os
+
+    quotes_prefix = os.environ.get("MARKET_QUOTES_PREFIX", "")
+    if market_bucket and not quotes_prefix:
+        raise SystemExit("MARKET_QUOTES_PREFIX is required to sample the market bucket")
+
+    targets = [(market_bucket, quotes_prefix)] if market_bucket else []
     if archive_bucket:
         # Paths that do NOT follow the raw/source=<name>/feed=<name>/ convention
         # and would be missed by the discovery below.

@@ -72,7 +72,7 @@ import re
 import sys
 from pathlib import Path
 
-QUOTES_PREFIX = "market/intraday/quotes/"
+QUOTES_PREFIX = os.environ.get("MARKET_QUOTES_PREFIX", "")
 
 # Anchored tickers to keep, and how many option snapshots to keep per anchored
 # equity. Sized against the other fixtures (~11 KiB per BLS feed): a snapshot is
@@ -312,7 +312,7 @@ def main() -> int:
     parser.add_argument(
         "--bucket",
         default=os.environ.get("MARKET_FIXTURE_BUCKET"),
-        help="S3 bucket holding market/intraday/quotes/ (env: MARKET_FIXTURE_BUCKET)",
+        help="S3 bucket holding the quote snapshots (env: MARKET_FIXTURE_BUCKET)",
     )
     parser.add_argument("--key", help="explicit snapshot object (else newest)")
     parser.add_argument("--dry-run", action="store_true")
@@ -321,6 +321,9 @@ def main() -> int:
 
     if not args.bucket:
         parser.error("--bucket is required (or set MARKET_FIXTURE_BUCKET)")
+
+    if not QUOTES_PREFIX:
+        parser.error("MARKET_QUOTES_PREFIX is required")
 
     import boto3
 

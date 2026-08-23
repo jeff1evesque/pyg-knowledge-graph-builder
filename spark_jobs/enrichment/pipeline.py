@@ -12,6 +12,9 @@ from pyspark.sql import SparkSession, DataFrame
 from spark_jobs.enrichment.intra_source_linker import enrich_intra_source
 from spark_jobs.enrichment.temporal_unifier import TemporalUnifier
 from spark_jobs.enrichment.cross_source_linker import enrich_cross_source
+from spark_jobs.enrichment.intra_source.market.patterns import (
+    get_sub_industries, get_ticker_cik_map,
+)
 from spark_jobs.enrichment.ontology_mapper import OntologyMapper
 from typing import Dict, Optional
 import logging
@@ -148,7 +151,23 @@ class EnrichmentPipeline:
         logger.info("PHASE 3: CROSS-SOURCE ENRICHMENT")
         logger.info("=" * 80)
 
-        cross_new = enrich_cross_source(self.spark, self.triples_df)
+        # The constituents CSV is read HERE, on the driver, once — not inside
+        # the linker. Two reasons: the linker runs against a DataFrame and
+        # should not also own an S3 client, and both tables are small enough
+        # (~500 rows) that reading them before the phase starts costs one GET
+        # and keeps the executors out of it entirely.
+        cross_new = enrich_cross_source(
+            self.spark,
+            self.triples_df,
+            ticker_cik_map=get_ticker_cik_map(
+                bucket=self._sector_definitions_bucket,
+                key=self._sector_definitions_key,
+            ),
+            sub_industries=get_sub_industries(
+                bucket=self._sector_definitions_bucket,
+                key=self._sector_definitions_key,
+            ),
+        )
 
         cross_count = cross_new.count()
         self.stats['cross_source_triples'] = cross_count

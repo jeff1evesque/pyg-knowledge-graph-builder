@@ -18,7 +18,15 @@ matters: a stored CDK bootstrap line published an AWS account id, and nobody
 reads an output cell in a diff.
 
 Python's ``re`` is a superset of the RE2 engine gitleaks uses, so every pattern
-that compiles there compiles here.
+that compiles for gitleaks compiles here.
+
+THE REVERSE IS NOT TRUE, AND IT BROKE CI. A pattern that compiles under Python
+``re`` can be rejected by RE2, which has no lookahead, no lookbehind and no
+backreferences. Such a rule passes this hook on every commit and then PANICS
+gitleaks in CI -- exit 2, no scan performed, so the branch is unprotected
+rather than merely noisy. Express the constraint inside the capture group, or
+split it into a second rule; see 'hardcoded-s3-bucket-prose' in .gitleaks.toml,
+which exists because of exactly this. tests/test_secret_rules.py pins it.
 
 Usage:
     python scripts/check_secrets.py              # scan everything tracked

@@ -428,7 +428,7 @@ def classify_edge_origin(
     marks its output in two different places:
 
       * inferred links carry a minted PREDICATE
-        (``bls.gov/enrichment/apparelSectorCorrelation``)
+        (``bls:refersToCompany``)
       * unification links carry a minted NODE but a standard predicate
         (``unified:November owl:sameAs cpi:November``)
 

@@ -36,7 +36,7 @@ from spark_jobs.utils.rdf_utils import (
     identifier_namespace,
 )
 from spark_jobs.enrichment.intra_source.sec.patterns import (
-    SEC_SECTOR_PATTERNS, SEC_VIOLATION_PATTERNS,
+    SEC_VIOLATION_PATTERNS,
 )
 from spark_jobs.utils.spark_rdf_utils import (
     deduplicate_against_existing,
@@ -84,7 +84,9 @@ _SEC_ENRICHMENT_NS = str(SEC_ENRICHMENT)
 _SEC_BASE_HAS_DATE_VALUE = str(SEC_COMMON.hasDateValue)
 
 # Enrichment predicates
-_BELONGS_TO_SECTOR = str(SEC_ENRICHMENT.belongsToSector)
+# sec:belongsToSector is no longer emitted. Its only writer was the keyword
+# sector classifier deleted below; filings now reach a sector through
+# filings:hasSic, which CrossSourceLinker attaches to the COMPANY.
 _HAS_VIOLATION_TYPE = str(SEC_ENRICHMENT.hasViolationType)
 _HAS_CIK = str(SEC_ENRICHMENT.hasCik)
 _PRECEDES = str(SEC_ENRICHMENT.precedes)
@@ -251,7 +253,6 @@ class SECIntraSourceLinker:
 
         # Step 4: Apply sector patterns
         logger.info("\n[Step 4/6] Applying sector patterns...")
-        self._append(new_dfs, self._apply_sector_patterns())
 
         # Step 5: Apply violation patterns
         logger.info("\n[Step 5/6] Applying violation patterns...")
@@ -915,138 +916,6 @@ class SECIntraSourceLinker:
             ["owner", "transaction_class"],
             order_cols=("filing", "document_index"),
         )
-
-    def _apply_sector_patterns(self) -> Optional[DataFrame]:
-        """
-        Apply sector-based linking patterns.
-
-        Links entities to industry sectors based on keyword matching
-        against entity URIs and rdfs:labels.
-        """
-        # Build keyword lookup: (keyword_normalized, keyword_lower, sector_uri, relationship, namespace)
-        sector_rows = []
-        for sector_name, pattern in SEC_SECTOR_PATTERNS.items():
-            sector_uri = str(pattern['sector_uri'])
-            relationship = str(pattern['relationship'])
-            for dataset_name in self.available_datasets:
-                keywords = pattern['keywords'].get(dataset_name, [])
-                ns = DATASET_NS_MAP.get(dataset_name, '')
-                if not ns or not keywords:
-                    continue
-                for keyword in keywords:
-                    normalized = normalize_keyword_for_uri_matching(keyword)
-                    sector_rows.append((normalized, keyword.lower(), sector_uri, relationship, ns))
-
-        if not sector_rows:
-            return None
-
-        sector_df = self.spark.createDataFrame(
-            sector_rows,
-            schema=["keyword_normalized", "keyword_lower", "sector_uri", "relationship", "namespace"],
-        )
-
-        # Get all SEC entities with their namespace
-        sec_entities = (
-            self._sec_triples
-            .select("subject")
-            .distinct()
-            .withColumn("subject_str", F.col("subject"))
-        )
-
-        # Match by URI: entity URI contains normalized keyword and starts with namespace
-        uri_matched = (
-            sec_entities
-            .join(F.broadcast(sector_df), how="inner",
-                  on=(
-                      F.col("subject").startswith(F.col("namespace")) &
-                      F.col("subject").contains(F.col("keyword_normalized"))
-                  ))
-        )
-
-        # Match by label: entity has rdfs:label containing keyword
-        labels = (
-            self._sec_triples
-            .filter(F.col("predicate") == _RDFS_LABEL)
-            .select(
-                F.col("subject"),
-                F.lower(F.col("object")).alias("label_lower"),
-            )
-        )
-
-        label_matched = (
-            labels
-            .join(F.broadcast(sector_df), how="inner",
-                  on=(
-                      F.col("subject").startswith(F.col("namespace")) &
-                      F.col("label_lower").contains(F.col("keyword_lower"))
-                  ))
-        )
-
-        # Union URI and label matches
-        all_matched = (
-            uri_matched.select("subject", "sector_uri", "relationship")
-            .unionAll(label_matched.select("subject", "sector_uri", "relationship"))
-            .dropDuplicates(["subject", "sector_uri"])
-        )
-
-        if all_matched.head(1) == []:
-            return None
-
-        # Sector type triples
-        sector_type_triples = (
-            all_matched.select("sector_uri").distinct()
-            .select(
-                F.col("sector_uri").alias("subject"),
-                F.lit(_RDF_TYPE).alias("predicate"),
-                F.lit(_ECONOMIC_SECTOR_TYPE).alias("object"),
-            )
-        )
-
-        # Sector label triples
-        sector_label_triples = (
-            all_matched.select("sector_uri").distinct()
-            .withColumn(
-                "label",
-                F.regexp_replace(
-                    F.regexp_extract(F.col("sector_uri"), r"[/#]([^/#]+)$", 1),
-                    "([A-Z])", r" $1"
-                )
-            )
-            .withColumn("label", F.trim(F.col("label")))
-            .select(
-                F.col("sector_uri").alias("subject"),
-                F.lit(_RDFS_LABEL).alias("predicate"),
-                F.col("label").alias("object"),
-            )
-        )
-
-        # belongsToSector triples
-        belongs_triples = all_matched.select(
-            F.col("subject"),
-            F.lit(_BELONGS_TO_SECTOR).alias("predicate"),
-            F.col("sector_uri").alias("object"),
-        )
-
-        # Relationship triples
-        rel_triples = all_matched.select(
-            F.col("subject"),
-            F.col("relationship").alias("predicate"),
-            F.col("sector_uri").alias("object"),
-        )
-
-        result = (
-            sector_type_triples
-            .unionAll(sector_label_triples)
-            .unionAll(belongs_triples)
-            .unionAll(rel_triples)
-        )
-
-        logger.info("  Sector pattern triples prepared (lazy)")
-        return result
-
-    # ================================================================
-    # Step 5: Violation patterns
-    # ================================================================
 
     def _apply_violation_patterns(self) -> Optional[DataFrame]:
         """

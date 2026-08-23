@@ -29,7 +29,7 @@ from spark_jobs.utils.rdf_utils import (
     identifier_namespace,
 )
 from spark_jobs.enrichment.intra_source.bls.patterns import (
-    BLS_SECTOR_CORRELATION, BLS_SECTOR_PATTERNS,
+    BLS_SECTOR_PATTERNS,
 )
 from spark_jobs.enrichment.intra_source.bls.correlations import KNOWN_CORRELATIONS
 from spark_jobs.enrichment.intra_source.bls.base_enricher import (
@@ -48,7 +48,6 @@ logger = logging.getLogger(__name__)
 _RDF_TYPE = str(RDF.type)
 _RDFS_LABEL = str(RDFS.label)
 _BELONGS_TO_SECTOR = str(BLS_ENRICHMENT.belongsToSector)
-_SECTOR_CORRELATION = str(BLS_SECTOR_CORRELATION)
 _HAS_PARENT = str(BLS_ENRICHMENT.hasParent)
 
 # IDENTIFIER prefixes for dataset detection and filtering.
@@ -371,19 +370,16 @@ class BLSIntraSourceLinker:
             F.col("sector_uri").alias("object"),
         )
 
-        # Sector correlation triples — one predicate for every sector, the
-        # sector itself carried by the object (see BLS_SECTOR_CORRELATION).
-        rel_triples = matched.select(
-            F.col("subject"),
-            F.lit(_SECTOR_CORRELATION).alias("predicate"),
-            F.col("sector_uri").alias("object"),
-        )
-
+        # NO CORRELATION TWIN. This used to also emit
+        # bls:hasSectorCorrelation over the identical (subject, object) pairs,
+        # from the same `matched` frame -- a copy of belongsToSector under a
+        # name that promised a derived correlation nothing ever computed.
+        # Nothing read it. See the fuller note in
+        # CrossSourceLinker._link_by_sector, which had the same pair.
         result = (
             sector_type_triples
             .unionAll(sector_label_triples)
             .unionAll(belongs_triples)
-            .unionAll(rel_triples)
         )
 
         logger.info("  Sector pattern triples prepared (lazy)")

@@ -103,11 +103,6 @@ import re
 
 logger = logging.getLogger(__name__)
 
-# Canonical CIK width. The SEC states CIKs as 10 digits, zero-padded, in every
-# context it controls; the unpadded spellings below are an artifact of reading
-# the number out of a document rather than an alternative convention.
-CIK_DIGITS = 10
-
 _SEC_FILINGS_ID = identifier_namespace(str(SEC_FILINGS))
 
 # Identifier locals keyed by a CIK: "<Word>_<cik>" under the sec-filings id
@@ -127,7 +122,10 @@ CIK_KEYED_LOCALS = ("Issuer", "ReportingOwner", "Owner")
 # an identifier whose leading zeros are part of it, so a lost zero is a
 # different entity rather than a cosmetic difference.
 #
-#   CIK    10  the SEC's own form everywhere it controls the spelling
+#   CIK    10  the SEC's own form everywhere it controls the spelling. Also
+#              imported by market/patterns.py, which pads the constituents
+#              CSV's unpadded CIK to this width so the market side of the
+#              company bridge keys on the same spelling the filings state.
 #   CUSIP   9  fixed-length by definition; the largest instance of the class,
 #              since only ~1 in 10 begins with a zero and the rest are typed
 #              numeric upstream

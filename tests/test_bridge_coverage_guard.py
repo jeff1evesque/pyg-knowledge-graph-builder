@@ -30,11 +30,20 @@ _ONT = "https://jefflevesque.com/ontology/"
 _ID = "https://jefflevesque.com/id/"
 
 _TICKER = f"{_ONT}sec-filings/hasIssuerTradingSymbol"
+_CIK = f"{_ONT}sec-filings/hasIssuerCik"
 _SYMBOL = f"{_ONT}market-quotes/symbol"
 _REFERS = f"{_ONT}bls/refersToCompany"
 
-_ISSUERS = [f"{_ID}sec-filings/Issuer_000000000{n}" for n in range(1, 4)]
-_SNAPSHOTS = [f"{_ID}market-quotes/snapshot/{s}" for s in ("AAPL", "MSFT")]
+_CIKS = [f"000000000{n}" for n in range(1, 4)]
+_ISSUERS = [f"{_ID}sec-filings/Issuer_{cik}" for cik in _CIKS]
+_TICKERS = [f"TCK{n}" for n in range(len(_CIKS))]
+
+# The snapshots are named for the tickers they quote, and those tickers are
+# stated by the issuers above. That overlap is now load-bearing: the market
+# coverage rule narrows its candidates to snapshots whose symbol an ingested
+# filing also states, because the bridge resolves a ticker to a CIK and a
+# snapshot for a company with no filings here has nothing to resolve against.
+_SNAPSHOTS = [f"{_ID}market-quotes/snapshot/{t}" for t in _TICKERS[:2]]
 
 
 class _Config:
@@ -53,15 +62,21 @@ def _write(tmp_path, rows):
 
 
 def _healthy_rows():
-    """Every ticker-bearing issuer and every symbol-bearing snapshot linked."""
+    """Every CIK-bearing issuer and every resolvable snapshot linked.
+
+    The SEC candidate population is issuers stating a CIK, not a ticker -- the
+    bridge was re-keyed onto the CIK precisely because the ticker capped it at
+    the ownership-form share of filings.
+    """
     rows = []
-    for i, issuer in enumerate(_ISSUERS):
-        rows.append((issuer, _TICKER, f"TCK{i}"))
-        rows.append((issuer, _REFERS, f"{_ONT}unified/Company_TCK{i}"))
-    for snapshot in _SNAPSHOTS:
+    for issuer, cik, ticker in zip(_ISSUERS, _CIKS, _TICKERS):
+        rows.append((issuer, _CIK, cik))
+        rows.append((issuer, _TICKER, ticker))
+        rows.append((issuer, _REFERS, f"{_ONT}unified/Company_{cik}"))
+    for snapshot, cik in zip(_SNAPSHOTS, _CIKS):
         symbol = snapshot.rsplit("/", 1)[-1]
         rows.append((snapshot, _SYMBOL, symbol))
-        rows.append((snapshot, _REFERS, f"{_ONT}unified/Company_{symbol}"))
+        rows.append((snapshot, _REFERS, f"{_ONT}unified/Company_{cik}"))
     return rows
 
 
@@ -94,7 +109,7 @@ def test_a_bridge_resolving_into_one_edge_fails(tmp_path):
         r for r in rows
         if not (r[1] == _REFERS and r[0] in (_ISSUERS[1], _ISSUERS[2]))
     ]
-    rows.append((_ISSUERS[0], _REFERS, f"{_ONT}unified/Company_TCK0"))
+    rows.append((_ISSUERS[0], _REFERS, f"{_ONT}unified/Company_{_CIKS[0]}"))
 
     with pytest.raises(AssertionError, match="under-cover their endpoints"):
         _smoke._assert_declared_bridges_are_not_degenerate(_write(tmp_path, rows))
@@ -104,9 +119,9 @@ def test_the_failure_names_the_ratio_and_the_side(tmp_path):
     """A guard that fires has to say what to go and look at."""
     rows = [r for r in _healthy_rows() if r[1] != _REFERS]
     rows += [
-        (_ISSUERS[0], _REFERS, f"{_ONT}unified/Company_TCK0"),
-        (_SNAPSHOTS[0], _REFERS, f"{_ONT}unified/Company_AAPL"),
-        (_SNAPSHOTS[1], _REFERS, f"{_ONT}unified/Company_MSFT"),
+        (_ISSUERS[0], _REFERS, f"{_ONT}unified/Company_{_CIKS[0]}"),
+        (_SNAPSHOTS[0], _REFERS, f"{_ONT}unified/Company_{_CIKS[0]}"),
+        (_SNAPSHOTS[1], _REFERS, f"{_ONT}unified/Company_{_CIKS[1]}"),
     ]
     with pytest.raises(AssertionError) as caught:
         _smoke._assert_declared_bridges_are_not_degenerate(_write(tmp_path, rows))
@@ -125,7 +140,7 @@ def test_one_side_thin_fails_even_when_the_other_is_complete(tmp_path):
     while the SEC half worked, so the relation existed and half of it was dead.
     """
     rows = [r for r in _healthy_rows() if not (r[1] == _REFERS and r[0] in _SNAPSHOTS)]
-    rows.append((_SNAPSHOTS[0], _REFERS, f"{_ONT}unified/Company_AAPL"))
+    rows.append((_SNAPSHOTS[0], _REFERS, f"{_ONT}unified/Company_{_CIKS[0]}"))
 
     with pytest.raises(AssertionError, match="market snapshot"):
         _smoke._assert_declared_bridges_are_not_degenerate(_write(tmp_path, rows))
@@ -164,13 +179,34 @@ def test_every_rule_is_exercised_by_the_committed_fixtures():
     spec.loader.exec_module(cvd)
 
     emitted = cvd.emitted_from_fixtures()
+
+    def is_emitted(local_name):
+        suffix = f"/{local_name}"
+        return any(term.endswith(suffix) for term in emitted)
+
     for rule in _smoke.BRIDGE_COVERAGE:
-        suffix = f"/{rule.candidates}"
-        assert any(term.endswith(suffix) for term in emitted), (
+        assert is_emitted(rule.candidates), (
             f"{rule.label}: no committed fixture emits {rule.candidates}, so "
             f"this rule can never measure anything. Give a fixture an example "
             f"or drop the rule."
         )
+        # A rule that narrows its candidates needs BOTH terms, or the
+        # intersection is empty for a reason that has nothing to do with the
+        # pipeline.
+        #
+        # This checks the TERMS, not their values. It cannot tell whether the
+        # market fixture's tickers actually overlap the SEC fixture's -- the
+        # two are sampled independently, and when they do not overlap the rule
+        # skips per-fixture rather than failing. That is the honest behaviour
+        # (a non-overlapping sample is not a defect) but it does mean the
+        # market half of the company bridge is exercised by the unit tests in
+        # test_cross_source_linker.py rather than end to end.
+        if rule.resolved_against:
+            assert is_emitted(rule.resolved_against), (
+                f"{rule.label}: no committed fixture emits "
+                f"{rule.resolved_against}, which this rule narrows its "
+                f"candidates against, so it can never measure anything."
+            )
 
 
 # ======================================================================

@@ -27,6 +27,9 @@ from spark_jobs.enrichment.temporal_unifier import (
     SOURCE_YEAR_TYPE,
     MARKET_CAPTURE_TIME,
     OBSERVED_IN_PERIOD_PRED,
+    COVERS_DAY_PRED,
+    SOURCE_DAY_TYPE,
+    UNIFIED_DAY_TYPE,
 )
 
 from spark_jobs.utils.rdf_utils import (
@@ -156,6 +159,10 @@ def test_dated_entities_reach_the_period_they_state(spark, make_triples):
 
     Asserted through to the unified entity, because reaching temporal/sec/August
     is only useful if that is the same August the other sources reach.
+
+    The period it attaches to is now the DAY, not the month: SEC is one of the
+    three sub-monthly sources, and the month it belongs to is reached through
+    the day's coversDay link. See the period-ladder note in temporal_unifier.
     """
     filing = "https://jefflevesque.com/id/sec-filings/0000842657-26-000011_Filing"
     rows = [
@@ -167,19 +174,24 @@ def test_dated_entities_reach_the_period_they_state(spark, make_triples):
 
     triples = _triple_set(TemporalUnifier(spark).enrich(make_triples(rows)))
 
-    sec_august = SEC_TEMPORAL + "August"
-    assert (filing, OBSERVED_IN_PERIOD_PRED, sec_august) in triples, (
+    sec_day = SEC_TEMPORAL + "2026-08-14"
+    assert (filing, OBSERVED_IN_PERIOD_PRED, sec_day) in triples, (
         "the filing does not reach the period it dates — the synthetic period "
         "node is an island"
     )
-    assert (filing, OBSERVED_IN_PERIOD_PRED, SEC_TEMPORAL + "2026") in triples
-    assert (UNIFIED_BASE + "August", OWL_SAME_AS, sec_august) in triples
+    assert (UNIFIED_BASE + "Day2026-08-14", OWL_SAME_AS, sec_day) in triples
+
+    # ...and August is still reachable, one hop further out.
+    assert (
+        UNIFIED_BASE + "August", COVERS_DAY_PRED, UNIFIED_BASE + "Day2026-08-14"
+    ) in triples
+    assert (UNIFIED_BASE + "August", OWL_SAME_AS, SEC_TEMPORAL + "August") in triples
 
     # The on-ramp is something this pipeline inferred, not a fact SEC reported.
     from spark_jobs.utils.rdf_utils import classify_edge_origin
 
     assert classify_edge_origin(
-        OBSERVED_IN_PERIOD_PRED, "filings_SECFiling", "temporal_SourceMonth"
+        OBSERVED_IN_PERIOD_PRED, "filings_SECFiling", "temporal_SourceDay"
     ) == "enrichment"
 
 
@@ -206,10 +218,15 @@ def test_quote_snapshots_reach_the_spine_via_capture_time(spark, make_triples):
 
     triples = _triple_set(TemporalUnifier(spark).enrich(make_triples(rows)))
 
-    quotes_july = QUOTES_TEMPORAL + "July"
-    assert (snap, OBSERVED_IN_PERIOD_PRED, quotes_july) in triples
-    assert (UNIFIED_BASE + "July", OWL_SAME_AS, quotes_july) in triples
-    assert (snap, OBSERVED_IN_PERIOD_PRED, QUOTES_TEMPORAL + "2026") in triples
+    quotes_day = QUOTES_TEMPORAL + "2026-07-02"
+    assert (snap, OBSERVED_IN_PERIOD_PRED, quotes_day) in triples
+    assert (UNIFIED_BASE + "Day2026-07-02", OWL_SAME_AS, quotes_day) in triples
+
+    # July is reached through the day, and the month node still exists.
+    assert (UNIFIED_BASE + "July", OWL_SAME_AS, QUOTES_TEMPORAL + "July") in triples
+    assert (
+        UNIFIED_BASE + "July", COVERS_DAY_PRED, UNIFIED_BASE + "Day2026-07-02"
+    ) in triples
 
     # The epoch-millis predicate must not have minted a period of its own.
     assert not [t for t in triples if t[2].endswith("/1783")], (
@@ -239,3 +256,148 @@ def test_non_temporal_input_short_circuits(spark, make_triples):
     rows = [("http://example.org/x", RDF_TYPE, "http://example.org/Widget")]
     result = TemporalUnifier(spark).enrich(make_triples(rows))
     assert result.count() == 0
+
+
+# ======================================================================
+# The day grain — unburdening the period hub
+# ======================================================================
+
+def _quotes_over(days, per_day=1):
+    """`per_day` snapshots on each of `days` dates in one month."""
+    rows = []
+    for date in days:
+        for n in range(per_day):
+            snap = f"https://jefflevesque.com/id/market-quotes/snapshot/S{n}/{date}"
+            rows.append((snap, RDF_TYPE, str(MARKET_QUOTES.EquitySnapshot)))
+            rows.append((snap, MARKET_CAPTURE_TIME, f"{date}T16:40:40.167Z"))
+    return rows
+
+
+def test_a_sub_monthly_source_attaches_to_the_day_not_the_month(
+    spark, make_triples
+):
+    """Market quotes are intraday and were being flattened into a month node."""
+    rows = _quotes_over(["2026-07-02"])
+    triples = _triple_set(TemporalUnifier(spark).enrich(make_triples(rows)))
+
+    attached = {o for _s, p, o in triples if p == OBSERVED_IN_PERIOD_PRED}
+
+    assert QUOTES_TEMPORAL + "2026-07-02" in attached
+    assert QUOTES_TEMPORAL + "July" not in attached, (
+        "a sub-monthly source is still attaching directly to the month hub"
+    )
+    assert QUOTES_TEMPORAL + "2026" not in attached, (
+        "a sub-monthly source is still attaching directly to the year hub"
+    )
+
+    # The day is a period node in its own right, or the edge resolves to
+    # nothing during node mapping.
+    assert (
+        QUOTES_TEMPORAL + "2026-07-02", RDF_TYPE, SOURCE_DAY_TYPE
+    ) in triples
+    assert (
+        UNIFIED_BASE + "Day2026-07-02", RDF_TYPE, UNIFIED_DAY_TYPE
+    ) in triples
+
+
+def test_a_monthly_source_stays_on_the_month_grain(spark, make_triples):
+    """The BLS feeds publish monthly; a day node for them would be invented.
+
+    They arrive stating `obs hasMonth cpi:February` rather than a date literal,
+    so they never reach the day collector at all -- the routing is structural,
+    not a source list someone has to keep in sync.
+    """
+    obs = "https://jefflevesque.com/id/cpi/AllItems_November2026_Index"
+    month = identifier_namespace(str(_CPI_NS)) + "November"
+    rows = [
+        (obs, RDF_TYPE, str(_CPI_NS.Index)),
+        (obs, str(_CPI_NS.hasMonth), month),
+    ]
+
+    triples = _triple_set(TemporalUnifier(spark).enrich(make_triples(rows)))
+
+    assert (month, RDF_TYPE, SOURCE_MONTH_TYPE) in triples
+    assert not [t for t in triples if t[1] == COVERS_DAY_PRED], (
+        "a monthly source produced a day node"
+    )
+    assert not [t for t in triples if t[2] == UNIFIED_DAY_TYPE]
+
+
+def test_the_period_hub_fan_in_drops_by_the_number_of_distinct_days(
+    spark, make_triples
+):
+    """Pinned as a RATIO, so the fixture can grow without editing the number.
+
+    Every dated entity used to attach to its month, so the month's in-degree
+    was the entity count. It is now the count of DISTINCT DAYS, which is what
+    makes the hub a ladder rung instead of a hub: the reduction is the average
+    number of entities per day, and it scales with volume rather than being a
+    one-off saving.
+    """
+    days = [f"2026-07-{n:02d}" for n in range(1, 11)]
+    per_day = 4
+    rows = _quotes_over(days, per_day=per_day)
+
+    triples = _triple_set(TemporalUnifier(spark).enrich(make_triples(rows)))
+
+    attachments = [t for t in triples if t[1] == OBSERVED_IN_PERIOD_PRED]
+    entities = {s for s, _p, _o in attachments}
+
+    # Fan-in of the busiest period node anything attaches to.
+    fan_in = {}
+    for _s, _p, period in attachments:
+        fan_in[period] = fan_in.get(period, 0) + 1
+    busiest = max(fan_in.values())
+
+    assert len(entities) == len(days) * per_day
+    assert busiest <= per_day, (
+        f"the busiest period node holds {busiest} of {len(entities)} entities; "
+        f"with {len(days)} distinct days it should hold at most {per_day}"
+    )
+
+    # The month is still reachable, and its fan-in is now the day count.
+    covered = {
+        o for s, p, o in triples
+        if p == COVERS_DAY_PRED and s == UNIFIED_BASE + "July"
+    }
+    assert len(covered) == len(days)
+    assert len(covered) * per_day == len(entities), (
+        "the month's fan-in should be the distinct-day count, not the entity count"
+    )
+
+
+def test_a_date_with_no_day_still_reaches_its_month(spark, make_triples):
+    """The grain rule is "finest AVAILABLE", not "always the day".
+
+    A GUARD, NOT AN OBSERVATION. No source emits a partial date today: every
+    hasFilingDate, hasPeriodOfReport and captureTime in the committed fixtures
+    carries a full YYYY-MM-DD. So this shape is not measured, and the test says
+    so rather than implying otherwise.
+
+    It is worth guarding because the cost of being wrong is silent. If the day
+    grain were hardcoded, a date arriving as "2026-06" would produce no day row
+    and no month row either, and the entity would drop off the temporal spine
+    with nothing raised -- the same class of silent orphaning that
+    OBSERVED_IN_PERIOD_PRED was added to fix.
+
+    Hung on hasPeriodOfReport because that is the one date here where a month is
+    semantically plausible: a quarterly filing reports on a period, not on a
+    day. A quote snapshot would be the wrong fixture -- captureTime is an
+    instant and cannot lose its day.
+    """
+    filing = "https://jefflevesque.com/id/sec-filings/0000842657-26-000012_Filing"
+    rows = [
+        (filing, RDF_TYPE, str(SEC_FILINGS.SECFiling)),
+        (filing, str(SEC_FILINGS.hasPeriodOfReport), "2026-06"),
+    ]
+
+    triples = _triple_set(TemporalUnifier(spark).enrich(make_triples(rows)))
+
+    attached = {
+        o for s, p, o in triples
+        if p == OBSERVED_IN_PERIOD_PRED and s == filing
+    }
+    assert SEC_TEMPORAL + "June" in attached, (
+        "an entity whose date carries no day was orphaned"
+    )
+    assert not [t for t in triples if t[2] == UNIFIED_DAY_TYPE]

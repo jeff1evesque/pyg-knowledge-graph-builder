@@ -1346,8 +1346,8 @@ When config is empty, sensible defaults are inferred from the data.
 | `--parquet_partitions` | No | `200` | Number of Parquet output partitions |
 | `--source_format` | No | `ntriples` | Source RDF format: `ntriples` (one triple per line in `.nt` files) or `turtle_parquet` (self-contained Turtle blobs in a Parquet column). Applies to modes `full` and `enrichment_only` only — `pyg_only` always reads enriched Parquet written by this pipeline |
 | `--turtle_column` | No | *(auto)* | Column name containing Turtle strings when `--source_format=turtle_parquet`. Ignored for `ntriples` format. Left unset, the column is resolved **per source** against `TURTLE_COLUMN_CANDIDATES` (`triples`, then `rdf_turtle`), so one run can span sources whose schemas disagree; set it to force a single name everywhere |
-| `--market_sector_definitions_bucket` | No | `""` | S3 bucket containing the S&P 500 tickers CSV for dynamic sector classification. If empty, falls back to hardcoded sector patterns |
-| `--market_sector_definitions_key` | No | `""` | S3 key for the tickers CSV (e.g., `market/sp500/tickers/latest.csv`). Tickers are grouped by `GICS Sector` column to build sector patterns at runtime |
+| `--market_sector_definitions_bucket` | No | `""` | S3 bucket holding the S&P 500 constituents CSV. **Set this for real runs** — three cross-source links are empty or degraded without it; see the note under Cross-Source Linking |
+| `--market_sector_definitions_key` | No | `""` | S3 key for the S&P 500 constituents CSV. Supplies three things: the ticker to company-ID map that keys the company bridge, the GICS sector classification, and the sub-industry peer links. Without it the first and third are empty and sector classification falls back to a small built-in list |
 
 Metadata files are always written when mode is `full` or `pyg_only`. Mode `enrichment_only` does not produce metadata files (no PyG graph is built in that mode).
 
@@ -1703,6 +1703,26 @@ def link_options_to_underlying(self, triples_df):
 ### Cross-Source Linking
 
 Discovers and creates relationships across different data source families:
+
+> **Set `--market_sector_definitions_bucket` / `--market_sector_definitions_key` for real runs.**
+> They point at the S&P 500 constituents CSV, and three links read it:
+>
+> | link | with the CSV | without |
+> |---|---|---|
+> | quote → company (ticker resolved to the SEC's company ID) | all 503 constituents | **none** |
+> | snapshot → GICS sector | 503 tickers, 11 sectors | ~130 tickers from a built-in list |
+> | company ↔ company, same sub-industry | 127 groups | **none** |
+>
+> Both default to empty, so a run that does not set them builds a graph missing
+> those links with nothing logged as wrong. There is deliberately **no** built-in
+> fallback for the company-ID map: guessing a regulator's ID would silently merge
+> two unrelated companies into one node, which is worse than an absent link.
+>
+> A second limit is upstream and not fixable here: a filing reaches an economic
+> sector through `filings:hasSic`, and the SEC leaves that code blank on most
+> filings — 15 of 40 on the committed fixtures. So roughly four companies in ten
+> get an industry, and the ceiling is EDGAR's classification coverage rather than
+> this join's.
 
 > **Note:** temporal alignment is **not** part of cross-source linking. It runs earlier, as its own enrichment phase (`TemporalUnifier`), and its output is merged before this stage runs. Cross-source linking previously duplicated it with a matcher anchored only at the end of the URI, so anything merely *ending* with a month name (e.g. `...PercentChange_..._2025_September`) was asserted to **be** that month via `owl:sameAs`. That step has been removed; the example below is what `TemporalUnifier` produces correctly.
 

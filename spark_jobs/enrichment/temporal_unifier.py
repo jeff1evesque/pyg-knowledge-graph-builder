@@ -33,6 +33,30 @@ Example output triples:
     unified:Q1        bls:coversMonth  unified:January
     unified:Q1        bls:coversMonth  unified:February
     unified:Q1        bls:coversMonth  unified:March
+
+    unified:Day2026-02-14  rdf:type       bls:UnifiedDay
+    unified:Day2026-02-14  rdfs:label     "2026-02-14"
+    unified:Day2026-02-14  owl:sameAs     https://jefflevesque.com/id/temporal/sec/2026-02-14
+    unified:February       bls:coversDay  unified:Day2026-02-14
+
+THE PERIOD LADDER, AND WHY IT HAS A DAY RUNG
+--------------------------------------------
+A dated entity attaches to ONE period -- the finest grain its own date supports
+-- and the period nodes chain upward: day -> month -> quarter -> year. Nothing
+attaches to two grains at once.
+
+That rule is the fix for a hub. observedInPeriod used to link every dated entity
+to its month AND its year, so both nodes accumulated an edge per entity in the
+whole build; the month became the graph's largest hub by a wide margin (3,867 of
+the cross-source edges over two node types, 97% from one source family), and a
+hub at that degree oversquashes -- aggregating over it mixes every source in the
+period into one representation.
+
+Monthly is the correct grain for the BLS feeds, which publish monthly and arrive
+already stating `obs hasMonth cpi:February`. It was the wrong grain for the
+three sources that are intraday or event-timed -- market quotes, SEC filings and
+weather alerts -- which are exactly the sources that reach
+_collect_date_based_temporals, so the routing needs no source list.
 """
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -63,7 +87,31 @@ OWL_SAME_AS = "http://www.w3.org/2002/07/owl#sameAs"
 UNIFIED_MONTH_TYPE = str(BLS_ENRICHMENT.UnifiedMonth)
 UNIFIED_YEAR_TYPE = str(BLS_ENRICHMENT.UnifiedYear)
 UNIFIED_QUARTER_TYPE = str(BLS_ENRICHMENT.UnifiedQuarter)
+UNIFIED_DAY_TYPE = str(BLS_ENRICHMENT.UnifiedDay)
 COVERS_MONTH_PRED = str(BLS_ENRICHMENT.coversMonth)
+
+# Month -> day, the rung this work adds to the period ladder.
+#
+# WHY A DAY GRAIN EXISTS AT ALL. observedInPeriod used to attach every dated
+# entity from every source directly to a month node, and the month nodes were
+# the graph's largest hub by a wide margin -- 3,867 of the cross-source edges on
+# two node types, 97% of them from one source family. A hub at that degree
+# OVERSQUASHES: aggregating over it mixes every source in the period into one
+# representation, and "same month" is not a relationship a model can learn
+# anything from.
+#
+# Monthly is the RIGHT grain for the economic indicator feeds, whose source data
+# is published monthly and which arrive already stating `obs hasMonth
+# cpi:February`. It is the wrong grain for the three sources that are intraday
+# or event-timed -- market quotes, SEC filings, weather alerts -- which were
+# being flattened into it. All three already carry day-resolution timestamps, so
+# this needs nothing upstream.
+#
+# The day hangs off the month rather than replacing it, so nothing loses
+# reachability: a quote still reaches February, now as
+# Snapshot -> Day -> February rather than Snapshot -> February. What changes is
+# the month's in-degree, which drops by roughly the number of days in it.
+COVERS_DAY_PRED = str(BLS_ENRICHMENT.coversDay)
 
 # The on-ramp from a dated entity to the period it falls in.
 #
@@ -90,12 +138,22 @@ OBSERVED_IN_PERIOD_PRED = str(BLS_ENRICHMENT.observedInPeriod)
 SOURCE_MONTH_TYPE = str(SOURCE_TEMPORAL.SourceMonth)
 SOURCE_YEAR_TYPE = str(SOURCE_TEMPORAL.SourceYear)
 SOURCE_QUARTER_TYPE = str(SOURCE_TEMPORAL.SourceQuarter)
+SOURCE_DAY_TYPE = str(SOURCE_TEMPORAL.SourceDay)
 
 SOURCE_TEMPORAL_TYPE_BY_KIND = {
     "month": SOURCE_MONTH_TYPE,
     "year": SOURCE_YEAR_TYPE,
     "quarter": SOURCE_QUARTER_TYPE,
+    "day": SOURCE_DAY_TYPE,
 }
+
+# The grains an entity may be attached to, finest first.
+#
+# observedInPeriod links each dated entity to the FINEST grain that entity's own
+# date supports -- see enrich(). Attaching to every grain is what made the month
+# a hub: an entity that already reaches February through a day does not need a
+# second edge saying February, and the second edge is the expensive one.
+PERIOD_GRAINS_FINEST_FIRST = ("day", "month", "year")
 
 UNIFIED_BASE = str(UNIFIED)
 
@@ -299,16 +357,22 @@ class TemporalUnifier:
         new_dfs.append(self._create_source_temporal_types(all_temporals))
 
         if dated is not None:
-            # The on-ramp: each entity that stated a date -> the period it names.
-            # Both granularities, matching how the BLS sources arrive (an
-            # observation states hasMonth AND hasYear).
-            new_dfs.append(
-                dated.select(
-                    F.col("subject"),
-                    F.lit(OBSERVED_IN_PERIOD_PRED).alias("predicate"),
-                    F.col("temporal_uri").alias("object"),
-                ).dropDuplicates()
-            )
+            # The on-ramp: each entity that stated a date -> the period it
+            # names, at the FINEST grain that entity's date supports.
+            #
+            # This used to emit every grain the collectors produced, so one
+            # filing attached to both its month and its year, and every dated
+            # entity in the build piled onto the same two nodes. That made the
+            # month the graph's largest hub -- 3,867 cross-source edges across
+            # two node types -- and a hub at that degree oversquashes: a GNN
+            # aggregating over it mixes every source in the period into one
+            # representation, which is why "same month" taught a model nothing.
+            #
+            # Coarser periods are NOT lost, they are reached through the finer
+            # one: Snapshot -> Day -> February -> 2026, via the coversDay and
+            # coversMonth links below. Same reachability, one more hop, roughly
+            # a 30x smaller fan-in on the month.
+            new_dfs.append(self._finest_grain_links(dated))
 
         df = self._create_unified_months(all_temporals)
         if df is not None:
@@ -319,6 +383,10 @@ class TemporalUnifier:
             new_dfs.append(df)
 
         df = self._create_unified_quarters(all_temporals)
+        if df is not None:
+            new_dfs.append(df)
+
+        df = self._create_unified_days(all_temporals)
         if df is not None:
             new_dfs.append(df)
 
@@ -334,6 +402,39 @@ class TemporalUnifier:
         logger.info("=" * 60)
 
         return result
+
+    def _finest_grain_links(self, dated: DataFrame) -> DataFrame:
+        """observedInPeriod, one grain per entity: the finest it supports.
+
+        `dated` carries a row per (subject, grain), so a filing appears three
+        times -- day, month, year. Emitting all three attaches one entity to
+        three period nodes and inflates the coarse ones by the number of
+        entities rather than by the number of finer periods.
+
+        Ranked per subject rather than filtered to "day", because the rule has
+        to hold for an entity whose date has no day in it: a value of "2024-11"
+        yields no day row and must still reach its month. A hardcoded grain
+        would silently orphan those.
+        """
+        rank = F.lit(len(PERIOD_GRAINS_FINEST_FIRST))
+        for position, grain in enumerate(PERIOD_GRAINS_FINEST_FIRST):
+            rank = F.when(F.col("kind") == grain, F.lit(position)).otherwise(rank)
+
+        ranked = dated.withColumn("_grain_rank", rank)
+
+        finest = ranked.groupBy("subject").agg(
+            F.min("_grain_rank").alias("_grain_rank")
+        )
+
+        return (
+            ranked.join(finest, ["subject", "_grain_rank"], "inner")
+            .select(
+                F.col("subject"),
+                F.lit(OBSERVED_IN_PERIOD_PRED).alias("predicate"),
+                F.col("temporal_uri").alias("object"),
+            )
+            .dropDuplicates()
+        )
 
     # ================================================================
     # BLS: Explicit month/year URIs
@@ -504,13 +605,26 @@ class TemporalUnifier:
 
         date_triples = date_triples.dropDuplicates()
 
-        # Extract month number and year from date strings.
+        # Extract day, month number and year from date strings.
         # Handles ISO formats: "2024-11-15", "2024-11-15T10:30:00", etc.
         # Uses substring extraction — no UDF needed.
         parsed = date_triples.withColumn(
             "year_str", F.regexp_extract(F.col("date_value"), r"(\d{4})", 1)
         ).withColumn(
             "month_str", F.regexp_extract(F.col("date_value"), r"\d{4}-(\d{2})", 1)
+        ).withColumn(
+            # The day is OPTIONAL, unlike the other two -- a GUARD rather than
+            # an observation. Every source reaching this method states a full
+            # YYYY-MM-DD today, in every committed fixture. But nothing
+            # upstream PREVENTS a partial date (hasPeriodOfReport is the
+            # plausible one: a quarterly filing reports on a period, not a
+            # day), and if the day grain were mandatory such a value would
+            # yield no day row, take the month row with it in _finest_grain_
+            # links, and drop the entity off the temporal spine entirely with
+            # nothing raised. Two characters of regex keep that from being
+            # silent.
+            "day_str",
+            F.regexp_extract(F.col("date_value"), r"(\d{4}-\d{2}-\d{2})", 1),
         ).filter(
             (F.col("year_str") != "") & (F.col("month_str") != "")
         )
@@ -542,7 +656,24 @@ class TemporalUnifier:
             F.lit("year").alias("kind"),
         ).dropDuplicates()
 
-        return months.unionAll(years)
+        # Produce day rows.
+        #
+        # Only the sources that reach THIS method get them, and that is the
+        # whole routing rule -- no source list to keep in sync. The three
+        # date-literal sources (SEC filings, market quotes, NOAA alerts) are
+        # exactly the sub-monthly ones, because a source that publishes monthly
+        # states its period as a URI and arrives through
+        # _collect_bls_months_years instead, which emits no day at all. The BLS
+        # feeds therefore stay on the month grain by construction rather than by
+        # exclusion.
+        days = parsed.filter(F.col("day_str") != "").select(
+            F.col("subject"),
+            F.concat(F.lit(synthetic_prefix), F.col("day_str")).alias("temporal_uri"),
+            F.col("day_str").alias("normalized_name"),
+            F.lit("day").alias("kind"),
+        ).dropDuplicates()
+
+        return months.unionAll(years).unionAll(days)
 
     # ================================================================
     # Market: Timestamps + expiration dates → synthetic temporal URIs
@@ -799,6 +930,96 @@ class TemporalUnifier:
             F.col("unified_uri").alias("subject"),
             F.lit(COVERS_MONTH_PRED).alias("predicate"),
             F.concat(F.lit(UNIFIED_BASE), F.col("month_name")).alias("object"),
+        )
+
+        return (
+            type_triples
+            .unionAll(label_triples)
+            .unionAll(same_as_triples)
+            .unionAll(covers_triples)
+        )
+
+
+    def _create_unified_days(
+        self, all_temporals: DataFrame
+    ) -> Optional[DataFrame]:
+        """
+        Create unified day entities, owl:sameAs links, and the coversDay link
+        from the unified month each day falls in.
+
+        For each distinct date, produces:
+          unified:Day2026-02-14  rdf:type         bls:UnifiedDay
+          unified:Day2026-02-14  rdfs:label       "2026-02-14"
+          unified:Day2026-02-14  owl:sameAs       <source_day_uri>
+          unified:February       bls:coversDay    unified:Day2026-02-14
+
+        The coversDay link is what keeps the month reachable. A quote no longer
+        points at February directly -- it points at the day, and the day sits
+        under February -- so the month's in-degree falls from "every dated
+        entity in the build" to "the days that occurred", while every path that
+        existed before still exists one hop longer.
+
+        The day is genuinely cross-source, which is the point: 2026-02-14 is
+        the same day for a filing, a quote and a weather alert, so the unified
+        day is a bridge in its own right at roughly a thirtieth of the fan-in.
+        Unlike the month, it is also a period over which those three sources
+        can plausibly be RELATED -- a filing and the market's reaction to it
+        share a day, and share a month only incidentally.
+        """
+        days = all_temporals.filter(F.col("kind") == "day")
+
+        if days.head(1) == []:
+            return None
+
+        # unified:Day{YYYY-MM-DD}. Prefixed with "Day" for the same reason
+        # years are prefixed with "Year": a bare local name that starts with a
+        # digit is a fragile URI, and the prefix keeps the three unified period
+        # vocabularies visibly distinct.
+        days = days.withColumn(
+            "unified_uri",
+            F.concat(F.lit(UNIFIED_BASE), F.lit("Day"), F.col("normalized_name")),
+        )
+
+        distinct_days = days.select("unified_uri", "normalized_name").dropDuplicates()
+
+        type_triples = distinct_days.select(
+            F.col("unified_uri").alias("subject"),
+            F.lit(RDF_TYPE).alias("predicate"),
+            F.lit(UNIFIED_DAY_TYPE).alias("object"),
+        )
+
+        label_triples = distinct_days.select(
+            F.col("unified_uri").alias("subject"),
+            F.lit(RDFS_LABEL).alias("predicate"),
+            F.col("normalized_name").alias("object"),
+        )
+
+        same_as_triples = days.select(
+            F.col("unified_uri").alias("subject"),
+            F.lit(OWL_SAME_AS).alias("predicate"),
+            F.col("temporal_uri").alias("object"),
+        )
+
+        # month -> day, via the month NUMBER carried in the date itself. No
+        # join back to the collected months is needed and none is wanted: the
+        # unified month URI is a pure function of the date, and deriving it
+        # here keeps this correct for a month that only a day ever mentioned.
+        month_mapping = self.spark.createDataFrame(
+            list(MONTH_NUM_TO_NAME.items()), ["month_str", "month_name"]
+        )
+
+        covers_triples = (
+            distinct_days
+            .withColumn(
+                "month_str",
+                F.regexp_extract(F.col("normalized_name"), r"^\d{4}-(\d{2})", 1),
+            )
+            .join(F.broadcast(month_mapping), "month_str", "inner")
+            .select(
+                F.concat(F.lit(UNIFIED_BASE), F.col("month_name")).alias("subject"),
+                F.lit(COVERS_DAY_PRED).alias("predicate"),
+                F.col("unified_uri").alias("object"),
+            )
         )
 
         return (

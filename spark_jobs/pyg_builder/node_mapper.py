@@ -59,8 +59,8 @@ _EXCLUDED_TYPE_PREFIXES = (
 )
 
 _TEMPORAL_TYPE_FRAGMENTS = (
-    "Month", "Year", "Quarter", "UnifiedMonth",
-    "UnifiedYear", "UnifiedQuarter", "TimePeriod",
+    "Month", "Year", "Quarter", "Day", "UnifiedMonth",
+    "UnifiedYear", "UnifiedQuarter", "UnifiedDay", "TimePeriod",
 )
 
 # Node types that must win the canonical-type contest outright, ahead of the
@@ -81,10 +81,17 @@ _TEMPORAL_TYPE_FRAGMENTS = (
 # granularity, which is the whole point of the unifier. The source type is not
 # lost -- it stays an rdf:type triple on the entity and is still available as a
 # feature; only the *canonical* type used for graph structure is overridden.
+#
+# SourceDay is here for the same reason as the other three, and matters more:
+# the day grain exists to take load off the month hub, and a day that sharded
+# across temporal_sec_Day / temporal_market_Day / temporal_noaa_Day would put
+# the three sources back on separate nodes -- undoing the bridge instead of
+# narrowing it.
 _CANONICAL_TYPE_PRIORITY = (
     "temporal_SourceMonth",
     "temporal_SourceYear",
     "temporal_SourceQuarter",
+    "temporal_SourceDay",
 )
 _SECTOR_TYPE_FRAGMENTS = ("EconomicSector", "Sector")
 
