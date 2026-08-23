@@ -427,11 +427,20 @@ def test_positional_issuer_nodes_do_not_collide():
 # regenerated without the other.
 
 def _fixture_graph(relative: str):
+    """The committed fixture at ``relative``, parsed by its own format.
+
+    Both formats are read here because both are committed and the e2e suite
+    loads each: the Parquet pair feeds test_full_turtle_parquet, the N-Triples
+    pair feeds test_full_ntriples.
+    """
     import pandas as pd
     import rdflib
 
     path = Path(__file__).resolve().parent / "fixtures" / "e2e" / relative
     graph = rdflib.Graph()
+    if path.suffix == ".nt":
+        graph.parse(path, format="nt")
+        return graph
     for document in pd.read_parquet(path)["triples"]:
         graph.parse(data=document, format="turtle")
     return graph
@@ -445,29 +454,52 @@ def _objects_of(graph, local_name: str) -> set[str]:
     }
 
 
-def test_the_two_fixtures_share_at_least_one_ticker():
+@pytest.mark.parametrize(
+    ("sec_fixture", "market_fixture"),
+    [
+        (
+            "turtle_parquet/sec/sec_sample.parquet",
+            "turtle_parquet/market/market_sample.parquet",
+        ),
+        ("ntriples/sec.nt", "ntriples/market.nt"),
+    ],
+    ids=("turtle_parquet", "ntriples"),
+)
+def test_the_two_fixtures_share_at_least_one_ticker(sec_fixture, market_fixture):
     """A SEC issuer's ticker must also quote in the market fixture.
 
-    Without an overlap the market half of the company bridge has an empty
-    candidate population, so BRIDGE_COVERAGE skips it and the e2e suite reports
-    success for a join it never exercised. Regenerate BOTH fixtures together --
-    generate_sec_e2e_fixtures.py keeps one index constituent for exactly this
-    reason, and generate_market_e2e_fixtures.py anchors on the symbols this
-    fixture states.
+    ONE shared ticker is the bar, not a matched pair of populations. Market data
+    covers an index and filings cover everyone who files, so the overlap is
+    small by nature and a filing with no quotes behind it is not a defect --
+    BRIDGE_COVERAGE filters to the intersection before it measures anything.
+    What this refuses is an intersection of *zero*, which leaves that rule no
+    candidates and turns the e2e suite green over an untested join.
+
+    Regenerate BOTH fixtures together -- generate_sec_e2e_fixtures.py keeps one
+    index constituent for exactly this reason, and
+    generate_market_e2e_fixtures.py anchors on the symbols this fixture states.
+
+    Checked per format because the pairs are sliced independently: sec.nt is a
+    slice of the same sample the Parquet rows come from, so the Parquet pair can
+    overlap while the N-Triples pair does not. That is not hypothetical -- the
+    slice took filings in URI order, left the one index constituent out, and
+    this test passed on the Parquet pair while test_full_ntriples failed on the
+    empty join.
     """
     sec_tickers = _objects_of(
-        _fixture_graph("turtle_parquet/sec/sec_sample.parquet"),
+        _fixture_graph(sec_fixture),
         "hasIssuerTradingSymbol",
     )
     market_symbols = _objects_of(
-        _fixture_graph("turtle_parquet/market/market_sample.parquet"),
+        _fixture_graph(market_fixture),
         "symbol",
     )
     # An option symbol carries its underlying in the first six characters.
     market_roots = {s[:6].strip() for s in market_symbols} | market_symbols
 
     assert sec_tickers & market_roots, (
-        f"no SEC fixture issuer quotes in the market fixture. SEC states "
+        f"no SEC fixture issuer quotes in the market fixture "
+        f"({sec_fixture} vs {market_fixture}). SEC states "
         f"{sorted(sec_tickers)}; the market fixture carries "
         f"{sorted(market_symbols)}. The company bridge has nothing to join, "
         f"and BRIDGE_COVERAGE will skip its market half rather than fail."
