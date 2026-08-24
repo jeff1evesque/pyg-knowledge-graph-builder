@@ -41,6 +41,7 @@ from spark_jobs.enrichment.intra_source.noaa_linker import (
     HAS_FIPS_CODE,
     HAS_SAME_CODE,
     ESCALATES_TO_PRED,
+    PRECEDES_PRED,
 )
 
 
@@ -77,7 +78,8 @@ def _alert(rows, alert, info, area_desc, sent_time, severity_uri, urgency_uri):
 ALERT_INFO_JOIN_LEGS = 10
 
 
-def _alert_over_geocodes(alert, fips_codes, *, restate_block, event="Flood Advisory"):
+def _alert_over_geocodes(alert, fips_codes, *, restate_block, event="Flood Advisory",
+                         sent_time="2024-11-15T10:00:00", area_desc=None):
     """The triples one alert covering `fips_codes` counties arrives as.
 
     `restate_block=True` is the real archive shape: the source stores one
@@ -93,14 +95,16 @@ def _alert_over_geocodes(alert, fips_codes, *, restate_block, event="Flood Advis
     block = [
         (alert, RDF_TYPE, WEATHER_ALERT_TYPE),
         (alert, HAS_INFO, info),
-        (info, HAS_SENT_TIME, "2024-11-15T10:00:00"),
+        (info, HAS_SENT_TIME, sent_time),
         (info, HAS_EVENT, event),
         (info, HAS_SEVERITY, _severity_uri(3)),
         (info, HAS_URGENCY, _urgency_uri(3)),
         (info, HAS_CERTAINTY, str(CAP.Observed)),
         (info, HAS_CATEGORY, str(CAP.Met)),
         (info, HAS_AREA, area),
-        (area, HAS_AREA_DESC, "; ".join(f"County {c}" for c in fips_codes)),
+        (area, HAS_AREA_DESC,
+         area_desc if area_desc is not None
+         else "; ".join(f"County {c}" for c in fips_codes)),
     ]
     assert len(block) == ALERT_INFO_JOIN_LEGS
 
@@ -256,6 +260,108 @@ def test_enrich_is_unchanged_by_a_source_that_restates_the_block(
     assert restated == stated_once
     # Guard the comparison itself: an all-empty result would satisfy it.
     assert restated
+
+
+def _precedes(triples):
+    return {(s, o) for s, p, o in triples if p == PRECEDES_PRED}
+
+
+def _enrich_rows(spark, make_triples, rows):
+    return _triple_set(NOAAIntraSourceLinker(spark).enrich(make_triples(rows)))
+
+
+# ======================================================================
+# Deep: temporal sequencing keys on the geocode, not the description
+# ======================================================================
+
+def test_precedes_chains_alerts_sharing_a_county(spark, make_triples):
+    """Two alerts over the same FIPS code are chained oldest -> newest."""
+    a1, a2 = "http://example.org/alert/t1", "http://example.org/alert/t2"
+    rows = (
+        _alert_over_geocodes(a1, ["012001"], restate_block=False,
+                             sent_time="2024-11-15T10:00:00")
+        + _alert_over_geocodes(a2, ["012001"], restate_block=False,
+                               sent_time="2024-11-15T11:00:00")
+    )
+
+    assert _precedes(_enrich_rows(spark, make_triples, rows)) == {(a1, a2)}
+
+
+def test_precedes_does_not_chain_alerts_in_different_counties(spark, make_triples):
+    """No shared code means no sequence, however close in time."""
+    a1, a2 = "http://example.org/alert/u1", "http://example.org/alert/u2"
+    rows = (
+        _alert_over_geocodes(a1, ["012001"], restate_block=False,
+                             sent_time="2024-11-15T10:00:00")
+        + _alert_over_geocodes(a2, ["012099"], restate_block=False,
+                               sent_time="2024-11-15T11:00:00")
+    )
+
+    assert _precedes(_enrich_rows(spark, make_triples, rows)) == set()
+
+
+def test_precedes_fires_when_area_descriptions_differ(spark, make_triples):
+    """The regression #339 is about: same county, different free-text lists.
+
+    Keying on cap:hasAreaDescription made this pair invisible — the strings
+    differ, so the two alerts landed in different window partitions and neither
+    got a successor. The geocode they share is the fact that matters.
+    """
+    a1, a2 = "http://example.org/alert/v1", "http://example.org/alert/v2"
+    rows = (
+        _alert_over_geocodes(a1, ["013083"], restate_block=False,
+                             sent_time="2024-11-15T10:00:00",
+                             area_desc="Dade; Walker; Catoosa")
+        + _alert_over_geocodes(a2, ["013083"], restate_block=False,
+                               sent_time="2024-11-15T11:00:00",
+                               area_desc="Dade; Walker; Catoosa; Whitfield")
+    )
+
+    assert _precedes(_enrich_rows(spark, make_triples, rows)) == {(a1, a2)}
+
+
+def test_precedes_emits_one_triple_for_a_pair_adjacent_in_several_counties(
+    spark, make_triples
+):
+    """An alert covering many counties appears in many chains, not many edges.
+
+    Sequencing per geocode means the same ordered pair can be adjacent in every
+    county they share. That is one fact, so it must be stated once.
+    """
+    a1, a2 = "http://example.org/alert/w1", "http://example.org/alert/w2"
+    shared = ["012001", "012003", "012005"]
+    rows = (
+        _alert_over_geocodes(a1, shared, restate_block=False,
+                             sent_time="2024-11-15T10:00:00")
+        + _alert_over_geocodes(a2, shared, restate_block=False,
+                               sent_time="2024-11-15T11:00:00")
+    )
+
+    triples = _enrich_rows(spark, make_triples, rows)
+    assert _precedes(triples) == {(a1, a2)}
+    # One triple, not one per shared county.
+    assert len([1 for _, p, _ in triples if p == PRECEDES_PRED]) == 1
+
+
+def test_precedes_is_deterministic_when_sent_times_tie(spark, make_triples):
+    """Identical timestamps must still yield a stable, single ordering.
+
+    sent_time alone is not a total order — alerts are issued in the same second
+    — and lead() over a non-deterministic order would vary run to run, which the
+    pipeline's reproducibility guarantee forbids. The tie breaks on the alert
+    URI, so the lower URI precedes the higher one.
+    """
+    a1, a2 = "http://example.org/alert/x1", "http://example.org/alert/x2"
+    same_time = "2024-11-15T10:00:00"
+    rows = (
+        _alert_over_geocodes(a1, ["012001"], restate_block=False,
+                             sent_time=same_time)
+        + _alert_over_geocodes(a2, ["012001"], restate_block=False,
+                               sent_time=same_time)
+    )
+
+    runs = [_precedes(_enrich_rows(spark, make_triples, rows)) for _ in range(2)]
+    assert runs[0] == runs[1] == {(a1, a2)}
 
 
 def test_noaa_triples_keeps_noaa_deduplicated_and_drops_the_rest(
