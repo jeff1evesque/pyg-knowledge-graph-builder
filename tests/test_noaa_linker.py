@@ -6,8 +6,9 @@ Three tiers, mirroring test_bls_linker.py:
     short-circuits to zero triples.
   - Targeted deep test: severity escalation (`_link_severity_escalations`) —
     the window-ordered, rank-comparison logic that is easy to regress. Covers
-    the positive case, the non-escalation case (severity drops), and the
-    secondary urgency-tiebreak signal.
+    the positive case, the non-escalation case (severity drops), the secondary
+    urgency-tiebreak signal, and the #339 partition key: escalations are
+    sequenced per FIPS/SAME geocode, not per free-text `cap:hasAreaDescription`.
   - Repeated-source-row tests: the NOAA archive states one row per
     (alert, geocode) and restates the whole alert/info/area block in each, so
     every one of `_build_alert_info`'s ten join legs sees the same triple k
@@ -49,6 +50,22 @@ def _triple_set(result):
     return {(r["subject"], r["predicate"], r["object"]) for r in result.collect()}
 
 
+def _enrich_rows(spark, make_triples, rows):
+    return _triple_set(NOAAIntraSourceLinker(spark).enrich(make_triples(rows)))
+
+
+def _pairs_under(triples, predicate):
+    return {(s, o) for s, p, o in triples if p == predicate}
+
+
+def _precedes(triples):
+    return _pairs_under(triples, PRECEDES_PRED)
+
+
+def _escalates(triples):
+    return _pairs_under(triples, ESCALATES_TO_PRED)
+
+
 def _severity_uri(level):
     """The CAP severity URI at a given rank (Minor=1 .. Extreme=4)."""
     return next(uri for uri, lvl in SEVERITY_HIERARCHY.items() if lvl == level)
@@ -59,27 +76,14 @@ def _urgency_uri(level):
     return next(uri for uri, lvl in URGENCY_HIERARCHY.items() if lvl == level)
 
 
-def _alert(rows, alert, info, area_desc, sent_time, severity_uri, urgency_uri):
-    """Append the triples for one fully-specified alert to `rows`."""
-    area = f"{alert}/area"
-    rows.extend([
-        (alert, RDF_TYPE, WEATHER_ALERT_TYPE),
-        (alert, HAS_INFO, info),
-        (info, HAS_SENT_TIME, sent_time),
-        (info, HAS_SEVERITY, severity_uri),
-        (info, HAS_URGENCY, urgency_uri),
-        (info, HAS_AREA, area),
-        (area, HAS_AREA_DESC, area_desc),
-    ])
-
-
 # The ten legs _build_alert_info joins. Named here so the k**10 arithmetic in
 # the tests below is checkable against the code rather than asserted.
 ALERT_INFO_JOIN_LEGS = 10
 
 
 def _alert_over_geocodes(alert, fips_codes, *, restate_block, event="Flood Advisory",
-                         sent_time="2024-11-15T10:00:00", area_desc=None):
+                         sent_time="2024-11-15T10:00:00", area_desc=None,
+                         severity=3, urgency=3):
     """The triples one alert covering `fips_codes` counties arrives as.
 
     `restate_block=True` is the real archive shape: the source stores one
@@ -90,6 +94,9 @@ def _alert_over_geocodes(alert, fips_codes, *, restate_block, event="Flood Advis
 
     `restate_block=False` is the same graph as a set: block stated once, one
     geocode sub-block per county. The two must enrich to the same triples.
+
+    `severity` and `urgency` are ranks in SEVERITY_HIERARCHY / URGENCY_HIERARCHY
+    (Minor=1..Extreme=4, Past=1..Immediate=4), for the escalation tests.
     """
     info, area = f"{alert}#info", f"{alert}#area"
     block = [
@@ -97,8 +104,8 @@ def _alert_over_geocodes(alert, fips_codes, *, restate_block, event="Flood Advis
         (alert, HAS_INFO, info),
         (info, HAS_SENT_TIME, sent_time),
         (info, HAS_EVENT, event),
-        (info, HAS_SEVERITY, _severity_uri(3)),
-        (info, HAS_URGENCY, _urgency_uri(3)),
+        (info, HAS_SEVERITY, _severity_uri(severity)),
+        (info, HAS_URGENCY, _urgency_uri(urgency)),
         (info, HAS_CERTAINTY, str(CAP.Observed)),
         (info, HAS_CATEGORY, str(CAP.Met)),
         (info, HAS_AREA, area),
@@ -151,18 +158,22 @@ def test_noaa_enrich_empty_for_non_noaa_data(spark, make_triples):
 
 # ======================================================================
 # Deep: severity escalation
+#
+# Keys on the geocode, not cap:hasAreaDescription — the same defect precedes
+# had, fixed the same way. See _link_severity_escalations.
 # ======================================================================
 
 def test_severity_escalation_links_increasing_severity(spark, make_triples):
-    """Same area, Moderate -> Severe over time yields a directional escalatesTo."""
+    """Same county, Moderate -> Severe over time yields a directional escalatesTo."""
     a1, a2 = "http://example.org/alert/a1", "http://example.org/alert/a2"
-    rows = []
-    _alert(rows, a1, a1 + "/i", "Test County",
-           "2024-11-15T10:00:00", _severity_uri(2), _urgency_uri(3))
-    _alert(rows, a2, a2 + "/i", "Test County",
-           "2024-11-15T11:00:00", _severity_uri(3), _urgency_uri(3))
+    rows = (
+        _alert_over_geocodes(a1, ["012001"], restate_block=False,
+                             sent_time="2024-11-15T10:00:00", severity=2)
+        + _alert_over_geocodes(a2, ["012001"], restate_block=False,
+                               sent_time="2024-11-15T11:00:00", severity=3)
+    )
 
-    triples = _triple_set(NOAAIntraSourceLinker(spark).enrich(make_triples(rows)))
+    triples = _enrich_rows(spark, make_triples, rows)
 
     assert (a1, ESCALATES_TO_PRED, a2) in triples
     # Directional: the higher-severity alert does not escalate back down.
@@ -172,29 +183,83 @@ def test_severity_escalation_links_increasing_severity(spark, make_triples):
 def test_no_escalation_when_severity_decreases(spark, make_triples):
     """Severe -> Minor is a de-escalation: no escalatesTo edge."""
     a1, a2 = "http://example.org/alert/b1", "http://example.org/alert/b2"
-    rows = []
-    _alert(rows, a1, a1 + "/i", "Calm County",
-           "2024-11-15T10:00:00", _severity_uri(3), _urgency_uri(3))
-    _alert(rows, a2, a2 + "/i", "Calm County",
-           "2024-11-15T11:00:00", _severity_uri(1), _urgency_uri(3))
+    rows = (
+        _alert_over_geocodes(a1, ["012003"], restate_block=False,
+                             sent_time="2024-11-15T10:00:00", severity=3)
+        + _alert_over_geocodes(a2, ["012003"], restate_block=False,
+                               sent_time="2024-11-15T11:00:00", severity=1)
+    )
 
-    triples = _triple_set(NOAAIntraSourceLinker(spark).enrich(make_triples(rows)))
-
-    assert not any(p == ESCALATES_TO_PRED for _, p, _ in triples)
+    assert _escalates(_enrich_rows(spark, make_triples, rows)) == set()
 
 
 def test_escalation_via_urgency_when_severity_equal(spark, make_triples):
     """Same severity but rising urgency (Expected -> Immediate) still escalates."""
     a1, a2 = "http://example.org/alert/c1", "http://example.org/alert/c2"
-    rows = []
-    _alert(rows, a1, a1 + "/i", "Urgent County",
-           "2024-11-15T10:00:00", _severity_uri(3), _urgency_uri(3))
-    _alert(rows, a2, a2 + "/i", "Urgent County",
-           "2024-11-15T11:00:00", _severity_uri(3), _urgency_uri(4))
+    rows = (
+        _alert_over_geocodes(a1, ["012005"], restate_block=False,
+                             sent_time="2024-11-15T10:00:00",
+                             severity=3, urgency=3)
+        + _alert_over_geocodes(a2, ["012005"], restate_block=False,
+                               sent_time="2024-11-15T11:00:00",
+                               severity=3, urgency=4)
+    )
 
-    triples = _triple_set(NOAAIntraSourceLinker(spark).enrich(make_triples(rows)))
+    assert (a1, ESCALATES_TO_PRED, a2) in _enrich_rows(spark, make_triples, rows)
 
-    assert (a1, ESCALATES_TO_PRED, a2) in triples
+
+def test_escalation_fires_when_area_descriptions_differ(spark, make_triples):
+    """The half of #339 the follow-up added: same county, different county lists.
+
+    This is the escalation the old key threw away. A warning is re-issued at a
+    higher severity over a slightly different set of counties, so the two
+    free-text descriptions differ, so the two alerts landed in different window
+    partitions and the upgrade went undetected — even though both alerts name
+    the same FIPS code. One day of 1,262 alerts yielded 56 escalatesTo edges.
+    """
+    a1, a2 = "http://example.org/alert/d1", "http://example.org/alert/d2"
+    rows = (
+        _alert_over_geocodes(a1, ["013083"], restate_block=False,
+                             sent_time="2024-11-15T10:00:00", severity=2,
+                             area_desc="Dade; Walker; Catoosa")
+        + _alert_over_geocodes(a2, ["013083"], restate_block=False,
+                               sent_time="2024-11-15T11:00:00", severity=4,
+                               area_desc="Dade; Walker; Catoosa; Whitfield")
+    )
+
+    assert _escalates(_enrich_rows(spark, make_triples, rows)) == {(a1, a2)}
+
+
+def test_escalation_does_not_link_alerts_in_different_counties(spark, make_triples):
+    """No shared code means no escalation, however sharp the severity rise."""
+    a1, a2 = "http://example.org/alert/e1", "http://example.org/alert/e2"
+    rows = (
+        _alert_over_geocodes(a1, ["012001"], restate_block=False,
+                             sent_time="2024-11-15T10:00:00", severity=1)
+        + _alert_over_geocodes(a2, ["012099"], restate_block=False,
+                               sent_time="2024-11-15T11:00:00", severity=4)
+    )
+
+    assert _escalates(_enrich_rows(spark, make_triples, rows)) == set()
+
+
+def test_escalation_emits_one_triple_for_a_pair_adjacent_in_several_counties(
+    spark, make_triples
+):
+    """An escalation over three shared counties is one fact, so one triple."""
+    a1, a2 = "http://example.org/alert/f1", "http://example.org/alert/f2"
+    shared = ["012001", "012003", "012005"]
+    rows = (
+        _alert_over_geocodes(a1, shared, restate_block=False,
+                             sent_time="2024-11-15T10:00:00", severity=2)
+        + _alert_over_geocodes(a2, shared, restate_block=False,
+                               sent_time="2024-11-15T11:00:00", severity=3)
+    )
+
+    triples = _enrich_rows(spark, make_triples, rows)
+    assert _escalates(triples) == {(a1, a2)}
+    # One triple, not one per shared county.
+    assert len([1 for _, p, _ in triples if p == ESCALATES_TO_PRED]) == 1
 
 
 # ======================================================================
@@ -260,14 +325,6 @@ def test_enrich_is_unchanged_by_a_source_that_restates_the_block(
     assert restated == stated_once
     # Guard the comparison itself: an all-empty result would satisfy it.
     assert restated
-
-
-def _precedes(triples):
-    return {(s, o) for s, p, o in triples if p == PRECEDES_PRED}
-
-
-def _enrich_rows(spark, make_triples, rows):
-    return _triple_set(NOAAIntraSourceLinker(spark).enrich(make_triples(rows)))
 
 
 # ======================================================================
@@ -362,6 +419,39 @@ def test_precedes_is_deterministic_when_sent_times_tie(spark, make_triples):
 
     runs = [_precedes(_enrich_rows(spark, make_triples, rows)) for _ in range(2)]
     assert runs[0] == runs[1] == {(a1, a2)}
+
+
+def test_alerts_sharing_only_a_cap_category_are_not_linked(spark, make_triples):
+    """Two alerts alike in nothing but cap:hasCategory get no edge between them.
+
+    Every alert the weather feed publishes is cap:Met, so linking on the
+    category alone was a complete graph over the window: 795,691 edges on one
+    real day's 1,262 alerts, 90% of everything NOAA contributed, growing as the
+    square of the alert count. The pairs asserted nothing -- both endpoints
+    shared a value every alert shares -- and no code read the predicate.
+
+    A tornado in Georgia and a winter storm in Texas share the category and
+    nothing else, so they must end up unconnected.
+    """
+    a1, a2 = "http://example.org/alert/g1", "http://example.org/alert/g2"
+    rows = (
+        _alert_over_geocodes(a1, ["013083"], restate_block=False,
+                             event="Tornado Warning")
+        + _alert_over_geocodes(a2, ["048201"], restate_block=False,
+                               event="Winter Storm Warning")
+    )
+
+    # Guard the premise: the two really do share a category in the input.
+    categories = {o for s, p, o in rows if p == HAS_CATEGORY}
+    assert categories == {str(CAP.Met)}
+
+    triples = _enrich_rows(spark, make_triples, rows)
+
+    assert not [
+        (s, p, o) for s, p, o in triples if s in (a1, a2) and o in (a1, a2)
+    ], "alerts sharing only a CAP category must not be linked"
+    # Each is still enriched on its own terms -- this is not an empty result.
+    assert {s for s, p, _ in triples if p == HAS_EVENT_CLASSIFICATION} == {a1, a2}
 
 
 def test_noaa_triples_keeps_noaa_deduplicated_and_drops_the_rest(
