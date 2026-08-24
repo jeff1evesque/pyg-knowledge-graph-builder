@@ -109,6 +109,24 @@ HAS_UGC_CODE = str(WEATHER.hasUGCCode)
 STATUS_ACTUAL = str(CAP.Actual)
 MSG_TYPE_CANCEL = str(CAP.Cancel)
 
+# Every predicate this linker reads, used to narrow the graph to NOAA's own
+# triples in one pass. rdf:type is NOT in the list -- every source uses it, so
+# it is matched on its object instead (see _noaa_triples).
+NOAA_PREDICATES = (
+    HAS_INFO,
+    HAS_SENT_TIME,
+    HAS_AREA,
+    HAS_AREA_DESC,
+    HAS_EVENT,
+    HAS_SEVERITY,
+    HAS_URGENCY,
+    HAS_CERTAINTY,
+    HAS_CATEGORY,
+    HAS_GEOCODE,
+    HAS_FIPS_CODE,
+    HAS_SAME_CODE,
+)
+
 # Enrichment property URIs
 PRECEDES_PRED = str(NOAA_ENRICHMENT.precedes)
 AFFECTS_SAME_REGION_PRED = str(NOAA_ENRICHMENT.affectsSameRegion)
@@ -122,9 +140,10 @@ class NOAAIntraSourceLinker:
     """
     NOAA intra-source enrichment using PySpark DataFrames.
 
-    Each method reads from triples_df, produces a DataFrame of new triples
-    (subject, predicate, object), and returns it. The enrich() method unions
-    all new triples together.
+    Each method reads from the narrowed NOAA frame _noaa_triples() builds,
+    produces a DataFrame of new triples (subject, predicate, object), and
+    returns it. The enrich() method unions all new triples together. Only the
+    "is there NOAA data at all" probe touches the full graph.
 
     The RML mapper produces a 3-level structure:
         Alert (nws:WeatherAlert) → Info (cap:Info) → Area (cap:Area) → Geocode (cap:Geocode)
@@ -167,19 +186,32 @@ class NOAAIntraSourceLinker:
         logger.info("Starting NOAA Intra-Source Enrichment (PySpark)")
         logger.info("=" * 60)
 
-        triples_df.cache()
+        # NOAA's own triples, as a set, read once. Everything below joins
+        # against this rather than the whole graph -- see _noaa_triples for why
+        # the deduplication is what makes the joins finish at all.
+        noaa_df = self._noaa_triples(triples_df).cache()
 
         # Build the denormalized alert info table once — used by multiple steps.
         # Structure: (alert, info, sent_time, event, severity_uri,
         #             urgency_uri, certainty_uri, category_uri,
         #             area, area_desc)
-        alert_info_df = self._build_alert_info(triples_df)
+        alert_info_df = self._build_alert_info(noaa_df)
 
         if alert_info_df is None:
             logger.info("No fully-specified alerts found")
+            noaa_df.unpersist()
             return empty
 
         alert_info_df.cache()
+
+        # Materialized and counted HERE, before any step reads it. Six steps
+        # join against this table, so if it is wrong every one of them is, and
+        # a count is the one number that says so. When the table exploded, the
+        # job had logged "[Step 1/6]" and then went silent for as long as it was
+        # left running -- the row count was the missing evidence, and it costs
+        # one pass over a table that holds one row per alert.
+        alert_count = alert_info_df.count()
+        logger.info(f"Denormalized alert table: {alert_count:,} rows")
 
         new_dfs: List[DataFrame] = []
 
@@ -189,7 +221,7 @@ class NOAAIntraSourceLinker:
             new_dfs.append(df)
 
         logger.info("[Step 2/6] Linking geographic relationships...")
-        df = self._link_geographic_relationships(triples_df)
+        df = self._link_geographic_relationships(noaa_df)
         if df is not None:
             new_dfs.append(df)
 
@@ -214,6 +246,7 @@ class NOAAIntraSourceLinker:
             new_dfs.append(df)
 
         alert_info_df.unpersist()
+        noaa_df.unpersist()
 
         if not new_dfs:
             logger.info("No enrichment triples produced")
@@ -229,10 +262,69 @@ class NOAAIntraSourceLinker:
         return result
 
     # ================================================================
+    # Shared: narrow the graph to NOAA's triples, once
+    # ================================================================
+
+    def _noaa_triples(self, triples_df: DataFrame) -> DataFrame:
+        """NOAA's own triples, deduplicated -- the frame every step reads.
+
+        Two things happen here, and only one of them is about speed.
+
+        **dropDuplicates is load-bearing.** RDF is a set, and the rest of the
+        pipeline treats it as one: EnrichmentPipeline unions each phase's output
+        and dropDuplicates over the whole frame. But that runs AFTER intra-source
+        enrichment, so a linker sees the source frame with its repeats intact --
+        and the NOAA source repeats heavily. Its archive stores one row per
+        (alert, geocode) pair, and every row's Turtle blob restates the alert,
+        info and area blocks in full; only the geocode sub-block differs. An
+        alert covering 72 counties therefore arrives as 72 identical copies of
+        each of its ten alert/info/area triples.
+
+        _build_alert_info joins ten such relations. Ten legs each repeated k
+        times is k**10 rows for that alert, so the 72-county alert alone expands
+        to 3.7e18 rows. Measured over one real day (2026-04-15: 4,984 parquet
+        rows, 1,262 alerts): 3,782,235,540,923,562,898 rows out of a table that
+        should hold 1,262. That is the "stalls at Step 1/6" symptom -- the job
+        was not slow, it was building a table that cannot be built. Nothing
+        detected it because _build_alert_info's own head(1) probe takes one row
+        off one partition and returns instantly; the first full evaluation is
+        the dropDuplicates inside _link_temporal_sequences, which is where the
+        log line stops.
+
+        Deduplicating here removes it entirely: every leg becomes at most one
+        row per (subject, value), and the ten-way join collapses to one row per
+        alert (verified on real days -- no per-info predicate carries more than
+        one distinct value, and the table lands at exactly one row per alert).
+        Nothing downstream changes, because every consumer of the table already
+        dropDuplicates the columns it uses.
+
+        **The narrowing is the cost half.** All fourteen relation legs below --
+        ten in _build_alert_info, four in _link_geographic_relationships -- used
+        to filter the whole accumulated graph, so the linker traversed ~20M rows
+        fourteen times to find NOAA's ~70k. One pass now selects them and the
+        legs filter that. This matches what the SEC and BLS linkers already do
+        (_filter_sec_triples / _filter_bls_triples), and the deduplication is
+        what those two get for free from sources that do not repeat rows.
+
+        The predicate list is the gate rather than a subject/object URI prefix:
+        NOAA subjects live under a third-party host (api.weather.gov), so there
+        is no namespace of ours to key on, and every predicate this linker reads
+        is CAP- or WEATHER-namespaced. rdf:type is shared with every other
+        source, so the alert type triple is matched on its object instead.
+        """
+        return triples_df.filter(
+            F.col("predicate").isin(*NOAA_PREDICATES)
+            | (
+                (F.col("predicate") == RDF_TYPE)
+                & (F.col("object") == WEATHER_ALERT_TYPE)
+            )
+        ).dropDuplicates(["subject", "predicate", "object"])
+
+    # ================================================================
     # Shared: Build denormalized alert info table
     # ================================================================
 
-    def _build_alert_info(self, triples_df: DataFrame) -> Optional[DataFrame]:
+    def _build_alert_info(self, noaa_df: DataFrame) -> Optional[DataFrame]:
         """
         Build a denormalized table of alert metadata by joining through
         the CAP/WEATHER structure produced by the RML mapper:
@@ -252,18 +344,24 @@ class NOAAIntraSourceLinker:
         subject, not the Alert subject. We join Alert → Info first,
         then read sent_time from the Info subject.
 
+        Takes the frame from _noaa_triples(), NOT the raw graph. Ten relations
+        are joined below and not one of them deduplicates, so a repeated source
+        triple multiplies through all ten -- k**10 rows for an alert the source
+        states k times. Passing the raw frame is what made this unfinishable;
+        read _noaa_triples' docstring before changing the argument.
+
         Returns DataFrame with columns:
             alert, info, sent_time, event, severity_uri, urgency_uri,
             certainty_uri, category_uri, area, area_desc
         """
         # Alerts — nws:WeatherAlert is the only type an alert node carries
-        alerts = triples_df.filter(
+        alerts = noaa_df.filter(
             (F.col("predicate") == RDF_TYPE)
             & (F.col("object") == WEATHER_ALERT_TYPE)
         ).select(F.col("subject").alias("alert"))
 
         # Alert → Info (cap:hasInfo)
-        alert_infos = triples_df.filter(
+        alert_infos = noaa_df.filter(
             F.col("predicate") == HAS_INFO
         ).select(
             F.col("subject").alias("alert"),
@@ -271,7 +369,7 @@ class NOAAIntraSourceLinker:
         )
 
         # Info → sent time (cap:hasSentTime is on Info subject per RML mapper)
-        sent_times = triples_df.filter(
+        sent_times = noaa_df.filter(
             F.col("predicate") == HAS_SENT_TIME
         ).select(
             F.col("subject").alias("info"),
@@ -279,7 +377,7 @@ class NOAAIntraSourceLinker:
         )
 
         # Info → Area (cap:hasArea)
-        info_areas = triples_df.filter(
+        info_areas = noaa_df.filter(
             F.col("predicate") == HAS_AREA
         ).select(
             F.col("subject").alias("info"),
@@ -287,7 +385,7 @@ class NOAAIntraSourceLinker:
         )
 
         # Area → area description
-        area_descs = triples_df.filter(
+        area_descs = noaa_df.filter(
             F.col("predicate") == HAS_AREA_DESC
         ).select(
             F.col("subject").alias("area"),
@@ -295,7 +393,7 @@ class NOAAIntraSourceLinker:
         )
 
         # Info → event (literal string like "Flood Advisory")
-        events = triples_df.filter(
+        events = noaa_df.filter(
             F.col("predicate") == HAS_EVENT
         ).select(
             F.col("subject").alias("info"),
@@ -303,7 +401,7 @@ class NOAAIntraSourceLinker:
         )
 
         # Info → severity (URI like cap:Severe)
-        severities = triples_df.filter(
+        severities = noaa_df.filter(
             F.col("predicate") == HAS_SEVERITY
         ).select(
             F.col("subject").alias("info"),
@@ -311,7 +409,7 @@ class NOAAIntraSourceLinker:
         )
 
         # Info → urgency (URI like cap:Immediate)
-        urgencies = triples_df.filter(
+        urgencies = noaa_df.filter(
             F.col("predicate") == HAS_URGENCY
         ).select(
             F.col("subject").alias("info"),
@@ -319,7 +417,7 @@ class NOAAIntraSourceLinker:
         )
 
         # Info → certainty (URI like cap:Observed)
-        certainties = triples_df.filter(
+        certainties = noaa_df.filter(
             F.col("predicate") == HAS_CERTAINTY
         ).select(
             F.col("subject").alias("info"),
@@ -327,7 +425,7 @@ class NOAAIntraSourceLinker:
         )
 
         # Info → category (URI like cap:Met)
-        categories = triples_df.filter(
+        categories = noaa_df.filter(
             F.col("predicate") == HAS_CATEGORY
         ).select(
             F.col("subject").alias("info"),
@@ -402,7 +500,7 @@ class NOAAIntraSourceLinker:
     # ================================================================
 
     def _link_geographic_relationships(
-        self, triples_df: DataFrame
+        self, noaa_df: DataFrame
     ) -> Optional[DataFrame]:
         """
         Link alerts that share FIPS or SAME geocodes (same geographic region).
@@ -417,9 +515,15 @@ class NOAAIntraSourceLinker:
         The RML mapper produces geocode URIs like:
             alert:{alert_id}#geocode-{fips_code}
         with nws:hasFIPSCode and nws:hasSAMECode both set to the FIPS code.
+
+        Takes the frame from _noaa_triples() for the same reason
+        _build_alert_info does. This chain is three joins deep rather than ten,
+        so on the repeated source it produced k**3 rows instead of k**10 and
+        survived -- which is why the job reached Step 1 and stopped there, not
+        here. The dedup still removes the waste.
         """
         # Alert → Info
-        alert_infos = triples_df.filter(
+        alert_infos = noaa_df.filter(
             F.col("predicate") == HAS_INFO
         ).select(
             F.col("subject").alias("alert"),
@@ -427,7 +531,7 @@ class NOAAIntraSourceLinker:
         )
 
         # Info → Area
-        info_areas = triples_df.filter(
+        info_areas = noaa_df.filter(
             F.col("predicate") == HAS_AREA
         ).select(
             F.col("subject").alias("info"),
@@ -435,7 +539,7 @@ class NOAAIntraSourceLinker:
         )
 
         # Area → Geocode
-        area_geocodes = triples_df.filter(
+        area_geocodes = noaa_df.filter(
             F.col("predicate") == HAS_GEOCODE
         ).select(
             F.col("subject").alias("area"),
@@ -444,7 +548,7 @@ class NOAAIntraSourceLinker:
 
         # Geocode → FIPS code (primary geographic identifier in new mapper)
         # Also check SAME code for backward compatibility
-        fips_codes = triples_df.filter(
+        fips_codes = noaa_df.filter(
             (F.col("predicate") == HAS_FIPS_CODE)
             | (F.col("predicate") == HAS_SAME_CODE)
         ).select(
