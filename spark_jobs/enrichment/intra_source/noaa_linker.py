@@ -115,12 +115,9 @@ NOAA_PREDICATES = (
     HAS_INFO,
     HAS_SENT_TIME,
     HAS_AREA,
-    HAS_AREA_DESC,
     HAS_EVENT,
     HAS_SEVERITY,
     HAS_URGENCY,
-    HAS_CERTAINTY,
-    HAS_CATEGORY,
     HAS_GEOCODE,
     HAS_FIPS_CODE,
     HAS_SAME_CODE,
@@ -190,9 +187,7 @@ class NOAAIntraSourceLinker:
         noaa_df = self._noaa_triples(triples_df).cache()
 
         # Build the denormalized alert info table once — used by multiple steps.
-        # Structure: (alert, info, sent_time, event, severity_uri,
-        #             urgency_uri, certainty_uri, category_uri,
-        #             area, area_desc)
+        # Structure: (alert, info, sent_time, event, severity_uri, urgency_uri)
         alert_info_df = self._build_alert_info(noaa_df)
 
         if alert_info_df is None:
@@ -269,41 +264,32 @@ class NOAAIntraSourceLinker:
 
         Two things happen here, and only one of them is about speed.
 
-        **dropDuplicates is load-bearing.** RDF is a set, and the rest of the
-        pipeline treats it as one: EnrichmentPipeline unions each phase's output
-        and dropDuplicates over the whole frame. But that runs AFTER intra-source
-        enrichment, so a linker sees the source frame with its repeats intact --
-        and the NOAA source repeats heavily. Its archive stores one row per
-        (alert, geocode) pair, and every row's Turtle blob restates the alert,
-        info and area blocks in full; only the geocode sub-block differs. An
-        alert covering 72 counties therefore arrives as 72 identical copies of
-        each of its ten alert/info/area triples.
+        **dropDuplicates is load-bearing -- do not remove it.** RDF is a set and
+        the pipeline treats it as one, but EnrichmentPipeline's dropDuplicates
+        runs AFTER intra-source enrichment, so a linker sees the source frame
+        with its repeats intact. The NOAA source repeats heavily: its archive
+        stores one row per (alert, geocode) pair and every row's Turtle blob
+        restates the alert, info and area blocks in full, so an alert covering
+        72 counties arrives as 72 identical copies of each of those triples.
 
-        _build_alert_info joins ten such relations. Ten legs each repeated k
-        times is k**10 rows for that alert, so the 72-county alert alone expands
-        to 3.7e18 rows. Measured over one real day (2026-04-15: 4,984 parquet
-        rows, 1,262 alerts): 3,782,235,540,923,562,898 rows out of a table that
-        should hold 1,262. That is the "stalls at Step 1/6" symptom -- the job
-        was not slow, it was building a table that cannot be built. Nothing
-        detected it because _build_alert_info's own head(1) probe takes one row
-        off one partition and returns instantly; the first full evaluation is
-        the dropDuplicates inside _link_temporal_sequences, which is where the
-        log line stops.
+        Every join leg then multiplies: k copies across n legs is k**n rows for
+        that alert. Measured on one real day when this table had ten legs
+        (2026-04-15, 4,984 parquet rows, 1,262 alerts), it built
+        3,782,235,540,923,562,898 rows in place of 1,262 -- not slow, but
+        unbuildable, and it presented as the job going silent after logging
+        Step 1. Nothing caught it because _build_alert_info's head(1) probe
+        takes one row off one partition and returns instantly; the first full
+        evaluation is downstream.
 
-        Deduplicating here removes it entirely: every leg becomes at most one
-        row per (subject, value), and the ten-way join collapses to one row per
-        alert (verified on real days -- no per-info predicate carries more than
-        one distinct value, and the table lands at exactly one row per alert).
-        Nothing downstream changes, because every consumer of the table already
-        dropDuplicates the columns it uses.
+        Deduplicating here makes k = 1 and the multiplication collapses to one
+        row per alert. Safe because repeated triples are the same RDF, and every
+        consumer already dropDuplicates the columns it uses.
 
-        **The narrowing is the cost half.** All fourteen relation legs below --
-        ten in _build_alert_info, four in _link_geographic_relationships -- used
-        to filter the whole accumulated graph, so the linker traversed ~20M rows
-        fourteen times to find NOAA's ~70k. One pass now selects them and the
-        legs filter that. This matches what the SEC and BLS linkers already do
-        (_filter_sec_triples / _filter_bls_triples), and the deduplication is
-        what those two get for free from sources that do not repeat rows.
+        **The narrowing is the cost half.** Every leg below used to filter the
+        whole accumulated graph, so the linker traversed ~20M rows once per leg
+        to find NOAA's ~70k. One pass now selects them and the legs filter that,
+        matching what the SEC and BLS linkers do (_filter_sec_triples /
+        _filter_bls_triples).
 
         The predicate list is the gate rather than a subject/object URI prefix:
         NOAA subjects live under a third-party host (api.weather.gov), so there
@@ -334,24 +320,25 @@ class NOAAIntraSourceLinker:
                   → cap:hasEvent (string literal)
                   → cap:hasSeverity (URI: cap:Minor/Moderate/Severe/Extreme)
                   → cap:hasUrgency (URI: cap:Immediate/Expected/Future/Past)
-                  → cap:hasCertainty (URI: cap:Observed/Likely/Possible/Unlikely)
-                  → cap:hasCategory (URI: cap:Met/Geo/Fire/etc.)
-                  → cap:hasArea → Area (cap:Area)
-                      → cap:hasAreaDescription (string literal)
 
         IMPORTANT: In the RML mapper, cap:hasSentTime is on the Info
         subject, not the Alert subject. We join Alert → Info first,
         then read sent_time from the Info subject.
 
-        Takes the frame from _noaa_triples(), NOT the raw graph. Ten relations
+        Only the properties some step reads are joined. cap:hasCertainty,
+        cap:hasCategory and cap:hasAreaDescription are all on the alert too, and
+        each is one more filter and shuffle for a column nothing selects.
+        Where an alert applies comes from _alert_geocodes instead, as a
+        structured code.
+
+        Takes the frame from _noaa_triples(), NOT the raw graph. Six relations
         are joined below and not one of them deduplicates, so a repeated source
-        triple multiplies through all ten -- k**10 rows for an alert the source
+        triple multiplies through all six -- k**6 rows for an alert the source
         states k times. Passing the raw frame is what made this unfinishable;
         read _noaa_triples' docstring before changing the argument.
 
         Returns DataFrame with columns:
-            alert, info, sent_time, event, severity_uri, urgency_uri,
-            certainty_uri, category_uri, area, area_desc
+            alert, info, sent_time, event, severity_uri, urgency_uri
         """
         # Alerts — nws:WeatherAlert is the only type an alert node carries
         alerts = noaa_df.filter(
@@ -373,22 +360,6 @@ class NOAAIntraSourceLinker:
         ).select(
             F.col("subject").alias("info"),
             F.col("object").alias("sent_time"),
-        )
-
-        # Info → Area (cap:hasArea)
-        info_areas = noaa_df.filter(
-            F.col("predicate") == HAS_AREA
-        ).select(
-            F.col("subject").alias("info"),
-            F.col("object").alias("area"),
-        )
-
-        # Area → area description
-        area_descs = noaa_df.filter(
-            F.col("predicate") == HAS_AREA_DESC
-        ).select(
-            F.col("subject").alias("area"),
-            F.col("object").alias("area_desc"),
         )
 
         # Info → event (literal string like "Flood Advisory")
@@ -415,26 +386,9 @@ class NOAAIntraSourceLinker:
             F.col("object").alias("urgency_uri"),
         )
 
-        # Info → certainty (URI like cap:Observed)
-        certainties = noaa_df.filter(
-            F.col("predicate") == HAS_CERTAINTY
-        ).select(
-            F.col("subject").alias("info"),
-            F.col("object").alias("certainty_uri"),
-        )
-
-        # Info → category (URI like cap:Met)
-        categories = noaa_df.filter(
-            F.col("predicate") == HAS_CATEGORY
-        ).select(
-            F.col("subject").alias("info"),
-            F.col("object").alias("category_uri"),
-        )
-
         # Join everything together:
         # Alert → Info (inner: every alert must have an info)
-        # Info → sent_time, event, severity, urgency, certainty, category (left)
-        # Info → Area → area_desc (left)
+        # Info → sent_time, event, severity, urgency (left)
         result = (
             alerts
             .join(alert_infos, "alert", "inner")
@@ -442,10 +396,6 @@ class NOAAIntraSourceLinker:
             .join(events, "info", "left")
             .join(severities, "info", "left")
             .join(urgencies, "info", "left")
-            .join(certainties, "info", "left")
-            .join(categories, "info", "left")
-            .join(info_areas, "info", "left")
-            .join(area_descs, "area", "left")
         )
 
         if result.head(1) == []:
