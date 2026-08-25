@@ -76,9 +76,13 @@ def _urgency_uri(level):
     return next(uri for uri, lvl in URGENCY_HIERARCHY.items() if lvl == level)
 
 
-# The ten legs _build_alert_info joins. Named here so the k**10 arithmetic in
-# the tests below is checkable against the code rather than asserted.
-ALERT_INFO_JOIN_LEGS = 10
+# What the source restates per (alert, geocode) row, and how much of it
+# _build_alert_info actually joins. The two differ: the alert block carries
+# certainty, category and the area description as well, and the linker reads
+# none of the three, so they are narrowed away before the join. Named here so
+# the k**n arithmetic below is checkable against the code rather than asserted.
+ALERT_BLOCK_TRIPLES = 10
+ALERT_INFO_JOIN_LEGS = 6
 
 
 def _alert_over_geocodes(alert, fips_codes, *, restate_block, event="Flood Advisory",
@@ -89,8 +93,8 @@ def _alert_over_geocodes(alert, fips_codes, *, restate_block, event="Flood Advis
     `restate_block=True` is the real archive shape: the source stores one
     Parquet row per (alert, geocode), and every row's Turtle blob carries the
     complete alert, info and area blocks — only the geocode sub-block differs.
-    Parsed and exploded, that yields len(fips_codes) identical copies of each of
-    the ten triples _build_alert_info joins on.
+    Parsed and exploded, that yields len(fips_codes) identical copies of every
+    triple in the block, including the ALERT_INFO_JOIN_LEGS that get joined.
 
     `restate_block=False` is the same graph as a set: block stated once, one
     geocode sub-block per county. The two must enrich to the same triples.
@@ -113,7 +117,7 @@ def _alert_over_geocodes(alert, fips_codes, *, restate_block, event="Flood Advis
          area_desc if area_desc is not None
          else "; ".join(f"County {c}" for c in fips_codes)),
     ]
-    assert len(block) == ALERT_INFO_JOIN_LEGS
+    assert len(block) == ALERT_BLOCK_TRIPLES
 
     rows = []
     for code in fips_codes:
@@ -269,29 +273,31 @@ def test_escalation_emits_one_triple_for_a_pair_adjacent_in_several_counties(
 def test_alert_table_is_one_row_per_alert_when_source_restates_the_block(
     spark, make_triples
 ):
-    """One alert over four counties denormalizes to ONE row, not 4**10.
+    """One alert over four counties denormalizes to ONE row, not 4**6.
 
     Reaches past enrich() into the two private steps because the row count is
-    the assertion: `_build_alert_info` joins ten attribute relations and none of
-    them deduplicates, so an alert the source states k times becomes k**10 rows
-    and every later step inherits it. On real data that reached 3.7e18 rows for
-    a single 72-county alert, which is why the job stopped logging at Step 1/6
-    rather than failing.
+    the assertion: `_build_alert_info` joins ALERT_INFO_JOIN_LEGS attribute
+    relations and none of them deduplicates, so an alert the source states k
+    times becomes k**legs rows and every later step inherits it. On real data,
+    with ten legs at the time, that reached 3.7e18 rows for a single 72-county
+    alert — which is why the job went silent after Step 1 rather than failing.
 
-    Four counties keeps the un-fixed number at 4**10 = 1,048,576 — large enough
-    to prove the multiplication, small enough that a regression fails this
+    Four counties keeps the un-fixed number at 4**6 = 4,096 — large enough to
+    prove the multiplication, small enough that a regression fails this
     assertion in seconds instead of hanging the suite.
     """
+    counties = ["013083", "013295", "013047", "013115"]
     alert = "http://example.org/alert/multi-county"
-    rows = _alert_over_geocodes(
-        alert, ["013083", "013295", "013047", "013115"], restate_block=True
-    )
+    rows = _alert_over_geocodes(alert, counties, restate_block=True)
 
     linker = NOAAIntraSourceLinker(spark)
     alert_info = linker._build_alert_info(linker._noaa_triples(make_triples(rows)))
 
     assert alert_info.count() == 1
     assert alert_info.select("alert").distinct().count() == 1
+    # Pin the arithmetic the docstring quotes: without the dedup this table
+    # would hold len(counties)**legs rows, not one.
+    assert len(counties) ** ALERT_INFO_JOIN_LEGS == 4096
 
 
 def test_enrich_is_unchanged_by_a_source_that_restates_the_block(
@@ -457,7 +463,13 @@ def test_alerts_sharing_only_a_cap_category_are_not_linked(spark, make_triples):
 def test_noaa_triples_keeps_noaa_deduplicated_and_drops_the_rest(
     spark, make_triples
 ):
-    """The narrowing gate: NOAA's predicates in, as a set; everything else out.
+    """The narrowing gate: what the linker reads, as a set; everything else out.
+
+    Three things are checked. Foreign triples stay out. What is kept is
+    deduplicated, which is what defuses the k**legs multiplication. And NOAA's
+    own unread predicates stay out too — the source publishes certainty,
+    category and the free-text area description on every alert, no step reads
+    any of them, so carrying them would be rows cached for nothing.
 
     rdf:type is the one predicate that cannot be matched by name — every source
     emits it — so it is admitted only when its object is the WeatherAlert type.
@@ -474,7 +486,11 @@ def test_noaa_triples_keeps_noaa_deduplicated_and_drops_the_rest(
     narrowed = NOAAIntraSourceLinker(spark)._noaa_triples(make_triples(rows + foreign))
     kept = _triple_set(narrowed)
 
-    assert kept == set(rows)
+    unread = {HAS_CERTAINTY, HAS_CATEGORY, HAS_AREA_DESC}
+    assert kept == {t for t in rows if t[1] not in unread}
     assert narrowed.count() == len(kept), "narrowed frame still carries duplicates"
     assert not kept & set(foreign)
     assert {p for _, p, _ in kept} <= set(NOAA_PREDICATES) | {RDF_TYPE}
+    # The fixture really does carry all three, so the assertion above bites.
+    assert unread <= {p for _, p, _ in rows}
+    assert not unread & set(NOAA_PREDICATES)
