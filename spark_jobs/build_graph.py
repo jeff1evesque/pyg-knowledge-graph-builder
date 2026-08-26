@@ -66,7 +66,6 @@ import json
 import logging
 import re
 import time
-import io
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Tuple, List
@@ -1248,10 +1247,13 @@ def save_pyg_to_s3(s3_client, hetero_data, bucket: str, key: str):
     """
     Save PyTorch Geometric HeteroData to S3.
 
-    Serializes using torch.save to a BytesIO buffer, then uploads
-    via S3 multipart upload to avoid holding multiple copies in memory.
+    Serializes to a temp file, then hands boto3 the path so its multipart
+    upload streams from disk.
 
-    This runs on the driver — only compact tensors are in memory.
+    Staging through disk rather than a BytesIO for the same reason as
+    save_pyg_local below: a day of four sources is ~53 GiB of tensors, and
+    buffering the serialized copy alongside them doubles a driver footprint
+    that already does not fit. Disk costs one .pt for the length of the upload.
 
     Args:
         s3_client: Boto3 S3 client
@@ -1259,22 +1261,24 @@ def save_pyg_to_s3(s3_client, hetero_data, bucket: str, key: str):
         bucket: S3 bucket name
         key: S3 key
     """
+    import os
+    import tempfile
+
     import torch
 
-    # Serialize to buffer — single copy in memory alongside HeteroData
-    buffer = io.BytesIO()
-    torch.save(hetero_data, buffer)
-    size_bytes = buffer.tell()
-    size_mb = size_bytes / (1024 * 1024)
-    buffer.seek(0)
-
-    # Upload using the buffer directly (no .getvalue() copy)
-    s3_client.upload_fileobj(
-        Fileobj=buffer,
-        Bucket=bucket,
-        Key=key,
-        ExtraArgs={"ContentType": "application/octet-stream"},
-    )
+    handle, staged = tempfile.mkstemp(prefix="hetero_data.", suffix=".pt")
+    os.close(handle)
+    try:
+        torch.save(hetero_data, staged)
+        size_mb = os.path.getsize(staged) / (1024 * 1024)
+        s3_client.upload_file(
+            Filename=staged,
+            Bucket=bucket,
+            Key=key,
+            ExtraArgs={"ContentType": "application/octet-stream"},
+        )
+    finally:
+        os.unlink(staged)
 
     logger.info(
         f"Saved PyG HeteroData ({size_mb:.2f} MB) to s3://{bucket}/{key}"
@@ -1292,20 +1296,18 @@ def save_pyg_local(hetero_data, local_path: str, spark: SparkSession = None) -> 
     ``torch.save`` to such a path writes a junk ``./s3a:/...`` tree on the
     driver's disk and reports success.
 
-    The two destinations are handled differently on purpose:
+    Both destinations stream through a file handle, and neither ever holds the
+    serialized graph in memory. That matters more than it sounds: a day of four
+    sources builds ~53 GiB of tensors, and the earlier version serialized a URI
+    destination into a BytesIO first. That is a second full copy in Python, and
+    handing it to Hadoop across Py4J makes a third in the JVM — on a driver heap
+    of 8g. "Only compact tensors are in memory" stopped being true somewhere
+    between the fixtures this was written against and a real day of data.
 
-    * A local path keeps the direct ``torch.save(obj, path)`` stream. torch
-      writes incrementally to the file handle, so peak memory stays at the
-      HeteroData itself.
-    * A URI has no file handle to stream to, so the graph is serialized to a
-      buffer first and the bytes handed to the Hadoop writer — the same shape as
-      save_pyg_to_s3 above. This costs a second in-memory copy of the (compact)
-      tensors, which is simply what writing to object storage costs; it is the
-      same trade the S3 archive path already makes.
-
-    Buffering unconditionally would be simpler, but it would impose that second
-    copy on every local run — including the e2e suite and any single-machine
-    build — to serve a case those runs never hit.
+    A local path is written in place. A URI is staged into a temp file beside
+    the destination's local spill area, then moved across by Hadoop, which
+    copies in blocks. Peak memory is the HeteroData itself either way; the URI
+    case costs disk equal to one .pt while the move runs.
 
     Args:
         hetero_data: PyG HeteroData object
@@ -1313,13 +1315,14 @@ def save_pyg_local(hetero_data, local_path: str, spark: SparkSession = None) -> 
         spark: Active SparkSession; required when local_path is a non-local URI
     """
     import os
+    import tempfile
 
     import torch
 
     from spark_jobs.utils.fs_utils import (
         is_local_path,
         local_filesystem_path,
-        write_bytes,
+        write_file,
     )
 
     if is_local_path(local_path):
@@ -1330,13 +1333,16 @@ def save_pyg_local(hetero_data, local_path: str, spark: SparkSession = None) -> 
         logger.info(f"Saved PyG HeteroData ({size_mb:.2f} MB) to {path}")
         return
 
-    buffer = io.BytesIO()
-    torch.save(hetero_data, buffer)
-    size_mb = buffer.tell() / (1024 * 1024)
-
-    # getbuffer() rather than getvalue(): a memoryview onto the buffer instead of
-    # yet another full copy of a graph that may be gigabytes.
-    write_bytes(local_path, buffer.getbuffer(), spark=spark)
+    handle, staged = tempfile.mkstemp(prefix="hetero_data.", suffix=".pt")
+    os.close(handle)
+    try:
+        torch.save(hetero_data, staged)
+        size_mb = os.path.getsize(staged) / (1024 * 1024)
+        write_file(staged, local_path, spark=spark)
+    finally:
+        # write_file consumes the staged file on success; this is the failure path.
+        if os.path.exists(staged):
+            os.unlink(staged)
 
     logger.info(
         f"Saved PyG HeteroData ({size_mb:.2f} MB) to {local_path} (via Hadoop FS)"

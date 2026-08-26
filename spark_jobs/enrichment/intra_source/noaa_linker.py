@@ -28,7 +28,6 @@ Enrichment strategies:
 3. Link alerts of the same event type (sameEventType)
 4. Link severity escalations within same area over time (escalatesTo)
 5. Classify alerts by event category (severeWeatherEvent, floodEvent, etc.)
-6. Link alerts sharing the same CAP category (sameCategory)
 
 Note: Temporal unification is handled separately by TemporalUnifier
 in pipeline.py Phase 2 — not called from here.
@@ -116,12 +115,9 @@ NOAA_PREDICATES = (
     HAS_INFO,
     HAS_SENT_TIME,
     HAS_AREA,
-    HAS_AREA_DESC,
     HAS_EVENT,
     HAS_SEVERITY,
     HAS_URGENCY,
-    HAS_CERTAINTY,
-    HAS_CATEGORY,
     HAS_GEOCODE,
     HAS_FIPS_CODE,
     HAS_SAME_CODE,
@@ -132,7 +128,6 @@ PRECEDES_PRED = str(NOAA_ENRICHMENT.precedes)
 AFFECTS_SAME_REGION_PRED = str(NOAA_ENRICHMENT.affectsSameRegion)
 SAME_EVENT_TYPE_PRED = str(NOAA_ENRICHMENT.sameEventType)
 ESCALATES_TO_PRED = str(NOAA_ENRICHMENT.escalatesTo)
-SAME_CATEGORY_PRED = str(NOAA_ENRICHMENT.sameCategory)
 HAS_EVENT_CLASSIFICATION = str(NOAA_ENRICHMENT.hasEventClassification)
 
 
@@ -192,9 +187,7 @@ class NOAAIntraSourceLinker:
         noaa_df = self._noaa_triples(triples_df).cache()
 
         # Build the denormalized alert info table once — used by multiple steps.
-        # Structure: (alert, info, sent_time, event, severity_uri,
-        #             urgency_uri, certainty_uri, category_uri,
-        #             area, area_desc)
+        # Structure: (alert, info, sent_time, event, severity_uri, urgency_uri)
         alert_info_df = self._build_alert_info(noaa_df)
 
         if alert_info_df is None:
@@ -213,39 +206,40 @@ class NOAAIntraSourceLinker:
         alert_count = alert_info_df.count()
         logger.info(f"Denormalized alert table: {alert_count:,} rows")
 
+        # Where each alert applies, as structured codes. Steps 1, 2 and 4 all
+        # read it, so it is derived once and cached rather than rebuilt per
+        # step -- the walk is four filters and three joins.
+        alert_geo_df = self._alert_geocodes(noaa_df).cache()
+
         new_dfs: List[DataFrame] = []
 
-        logger.info("[Step 1/6] Linking temporal sequences...")
-        df = self._link_temporal_sequences(alert_info_df)
+        logger.info("[Step 1/5] Linking temporal sequences...")
+        df = self._link_temporal_sequences(alert_info_df, alert_geo_df)
         if df is not None:
             new_dfs.append(df)
 
-        logger.info("[Step 2/6] Linking geographic relationships...")
-        df = self._link_geographic_relationships(noaa_df)
+        logger.info("[Step 2/5] Linking geographic relationships...")
+        df = self._link_geographic_relationships(alert_geo_df)
         if df is not None:
             new_dfs.append(df)
 
-        logger.info("[Step 3/6] Linking event type relationships...")
+        logger.info("[Step 3/5] Linking event type relationships...")
         df = self._link_event_relationships(alert_info_df)
         if df is not None:
             new_dfs.append(df)
 
-        logger.info("[Step 4/6] Linking severity escalations...")
-        df = self._link_severity_escalations(alert_info_df)
+        logger.info("[Step 4/5] Linking severity escalations...")
+        df = self._link_severity_escalations(alert_info_df, alert_geo_df)
         if df is not None:
             new_dfs.append(df)
 
-        logger.info("[Step 5/6] Classifying alerts by event category...")
+        logger.info("[Step 5/5] Classifying alerts by event category...")
         df = self._classify_event_categories(alert_info_df)
         if df is not None:
             new_dfs.append(df)
 
-        logger.info("[Step 6/6] Linking alerts by CAP category...")
-        df = self._link_by_cap_category(alert_info_df)
-        if df is not None:
-            new_dfs.append(df)
-
         alert_info_df.unpersist()
+        alert_geo_df.unpersist()
         noaa_df.unpersist()
 
         if not new_dfs:
@@ -270,41 +264,32 @@ class NOAAIntraSourceLinker:
 
         Two things happen here, and only one of them is about speed.
 
-        **dropDuplicates is load-bearing.** RDF is a set, and the rest of the
-        pipeline treats it as one: EnrichmentPipeline unions each phase's output
-        and dropDuplicates over the whole frame. But that runs AFTER intra-source
-        enrichment, so a linker sees the source frame with its repeats intact --
-        and the NOAA source repeats heavily. Its archive stores one row per
-        (alert, geocode) pair, and every row's Turtle blob restates the alert,
-        info and area blocks in full; only the geocode sub-block differs. An
-        alert covering 72 counties therefore arrives as 72 identical copies of
-        each of its ten alert/info/area triples.
+        **dropDuplicates is load-bearing -- do not remove it.** RDF is a set and
+        the pipeline treats it as one, but EnrichmentPipeline's dropDuplicates
+        runs AFTER intra-source enrichment, so a linker sees the source frame
+        with its repeats intact. The NOAA source repeats heavily: its archive
+        stores one row per (alert, geocode) pair and every row's Turtle blob
+        restates the alert, info and area blocks in full, so an alert covering
+        72 counties arrives as 72 identical copies of each of those triples.
 
-        _build_alert_info joins ten such relations. Ten legs each repeated k
-        times is k**10 rows for that alert, so the 72-county alert alone expands
-        to 3.7e18 rows. Measured over one real day (2026-04-15: 4,984 parquet
-        rows, 1,262 alerts): 3,782,235,540,923,562,898 rows out of a table that
-        should hold 1,262. That is the "stalls at Step 1/6" symptom -- the job
-        was not slow, it was building a table that cannot be built. Nothing
-        detected it because _build_alert_info's own head(1) probe takes one row
-        off one partition and returns instantly; the first full evaluation is
-        the dropDuplicates inside _link_temporal_sequences, which is where the
-        log line stops.
+        Every join leg then multiplies: k copies across n legs is k**n rows for
+        that alert. Measured on one real day when this table had ten legs
+        (2026-04-15, 4,984 parquet rows, 1,262 alerts), it built
+        3,782,235,540,923,562,898 rows in place of 1,262 -- not slow, but
+        unbuildable, and it presented as the job going silent after logging
+        Step 1. Nothing caught it because _build_alert_info's head(1) probe
+        takes one row off one partition and returns instantly; the first full
+        evaluation is downstream.
 
-        Deduplicating here removes it entirely: every leg becomes at most one
-        row per (subject, value), and the ten-way join collapses to one row per
-        alert (verified on real days -- no per-info predicate carries more than
-        one distinct value, and the table lands at exactly one row per alert).
-        Nothing downstream changes, because every consumer of the table already
-        dropDuplicates the columns it uses.
+        Deduplicating here makes k = 1 and the multiplication collapses to one
+        row per alert. Safe because repeated triples are the same RDF, and every
+        consumer already dropDuplicates the columns it uses.
 
-        **The narrowing is the cost half.** All fourteen relation legs below --
-        ten in _build_alert_info, four in _link_geographic_relationships -- used
-        to filter the whole accumulated graph, so the linker traversed ~20M rows
-        fourteen times to find NOAA's ~70k. One pass now selects them and the
-        legs filter that. This matches what the SEC and BLS linkers already do
-        (_filter_sec_triples / _filter_bls_triples), and the deduplication is
-        what those two get for free from sources that do not repeat rows.
+        **The narrowing is the cost half.** Every leg below used to filter the
+        whole accumulated graph, so the linker traversed ~20M rows once per leg
+        to find NOAA's ~70k. One pass now selects them and the legs filter that,
+        matching what the SEC and BLS linkers do (_filter_sec_triples /
+        _filter_bls_triples).
 
         The predicate list is the gate rather than a subject/object URI prefix:
         NOAA subjects live under a third-party host (api.weather.gov), so there
@@ -335,24 +320,25 @@ class NOAAIntraSourceLinker:
                   → cap:hasEvent (string literal)
                   → cap:hasSeverity (URI: cap:Minor/Moderate/Severe/Extreme)
                   → cap:hasUrgency (URI: cap:Immediate/Expected/Future/Past)
-                  → cap:hasCertainty (URI: cap:Observed/Likely/Possible/Unlikely)
-                  → cap:hasCategory (URI: cap:Met/Geo/Fire/etc.)
-                  → cap:hasArea → Area (cap:Area)
-                      → cap:hasAreaDescription (string literal)
 
         IMPORTANT: In the RML mapper, cap:hasSentTime is on the Info
         subject, not the Alert subject. We join Alert → Info first,
         then read sent_time from the Info subject.
 
-        Takes the frame from _noaa_triples(), NOT the raw graph. Ten relations
+        Only the properties some step reads are joined. cap:hasCertainty,
+        cap:hasCategory and cap:hasAreaDescription are all on the alert too, and
+        each is one more filter and shuffle for a column nothing selects.
+        Where an alert applies comes from _alert_geocodes instead, as a
+        structured code.
+
+        Takes the frame from _noaa_triples(), NOT the raw graph. Six relations
         are joined below and not one of them deduplicates, so a repeated source
-        triple multiplies through all ten -- k**10 rows for an alert the source
+        triple multiplies through all six -- k**6 rows for an alert the source
         states k times. Passing the raw frame is what made this unfinishable;
         read _noaa_triples' docstring before changing the argument.
 
         Returns DataFrame with columns:
-            alert, info, sent_time, event, severity_uri, urgency_uri,
-            certainty_uri, category_uri, area, area_desc
+            alert, info, sent_time, event, severity_uri, urgency_uri
         """
         # Alerts — nws:WeatherAlert is the only type an alert node carries
         alerts = noaa_df.filter(
@@ -374,22 +360,6 @@ class NOAAIntraSourceLinker:
         ).select(
             F.col("subject").alias("info"),
             F.col("object").alias("sent_time"),
-        )
-
-        # Info → Area (cap:hasArea)
-        info_areas = noaa_df.filter(
-            F.col("predicate") == HAS_AREA
-        ).select(
-            F.col("subject").alias("info"),
-            F.col("object").alias("area"),
-        )
-
-        # Area → area description
-        area_descs = noaa_df.filter(
-            F.col("predicate") == HAS_AREA_DESC
-        ).select(
-            F.col("subject").alias("area"),
-            F.col("object").alias("area_desc"),
         )
 
         # Info → event (literal string like "Flood Advisory")
@@ -416,26 +386,9 @@ class NOAAIntraSourceLinker:
             F.col("object").alias("urgency_uri"),
         )
 
-        # Info → certainty (URI like cap:Observed)
-        certainties = noaa_df.filter(
-            F.col("predicate") == HAS_CERTAINTY
-        ).select(
-            F.col("subject").alias("info"),
-            F.col("object").alias("certainty_uri"),
-        )
-
-        # Info → category (URI like cap:Met)
-        categories = noaa_df.filter(
-            F.col("predicate") == HAS_CATEGORY
-        ).select(
-            F.col("subject").alias("info"),
-            F.col("object").alias("category_uri"),
-        )
-
         # Join everything together:
         # Alert → Info (inner: every alert must have an info)
-        # Info → sent_time, event, severity, urgency, certainty, category (left)
-        # Info → Area → area_desc (left)
+        # Info → sent_time, event, severity, urgency (left)
         result = (
             alerts
             .join(alert_infos, "alert", "inner")
@@ -443,10 +396,6 @@ class NOAAIntraSourceLinker:
             .join(events, "info", "left")
             .join(severities, "info", "left")
             .join(urgencies, "info", "left")
-            .join(certainties, "info", "left")
-            .join(categories, "info", "left")
-            .join(info_areas, "info", "left")
-            .join(area_descs, "area", "left")
         )
 
         if result.head(1) == []:
@@ -455,30 +404,111 @@ class NOAAIntraSourceLinker:
         return result
 
     # ================================================================
+    # Shared: alert → geographic code
+    # ================================================================
+
+    def _alert_geocodes(self, noaa_df: DataFrame) -> DataFrame:
+        """(alert, geo_code) for every alert, deduplicated.
+
+        Walks the mapper's structure:
+            Alert -> cap:hasInfo -> Info -> cap:hasArea -> Area
+                  -> cap:hasGeocode -> Geocode -> nws:hasFIPSCode / hasSAMECode
+
+        This is the graph's only STRUCTURED statement of where an alert applies.
+        cap:hasAreaDescription is the same fact as free text, and the difference
+        matters: both steps that sequence alerts over an area -- precedes and
+        escalatesTo -- key on the code, never the description.
+
+        Both code predicates are read and the result deduplicated, because the
+        mapper sets hasFIPSCode and hasSAMECode to the same value on the same
+        geocode -- reading either alone works, reading both without the dedup
+        doubles every row.
+        """
+        alert_infos = noaa_df.filter(
+            F.col("predicate") == HAS_INFO
+        ).select(
+            F.col("subject").alias("alert"),
+            F.col("object").alias("info"),
+        )
+
+        info_areas = noaa_df.filter(
+            F.col("predicate") == HAS_AREA
+        ).select(
+            F.col("subject").alias("info"),
+            F.col("object").alias("area"),
+        )
+
+        area_geocodes = noaa_df.filter(
+            F.col("predicate") == HAS_GEOCODE
+        ).select(
+            F.col("subject").alias("area"),
+            F.col("object").alias("geocode"),
+        )
+
+        fips_codes = noaa_df.filter(
+            (F.col("predicate") == HAS_FIPS_CODE)
+            | (F.col("predicate") == HAS_SAME_CODE)
+        ).select(
+            F.col("subject").alias("geocode"),
+            F.col("object").alias("geo_code"),
+        ).dropDuplicates()
+
+        return (
+            alert_infos
+            .join(info_areas, "info", "inner")
+            .join(area_geocodes, "area", "inner")
+            .join(fips_codes, "geocode", "inner")
+            .select("alert", "geo_code")
+            .dropDuplicates()
+        )
+
+    # ================================================================
     # Step 1: Temporal Sequences
     # ================================================================
 
     def _link_temporal_sequences(
-        self, alert_info_df: DataFrame
+        self, alert_info_df: DataFrame, alert_geo_df: DataFrame
     ) -> Optional[DataFrame]:
         """
         Link alerts in chronological order per geographic area.
 
-        For each area_desc, orders alerts by sent_time and produces:
+        For each geographic code, orders alerts by sent_time and produces:
             alert_N  noaa_enrichment:precedes  alert_N+1
 
-        Uses the denormalized alert_info_df where sent_time comes from
-        the Info subject (joined through cap:hasInfo).
+        The partition key is the FIPS/SAME code, NOT cap:hasAreaDescription.
+        The description is a free-text list of every county an alert covers --
+        "Dade; Walker; Catoosa; Whitfield; ..." -- so two alerts share a
+        partition only if their county lists match exactly, string for string.
+        Measured over real days, ~80% of descriptions belong to a single alert
+        (2026-04-15: 702 of 904 distinct values; 2026-08-22: 891 of 1,073), so
+        most partitions held one row, lead() returned null, and the alert got no
+        successor. One day of 1,262 alerts produced 358 edges.
+
+        Keying on the geocode sequences alerts per county, which is what
+        "chronological order per geographic area" means, and an alert covering
+        several counties correctly appears in several chains. The same pair can
+        therefore be adjacent in more than one county, so the result is
+        deduplicated -- the triple is the same fact however many counties
+        witnessed it.
+
+        Ordering breaks ties on the alert URI. sent_time alone is not a total
+        order (alerts are issued in the same second), and lead() over a
+        non-deterministic order makes the output vary between runs, which the
+        pipeline's reproducibility guarantee does not allow.
         """
-        # Only alerts with area_desc and sent_time
-        sequenceable = alert_info_df.filter(
-            F.col("area_desc").isNotNull() & F.col("sent_time").isNotNull()
-        ).select("alert", "area_desc", "sent_time").dropDuplicates()
+        sequenceable = (
+            alert_info_df
+            .filter(F.col("sent_time").isNotNull())
+            .select("alert", "sent_time")
+            .dropDuplicates()
+            .join(alert_geo_df, "alert", "inner")
+        )
 
         if sequenceable.head(1) == []:
+            logger.info("  No alerts with a geocode and a sent time")
             return None
 
-        w = Window.partitionBy("area_desc").orderBy("sent_time")
+        w = Window.partitionBy("geo_code").orderBy("sent_time", "alert")
         sequenced = sequenceable.withColumn(
             "next_alert", F.lead("alert").over(w)
         ).filter(F.col("next_alert").isNotNull())
@@ -490,7 +520,7 @@ class NOAAIntraSourceLinker:
             F.col("alert").alias("subject"),
             F.lit(PRECEDES_PRED).alias("predicate"),
             F.col("next_alert").alias("object"),
-        )
+        ).dropDuplicates()
 
         logger.info("  Temporal sequence linking complete")
         return result
@@ -500,71 +530,20 @@ class NOAAIntraSourceLinker:
     # ================================================================
 
     def _link_geographic_relationships(
-        self, noaa_df: DataFrame
+        self, alert_geo_df: DataFrame
     ) -> Optional[DataFrame]:
         """
         Link alerts that share FIPS or SAME geocodes (same geographic region).
 
-        Traverses the RML mapper structure:
-            Alert → cap:hasInfo → Info → cap:hasArea → Area
-                → cap:hasGeocode → Geocode → nws:hasFIPSCode / nws:hasSAMECode
+        Self-joins _alert_geocodes() on the code to find alert pairs, using
+        alert1 < alert2 so each pair is produced exactly once.
 
-        Then self-joins on FIPS/SAME code to find alert pairs.
-        Uses alert1 < alert2 to produce each pair exactly once.
-
-        The RML mapper produces geocode URIs like:
-            alert:{alert_id}#geocode-{fips_code}
-        with nws:hasFIPSCode and nws:hasSAMECode both set to the FIPS code.
-
-        Takes the frame from _noaa_triples() for the same reason
-        _build_alert_info does. This chain is three joins deep rather than ten,
-        so on the repeated source it produced k**3 rows instead of k**10 and
-        survived -- which is why the job reached Step 1 and stopped there, not
-        here. The dedup still removes the waste.
+        Takes the derived (alert, geo_code) relation rather than the triples
+        frame: Step 1 needs the same walk, so it is built once in enrich() and
+        cached. The walk itself, and why both code predicates are read, are
+        documented on _alert_geocodes.
         """
-        # Alert → Info
-        alert_infos = noaa_df.filter(
-            F.col("predicate") == HAS_INFO
-        ).select(
-            F.col("subject").alias("alert"),
-            F.col("object").alias("info"),
-        )
-
-        # Info → Area
-        info_areas = noaa_df.filter(
-            F.col("predicate") == HAS_AREA
-        ).select(
-            F.col("subject").alias("info"),
-            F.col("object").alias("area"),
-        )
-
-        # Area → Geocode
-        area_geocodes = noaa_df.filter(
-            F.col("predicate") == HAS_GEOCODE
-        ).select(
-            F.col("subject").alias("area"),
-            F.col("object").alias("geocode"),
-        )
-
-        # Geocode → FIPS code (primary geographic identifier in new mapper)
-        # Also check SAME code for backward compatibility
-        fips_codes = noaa_df.filter(
-            (F.col("predicate") == HAS_FIPS_CODE)
-            | (F.col("predicate") == HAS_SAME_CODE)
-        ).select(
-            F.col("subject").alias("geocode"),
-            F.col("object").alias("geo_code"),
-        ).dropDuplicates()
-
-        # Join: alert → geo_code
-        alert_geo = (
-            alert_infos
-            .join(info_areas, "info", "inner")
-            .join(area_geocodes, "area", "inner")
-            .join(fips_codes, "geocode", "inner")
-            .select("alert", "geo_code")
-            .dropDuplicates()
-        )
+        alert_geo = alert_geo_df
 
         if alert_geo.head(1) == []:
             logger.info("  No FIPS/SAME codes found")
@@ -653,13 +632,13 @@ class NOAAIntraSourceLinker:
     # ================================================================
 
     def _link_severity_escalations(
-        self, alert_info_df: DataFrame
+        self, alert_info_df: DataFrame, alert_geo_df: DataFrame
     ) -> Optional[DataFrame]:
         """
-        Link severity escalations for the same geographic area.
+        Link severity escalations over the same geographic area.
 
-        For each area_desc, orders alerts by sent_time, then links
-        consecutive alerts where severity increases:
+        For each geographic code, orders alerts by sent_time and links
+        consecutive alerts where the hazard got worse:
             alert_N  noaa_enrichment:escalatesTo  alert_N+1
             (only when severity_level(N+1) > severity_level(N))
 
@@ -672,14 +651,31 @@ class NOAAIntraSourceLinker:
         Also considers urgency as a secondary escalation signal:
         if severity is the same but urgency increases, that is also
         treated as an escalation.
+
+        The partition key is the FIPS/SAME code, for the reason set out on
+        _link_temporal_sequences -- this step had the identical defect and is
+        fixed the identical way. It keyed on cap:hasAreaDescription, the
+        free-text county list, so two alerts shared a partition only if their
+        lists matched string for string, and ~80% of those lists belong to a
+        single alert (2026-04-15: 702 of 904 distinct values; 2026-08-22: 891
+        of 1,073). Most partitions held one row, lead() returned null, and no
+        escalation was detected. One day of 1,262 alerts produced 56 edges.
+
+        The miss costs more here than it did for precedes. "The warning over
+        this county got more severe" is the whole point of the relation, and it
+        went undetected whenever the follow-up alert listed a different set of
+        counties -- while the county they actually share, the thing that makes
+        it the same area, was sitting in the graph as a structured code.
         """
-        # Only alerts with area_desc, sent_time, and severity
+        # Only alerts with a sent time and a severity. Requiring an area_desc
+        # is what this step used to do INSTEAD of requiring a geocode; the
+        # inner join below is the requirement now, so the description is not
+        # read at all any more.
         escalatable = alert_info_df.filter(
-            F.col("area_desc").isNotNull()
-            & F.col("sent_time").isNotNull()
+            F.col("sent_time").isNotNull()
             & F.col("severity_uri").isNotNull()
         ).select(
-            "alert", "area_desc", "sent_time", "severity_uri", "urgency_uri"
+            "alert", "sent_time", "severity_uri", "urgency_uri"
         ).dropDuplicates()
 
         if escalatable.head(1) == []:
@@ -705,11 +701,23 @@ class NOAAIntraSourceLinker:
             F.broadcast(urgency_df), "urgency_uri", "left"
         ).fillna({"urgency_level": 0})
 
+        # Where each alert applies. Joined AFTER both level lookups because
+        # this is the step that fans an alert out to one row per county:
+        # mapping the levels first does that work once per alert rather than
+        # once per (alert, county). The join is inner, so an alert with no
+        # geocode drops out here -- it has no area to be sequenced within.
+        escalatable = escalatable.join(alert_geo_df, "alert", "inner")
+
         if escalatable.head(1) == []:
+            logger.info("  No alerts with a geocode, a sent time and a severity")
             return None
 
-        # Window: partition by area, order by time
-        w = Window.partitionBy("area_desc").orderBy("sent_time")
+        # Window: partition by geographic code, order by time.
+        # The tie-break on the alert URI matters for the same reason it does in
+        # Step 1 -- sent_time alone is not a total order, alerts are issued in
+        # the same second, and lead() over a non-deterministic order would make
+        # the output vary between runs.
+        w = Window.partitionBy("geo_code").orderBy("sent_time", "alert")
 
         with_next = escalatable.withColumn(
             "next_alert", F.lead("alert").over(w)
@@ -735,11 +743,15 @@ class NOAAIntraSourceLinker:
         if escalations.head(1) == []:
             return None
 
+        # One triple per escalating pair. Sequencing per geocode puts an alert
+        # in one chain per county it covers, so the same escalation can be
+        # adjacent in several of them -- that is one fact, however many
+        # counties witnessed it.
         result = escalations.select(
             F.col("alert").alias("subject"),
             F.lit(ESCALATES_TO_PRED).alias("predicate"),
             F.col("next_alert").alias("object"),
-        )
+        ).dropDuplicates()
 
         logger.info("  Severity escalation linking complete")
         return result
@@ -813,53 +825,4 @@ class NOAAIntraSourceLinker:
         result = classification_triples.unionByName(relationship_triples)
 
         logger.info("  Event category classification complete")
-        return result
-
-    # ================================================================
-    # Step 6: CAP Category Linking
-    # ================================================================
-
-    def _link_by_cap_category(
-        self, alert_info_df: DataFrame
-    ) -> Optional[DataFrame]:
-        """
-        Link alerts that share the same CAP category (cap:hasCategory).
-
-        CAP categories are URI-valued named individuals (e.g., cap:Met,
-        cap:Geo, cap:Fire) produced by the RML mapper's enum mapping.
-
-        Uses alert1 < alert2 to produce each pair exactly once.
-        """
-        alert_categories = alert_info_df.filter(
-            F.col("category_uri").isNotNull()
-        ).select("alert", "category_uri").dropDuplicates()
-
-        if alert_categories.head(1) == []:
-            return None
-
-        left = alert_categories.select(
-            F.col("alert").alias("alert1"),
-            F.col("category_uri").alias("cat1"),
-        )
-        right = alert_categories.select(
-            F.col("alert").alias("alert2"),
-            F.col("category_uri").alias("cat2"),
-        )
-
-        pairs = left.join(
-            right,
-            (left.cat1 == right.cat2) & (left.alert1 < right.alert2),
-            "inner",
-        ).select("alert1", "alert2").dropDuplicates()
-
-        if pairs.head(1) == []:
-            return None
-
-        result = pairs.select(
-            F.col("alert1").alias("subject"),
-            F.lit(SAME_CATEGORY_PRED).alias("predicate"),
-            F.col("alert2").alias("object"),
-        )
-
-        logger.info("  CAP category linking complete")
         return result

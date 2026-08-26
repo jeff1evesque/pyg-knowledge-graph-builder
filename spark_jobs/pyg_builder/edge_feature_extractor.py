@@ -636,10 +636,10 @@ class EdgeFeatureExtractor:
       - gc.collect() between types reclaims fragmented memory
     """
 
-    # Columns identifying an edge type. These travel with every sparse
-    # entry in a batched collect, because edge_idx is only unique
-    # within a type.
-    _TYPE_COLS: Tuple[str, ...] = ("src_type", "relation", "dst_type")
+    # Column identifying an edge type inside a batched collect. It travels
+    # with every sparse entry, because edge_idx is only unique within a
+    # type. One int, not the type triple's three strings — see _flush_batch.
+    _TYPE_COL: str = "edge_type_id"
 
     def __init__(self, spark: SparkSession, config: Dict[str, Any]):
         self.spark = spark
@@ -2401,17 +2401,21 @@ class EdgeFeatureExtractor:
         scatter into per-type dense tensors on the driver.
 
         edge_idx is per-type 0-based (assigned by a window partitioned
-        on the type triple), so the type columns must travel with every
-        row and the scatter has to be done per group — unlike the node
-        side, where node_id alone identifies the row.
+        on the type triple), so a type key has to travel with every row
+        and the scatter has to be done per group — unlike the node side,
+        where node_id alone identifies the row.
+
+        The key is the type's position in this batch, as one int, not the
+        three strings of the type triple. Those strings repeat on every
+        sparse entry, and a batch holds up to _chunk_threshold edges times
+        their non-zero dims — millions of string objects for the driver to
+        build, where an int costs 4 bytes. Same reasoning as the edge-index
+        collect in edge_mapper.py.
         """
         unioned: Optional[DataFrame] = None
-        for edge_type_key, _, entries in batch:
-            src_type, relation, dst_type = edge_type_key
+        for type_id, (_, _, entries) in enumerate(batch):
             tagged = entries.select(
-                F.lit(src_type).alias("src_type"),
-                F.lit(relation).alias("relation"),
-                F.lit(dst_type).alias("dst_type"),
+                F.lit(type_id).cast("int").alias(self._TYPE_COL),
                 F.col("edge_idx"),
                 F.col("dim"),
                 F.col("value"),
@@ -2422,19 +2426,19 @@ class EdgeFeatureExtractor:
             )
 
         pdf = self._aggregate_entries(
-            unioned, self._TYPE_COLS
+            unioned, (self._TYPE_COL,)
         ).toPandas()
 
         groups = (
-            {k: g for k, g in pdf.groupby(list(self._TYPE_COLS))}
+            {int(k): g for k, g in pdf.groupby(self._TYPE_COL)}
             if not pdf.empty else {}
         )
 
-        for edge_type_key, num_edges, _ in batch:
+        for type_id, (edge_type_key, num_edges, _) in enumerate(batch):
             tensor = np.zeros(
                 (num_edges, edge_vector_dim), dtype=np.float32
             )
-            g = groups.get(edge_type_key)
+            g = groups.get(type_id)
             if g is not None and not g.empty:
                 edge_idxs = g["edge_idx"].values
                 dims = g["dim"].values

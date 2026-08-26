@@ -9,8 +9,10 @@ Architecture:
   executors using DataFrame operations
 - Node URI → integer ID mapping uses Spark Window functions, never
   collected as a Python dict
-- Only compact numeric tensors are collected to the driver via
-  Arrow-optimized toPandas()
+- Only compact numeric tensors are collected to the driver, in chunks,
+  via toPandas(). Set PYSPARK_ARROW_ENABLED=true to have those columns
+  move as Arrow buffers rather than one object per row; Spark's default
+  is off, so a run that does not set it pays the object cost
 - Final HeteroData assembly happens on the driver
 
 Node feature vectors:

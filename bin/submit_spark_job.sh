@@ -40,14 +40,30 @@
 #                               on its worker, which is usually what this job wants.
 #   RAPIDS_GPU_ALLOC_FRACTION   (optional, default 0.25) fraction of FREE GPU memory
 #                               the RMM pool takes. Must not exceed the max below;
-#                               the script refuses to submit if it does.
+#                               the script refuses to submit if it does. The default is
+#                               a floor for unified-memory GPUs; see the note below.
 #   RAPIDS_GPU_MAX_ALLOC_FRACTION
 #                               (optional, default 0.4) hard cap on the pool as a
 #                               fraction of TOTAL GPU memory. Raising the alloc
 #                               fraction alone cannot grow the pool past this.
+#   NETWORK_TIMEOUT             (optional, default 120s) how long the driver waits on an
+#                               unresponsive executor before evicting it. See note below.
+#   EXECUTOR_HEARTBEAT_INTERVAL (optional, default 10s) must stay well under the above.
 #   MAX_PLAN_STRING_LENGTH      (optional, default 16k) see note below
 #   PARQUET_NANOS_AS_LONG       (optional, default true) see note below
+#   DRIVER_MAX_RESULT_SIZE      (optional, unset) cap on the results one collect may
+#                               return. Unset leaves Spark's own 1g default in place;
+#                               a big graph's edge collect needs more. Passed only when
+#                               set, so nothing changes for smoke and fixture runs.
+#   PYSPARK_ARROW_ENABLED       (optional, unset) "true" makes toPandas() move columns
+#                               instead of row objects, which is what the PyG tensor
+#                               assembly wants -- see the note below. Passed only when
+#                               set, so it cannot alter a run that did not ask for it.
 #   SPARK_EXTRA_CONF            (optional) extra "--conf k=v" flags, space-separated
+#
+# For a large run, source a profile before setting the cluster's own variables:
+#   . bin/profiles/large-run.env
+# It sets sizing only -- no addresses, buckets or paths.
 #
 # SPARK_DRIVER_HOST: in client mode the driver picks its own advertised address from
 # the host's first non-loopback interface, and every executor dials back on it. On a
@@ -75,6 +91,26 @@
 # it, and no amount of --driver-memory helps. A 7-source run OOMs without this cap and
 # passes with it (at the stock 4g heap). Cost: plans shown in the SQL UI and by
 # explain() are truncated past this length.
+#
+# NETWORK_TIMEOUT: Spark evicts an executor that misses heartbeats for 120s, and a
+# localCheckpoint'd RDD has no replica -- so evicting one executor destroys the
+# checkpoint blocks it held, and any job still reading them aborts with "Checkpoint
+# block rdd_N not found". A busy executor can go quiet for longer than 120s without
+# being dead: measured, one stalled for 173s inside block eviction while spilling to
+# disk under GPU and heap pressure, was evicted, and took a 2.5-hour four-source run
+# with it. The JVM was alive the whole time and logged its own SIGTERM. Raising this
+# lets a large run ride out a stall that a small one never produces. It is a real
+# trade: a genuinely dead executor also goes undetected for that much longer, which is
+# why the default stays at Spark's own value and the large-run profile raises it.
+#
+# PYSPARK_ARROW_ENABLED: the PyG build ends by pulling integer columns to the driver
+# with toPandas(), and several comments in that code describe the transfer as
+# "Arrow-optimized". It is not, unless this is set: Spark's own default is off, so
+# toPandas() falls back to shipping one object per row. The columns it moves are
+# non-null ints and floats, which Arrow carries exactly, and Spark's own fallback
+# switch (on by default) keeps a run working if pyarrow is missing. Left unset here
+# because turning it on changes how every toPandas() in the process behaves, which is
+# not something a fixture or smoke run should inherit silently.
 #
 set -euo pipefail
 
@@ -216,6 +252,21 @@ fi
 # That is not a property to depend on -- it means the same config starts on a busy GPU
 # and fails on an idle one. Requiring the ordering makes the setting deterministic; to
 # genuinely want a bigger pool, raise both.
+#
+# THE 0.25/0.4 DEFAULT IS A HARDWARE FLOOR, NOT AN UNTUNED VALUE -- see README section 3
+# and conf/spark-rapids.conf.template. On an integrated / unified-memory GPU the "GPU
+# memory" IS the host's RAM, so a large pool starves the OS and the JVM and drives the
+# machine into swap. Do not raise it globally to fix one big run.
+#
+# It IS too small for a large run, and the symptom is worth recognising: task slots per
+# executor are min(cores/task.cpus, gpu/task.gpu), which at the GPU_PER_TASK default of
+# 0.125 is 8 tasks sharing one RMM pool whatever the core count. Measured on a
+# four-source day whose market source alone parses to 345M triples: 215,144
+# "[RMM] [error] maximum pool size exceeded" lines from a single executor, rising hour
+# over hour (1.9k -> 72k -> 122k) until it stalled and was evicted, which destroyed the
+# localCheckpoint blocks it held and aborted the job. Raise both fractions for that run
+# via bin/profiles/large-run.env -- opted into per run, where the host-RAM trade can be
+# weighed against what else is resident -- rather than changing the floor here.
 RAPIDS_GPU_ALLOC_FRACTION="${RAPIDS_GPU_ALLOC_FRACTION:-0.25}"
 RAPIDS_GPU_MAX_ALLOC_FRACTION="${RAPIDS_GPU_MAX_ALLOC_FRACTION:-0.4}"
 if awk "BEGIN{exit !($RAPIDS_GPU_ALLOC_FRACTION > $RAPIDS_GPU_MAX_ALLOC_FRACTION)}"; then
@@ -234,6 +285,8 @@ fi
   --master "$SPARK_MASTER_URL" \
   --driver-memory "${DRIVER_MEMORY:-4g}" \
   ${SPARK_DRIVER_HOST:+--conf spark.driver.host="$SPARK_DRIVER_HOST"} \
+  ${DRIVER_MAX_RESULT_SIZE:+--conf spark.driver.maxResultSize="$DRIVER_MAX_RESULT_SIZE"} \
+  ${PYSPARK_ARROW_ENABLED:+--conf spark.sql.execution.arrow.pyspark.enabled="$PYSPARK_ARROW_ENABLED"} \
   ${RAPIDS_JAR:+--jars "$RAPIDS_JAR"} \
   --py-files "$PKG_ZIP" \
   --conf spark.plugins=com.nvidia.spark.SQLPlugin \
@@ -245,6 +298,8 @@ fi
   --conf spark.rapids.memory.gpu.maxAllocFraction="${RAPIDS_GPU_MAX_ALLOC_FRACTION}" \
   --conf spark.rapids.sql.format.parquet.reader.type=MULTITHREADED \
   --conf spark.rapids.sql.explain="${RAPIDS_EXPLAIN:-NONE}" \
+  --conf spark.network.timeout="${NETWORK_TIMEOUT:-120s}" \
+  --conf spark.executor.heartbeatInterval="${EXECUTOR_HEARTBEAT_INTERVAL:-10s}" \
   --conf spark.sql.maxPlanStringLength="${MAX_PLAN_STRING_LENGTH:-16k}" \
   --conf spark.sql.legacy.parquet.nanosAsLong="${PARQUET_NANOS_AS_LONG:-true}" \
   --conf spark.hadoop.fs.s3a.path.style.access="${S3A_PATH_STYLE_ACCESS:-true}" \

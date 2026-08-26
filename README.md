@@ -1585,11 +1585,58 @@ costs the whole run.
 | `DRIVER_MEMORY` | `4g` | all masters |
 | `RAPIDS_GPU_ALLOC_FRACTION` | `0.25` | pool as a fraction of **free** GPU memory |
 | `RAPIDS_GPU_MAX_ALLOC_FRACTION` | `0.4` | hard cap as a fraction of **total** GPU memory |
+| `RAPIDS_PINNED_POOL` | `2G` | host memory staged for host↔device transfer |
+| `NETWORK_TIMEOUT` | `120s` | how long the driver waits on a silent executor |
+| `EXECUTOR_HEARTBEAT_INTERVAL` | `10s` | must stay well under `NETWORK_TIMEOUT` |
 
 **Verify GPU execution; don't assume it.** A `count()` on Parquet can be answered
 from file metadata without touching the GPU. Set `spark.rapids.sql.explain=ALL`,
 or confirm that `Gpu*` operators (e.g. `GpuFileSourceScanExec`) appear in the
 physical plan.
+
+### Sizing a large run
+
+Every default above is a **floor**, chosen so that a run on unfamiliar hardware fails
+safe rather than fast. A full-day, multi-source run needs more than the floor, and
+[`bin/profiles/large-run.env`](bin/profiles/large-run.env) carries that sizing. Source
+it before the variables that identify your cluster:
+
+```bash
+. bin/profiles/large-run.env
+. ~/my-cluster.env          # master URL, driver host, bucket paths — NOT tracked
+bin/submit_spark_job.sh --mode full ...
+```
+
+The split is deliberate: the profile holds only *how big the job is*, so it names no
+host, address, bucket, account or path and is safe to track. Anything identifying a
+deployment stays in an untracked file sourced afterwards.
+
+**Why the floors stay low even though a large run needs more.** The two GPU fractions
+guard a *hardware* constraint, not a workload one — on a unified-memory GPU the pool is
+host RAM (see prerequisite 3), so raising the default would reserve more of the host on
+every run, including the kilobyte-fixture cluster smoke test. Workload size is the wrong
+axis to set them on, which is why the profile opts in per run instead.
+
+**The symptom that says the pool is too small.** Task slots per executor are
+`min(cores/task.cpus, gpu/task.gpu)` — at the `GPU_PER_TASK` default of `0.125` that is
+**8 tasks sharing one RMM pool regardless of core count**, so adding cores does not
+relieve GPU pressure. Under-sizing shows up in the *executor* log (not the driver's) as:
+
+```
+[RMM] [error] [A][Stream 0][Upstream 220200960B][FAILURE maximum pool size exceeded]
+```
+
+Measured on a four-source day whose market source alone parses to 345M triples: 215,144
+such lines from a single executor, rising hour over hour, until it stalled inside block
+eviction for 173s and was evicted at the stock `120s` timeout. Because
+`localCheckpoint` blocks have no replica, eviction destroyed the blocks that executor
+held and the job aborted with `Checkpoint block rdd_N not found` after 2h35m. Raising
+`NETWORK_TIMEOUT` buys tolerance for the stall; raising the fractions addresses the
+cause. The profile does both.
+
+Read executor-side logs at `$SPARK_HOME/work/<app-id>/<executor-id>/stderr` — the driver
+log cannot distinguish a hung executor from a dead one, and the difference decides
+whether more memory or a longer timeout is the fix.
 
 ## Knowledge Graph Enrichment
 
@@ -1986,6 +2033,8 @@ The pipeline ingests RDF data from multiple heterogeneous sources, all in **N-Tr
 ```
 pyg-knowledge-graph-builder/
 ├── bin/
+│   ├── profiles/
+│   │   └── large-run.env                   # opt-in sizing for a full-day run
 │   └── submit_spark_job.sh                 # spark-submit launcher (RAPIDS/GPU)
 ├── conf/
 │   └── spark-rapids.conf.template          # reference RAPIDS spark-defaults
