@@ -18,6 +18,7 @@ scheme through Hadoop and must NOT come through here.
 
 import logging
 import os
+import shutil
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -42,8 +43,14 @@ def local_filesystem_path(path: str) -> str:
 def write_bytes(path: str, body, spark=None) -> None:
     """Write ``body`` to ``path``, routing by the path's URI scheme.
 
-    ``body`` is any bytes-like object. Callers serializing something large pass a
-    ``memoryview`` (e.g. ``BytesIO.getbuffer()``) to avoid copying it again.
+    ``body`` is any bytes-like object.
+
+    FOR SMALL PAYLOADS ONLY — manifests, metadata, anything measured in
+    megabytes. The non-local branch has to hand the bytes across Py4J, which
+    copies them into a JVM array, so the whole payload has to fit the driver
+    heap on top of the copy Python is already holding. Use ``write_file`` for
+    anything large: it streams from disk and never materializes the payload in
+    either heap.
 
     Local paths take the direct filesystem call (creating parent directories).
     Non-local URIs go through the Hadoop FileSystem API, so they land on the
@@ -87,6 +94,53 @@ def write_bytes(path: str, body, spark=None) -> None:
         stream.write(bytearray(body))
     finally:
         stream.close()
+
+
+def write_file(src_path: str, path: str, spark=None) -> None:
+    """Move the file at ``src_path`` to ``path``, routing by URI scheme.
+
+    The streaming counterpart to ``write_bytes``, for payloads too big to hold
+    in memory. Hadoop copies the file across in blocks, so peak memory is a
+    block rather than the whole file — which is what makes a graph measured in
+    tens of gigabytes writable at all.
+
+    ``src_path`` is consumed: on success it no longer exists, whichever branch
+    ran. Callers stage into a temp file and hand it over.
+
+    Args:
+        src_path: Local file to move.
+        path: Destination, bare path or URI.
+        spark: Active SparkSession. Required for non-local URIs, for the same
+            reason as ``write_bytes``.
+
+    Raises:
+        ValueError: ``path`` is a non-local URI and no SparkSession was given.
+    """
+    if is_local_path(path):
+        local_path = local_filesystem_path(path)
+        os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
+        shutil.move(src_path, local_path)
+        return
+
+    if spark is None:
+        raise ValueError(
+            f"cannot write to {path!r}: it is a non-local URI and no "
+            "SparkSession was supplied to resolve it. Writing it with plain "
+            "local I/O would create a junk './"
+            f"{urlparse(path).scheme}:/...' tree on the driver's disk instead "
+            "of reaching shared storage."
+        )
+
+    jvm = spark._jvm
+    hadoop_conf = spark._jsc.hadoopConfiguration()
+    juri = jvm.java.net.URI(path)
+    fs = jvm.org.apache.hadoop.fs.FileSystem.get(juri, hadoop_conf)
+    fs.copyFromLocalFile(
+        True,   # delSrc — the staged file has no purpose once it is across
+        True,   # overwrite
+        jvm.org.apache.hadoop.fs.Path("file://" + os.path.abspath(src_path)),
+        jvm.org.apache.hadoop.fs.Path(path),
+    )
 
 
 def join_path(prefix: str, name: str) -> str:

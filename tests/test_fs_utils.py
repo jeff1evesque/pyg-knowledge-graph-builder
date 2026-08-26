@@ -22,6 +22,7 @@ from spark_jobs.utils.fs_utils import (
     join_path,
     local_filesystem_path,
     write_bytes,
+    write_file,
 )
 
 
@@ -216,6 +217,107 @@ def test_stream_is_closed_even_when_the_write_fails(tmp_path):
         write_bytes("s3a://bucket/x.pt", b"payload", spark=_FakeSpark)
 
     assert closed == [True]
+
+
+# --------------------------------------------------------------------------- #
+# write_file — the streaming path for payloads too big to buffer
+# --------------------------------------------------------------------------- #
+
+def test_write_file_moves_a_local_file_and_creates_parents(tmp_path):
+    src = tmp_path / "staged.pt"
+    src.write_bytes(b"payload")
+    dest = tmp_path / "nested" / "deeper" / "hetero_data.pt"
+
+    write_file(str(src), str(dest))
+
+    assert dest.read_bytes() == b"payload"
+    assert not src.exists(), "the staged file must not be left behind"
+
+
+def test_write_file_accepts_file_uri(tmp_path):
+    src = tmp_path / "staged.pt"
+    src.write_bytes(b"payload")
+    dest = tmp_path / "hetero_data.pt"
+
+    write_file(str(src), f"file://{dest}")
+
+    assert dest.read_bytes() == b"payload"
+
+
+def test_write_file_refuses_a_uri_without_spark(tmp_path):
+    """Same guard as write_bytes: a non-local URI with no session must raise.
+
+    Falling back to local I/O here would move the graph into a junk './s3a:/...'
+    tree and report success -- the exact silent failure this module exists for.
+    """
+    src = tmp_path / "staged.pt"
+    src.write_bytes(b"payload")
+    monkey_cwd = tmp_path / "cwd"
+    monkey_cwd.mkdir()
+
+    with pytest.raises(ValueError) as excinfo:
+        write_file(str(src), "s3a://bucket/pyg/hetero_data.pt")
+
+    assert "s3a://bucket/pyg/hetero_data.pt" in str(excinfo.value)
+    assert not (monkey_cwd / "s3a:").exists()
+    assert src.exists(), "a refused write must leave the staged file for the caller"
+
+
+def test_write_file_uri_streams_through_hadoop_copy(tmp_path, monkeypatch):
+    """The URI branch must hand Hadoop the FILE, not the file's bytes.
+
+    copyFromLocalFile streams in blocks. The buffered alternative -- read it all,
+    ship it over Py4J -- needs the whole payload resident in the Python heap AND
+    again in the JVM's, which a graph measured in tens of gigabytes cannot do.
+    """
+    monkeypatch.chdir(tmp_path)
+    src = tmp_path / "staged.pt"
+    src.write_bytes(b"payload")
+
+    called = {}
+
+    class _FileSystem:
+        @staticmethod
+        def get(uri, conf):
+            called["uri"] = uri
+            return _FileSystem()
+
+        def copyFromLocalFile(self, del_src, overwrite, src_path, dst_path):
+            called["del_src"] = del_src
+            called["overwrite"] = overwrite
+            called["src"] = src_path
+            called["dst"] = dst_path
+
+    class _JVM:
+        class java:
+            class net:
+                URI = staticmethod(lambda s: f"URI({s})")
+
+        class org:
+            class apache:
+                class hadoop:
+                    class fs:
+                        FileSystem = _FileSystem
+                        Path = staticmethod(lambda s: f"Path({s})")
+
+    class _FakeSpark:
+        _jvm = _JVM
+
+        class _jsc:
+            @staticmethod
+            def hadoopConfiguration():
+                return "hadoop-conf"
+
+    write_file(str(src), "s3a://bucket/pyg/hetero_data.pt", spark=_FakeSpark)
+
+    assert called["uri"] == "URI(s3a://bucket/pyg/hetero_data.pt)"
+    assert called["dst"] == "Path(s3a://bucket/pyg/hetero_data.pt)"
+    assert called["src"] == f"Path(file://{src})"
+    assert called["overwrite"] is True
+    assert called["del_src"] is True, "Hadoop must clean up the staged file"
+
+    # Nothing landed on the driver's local disk under the URI's scheme.
+    assert not (tmp_path / "s3a:").exists()
 
 
 # --------------------------------------------------------------------------- #
