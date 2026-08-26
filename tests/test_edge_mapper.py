@@ -9,6 +9,9 @@ in-memory fixtures over the shared local SparkSession:
   * the edge-type key is (src_type, relation, dst_type) with the documented name,
   * within a type edges are ordered (src_id ASC, dst_id ASC) — the alignment
     contract EdgeFeatureExtractor relies on,
+  * splitting the collect into chunks does not change that ordering, or anything
+    else about the result. Real graphs cross the row budget and fixtures never
+    do, so the multi-chunk path is only ever exercised here,
   * excluded predicates, literal/untyped endpoints, and duplicate edges are dropped,
   * the edge_types whitelist filters by relation,
   * get_predicate_uri_mapping inverts the relation name back to its predicate URI,
@@ -32,6 +35,8 @@ from spark_jobs.utils.rdf_utils import BLS_ENRICHMENT  # noqa: E402
 
 PRECEDES = f"{BLS_ENRICHMENT}precedes"  # -> bls_enrichment_precedes
 RELATION = "bls_enrichment_precedes"
+FOLLOWS = f"{BLS_ENRICHMENT}follows"  # a second edge type, for the chunking tests
+FOLLOWS_RELATION = "bls_enrichment_follows"
 RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"  # excluded predicate
 
 # Fully-known node ID table: two cpi_Index sources, two cpi_Series destinations.
@@ -106,6 +111,57 @@ def test_within_type_ordering_is_src_then_dst(spark):
     ei = edge_indices[EDGE_KEY]
     assert ei[0].tolist() == [0, 0, 1]
     assert ei[1].tolist() == [0, 1, 0]
+
+
+# ======================================================================
+# Chunked collection
+#
+# The collect is split into chunks of whole edge types so the driver never
+# holds the entire edge set at once. On a real graph that is several chunks;
+# on any fixture it is one, so without forcing the budget down the split would
+# ship untested. A boundary that lands mid-type would silently reorder that
+# type and break the alignment EdgeFeatureExtractor depends on.
+# ======================================================================
+
+def test_chunking_the_collect_does_not_change_the_result(spark):
+    rows = [
+        ("https://ex/s2", PRECEDES, "https://ex/o1"),  # (1, 0)
+        ("https://ex/s1", PRECEDES, "https://ex/o2"),  # (0, 1)
+        ("https://ex/s1", PRECEDES, "https://ex/o1"),  # (0, 0)
+        ("https://ex/s2", FOLLOWS, "https://ex/o2"),   # (1, 1)
+        ("https://ex/s1", FOLLOWS, "https://ex/o1"),   # (0, 0)
+    ]
+
+    one_chunk, _ = _build(spark, rows)
+    # A budget of 1 is below every type's size, so each takes its own chunk.
+    per_type, _ = _build(spark, rows, {"edge_collect_row_budget": 1})
+
+    assert set(one_chunk) == set(per_type) == {
+        EDGE_KEY, ("cpi_Index", FOLLOWS_RELATION, "cpi_Series"),
+    }
+    for key in one_chunk:
+        assert torch.equal(one_chunk[key], per_type[key]), key
+
+
+def test_chunk_ranges_pack_whole_types_under_the_budget(spark):
+    mapper = EdgeMapper(spark, {"edge_collect_row_budget": 10})
+    keys = [("a", "r", "b"), ("c", "r", "d"), ("e", "r", "f")]
+
+    # 6 + 6 exceeds the budget, so the second type opens a new chunk that the
+    # third (3 more, total 9) still fits into.
+    chunks = mapper._chunk_type_ids(keys, {keys[0]: 6, keys[1]: 6, keys[2]: 3})
+
+    assert chunks == [(0, 0), (1, 2)]
+
+
+def test_a_type_bigger_than_the_budget_gets_its_own_chunk(spark):
+    """The budget cannot split a type — one type's tensor is built in one piece."""
+    mapper = EdgeMapper(spark, {"edge_collect_row_budget": 10})
+    keys = [("a", "r", "b"), ("c", "r", "d")]
+
+    chunks = mapper._chunk_type_ids(keys, {keys[0]: 50, keys[1]: 2})
+
+    assert chunks == [(0, 0), (1, 1)]
 
 
 # ======================================================================

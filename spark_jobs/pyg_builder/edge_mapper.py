@@ -32,8 +32,9 @@ Ordering contract:
   rows align with edge_index tensor columns without any driver
   round-trip.
 """
+import gc
 import logging
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, List, Tuple
 
 import torch
 from pyspark.sql import SparkSession, DataFrame
@@ -42,6 +43,12 @@ from pyspark.sql import functions as F
 from spark_jobs.utils.rdf_utils import NAMESPACE_PREFIXES
 
 logger = logging.getLogger(__name__)
+
+# Edges pulled to the driver per collect. At three integer columns an edge
+# costs ~20 bytes over Arrow, so this bounds a chunk at roughly 400 MB —
+# comfortably under the 1g spark.driver.maxResultSize default, and small
+# enough that the pandas frame and the tensors built from it coexist.
+_COLLECT_ROW_BUDGET = 20_000_000
 
 # ============================================
 # URI constants
@@ -123,6 +130,9 @@ class EdgeMapper:
         self.spark = spark
         self.config = config
         self._requested_edge_types = config.get("edge_types", None)
+        self._collect_row_budget = config.get(
+            "edge_collect_row_budget", _COLLECT_ROW_BUDGET
+        )
 
     def build_edge_indices(
         self,
@@ -235,44 +245,82 @@ class EdgeMapper:
         edges_final = edges_final.cache()
 
         # ============================================
-        # Step 5: Collect ALL edge types in ONE pass, split on the driver
+        # Step 5: Collect the edges in one globally-sorted pass, keyed by a
+        # small integer, and split them on the driver
         #
-        # A single global sort by (src_type, relation, dst_type, src_id,
-        # dst_id) makes every edge type's rows both contiguous AND internally
-        # ordered, so one toPandas replaces the former per-type
-        # filter+orderBy+toPandas loop — which ran one Spark job per edge type
-        # and was the dominant cost at hundreds of edge types. The driver then
-        # slices the single frame by edge-type key. Mirrors the single-pass
-        # encoder refactor in feature_extractor.py (#188).
+        # One global sort makes every edge type's rows both contiguous AND
+        # internally ordered, so a handful of collects replaces the former
+        # per-type filter+orderBy+toPandas loop — which ran one Spark job per
+        # edge type and was the dominant cost at hundreds of edge types.
         #
-        # No chunking is needed here (unlike the wide node-feature tensors):
-        # edges are just two int64 columns (~16 bytes/edge), so the whole set
-        # is compact on the driver even at cluster scale — and every edge
-        # type's tensor is retained on the driver anyway, so peak memory is
-        # unchanged.
+        # The type triple does not ride along with the rows. An earlier
+        # version collected (src_type, relation, dst_type, src_id, dst_id)
+        # on the reasoning that edges are "just two int64 columns, ~16 bytes
+        # each". Three of those five columns are strings, repeated on every
+        # row: at 76.7M edges that is 230M string objects to build on the
+        # driver, and the 16g heap ran out on every leg of the 2026-08-25
+        # run. An int32 id costs 4 bytes and maps back from a few hundred
+        # rows.
         # ============================================
         import numpy as np
 
-        ordered = (
+        # One pass gives both the distinct types and their sizes.
+        count_rows = (
             edges_final
-            .select("src_type", "relation", "dst_type", "src_id", "dst_id")
-            .orderBy("src_type", "relation", "dst_type", "src_id", "dst_id")
+            .groupBy("src_type", "relation", "dst_type")
+            .agg(F.count("*").alias("cnt"))
+            .collect()
         )
-
-        # Collect via Arrow-optimized toPandas — only int64 pairs + keys
-        pdf = ordered.toPandas()
 
         edge_indices: Dict[Tuple[str, str, str], torch.Tensor] = {}
 
-        if not pdf.empty:
+        if not count_rows:
+            logger.info("  Discovered 0 distinct edge types")
+            return edge_indices, edges_final
+
+        edge_counts = {
+            (row["src_type"], row["relation"], row["dst_type"]): row["cnt"]
+            for row in count_rows
+        }
+
+        # Ids follow sorted key order, so a contiguous range of ids is also a
+        # contiguous block of the sorted frame.
+        keys_by_id = sorted(edge_counts)
+        id_of_key = {key: i for i, key in enumerate(keys_by_id)}
+
+        id_df = self.spark.createDataFrame(
+            [(s, r, d, i) for (s, r, d), i in id_of_key.items()],
+            "src_type string, relation string, dst_type string, "
+            "edge_type_id int",
+        )
+
+        ordered = (
+            edges_final
+            .join(F.broadcast(id_df), ["src_type", "relation", "dst_type"])
+            .select("edge_type_id", "src_id", "dst_id")
+            .orderBy("edge_type_id", "src_id", "dst_id")
+            .cache()
+        )
+
+        chunks = self._chunk_type_ids(keys_by_id, edge_counts)
+
+        for chunk_num, (lo, hi) in enumerate(chunks, start=1):
+            pdf = (
+                ordered
+                .filter(
+                    (F.col("edge_type_id") >= lo)
+                    & (F.col("edge_type_id") <= hi)
+                )
+                .toPandas()
+            )
+
             # groupby preserves within-group row order (rows are already
-            # globally sorted), so per-type (src_id ASC, dst_id ASC) ordering —
-            # the contract EdgeFeatureExtractor aligns against — is retained.
+            # sorted), so per-type (src_id ASC, dst_id ASC) ordering — the
+            # contract EdgeFeatureExtractor aligns against — is retained.
             # sort=False: the group-key ordering is irrelevant (keys index a
             # dict), and skipping it avoids a redundant re-sort.
-            for edge_type_key, group in pdf.groupby(
-                ["src_type", "relation", "dst_type"], sort=False
-            ):
+            for type_id, group in pdf.groupby("edge_type_id", sort=False):
+                edge_type_key = keys_by_id[int(type_id)]
                 # from_numpy shares memory with numpy; .contiguous() ensures a
                 # clean tensor for PyG
                 src_ids = torch.from_numpy(
@@ -290,17 +338,55 @@ class EdgeMapper:
                     f"{edge_indices[edge_type_key].shape[1]:,} edges"
                 )
 
+            del pdf  # release Pandas memory immediately
+            gc.collect()
+
+            logger.info(
+                f"  Chunk {chunk_num}/{len(chunks)} collected "
+                f"(edge type ids {lo}–{hi})"
+            )
+
+        ordered.unpersist()
+
         logger.info(
             f"  Discovered {len(edge_indices)} distinct edge types"
         )
-
-        del pdf  # release Pandas memory immediately
 
         # NOTE: edges_final is NOT unpersisted here — it is returned
         # for reuse by EdgeFeatureExtractor. The caller (constructor.py)
         # is responsible for unpersisting it after all consumers finish.
 
         return edge_indices, edges_final
+
+    def _chunk_type_ids(
+        self,
+        keys_by_id: List[Tuple[str, str, str]],
+        edge_counts: Dict[Tuple[str, str, str], int],
+    ) -> List[Tuple[int, int]]:
+        """
+        Group edge-type ids into contiguous (lo, hi) ranges, each holding
+        at most _collect_row_budget edges.
+
+        Whole types are packed into a chunk, so a boundary never splits one
+        and the per-type ordering contract survives the split. A single type
+        larger than the budget becomes a chunk of its own — that is the floor,
+        since an edge type's tensor has to be built in one piece.
+        """
+        budget = max(1, self._collect_row_budget)
+        chunks: List[Tuple[int, int]] = []
+        lo = 0
+        rows = 0
+
+        for type_id, key in enumerate(keys_by_id):
+            count = edge_counts[key]
+            if type_id > lo and rows + count > budget:
+                chunks.append((lo, type_id - 1))
+                lo = type_id
+                rows = 0
+            rows += count
+
+        chunks.append((lo, len(keys_by_id) - 1))
+        return chunks
 
     # Add this method to the existing EdgeMapper class,
     # after build_edge_indices
