@@ -51,6 +51,14 @@
 #   EXECUTOR_HEARTBEAT_INTERVAL (optional, default 10s) must stay well under the above.
 #   MAX_PLAN_STRING_LENGTH      (optional, default 16k) see note below
 #   PARQUET_NANOS_AS_LONG       (optional, default true) see note below
+#   DRIVER_MAX_RESULT_SIZE      (optional, unset) cap on the results one collect may
+#                               return. Unset leaves Spark's own 1g default in place;
+#                               a big graph's edge collect needs more. Passed only when
+#                               set, so nothing changes for smoke and fixture runs.
+#   PYSPARK_ARROW_ENABLED       (optional, unset) "true" makes toPandas() move columns
+#                               instead of row objects, which is what the PyG tensor
+#                               assembly wants -- see the note below. Passed only when
+#                               set, so it cannot alter a run that did not ask for it.
 #   SPARK_EXTRA_CONF            (optional) extra "--conf k=v" flags, space-separated
 #
 # For a large run, source a profile before setting the cluster's own variables:
@@ -94,6 +102,15 @@
 # lets a large run ride out a stall that a small one never produces. It is a real
 # trade: a genuinely dead executor also goes undetected for that much longer, which is
 # why the default stays at Spark's own value and the large-run profile raises it.
+#
+# PYSPARK_ARROW_ENABLED: the PyG build ends by pulling integer columns to the driver
+# with toPandas(), and several comments in that code describe the transfer as
+# "Arrow-optimized". It is not, unless this is set: Spark's own default is off, so
+# toPandas() falls back to shipping one object per row. The columns it moves are
+# non-null ints and floats, which Arrow carries exactly, and Spark's own fallback
+# switch (on by default) keeps a run working if pyarrow is missing. Left unset here
+# because turning it on changes how every toPandas() in the process behaves, which is
+# not something a fixture or smoke run should inherit silently.
 #
 set -euo pipefail
 
@@ -268,6 +285,8 @@ fi
   --master "$SPARK_MASTER_URL" \
   --driver-memory "${DRIVER_MEMORY:-4g}" \
   ${SPARK_DRIVER_HOST:+--conf spark.driver.host="$SPARK_DRIVER_HOST"} \
+  ${DRIVER_MAX_RESULT_SIZE:+--conf spark.driver.maxResultSize="$DRIVER_MAX_RESULT_SIZE"} \
+  ${PYSPARK_ARROW_ENABLED:+--conf spark.sql.execution.arrow.pyspark.enabled="$PYSPARK_ARROW_ENABLED"} \
   ${RAPIDS_JAR:+--jars "$RAPIDS_JAR"} \
   --py-files "$PKG_ZIP" \
   --conf spark.plugins=com.nvidia.spark.SQLPlugin \
