@@ -28,7 +28,10 @@ from spark_jobs.pyg_builder.node_mapper import NodeMapper
 from spark_jobs.pyg_builder.edge_mapper import EdgeMapper
 from spark_jobs.pyg_builder.edge_feature_extractor import (
     EdgeFeatureExtractor,
+    _NUMERIC_ROW_BYTES,
+    _PropertyRows,
     _classify_relation,
+    _parse_byte_string,
 )
 
 CPI_INDEX = "https://jefflevesque.com/ontology/cpi/Index"        # -> cpi_Index
@@ -564,3 +567,268 @@ def test_large_edge_type_streams_via_chunked_path(spark, caplog):
     assert batched[key].shape == (6, layout.edge_vector_dim)
     assert chunked[key].shape == batched[key].shape
     assert torch.equal(batched[key], chunked[key])
+
+
+# ======================================================================
+# Broadcast sizing — the endpoint property frames
+#
+# The six joins that attach endpoint properties to edges used to hint
+# F.broadcast() unconditionally, on the stated assumption that the
+# filtered frame holds "order 1e3 rows". That holds for the node types
+# these fixtures exercise and fails by five orders of magnitude on real
+# data, where one node type carried 10.1M nodes and 305M property rows.
+# A broadcast build side is collected to the driver whatever its size and
+# charged against spark.driver.maxResultSize, so the hint turned a count
+# into an 8.1 GiB driver transfer and no run with edge features could
+# finish. These tests pin the size test that replaced the assumption.
+# ======================================================================
+
+_BROADCAST_HINT = "ResolvedHint (strategy=broadcast)"
+
+
+def _is_hinted(df):
+    """True when df carries a broadcast hint in its analyzed plan."""
+    return _BROADCAST_HINT in df._jdf.queryExecution().analyzed().toString()
+
+
+@pytest.fixture
+def broadcast_bar(spark):
+    """Build extractors against a chosen autoBroadcastJoinThreshold.
+
+    The threshold is read once at construction, so the conf is restored
+    immediately afterwards and never leaks into another test.
+    """
+    key = "spark.sql.autoBroadcastJoinThreshold"
+
+    def build(threshold, config=None):
+        original = spark.conf.get(key)
+        spark.conf.set(key, str(threshold))
+        try:
+            return EdgeFeatureExtractor(spark, config or {})
+        finally:
+            spark.conf.set(key, original)
+
+    return build
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("10485760b", 10485760),   # what Spark answers when nothing set it
+    ("10485760", 10485760),
+    ("10MB", 10 * 1024 * 1024),
+    ("10m", 10 * 1024 * 1024),
+    ("1g", 1024 ** 3),
+    ("64k", 64 * 1024),
+    # Spark accepts pebibytes too; a suffix we don't know reads as
+    # unparseable and would silently disable every hint.
+    ("2p", 2 * 1024 ** 5),
+    ("-1", -1),                # broadcasting disabled
+    ("", None),
+    ("nonsense", None),
+])
+def test_parse_byte_string(text, expected):
+    """Spark states byte settings in several forms; all of them have to read."""
+    assert _parse_byte_string(text) == expected
+
+
+def test_broadcast_threshold_read_from_the_session(broadcast_bar):
+    """The bar comes from config, not a constant.
+
+    Nothing in this repo sets spark.sql.autoBroadcastJoinThreshold, so the
+    usual answer is Spark's 10 MB default — but a deployment that raises it
+    is asking for the wider hint and must get it.
+    """
+    assert broadcast_bar("64k")._broadcast_limit == 64 * 1024
+    assert broadcast_bar(-1)._broadcast_limit == -1
+
+
+def test_threshold_falls_back_when_the_session_cannot_answer():
+    """A threshold we cannot read must not read as zero.
+
+    Zero would suppress every hint, quietly costing a shuffle per join per
+    edge type on graphs where the frames really are small. Spark rejects an
+    unparseable value at conf.set(), so the way this happens is the session
+    failing to answer at all.
+    """
+    class _SilentSession:
+        class conf:
+            @staticmethod
+            def get(_key):
+                raise RuntimeError("session is not available")
+
+    efe = EdgeFeatureExtractor(_SilentSession(), {})
+    assert efe._broadcast_limit == 10 * 1024 * 1024
+
+
+def test_maybe_broadcast_hints_only_below_the_bar(spark, broadcast_bar):
+    """The size test itself: same frame, different measured row count."""
+    efe = broadcast_bar(1024)          # 8 rows at 128 bytes each
+    frame = spark.createDataFrame([(1, 2.0)], ["node_id", "numeric_value"])
+
+    assert _is_hinted(efe._maybe_broadcast(frame, 4, _NUMERIC_ROW_BYTES))
+    assert not _is_hinted(
+        efe._maybe_broadcast(frame, 40, _NUMERIC_ROW_BYTES)
+    )
+
+
+def test_maybe_broadcast_honours_a_disabled_threshold(spark, broadcast_bar):
+    """-1 means the deployment turned broadcast joins off. Say nothing."""
+    efe = broadcast_bar(-1)
+    frame = spark.createDataFrame([(1, 2.0)], ["node_id", "numeric_value"])
+
+    assert not _is_hinted(efe._maybe_broadcast(frame, 1, _NUMERIC_ROW_BYTES))
+
+
+def test_endpoint_property_rows_counts_per_type_and_subset(spark):
+    """Segment 1 broadcasts the month/year subsets, segment 2 the whole
+    per-type frame, so all three are counted in the one pass."""
+    props = spark.createDataFrame(
+        [
+            ("big_Type", 1, HAS_MONTH, 1.0),
+            ("big_Type", 1, HAS_YEAR, 2020.0),
+            ("big_Type", 1, STRIKE, 100.0),
+            ("big_Type", 2, HAS_MONTH, 2.0),
+            ("small_Type", 3, STRIKE, 5.0),
+        ],
+        schema=(
+            "node_type STRING, node_id LONG, predicate STRING, "
+            "numeric_value DOUBLE"
+        ),
+    )
+
+    sizes = EdgeFeatureExtractor(spark, {})._endpoint_property_rows(props)
+
+    assert sizes["big_Type"].total == 4
+    assert sizes["big_Type"].month == 2
+    assert sizes["big_Type"].year == 1
+    assert sizes["small_Type"].total == 1
+    assert sizes["small_Type"].month == 0
+    # A type with no numeric properties is absent, and reads as zero rows.
+    assert "absent_Type" not in sizes
+
+
+def _one_edge_df(spark, src_type, dst_type):
+    return spark.createDataFrame(
+        [(0, 1, 2, src_type, dst_type)],
+        schema=(
+            "edge_idx LONG, src_id LONG, dst_id LONG, "
+            "src_type STRING, dst_type STRING"
+        ),
+    )
+
+
+def _two_type_props(spark):
+    return spark.createDataFrame(
+        [
+            ("big_Type", 1, HAS_MONTH, 1.0),
+            ("big_Type", 1, HAS_YEAR, 2020.0),
+            ("big_Type", 1, STRIKE, 100.0),
+            ("small_Type", 2, HAS_MONTH, 2.0),
+            ("small_Type", 2, HAS_YEAR, 2020.0),
+            ("small_Type", 2, STRIKE, 110.0),
+        ],
+        schema=(
+            "node_type STRING, node_id LONG, predicate STRING, "
+            "numeric_value DOUBLE"
+        ),
+    )
+
+
+def test_temporal_joins_drop_the_hint_for_a_large_endpoint_type(
+    spark, broadcast_bar
+):
+    """Segment 1, the four-broadcast path.
+
+    market_enrichment_precedes has the same 10.1M-node type on both ends and
+    took this path on the run that failed. A frame that size must plan as an
+    ordinary shuffle join instead.
+    """
+    efe = broadcast_bar(256)      # ~10 temporal rows at 24 bytes each
+    big = _PropertyRows(total=10_000, month=5_000, year=5_000)
+
+    entries = efe._encode_temporal_signals(
+        edge_df=_one_edge_df(spark, "big_Type", "big_Type"),
+        src_type="big_Type",
+        dst_type="big_Type",
+        category="temporal",
+        numeric_props_df=_two_type_props(spark),
+        src_rows=big,
+        dst_rows=big,
+    )
+
+    assert entries is not None
+    assert not _is_hinted(entries)
+
+
+def test_temporal_joins_keep_the_hint_for_a_small_endpoint_type(
+    spark, broadcast_bar
+):
+    """The other half of the contract — the original rationale still holds.
+
+    These frames come through an anti-join and an aggregation, so Catalyst's
+    estimate for them is far too pessimistic and no join would auto-broadcast.
+    Where the frame really is small the hint must stay, or the phase pays one
+    shuffle stage per join per edge type.
+    """
+    efe = broadcast_bar(1024 * 1024)
+    small = _PropertyRows(total=6, month=2, year=2)
+
+    entries = efe._encode_temporal_signals(
+        edge_df=_one_edge_df(spark, "small_Type", "small_Type"),
+        src_type="small_Type",
+        dst_type="small_Type",
+        category="temporal",
+        numeric_props_df=_two_type_props(spark),
+        src_rows=small,
+        dst_rows=small,
+    )
+
+    assert entries is not None
+    assert _is_hinted(entries)
+
+
+def test_numeric_contrast_drops_the_hint_for_a_large_endpoint_type(
+    spark, broadcast_bar
+):
+    """Segment 2, the two-broadcast path — the widest of the six frames.
+
+    No predicate filter narrows these, so the type contributes every numeric
+    property of every one of its nodes: 305M rows on the failing run.
+    """
+    efe = broadcast_bar(256)      # 2 rows at 128 bytes each
+    big = _PropertyRows(total=10_000, month=5_000, year=5_000)
+
+    entries = efe._encode_numeric_contrast(
+        edge_df=_one_edge_df(spark, "big_Type", "big_Type"),
+        src_type="big_Type",
+        dst_type="big_Type",
+        category="temporal",
+        numeric_props_df=_two_type_props(spark),
+        has_shared_numerics=True,
+        src_rows=big,
+        dst_rows=big,
+    )
+
+    assert entries is not None
+    assert not _is_hinted(entries)
+
+
+def test_sizing_leaves_the_encoded_values_unchanged(spark):
+    """Whether a join is hinted is a planning decision, not a value one.
+
+    Same fixture encoded under a bar that admits every frame and one that
+    admits none must produce identical tensors.
+    """
+    key = ("cpi_Index", PRECEDES_REL, "cpi_Series")
+    rows = _temporal_edge_set(4)
+    conf_key = "spark.sql.autoBroadcastJoinThreshold"
+    original = spark.conf.get(conf_key)
+
+    try:
+        spark.conf.set(conf_key, "1g")
+        hinted, _ei, _layout = _edge_features(spark, rows)
+        spark.conf.set(conf_key, "-1")
+        shuffled, _ei2, _layout2 = _edge_features(spark, rows)
+    finally:
+        spark.conf.set(conf_key, original)
+
+    assert torch.equal(hinted[key], shuffled[key])

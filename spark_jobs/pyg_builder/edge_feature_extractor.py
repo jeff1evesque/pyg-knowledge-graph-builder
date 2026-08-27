@@ -238,6 +238,81 @@ _CHUNK_EDGE_THRESHOLD = 1_000_000
 # enrichment phases. This caps plan width independently of row count.
 _MAX_EDGE_TYPES_PER_BATCH = 8
 
+# Predicate patterns that identify a month or a year property. Hoisted
+# out of _encode_temporal_signals so _endpoint_property_rows can count
+# exactly the rows that method filters to — a count taken with a
+# different pattern would size the wrong frame.
+_MONTH_PREDICATE_PATTERN = "(?i)(hasMonth|month|hasMonthNum|monthNumber)"
+_YEAR_PREDICATE_PATTERN = "(?i)(hasYear|year|hasYearNum|yearNumber)"
+
+# ============================================
+# Broadcast sizing
+# ============================================
+# Approximate width, in bytes, of one row of each endpoint property
+# frame. Used to turn Spark's byte-denominated broadcast threshold into
+# a row budget, since a row count is what we can measure cheaply.
+#
+# The temporal frames carry a long node id and a double value. The
+# segment-2 frame carries the predicate URI as well, which is most of
+# its width — these are full URIs, not local names.
+_TEMPORAL_ROW_BYTES = 24
+_NUMERIC_ROW_BYTES = 128
+
+# Spark's own default, used when the session does not report a value.
+_DEFAULT_BROADCAST_THRESHOLD = 10 * 1024 * 1024
+
+_BYTE_SUFFIXES = {
+    "b": 1,
+    "k": 1024, "kb": 1024,
+    "m": 1024 ** 2, "mb": 1024 ** 2,
+    "g": 1024 ** 3, "gb": 1024 ** 3,
+    "t": 1024 ** 4, "tb": 1024 ** 4,
+    "p": 1024 ** 5, "pb": 1024 ** 5,
+}
+
+
+def _parse_byte_string(value: str) -> Optional[int]:
+    """
+    Parse a Spark byte setting ("10MB", "10485760", "-1") into bytes.
+
+    Returns None when the value cannot be read, so the caller can fall
+    back rather than treat an unparseable setting as zero.
+    """
+    text = str(value).strip().lower()
+    if not text:
+        return None
+
+    for suffix, multiplier in sorted(
+        _BYTE_SUFFIXES.items(), key=lambda kv: -len(kv[0])
+    ):
+        if text.endswith(suffix):
+            number = text[: -len(suffix)].strip()
+            try:
+                return int(float(number) * multiplier)
+            except ValueError:
+                return None
+
+    try:
+        return int(float(text))
+    except ValueError:
+        return None
+
+
+class _PropertyRows:
+    """
+    Row counts of the endpoint property frames for one node type.
+
+    ``month`` and ``year`` are the subsets segment 1 filters to;
+    ``total`` is the whole per-type frame segment 2 uses.
+    """
+
+    __slots__ = ("total", "month", "year")
+
+    def __init__(self, total: int = 0, month: int = 0, year: int = 0):
+        self.total = total
+        self.month = month
+        self.year = year
+
 
 class EdgeVectorLayout:
     """
@@ -668,6 +743,70 @@ class EdgeFeatureExtractor:
         # scale proportionally
         self._layout = EdgeVectorLayout(self._edge_vector_dim)
 
+        # The bar a property frame has to clear to be broadcast. Read
+        # from the session rather than hardcoded, so a deployment that
+        # raises Spark's threshold gets the wider hint it asked for.
+        self._broadcast_limit = self._read_broadcast_threshold()
+
+    def _read_broadcast_threshold(self) -> int:
+        """
+        Spark's own byte bar for auto-broadcasting a join side.
+
+        A negative value means broadcasting is disabled, which we honour
+        by never hinting.
+        """
+        # Asked for without a default on purpose: Spark then answers with
+        # its own ("10485760b" when nothing set it), so a deployment that
+        # configured the threshold is honoured and one that did not still
+        # gets the same bar its joins are planned against.
+        try:
+            raw = self.spark.conf.get(
+                "spark.sql.autoBroadcastJoinThreshold"
+            )
+        except Exception:
+            raw = None
+
+        if raw is None:
+            return _DEFAULT_BROADCAST_THRESHOLD
+
+        parsed = _parse_byte_string(raw)
+        if parsed is None:
+            logger.warning(
+                f"  Could not read spark.sql.autoBroadcastJoinThreshold "
+                f"({raw!r}); using Spark's default of "
+                f"{_DEFAULT_BROADCAST_THRESHOLD:,} bytes to size "
+                f"endpoint property broadcasts"
+            )
+            return _DEFAULT_BROADCAST_THRESHOLD
+
+        return parsed
+
+    def _maybe_broadcast(
+        self, frame: DataFrame, rows: int, bytes_per_row: int
+    ) -> DataFrame:
+        """
+        Hint a broadcast join only when the frame actually fits.
+
+        The endpoint property frames reach these joins through an
+        anti-join and an aggregation, so Catalyst's size estimate for
+        them is far too pessimistic and no join would auto-broadcast.
+        That is why the hint is here at all. But the hint is a promise,
+        not a request: Spark collects the build side to the driver
+        whatever its size, and the task results are charged against
+        spark.driver.maxResultSize. On a node type with 10M nodes that
+        is tens of GB arriving at the driver during a count.
+
+        So hint against a measured row count, and let anything larger
+        plan as an ordinary shuffle join.
+
+        Returns the frame with or without the hint.
+        """
+        if self._broadcast_limit <= 0:
+            return frame
+        if rows * bytes_per_row > self._broadcast_limit:
+            return frame
+        return F.broadcast(frame)
+
     def get_layout(self) -> EdgeVectorLayout:
         """Return the EdgeVectorLayout for metadata registration."""
         return self._layout
@@ -954,6 +1093,10 @@ class EdgeFeatureExtractor:
             edges_with_idx, numeric_props_df
         )
 
+        # Size the frames the encoders broadcast, once for the whole
+        # phase rather than once per edge type.
+        property_rows = self._endpoint_property_rows(numeric_props_df)
+
         # ============================================
         # Build features for all eligible edge types
         #
@@ -994,6 +1137,7 @@ class EdgeFeatureExtractor:
                 has_shared_numerics=(
                     edge_type_key in shared_numeric_types
                 ),
+                property_rows=property_rows,
             )
 
             if entries is None:
@@ -1146,6 +1290,69 @@ class EdgeFeatureExtractor:
 
         return numeric_df
 
+    def _endpoint_property_rows(
+        self,
+        numeric_props_df: DataFrame,
+    ) -> Dict[str, _PropertyRows]:
+        """
+        Count the endpoint property rows each node type contributes.
+
+        The encoders filter this frame by the edge's endpoint type, and
+        broadcast the result. How big that result is depends entirely on
+        the node type: on real data one type can hold 98% of the graph's
+        nodes and tens of millions of property rows, while the next
+        holds a few thousand. Nothing in the frame's shape says which,
+        so it has to be measured.
+
+        Counted per (type, month, year) in a single pass, because
+        segment 1 broadcasts the month and year subsets while segment 2
+        broadcasts the whole per-type frame. numeric_props_df is already
+        localCheckpointed, so this is one job for the phase.
+
+        Returns node_type -> _PropertyRows. A type absent from the frame
+        is absent here too, and reads as zero rows.
+        """
+        rows = (
+            numeric_props_df
+            .groupBy("node_type")
+            .agg(
+                F.count(F.lit(1)).alias("total_rows"),
+                F.sum(
+                    F.when(
+                        F.col("predicate").rlike(_MONTH_PREDICATE_PATTERN),
+                        F.lit(1),
+                    ).otherwise(F.lit(0))
+                ).alias("month_rows"),
+                F.sum(
+                    F.when(
+                        F.col("predicate").rlike(_YEAR_PREDICATE_PATTERN),
+                        F.lit(1),
+                    ).otherwise(F.lit(0))
+                ).alias("year_rows"),
+            )
+            .collect()
+        )
+
+        sizes = {
+            row["node_type"]: _PropertyRows(
+                total=row["total_rows"],
+                month=row["month_rows"],
+                year=row["year_rows"],
+            )
+            for row in rows
+        }
+
+        if sizes:
+            widest = max(sizes.items(), key=lambda kv: kv[1].total)
+            logger.info(
+                f"    Endpoint property frames sized for "
+                f"{len(sizes)} node type(s); widest is {widest[0]} at "
+                f"{widest[1].total:,} rows (broadcast bar "
+                f"{self._broadcast_limit:,} bytes)"
+            )
+
+        return sizes
+
     def _extract_node_labels(
         self,
         triples_df: DataFrame,
@@ -1274,6 +1481,7 @@ class EdgeFeatureExtractor:
         numeric_props_df: DataFrame,
         label_df: DataFrame,
         has_shared_numerics: bool,
+        property_rows: Dict[str, _PropertyRows],
     ) -> Optional[DataFrame]:
         """
         Build the lazy sparse entries for all edges of one type.
@@ -1310,12 +1518,17 @@ class EdgeFeatureExtractor:
         # ============================================
         # Compute all three segments (lazy on executors)
         # ============================================
+        src_rows = property_rows.get(src_type, _PropertyRows())
+        dst_rows = property_rows.get(dst_type, _PropertyRows())
+
         seg1_entries = self._encode_temporal_signals(
             edge_df=edge_df,
             src_type=src_type,
             dst_type=dst_type,
             category=category,
             numeric_props_df=numeric_props_df,
+            src_rows=src_rows,
+            dst_rows=dst_rows,
         )
 
         seg2_entries = self._encode_numeric_contrast(
@@ -1325,6 +1538,8 @@ class EdgeFeatureExtractor:
             category=category,
             numeric_props_df=numeric_props_df,
             has_shared_numerics=has_shared_numerics,
+            src_rows=src_rows,
+            dst_rows=dst_rows,
         )
 
         seg3_entries = self._encode_relational_context(
@@ -1364,6 +1579,8 @@ class EdgeFeatureExtractor:
         dst_type: str,
         category: str,
         numeric_props_df: DataFrame,
+        src_rows: _PropertyRows,
+        dst_rows: _PropertyRows,
     ) -> Optional[DataFrame]:
         """
         Encode Segment 1: time delta, period flags, and temporal
@@ -1394,14 +1611,10 @@ class EdgeFeatureExtractor:
             # These patterns match predicates like cpi:hasMonth,
             # market:monthNumber, etc.
             month_preds = numeric_props_df.filter(
-                F.col("predicate").rlike(
-                    "(?i)(hasMonth|month|hasMonthNum|monthNumber)"
-                )
+                F.col("predicate").rlike(_MONTH_PREDICATE_PATTERN)
             )
             year_preds = numeric_props_df.filter(
-                F.col("predicate").rlike(
-                    "(?i)(hasYear|year|hasYearNum|yearNumber)"
-                )
+                F.col("predicate").rlike(_YEAR_PREDICATE_PATTERN)
             )
 
             # Source endpoint temporal properties
@@ -1443,34 +1656,41 @@ class EdgeFeatureExtractor:
             # Join temporal properties to edges (on executors).
             # Left joins ensure edges without temporal properties
             # still get zero-valued features rather than being dropped.
-            # Broadcast the endpoint property side explicitly. These
-            # frames are tiny (order 1e3 rows) but are derived through
-            # an anti-join and an aggregation, so Catalyst's size
-            # estimate is far too pessimistic to auto-broadcast them.
-            # Without this each join plans as a shuffle, and the phase
-            # pays one shuffle stage per join per edge type.
+            # The endpoint property side is broadcast when it is small
+            # enough to be — see _maybe_broadcast. For a node type of a
+            # few thousand nodes that is every time, and it saves one
+            # shuffle stage per join per edge type. For a node type of
+            # ten million it is never, and the join shuffles.
             temporal_edges = (
                 edge_df
                 .join(
-                    F.broadcast(src_month),
+                    self._maybe_broadcast(
+                        src_month, src_rows.month, _TEMPORAL_ROW_BYTES
+                    ),
                     edge_df["src_id"] == src_month["_src_nid"],
                     "left",
                 )
                 .drop("_src_nid")
                 .join(
-                    F.broadcast(src_year),
+                    self._maybe_broadcast(
+                        src_year, src_rows.year, _TEMPORAL_ROW_BYTES
+                    ),
                     edge_df["src_id"] == src_year["_src_nid"],
                     "left",
                 )
                 .drop("_src_nid")
                 .join(
-                    F.broadcast(dst_month),
+                    self._maybe_broadcast(
+                        dst_month, dst_rows.month, _TEMPORAL_ROW_BYTES
+                    ),
                     edge_df["dst_id"] == dst_month["_dst_nid"],
                     "left",
                 )
                 .drop("_dst_nid")
                 .join(
-                    F.broadcast(dst_year),
+                    self._maybe_broadcast(
+                        dst_year, dst_rows.year, _TEMPORAL_ROW_BYTES
+                    ),
                     edge_df["dst_id"] == dst_year["_dst_nid"],
                     "left",
                 )
@@ -1639,6 +1859,8 @@ class EdgeFeatureExtractor:
         category: str,
         numeric_props_df: DataFrame,
         has_shared_numerics: bool,
+        src_rows: _PropertyRows,
+        dst_rows: _PropertyRows,
     ) -> Optional[DataFrame]:
         """
         Encode Segment 2: numeric differences, ratios, and magnitudes
@@ -1697,12 +1919,16 @@ class EdgeFeatureExtractor:
         # Join edge endpoints with their numeric properties.
         # Inner join on predicate ensures we only get properties
         # that both endpoints share.
-        # Broadcast for the same reason as the segment-1 joins: the
-        # property side is tiny but its size estimate is not.
+        # Broadcast on the same terms as the segment-1 joins, and note
+        # that these frames are the widest of the six: no predicate
+        # filter narrows them, so a type contributes every numeric
+        # property of every one of its nodes.
         edge_with_src = (
             edge_df
             .join(
-                F.broadcast(src_numerics),
+                self._maybe_broadcast(
+                    src_numerics, src_rows.total, _NUMERIC_ROW_BYTES
+                ),
                 edge_df["src_id"] == src_numerics["_src_nid"],
                 "inner",
             )
@@ -1712,7 +1938,9 @@ class EdgeFeatureExtractor:
         edge_with_both = (
             edge_with_src
             .join(
-                F.broadcast(dst_numerics),
+                self._maybe_broadcast(
+                    dst_numerics, dst_rows.total, _NUMERIC_ROW_BYTES
+                ),
                 (edge_with_src["dst_id"] == dst_numerics["_dst_nid"])
                 & (edge_with_src["src_pred"] == dst_numerics["dst_pred"]),
                 "inner",
