@@ -68,6 +68,21 @@ def literal_datatype_observations(parsed_df: DataFrame) -> DataFrame:
     rdfs:range here would erase the distinction ontology_schema.json has to
     publish.
 
+    THE COALESCE IS NOT A TIDY-UP. ``distinct()`` is a shuffle, and a shuffle
+    lands on ``spark.sql.shuffle.partitions`` -- 200 by default -- however few
+    rows come out of it. The loader unions this frame into the triples for its
+    source, so each source contributed 200 partitions of a few-hundred-row frame
+    on top of its file-scan partitions, and a union's partition count is the sum
+    of its children's. Measured on five sources: 160 scan partitions and 1,000
+    of these, and every one of the ~501 enrichment stages that read the cached
+    frame inherited all 1,160. That is 69% of every task the job launched, at an
+    average of 80 ms each -- task setup, not work.
+
+    One partition, not a tuned number: the row count is bounded by the source's
+    distinct (predicate, datatype) pairs by construction, which is vocabulary,
+    not data. The shuffle above it still runs 200 ways and still does the real
+    reduction; this only stops the result being *carried* 200 ways.
+
     Args:
         parsed_df: a frame carrying at least ``predicate`` and
             ``object_datatype`` (empty string where the literal declared none,
@@ -84,6 +99,7 @@ def literal_datatype_observations(parsed_df: DataFrame) -> DataFrame:
             F.col("object_datatype").alias("object"),
         )
         .distinct()
+        .coalesce(1)
     )
 
 
