@@ -1646,10 +1646,19 @@ in `distinct()`, which is a shuffle, and a shuffle lands on
 source used to contribute its file-scan partitions **plus 200**, for a frame whose row
 count is bounded by distinct (predicate, datatype) pairs. Measured on five sources: 160
 scan partitions and 1,000 marker partitions, and because the union is cached and read by
-every enrichment phase, all ~501 stages inherited all 1,160 — 69% of every task the job
-launched, averaging 80 ms each, which is task setup rather than work. The marker frame is
+every enrichment phase, every stage that read it inherited all 1,160. The marker frame is
 now coalesced to one partition at the point it is built, so what remains is the scan
 partitioning of the actual data.
+
+**What that is worth — measure it, do not estimate it.** On a cluster run the coalesce took
+the seed leg from 661,509 tasks to 151,808, and its wall clock from 174.5 to 168.2 minutes.
+Almost all of the removed tasks were empty: they held a task slot for 3.3 ms each, 1,600s in
+total, which is 2% of the run's slot time, against 430 ms for a task that does real work. An
+earlier estimate of 60–80 minutes came from costing the empty tasks at the average across
+*all* tasks — a blend of those two populations that overstates them by about 24x. Task
+counts and task cost are separate measurements, and on this pipeline they differ by two
+orders of magnitude. The reason to fix the partition count is that nothing bounds it: it
+grows with every source added, and every enrichment stage reads the result.
 
 The lesson generalizes past this one frame: a small `distinct()`, `groupBy` or join
 *inside a branch you are about to union* costs the whole downstream pipeline that branch's
