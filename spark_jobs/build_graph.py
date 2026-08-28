@@ -1498,10 +1498,29 @@ def get_spark_session() -> SparkSession:
     ``spark.rapids.sql.enabled=true`` here so GPU acceleration is on even for
     a bare submit; if the RAPIDS plugin jar is not on the classpath this flag
     is simply ignored.
+
+    ``PYG_RAPIDS_SQL_ENABLED=false`` turns it off. Setting the key here rather
+    than reading what spark-submit passed is what made it unreachable: builder
+    options are applied over the submitted conf, so ``--conf
+    spark.rapids.sql.enabled=false`` was accepted, logged, and then overwritten.
+    A benchmark arm for issue #342 ran a whole leg believing RAPIDS was off when
+    the event log says it was on. The parse is a Python UDF that RAPIDS cannot
+    accelerate, so being able to take it out of the query path is the thing #342
+    needs to measure.
     """
+    import os
+
+    rapids_enabled = os.environ.get("PYG_RAPIDS_SQL_ENABLED", "true").strip().lower()
+    if rapids_enabled not in ("true", "false"):
+        raise ValueError(
+            f"PYG_RAPIDS_SQL_ENABLED must be 'true' or 'false', got "
+            f"{os.environ['PYG_RAPIDS_SQL_ENABLED']!r}. Anything else would be "
+            f"read as false by Spark and quietly disable GPU acceleration."
+        )
+    logger.info(f"RAPIDS SQL acceleration requested: {rapids_enabled}")
     return (
         SparkSession.builder.appName("PyG-Knowledge-Graph-Builder")
-        .config("spark.rapids.sql.enabled", "true")
+        .config("spark.rapids.sql.enabled", rapids_enabled)
         .getOrCreate()
     )
 
