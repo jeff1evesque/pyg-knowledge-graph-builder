@@ -68,6 +68,30 @@ def literal_datatype_observations(parsed_df: DataFrame) -> DataFrame:
     rdfs:range here would erase the distinction ontology_schema.json has to
     publish.
 
+    THE COALESCE IS NOT A TIDY-UP. ``distinct()`` is a shuffle, and a shuffle
+    lands on ``spark.sql.shuffle.partitions`` -- 200 by default -- however few
+    rows come out of it. The loader unions this frame into the triples for its
+    source, and a union's partition count is the sum of its children's, so each
+    source contributed 200 partitions of a few-hundred-row frame on top of its
+    file-scan partitions. Measured on five sources: 160 scan partitions and
+    1,000 of these, and every stage that read the cached frame inherited all
+    1,160.
+
+    Measured on a cluster run, not estimated: this took the seed leg from
+    661,509 tasks to 151,808, and its wall clock from 174.5 to 168.2 minutes.
+    Do not expect it to buy time. The tasks it removes held a slot for 3.3 ms
+    each -- 1,600s in total, 2% of the run's slot time -- against 430 ms for a
+    task that does real work. An earlier estimate of 60-80 minutes came from
+    costing them at the average across all tasks, which is a blend of those two
+    populations and overstates the empty ones by about 24x.
+
+    The reason to do it is that nothing bounds the partition count: it grows
+    with every source added, and every enrichment stage reads the result. One
+    partition, not a tuned number -- the row count is bounded by the source's
+    distinct (predicate, datatype) pairs by construction, which is vocabulary,
+    not data. The shuffle above it still runs 200 ways and still does the real
+    reduction; this only stops the result being *carried* 200 ways.
+
     Args:
         parsed_df: a frame carrying at least ``predicate`` and
             ``object_datatype`` (empty string where the literal declared none,
@@ -84,6 +108,7 @@ def literal_datatype_observations(parsed_df: DataFrame) -> DataFrame:
             F.col("object_datatype").alias("object"),
         )
         .distinct()
+        .coalesce(1)
     )
 
 

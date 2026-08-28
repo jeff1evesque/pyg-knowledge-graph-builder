@@ -159,3 +159,40 @@ def test_turtle_parquet_preserves_datatypes(spark, tmp_path):
     # observation too — correct, and it is what makes string-valued
     # properties rangeable at all.
     assert (SUBJ, PRED, "1.5") in _data(df)
+
+
+# ======================================================================
+# partition count — issue #344
+# ======================================================================
+
+def test_marker_frame_lands_on_one_partition(spark):
+    """The marker frame must not carry a shuffle's worth of partitions.
+
+    ``distinct()`` lands on ``spark.sql.shuffle.partitions`` no matter how few
+    rows survive it, and every loader unions this frame into the triples for
+    its source. A union's partition count is the sum of its children's, so
+    before this was coalesced each source added 200 partitions of a
+    few-hundred-row frame to the cached triples, and each of the ~501
+    enrichment stages that read that cache inherited every one of them.
+
+    AQE hides this locally -- it coalesces the tiny exchange away -- so the
+    assertion is made with AQE off, which is the shape the cluster runs in.
+    """
+    from spark_jobs.utils.spark_rdf_utils import literal_datatype_observations
+
+    parsed = spark.createDataFrame(
+        [(f"{SUBJ}{i}", PRED, "1.5", f"{XSD}decimal") for i in range(50)],
+        schema="subject STRING, predicate STRING, object STRING, "
+               "object_datatype STRING",
+    ).repartition(8)
+
+    previous = spark.conf.get("spark.sql.adaptive.enabled", "true")
+    spark.conf.set("spark.sql.adaptive.enabled", "false")
+    try:
+        markers = literal_datatype_observations(parsed)
+        assert markers.rdd.getNumPartitions() == 1
+    finally:
+        spark.conf.set("spark.sql.adaptive.enabled", previous)
+
+    # ...and the rows it carries are unchanged by the coalesce.
+    assert markers.count() == 1

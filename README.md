@@ -1638,6 +1638,33 @@ Read executor-side logs at `$SPARK_HOME/work/<app-id>/<executor-id>/stderr` — 
 log cannot distinguish a hung executor from a dead one, and the difference decides
 whether more memory or a longer timeout is the fix.
 
+**Where the loaded frame's partition count comes from.** Every loader returns the source's
+triples unioned with the datatype markers `literal_datatype_observations()` derives from
+them, and a union's partition count is the *sum* of its children's. The marker frame ends
+in `distinct()`, which is a shuffle, and a shuffle lands on
+`spark.sql.shuffle.partitions` — 200 by default — however few rows survive it. So each
+source used to contribute its file-scan partitions **plus 200**, for a frame whose row
+count is bounded by distinct (predicate, datatype) pairs. Measured on five sources: 160
+scan partitions and 1,000 marker partitions, and because the union is cached and read by
+every enrichment phase, every stage that read it inherited all 1,160. The marker frame is
+now coalesced to one partition at the point it is built, so what remains is the scan
+partitioning of the actual data.
+
+**What that is worth — measure it, do not estimate it.** On a cluster run the coalesce took
+the seed leg from 661,509 tasks to 151,808, and its wall clock from 174.5 to 168.2 minutes.
+Almost all of the removed tasks were empty: they held a task slot for 3.3 ms each, 1,600s in
+total, which is 2% of the run's slot time, against 430 ms for a task that does real work. An
+earlier estimate of 60–80 minutes came from costing the empty tasks at the average across
+*all* tasks — a blend of those two populations that overstates them by about 24x. Task
+counts and task cost are separate measurements, and on this pipeline they differ by two
+orders of magnitude. The reason to fix the partition count is that nothing bounds it: it
+grows with every source added, and every enrichment stage reads the result.
+
+The lesson generalizes past this one frame: a small `distinct()`, `groupBy` or join
+*inside a branch you are about to union* costs the whole downstream pipeline that branch's
+shuffle width, not just its own stage. Adaptive query execution hides it locally — AQE
+coalesces the tiny exchange away — so it shows up only at cluster scale.
+
 ## Knowledge Graph Enrichment
 
 The enrichment pipeline creates a unified knowledge graph by establishing relationships at two levels across **100+ data sources and ontologies**. Each enrichment step is a PySpark transformation that reads the triples DataFrame, computes new relationship triples, and unions them back.
@@ -2143,6 +2170,7 @@ The pipeline is designed to handle:
 - **No double-join for edge features** — the expensive double-join (triples × node_id_df) runs exactly once in EdgeMapper; EdgeFeatureExtractor reuses the cached result
 - **No Python UDFs in the hot path** — URI-to-name conversions, hash-based encoding, and numeric parsing use pure Spark expressions (JVM-native), avoiding Python serialization overhead on 30-50M rows
 - **Controlled Parquet output** — configurable partition count prevents thousands of tiny files or few huge files
+- **Loaded partitions track the data, not the shuffle default** — the datatype markers each loader unions into its source are coalesced to one partition, so a vocabulary-sized frame no longer adds 200 partitions per source to the cached triples that every enrichment stage reads (see [Sizing a large run](#sizing-a-large-run))
 - **Efficient literal isolation** — anti-join against node_id_df filters out edge triples before numeric parsing, avoiding wasted computation on URI-valued objects
 - **Canonical namespace registry** — `NAMESPACE_PREFIXES` and `ONTOLOGY_NAMESPACE_INDICES` in `rdf_utils.py` are the single source of truth, imported by `node_mapper.py`, `edge_mapper.py`, `feature_extractor.py`, and `edge_feature_extractor.py` to eliminate duplication
 - **Negligible metadata overhead** — all metadata collect calls target small aggregated DataFrames (<5000 rows each); total metadata memory is under 1 MB; six JSON files are written after the `.pt` file with no impact on tensor collection or HeteroData assembly
