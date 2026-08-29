@@ -24,6 +24,18 @@
 #   GPU_PER_EXECUTOR            (optional, default 1)
 #   GPU_PER_TASK                (optional, default 0.125 -> up to 8 tasks/GPU)
 #   RAPIDS_CONCURRENT_GPU_TASKS (optional, default 2)
+#   RAPIDS_BATCH_SIZE_BYTES     (optional, default 1g -- RAPIDS' own default, stated here
+#                               rather than left implicit because it is per CONCURRENT
+#                               TASK, which makes it the setting that decides how many
+#                               tasks fit in host memory. Measured 2026-08-29 on a
+#                               unified-memory host, where the RMM pool comes out of
+#                               system RAM: ~1.0 GB of host RAM per concurrent task at
+#                               this default, on a ~26 GB base. At 144 concurrent tasks
+#                               that asks for ~170 GB on a 121 GiB host and the run dies.
+#                               At 256m all 144 held with 44 GB still free -- more
+#                               headroom than 64 tasks had at 1g. Lower this before
+#                               lowering concurrency; concurrency is not what costs the
+#                               memory.)
 #   RAPIDS_PINNED_POOL          (optional, default 2G)
 #   RAPIDS_EXPLAIN              (optional, default NONE; set ALL to log which
 #                               operators run on GPU vs fall back to CPU)
@@ -370,6 +382,7 @@ fi
   --conf spark.plugins=com.nvidia.spark.SQLPlugin \
   --conf spark.rapids.sql.enabled=true \
   --conf spark.rapids.sql.concurrentGpuTasks="${RAPIDS_CONCURRENT_GPU_TASKS:-2}" \
+  --conf spark.rapids.sql.batchSizeBytes="${RAPIDS_BATCH_SIZE_BYTES:-1g}" \
   --conf spark.rapids.memory.pinnedPool.size="${RAPIDS_PINNED_POOL:-2G}" \
   --conf spark.rapids.memory.gpu.allocFraction="${RAPIDS_GPU_ALLOC_FRACTION}" \
   --conf spark.rapids.memory.gpu.minAllocFraction="${RAPIDS_GPU_MIN_ALLOC_FRACTION:-0}" \
