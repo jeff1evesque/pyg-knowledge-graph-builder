@@ -73,14 +73,30 @@ class EnrichmentPipeline:
         constraint inference makes the plan blow up super-linearly (measured
         6 -> 436 -> 5,854 plan nodes over three phases on a 184-triple fixture,
         then OutOfMemoryError with ~1.5M constraint BitSets on the driver
-        heap). ``localCheckpoint(eager=True)`` writes the rows to the block
-        manager and replaces the plan with a single-node scan, so each phase
-        starts planning fresh and the node count stays flat.
+        heap). Checkpointing eagerly writes the rows out and replaces the plan
+        with a single-node scan, so each phase starts planning fresh and the
+        node count stays flat.
 
-        localCheckpoint is executor-local (not fault-tolerant); that is fine
-        for a batch job, which simply recomputes from source on failure, and
-        avoids the reliable-checkpoint requirement of an HDFS/S3 checkpoint dir.
+        This used ``localCheckpoint(eager=True)``, on the reasoning that an
+        executor-local copy is fine for a batch job because it recomputes from
+        source on failure. It does not recompute: settling truncates the plan,
+        so once the blocks are gone there is nothing left to recompute from, the
+        task fails four times and the job aborts. Losing one executor therefore
+        loses every phase settled so far -- 47 minutes on 2026-08-29, longer on
+        2026-08-24, both from a single evicted executor.
+
+        ``checkpoint(eager=True)`` writes the same truncating copy to the
+        session's checkpoint dir, which build_graph points at the run's work
+        dir. Callers that set no checkpoint dir keep the old behaviour, so the
+        unit suite runs unchanged; the session is read off the DataFrame
+        because the plan-truncation tests call this with no instance.
         """
+        if df.sparkSession.sparkContext.getCheckpointDir():
+            return df.checkpoint(eager=True)
+        logger.warning(
+            "No checkpoint dir is set, so this phase settles with "
+            "localCheckpoint, which does not survive losing an executor."
+        )
         return df.localCheckpoint(eager=True)
 
     def run(
