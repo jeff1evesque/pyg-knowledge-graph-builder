@@ -87,7 +87,7 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, Tuple, List
+from typing import Dict, Any, Optional, Tuple, List
 
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
@@ -399,6 +399,12 @@ class JobConfig:
         self.time_period = args.get("time_period") or datetime.now().strftime(
             "%Y-%m"
         )
+        # A name for this combination of sources, e.g. "all-sources" or
+        # "no-market". Cannot be derived -- which sources belong together under
+        # one name is a judgement, not a fact about the paths -- so it is stated
+        # or it is empty. Recorded in the dataset descriptor and from there in
+        # the published graph schema.
+        self.dataset = args.get("dataset") or ""
         self.pyg_config = self._parse_pyg_config(args.get("pyg_config", ""))
         self.class_mappings = self._parse_json_arg(
             args.get("class_mappings", ""), "class_mappings"
@@ -614,6 +620,10 @@ def parse_args() -> JobConfig:
     parser.add_argument("--pyg_filename", default=DEFAULT_PYG_FILENAME)
     parser.add_argument("--enable_ontology_mapping", default="true")
     parser.add_argument("--time_period", default="")
+    # Names the combination of sources, e.g. "all-sources" or "no-market".
+    # Recorded beside the enriched output and carried into the graph schema, so
+    # a published graph can say what it was built from.
+    parser.add_argument("--dataset", default="")
     parser.add_argument("--pyg_config", default="")
     parser.add_argument("--class_mappings", default="")
     parser.add_argument(
@@ -1371,6 +1381,84 @@ def save_enriched_parquet(
     )
 
 
+DATASET_DESCRIPTOR_NAME = "dataset.json"
+
+
+def dataset_descriptor_path(enriched_parquet_path: str) -> str:
+    """Where the dataset descriptor sits: beside the Parquet dir, not inside it.
+
+    Inside would put a non-Parquet file in a directory Spark reads as one. A
+    leading underscore would make Spark's reader skip it, but Hadoop's hidden
+    file filter then also hides it from an explicit read -- it could be written
+    and never read back.
+    """
+    parent = enriched_parquet_path.rstrip("/").rsplit("/", 1)[0]
+    return f"{parent}/{DATASET_DESCRIPTOR_NAME}"
+
+
+def save_dataset_descriptor(config: "JobConfig", spark: SparkSession) -> None:
+    """Record which sources produced this enriched output, beside the output.
+
+    The enriched Parquet is subject/predicate/object only -- SOURCE_COLUMN is
+    dropped at the write -- so a later pyg_only run cannot tell what its graph
+    was built from. Without this, that fact lives solely in the enrichment
+    manifest: a different file, under a different prefix, that a reader has to
+    know to go looking for. It is lost outright the moment a graph is copied
+    anywhere else.
+
+    Labels, not paths. source_label() exists so a source can be named without
+    naming a bucket, and what is written here reaches the published graph schema.
+    """
+    labels = sorted({
+        source_label(path, index)
+        for index, path in enumerate(config.source_paths)
+    })
+    body = json.dumps({
+        "dataset": config.dataset,
+        "sources": labels,
+        "time_period": config.time_period,
+        "written": _utcnow().isoformat(),
+    }, indent=2).encode("utf-8")
+
+    path = dataset_descriptor_path(config.enriched_parquet_path)
+    try:
+        _write_manifest_bytes(spark, path, body)
+        logger.info(f"Saved dataset descriptor to {path}")
+        logger.info(f"  dataset: {config.dataset or '(unnamed)'}")
+        logger.info(f"  sources: {', '.join(labels) or '(none)'}")
+    except Exception as e:
+        # Not fatal: the enriched output is already written and correct, and a
+        # graph built without this simply records no sources.
+        logger.warning(f"Failed to save dataset descriptor: {e}")
+
+
+def load_dataset_descriptor(
+    spark: SparkSession, enriched_parquet_path: str
+) -> Dict[str, Any]:
+    """Read the descriptor beside the enriched output, or ``{}`` if absent.
+
+    Absent is normal rather than an error: every enriched directory written
+    before this existed has none, and a graph schema that records nothing is
+    honest where one that guessed would not be.
+    """
+    path = dataset_descriptor_path(enriched_parquet_path)
+    try:
+        # One row per line, not one row per file: the `wholetext` option is
+        # silently ignored here, so a pretty-printed descriptor arrives split
+        # and rows[0] is just "{". Rejoining is safe because the file is well
+        # under a block -- Spark reads it as a single partition and collect()
+        # preserves order within one.
+        rows = spark.read.text(path).collect()
+        if rows:
+            return json.loads("\n".join(row[0] for row in rows))
+    except Exception as e:
+        logger.info(
+            f"No readable dataset descriptor at {path} ({type(e).__name__}: "
+            f"{e}); the graph schema will not name its sources."
+        )
+    return {}
+
+
 def load_enriched_parquet(
     spark: SparkSession, input_path: str
 ) -> DataFrame:
@@ -1564,6 +1652,8 @@ def run_pyg_construction(
     triples_df: DataFrame,
     pyg_config: Dict[str, Any] = None,
     time_period: str = "",
+    dataset: str = "",
+    sources: Optional[List[str]] = None,
 ) -> Tuple:
     """
     Run PyG HeteroData construction from enriched triples DataFrame.
@@ -1602,7 +1692,8 @@ def run_pyg_construction(
 
     config = pyg_config or {}
     hetero_data, metadata, node_index_df = build_hetero_data(
-        spark, triples_df, config, time_period=time_period
+        spark, triples_df, config, time_period=time_period,
+        dataset=dataset, sources=sources,
     )
 
     elapsed = time.time() - start_time
@@ -1853,11 +1944,17 @@ def execute_full_pipeline(
     save_enriched_parquet(
         enriched_df, config.enriched_parquet_path, config.parquet_partitions
     )
+    save_dataset_descriptor(config, spark)
 
     # Step 4: Build PyG (executors → compact tensors → driver)
     hetero_data, metadata, node_index_df = run_pyg_construction(
         spark, enriched_df, config.pyg_config,
         time_period=config.time_period,
+        dataset=config.dataset,
+        sources=sorted({
+            source_label(path, index)
+            for index, path in enumerate(config.source_paths)
+        }),
     )
 
     # Step 5: Save final artifacts (local + optional S3)
@@ -1927,6 +2024,7 @@ def execute_enrichment_only(
     save_enriched_parquet(
         enriched_df, config.enriched_parquet_path, config.parquet_partitions
     )
+    save_dataset_descriptor(config, spark)
 
     return {
         "mode": "enrichment_only",
@@ -1979,9 +2077,16 @@ def execute_pyg_only(
     logger.info("")
 
     # Step 2: Build PyG (executors → compact tensors → driver)
+    # What this enriched output was built from. pyg_only never sees
+    # source_paths -- it reads Parquet a previous run wrote -- so the descriptor
+    # beside that Parquet is the only way the graph can name its own sources.
+    descriptor = load_dataset_descriptor(spark, config.enriched_parquet_path)
+
     hetero_data, metadata, node_index_df = run_pyg_construction(
         spark, triples_df, config.pyg_config,
         time_period=config.time_period,
+        dataset=config.dataset or descriptor.get("dataset", ""),
+        sources=descriptor.get("sources"),
     )
 
     # Step 3: Save final artifacts (local + optional S3)
