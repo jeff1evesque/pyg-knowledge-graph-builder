@@ -431,6 +431,20 @@ class JobConfig:
             f"{self.local_work_dir}/enriched/"
             f"{self.period_partition}/triples"
         )
+        # Where enriched triples are READ from, which is not always where they
+        # were written. Deriving both ends from local_work_dir meant a pyg_only
+        # run could only read enriched output by also writing its graph beside
+        # it -- so reusing a published run's output required copying it into a
+        # scratch directory first, purely to give the job somewhere safe to
+        # write. An explicit input path separates the two: read wherever the
+        # data actually is, write wherever this run should.
+        #
+        # Explicit means explicit -- the path is used verbatim, with no period
+        # partition appended, because data being pointed at may not follow this
+        # pipeline's directory convention.
+        self.enriched_input_path = (
+            args.get("enriched_input_path") or self.enriched_parquet_path
+        )
         self.pyg_output_path = (
             f"{self.local_work_dir}/pyg/"
             f"{self.period_partition}/{self.pyg_filename}"
@@ -526,6 +540,18 @@ class JobConfig:
         if not self.local_work_dir:
             raise ValueError("local_work_dir is required")
 
+        # Warn rather than fail: only pyg_only reads enriched output from disk,
+        # so the flag has no effect in the other modes. Silently ignoring it
+        # would let someone believe a run read from somewhere it never touched.
+        if (
+            self.enriched_input_path != self.enriched_parquet_path
+            and self.mode != "pyg_only"
+        ):
+            logger.warning(
+                f"--enriched_input_path is set but mode is {self.mode}, which "
+                f"does not read enriched output from disk. It will be ignored."
+            )
+
         if self.source_format not in VALID_SOURCE_FORMATS:
             raise ValueError(
                 f"Invalid source_format '{self.source_format}'. "
@@ -565,6 +591,11 @@ class JobConfig:
             f"turtle_column={self.turtle_column}, "
             f"local_work_dir={self.local_work_dir}, "
             f"enriched_parquet_path={self.enriched_parquet_path}, "
+            + (
+                f"enriched_input_path={self.enriched_input_path}, "
+                if self.enriched_input_path != self.enriched_parquet_path
+                else ""
+            ) +
             f"pyg_output_path={self.pyg_output_path}, "
             f"s3_archive_bucket={self.s3_archive_bucket or '(none)'}, "
             f"s3_pyg_key={self.s3_pyg_key or '(none)'}, "
@@ -624,6 +655,10 @@ def parse_args() -> JobConfig:
     # Recorded beside the enriched output and carried into the graph schema, so
     # a published graph can say what it was built from.
     parser.add_argument("--dataset", default="")
+    # Read enriched triples from here instead of deriving the location from
+    # --local_work_dir. Used verbatim. Only --mode pyg_only reads enriched
+    # output from disk, so it is ignored elsewhere.
+    parser.add_argument("--enriched_input_path", default="")
     parser.add_argument("--pyg_config", default="")
     parser.add_argument("--class_mappings", default="")
     parser.add_argument(
@@ -2065,7 +2100,9 @@ def execute_pyg_only(
     logger.info("=" * 80)
     start_time = time.time()
 
-    enriched_path = config.enriched_parquet_path
+    # The input path, not the derived one: this run may be reading a previous
+    # run's published output and writing its graph somewhere else entirely.
+    enriched_path = config.enriched_input_path
     triples_df = load_enriched_parquet(spark, enriched_path)
     triples_df = triples_df.cache()
     triple_count = triples_df.count()
@@ -2080,7 +2117,7 @@ def execute_pyg_only(
     # What this enriched output was built from. pyg_only never sees
     # source_paths -- it reads Parquet a previous run wrote -- so the descriptor
     # beside that Parquet is the only way the graph can name its own sources.
-    descriptor = load_dataset_descriptor(spark, config.enriched_parquet_path)
+    descriptor = load_dataset_descriptor(spark, config.enriched_input_path)
 
     hetero_data, metadata, node_index_df = run_pyg_construction(
         spark, triples_df, config.pyg_config,
