@@ -28,6 +28,12 @@ Launch with spark-submit (see bin/submit_spark_job.sh). Parameters:
     --mode:                    full | enrichment_only | pyg_only
     --source_paths:            comma-separated source path(s)/URI(s);
                                local dirs or s3a://... (full, enrichment_only)
+    --input_mode:              s3 | local (default: s3). "local" reads a
+                               staged mirror of the s3a:// sources from
+                               --local_source_root instead of object storage;
+                               see bin/stage_sources.sh
+    --local_source_root:       root of the staged mirror, required when
+                               --input_mode local
     --local_work_dir:          base dir on the shared filesystem for
                                enriched Parquet + local final artifacts
     --s3_archive_bucket:       optional S3 bucket to mirror final artifacts
@@ -59,6 +65,19 @@ Example (Turtle Parquet, s3a source, local only):
         --local_work_dir /data \\
         --source_format turtle_parquet \\
         --turtle_column triples \\
+        --time_period 2024-12
+
+Example (same sources, read from a staged mirror instead of object storage):
+    bin/stage_sources.sh --dest /srv/pyg-source --nodes worker-a,worker-b \\
+        --source s3a://my-data-lake/raw/sec/filings/2024-12/
+
+    spark_jobs/build_graph.py \\
+        --mode enrichment_only \\
+        --source_paths s3a://my-data-lake/raw/sec/filings/2024-12/ \\
+        --input_mode local \\
+        --local_source_root /srv/pyg-source \\
+        --local_work_dir /data \\
+        --source_format turtle_parquet \\
         --time_period 2024-12
 """
 import sys
@@ -159,6 +178,18 @@ def _utcnow() -> datetime:
 VALID_MODES = {"full", "enrichment_only", "pyg_only"}
 VALID_SOURCE_FORMATS = {"ntriples", "turtle_parquet"}
 
+# Where the parse reads its input from.
+#
+#   "s3"    -- open every s3a:// source path directly. Right in the cloud, where
+#              the executors sit beside the bucket on an in-region link.
+#   "local" -- read a mirror of those same objects from node-local disk, staged
+#              once by bin/stage_sources.sh. Right on-prem, where the site
+#              uplink is the scarce resource and hundreds of readers can take
+#              the network down (see issue #342).
+#
+# s3 stays the default so nothing changes for a deployment that has not staged.
+VALID_INPUT_MODES = {"s3", "local"}
+
 TRIPLES_SCHEMA = StructType([
     StructField("subject", StringType(), nullable=False),
     StructField("predicate", StringType(), nullable=False),
@@ -252,6 +283,42 @@ def assert_sec_paths_name_the_handled_feed(source_paths: List[str]) -> None:
 DEFAULT_PYG_FILENAME = "hetero_data.pt"
 
 
+def staged_local_path(source_path: str, local_source_root: str) -> str:
+    """Map one object-storage source path onto its staged local mirror.
+
+    ``s3a://bucket/key/...`` becomes ``file://<root>/bucket/key/...``. Carrying
+    the bucket and the whole key under the root is what makes the two input
+    modes interchangeable: source_label() reads the source out of path
+    fragments (``source=sec``, ``quotes``), so a mirror that keeps the key
+    layout reports the same per-source statistics as reading the bucket
+    directly. It also keeps two buckets that share a key prefix apart.
+
+    A path that is already local is returned unchanged, so one run can mix a
+    staged bucket with a directory that was never in object storage.
+
+    The result names its scheme on purpose. A bare path is resolved against
+    fs.defaultFS, so a site that points that at object storage would send a
+    read the operator asked to keep local straight back over the wire.
+    """
+    remainder = None
+    for scheme in ("s3a://", "s3n://", "s3://"):
+        if source_path.startswith(scheme):
+            remainder = source_path[len(scheme):]
+            break
+    if remainder is None:
+        return source_path
+
+    root = local_source_root.rstrip("/")
+    if not root.startswith("/"):
+        raise ValueError(
+            f"local_source_root must be an absolute path, got {root!r}. "
+            f"Every worker opens this path itself, so a relative one would "
+            f"resolve against whatever directory each executor happens to be "
+            f"started in."
+        )
+    return f"file://{root}/{remainder}"
+
+
 class JobConfig:
     """Parsed and validated job configuration."""
 
@@ -288,6 +355,29 @@ class JobConfig:
         self.source_paths: List[str] = [
             p.strip() for p in raw_sources.split(",") if p.strip()
         ]
+
+        # Where those sources are actually opened from. See VALID_INPUT_MODES.
+        # source_paths keeps naming the object-storage locations either way, so
+        # the manifest records what the run was asked for and read_paths records
+        # what it opened -- the two differ only by the staging root.
+        self.input_mode = (args.get("input_mode") or "s3").lower().strip()
+        self.local_source_root = (
+            args.get("local_source_root") or ""
+        ).rstrip("/")
+        if self.input_mode == "local":
+            if not self.local_source_root:
+                raise ValueError(
+                    "local_source_root is required when input_mode is "
+                    "'local'. It is the root bin/stage_sources.sh mirrored "
+                    "the buckets into, and every worker must carry the same "
+                    "one at the same path."
+                )
+            self.read_paths: List[str] = [
+                staged_local_path(p, self.local_source_root)
+                for p in self.source_paths
+            ]
+        else:
+            self.read_paths = list(self.source_paths)
 
         # Source format:
         #   "ntriples":       one triple per line in .nt files
@@ -391,6 +481,36 @@ class JobConfig:
             )
             return {}
 
+    def _assert_staged_mirror_present(self) -> None:
+        """Fail before the job starts when the mirror is missing or empty.
+
+        Checked on the driver, which covers only the driver's own host. The
+        other workers are the staging script's job -- it syncs each node and
+        compares a content digest across them before reporting success. What
+        this catches is the cheap half: a root that was never staged, or staged
+        for a different day, which would otherwise surface as an empty parse
+        or a FileNotFoundError several minutes in.
+        """
+        missing = []
+        for declared, resolved in zip(self.source_paths, self.read_paths):
+            if not resolved.startswith("file://"):
+                continue
+            local = Path(resolved[len("file://"):])
+            if not local.exists():
+                missing.append((declared, local))
+            elif local.is_dir() and not any(local.iterdir()):
+                missing.append((declared, local))
+
+        if missing:
+            listed = "\n".join(f"  {d}\n    -> {p}" for d, p in missing)
+            raise FileNotFoundError(
+                f"input_mode is 'local' but the staged mirror is missing or "
+                f"empty for {len(missing)} source path(s):\n{listed}\n"
+                f"Stage them first:\n"
+                f"  bin/stage_sources.sh --dest {self.local_source_root} "
+                f"--nodes <every worker> --source <each source path>"
+            )
+
     def _validate(self):
         if self.mode not in VALID_MODES:
             raise ValueError(
@@ -406,12 +526,20 @@ class JobConfig:
                 f"Must be one of: {', '.join(VALID_SOURCE_FORMATS)}"
             )
 
+        if self.input_mode not in VALID_INPUT_MODES:
+            raise ValueError(
+                f"Invalid input_mode '{self.input_mode}'. "
+                f"Must be one of: {', '.join(sorted(VALID_INPUT_MODES))}"
+            )
+
         if self.mode in ("full", "enrichment_only"):
             if not self.source_paths:
                 raise ValueError(
                     f"source_paths is required for mode '{self.mode}'"
                 )
             assert_sec_paths_name_the_handled_feed(self.source_paths)
+            if self.input_mode == "local":
+                self._assert_staged_mirror_present()
         if self.mode in ("full", "pyg_only"):
             if not _pyg_builder_available:
                 raise ImportError(
@@ -425,6 +553,8 @@ class JobConfig:
         return (
             f"JobConfig(mode={self.mode}, "
             f"source_paths={self.source_paths}, "
+            f"input_mode={self.input_mode}, "
+            f"local_source_root={self.local_source_root or '(none)'}, "
             f"source_format={self.source_format}, "
             f"turtle_column={self.turtle_column}, "
             f"local_work_dir={self.local_work_dir}, "
@@ -449,6 +579,20 @@ def parse_args() -> JobConfig:
         "--source_paths",
         default="",
         help="Comma-separated source path(s)/URI(s): local dirs or s3a://...",
+    )
+    parser.add_argument(
+        "--input_mode",
+        choices=sorted(VALID_INPUT_MODES),
+        default="s3",
+        help="Where source_paths are opened from: 's3' reads the s3a:// URIs "
+        "directly (default); 'local' reads the mirror bin/stage_sources.sh "
+        "put under --local_source_root",
+    )
+    parser.add_argument(
+        "--local_source_root",
+        default="",
+        help="Root of the staged mirror, identical on every worker. "
+        "Required when --input_mode local",
     )
     parser.add_argument(
         "--local_work_dir",
@@ -1087,17 +1231,19 @@ def load_source_triples(
         ValueError: If turtle_column is not found (turtle_parquet only).
     """
     source_paths = list(config.source_paths)
+    read_paths = list(config.read_paths)
 
     logger.info(
         f"Source format: {config.source_format}, "
-        f"{len(source_paths)} path(s)"
+        f"input mode: {config.input_mode}, "
+        f"{len(read_paths)} path(s)"
     )
-    for path in source_paths:
+    for path in read_paths:
         logger.info(f"  {path}")
 
     loaded: List[DataFrame] = []
 
-    for index, source_path in enumerate(source_paths):
+    for index, source_path in enumerate(read_paths):
         if config.source_format == "ntriples":
             df = load_ntriples_to_dataframe(spark, source_path)
         else:
@@ -1113,7 +1259,15 @@ def load_source_triples(
         # expression, so it does not matter whether rows from different paths are
         # in the same frame yet.
         df = canonicalize_source_triples(df)
-        df = df.withColumn(SOURCE_COLUMN, F.lit(source_label(source_path, index)))
+        # Labelled from the DECLARED path, not the one just read. A staged
+        # mirror keeps the key layout so both spell the source the same way,
+        # but the staging root is chosen by whoever ran the sync -- keying the
+        # label off it would let a root named /srv/sec-mirror relabel every
+        # source in the run, and per-source statistics have to mean the same
+        # thing in both input modes to be comparable at all.
+        df = df.withColumn(
+            SOURCE_COLUMN, F.lit(source_label(source_paths[index], index))
+        )
         loaded.append(df)
         logger.info(f"  Parsed: {source_path}")
 
@@ -1874,6 +2028,12 @@ def save_job_manifest(
         "mode": config.mode,
         "config": {
             "source_paths": config.source_paths,
+            # Recorded because it changes nothing about the graph and
+            # everything about how a run's timings should be read: an s3 leg
+            # is bounded by the site uplink and a local leg is not, so the two
+            # are not comparable without knowing which this was. The root
+            # itself is deployment detail and stays out, like the paths above.
+            "input_mode": config.input_mode,
             "source_format": config.source_format,
             "turtle_column": config.turtle_column,
             "local_work_dir": config.local_work_dir,
