@@ -28,6 +28,7 @@ def _config(work_dir: str, mode: str = "enrichment_only") -> SimpleNamespace:
         mode=mode,
         time_period="2099-01",
         source_paths=["s3a://bucket/raw/sec"],
+        input_mode="s3",
         source_format="turtle_parquet",
         turtle_column="triples",
         local_work_dir=work_dir.rstrip("/"),
