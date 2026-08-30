@@ -238,42 +238,46 @@ class CrossSourceLinker:
         logger.info(f"Detected data sources: {', '.join(self.available_sources)}")
 
     def _detect_sources(self) -> Set[str]:
-        """Detect which data sources are present (collects at most ~10 rows)."""
-        sources = set()
+        """Which sources are present. Reads every row, not a sample.
 
-        bls_prefixes = _BLS_ENTITY_PREFIXES
-        sec_prefixes = _SEC_ENTITY_PREFIXES
-        market_prefixes = _MARKET_ENTITY_PREFIXES
-        # NOAA alert instances use the ALERT namespace
-        # (https://api.weather.gov/alerts/) — a real publisher namespace, so it
-        # has no id/ counterpart and is matched as-is. CAP/WEATHER are checked
-        # too, for type triples.
-        noaa_prefixes = [str(ALERT), *_entity_prefixes(CAP, WEATHER)]
+        This used to read the first 100,000 subjects and decide from those.
+        Whether a source turned up in that window depended on how the rows
+        happened to be laid out, not on whether the source was there. The same
+        shape in bls_linker skipped the whole BLS leg on every four-source run
+        (#350); here it would skip the steps gated on a source instead.
 
-        # Sample subjects to detect sources — bounded, fast
-        sample = (
+        Naming the source in one column and taking the distinct values reads
+        the data once and collects at most one row per source.
+        """
+        by_source = (
+            ('bls', _BLS_ENTITY_PREFIXES),
+            ('sec', _SEC_ENTITY_PREFIXES),
+            ('market', _MARKET_ENTITY_PREFIXES),
+            # NOAA alert instances use the ALERT namespace
+            # (https://api.weather.gov/alerts/) — a real publisher namespace, so
+            # it has no id/ counterpart and is matched as-is. CAP/WEATHER are
+            # checked too, for type triples.
+            ('noaa', [str(ALERT), *_entity_prefixes(CAP, WEATHER)]),
+        )
+
+        def _starts_with_any(prefixes: List[str]) -> Column:
+            test = F.col("subject").startswith(prefixes[0])
+            for p in prefixes[1:]:
+                test = test | F.col("subject").startswith(p)
+            return test
+
+        # First match wins, so the branch order is the old if/elif order.
+        source = F.when(_starts_with_any(by_source[0][1]), by_source[0][0])
+        for name, prefixes in by_source[1:]:
+            source = source.when(_starts_with_any(prefixes), name)
+
+        rows = (
             self.triples_df
-            .select("subject")
-            .limit(100000)
+            .select(source.alias("source"))
             .distinct()
             .collect()
         )
-
-        for row in sample:
-            s = row.subject
-            if any(s.startswith(p) for p in bls_prefixes):
-                sources.add('bls')
-            elif any(s.startswith(p) for p in sec_prefixes):
-                sources.add('sec')
-            elif any(s.startswith(p) for p in market_prefixes):
-                sources.add('market')
-            elif any(s.startswith(p) for p in noaa_prefixes):
-                sources.add('noaa')
-
-            if len(sources) == 4:
-                break
-
-        return sources
+        return {row.source for row in rows if row.source is not None}
 
     def enrich(self) -> DataFrame:
         """Run all cross-source enrichment. Returns new triples only."""
