@@ -1340,3 +1340,125 @@ def test_route_counts_have_a_stable_key_order():
     assert list(detail["counts"]) == sorted(detail["counts"])
     assert list(detail["axioms"]) == sorted(detail["axioms"])
     assert detail["counts"]["declared"] == 0
+
+
+# ======================================================================
+# Non-finite literals (#351)
+#
+# cast("double") fails to null on a value it cannot read, but returns
+# infinity on one it reads as a number too large to hold. The CUSIP
+# 46120E602 is a real identifier and valid scientific notation, so it
+# arrives as inf, passed the isNotNull() filter, made its predicate's mean
+# infinite and its stddev NaN, and put NaN in 5,396 feature rows.
+# ======================================================================
+
+# The literal from the run that surfaced this: 46120 x 10^602.
+OVERFLOWING_CUSIP = "46120E602"
+
+
+def test_a_literal_that_overflows_to_infinity_leaves_no_nan(spark):
+    """One unusable value must not poison the other rows of its predicate.
+
+    Before the fix every row of METRIC came back NaN, including the three
+    whose values were ordinary numbers.
+    """
+    x = _node_features(spark, [
+        ("https://ex/n0", RDF_TYPE, CPI_INDEX),
+        ("https://ex/n1", RDF_TYPE, CPI_INDEX),
+        ("https://ex/n2", RDF_TYPE, CPI_INDEX),
+        ("https://ex/n3", RDF_TYPE, CPI_INDEX),
+        ("https://ex/n0", METRIC, "10"),
+        ("https://ex/n1", METRIC, "20"),
+        ("https://ex/n2", METRIC, "30"),
+        ("https://ex/n3", METRIC, OVERFLOWING_CUSIP),
+    ])["cpi_Index"]
+
+    assert np.isfinite(x).all(), "non-finite values reached the feature tensor"
+
+
+def test_the_surviving_values_still_normalize_correctly(spark):
+    """Dropping the overflow must not perturb the statistics of the rest.
+
+    10/20/30 keep mean 20 and sample std 10, exactly as they do without the
+    fourth row — the bad value is absent, not imputed.
+    """
+    x = _node_features(spark, [
+        ("https://ex/n0", RDF_TYPE, CPI_INDEX),
+        ("https://ex/n1", RDF_TYPE, CPI_INDEX),
+        ("https://ex/n2", RDF_TYPE, CPI_INDEX),
+        ("https://ex/n3", RDF_TYPE, CPI_INDEX),
+        ("https://ex/n0", METRIC, "10"),
+        ("https://ex/n1", METRIC, "20"),
+        ("https://ex/n2", METRIC, "30"),
+        ("https://ex/n3", METRIC, OVERFLOWING_CUSIP),
+    ])["cpi_Index"]
+
+    L = VectorLayout(VDIM)
+    slot = _hash_slot(spark, [METRIC, 500], L.seg3_numeric_dim,
+                      L.seg3_numeric_start)
+
+    for node_id, want in enumerate([-1.0, 0.0, 1.0]):
+        assert x[node_id, slot] == pytest.approx(want, abs=1e-5)
+
+    # The node whose only value overflowed carries nothing in that slot,
+    # the same as a node that never had the property.
+    assert x[3, slot] == pytest.approx(0.0, abs=1e-5)
+
+
+def test_an_overflowing_literal_does_not_count_toward_the_numeric_share(spark):
+    """A property of mostly-unusable values is not a numeric property.
+
+    Three overflows and one real number is 25% parseable, below the majority
+    the classifier needs. Counting the overflows made it 100% and put the
+    property in the numeric segment on the strength of values that could not
+    be encoded.
+    """
+    numeric = _numeric_predicates(spark, [
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/b", RDF_TYPE, CPI_INDEX),
+        ("https://ex/c", RDF_TYPE, CPI_INDEX),
+        ("https://ex/d", RDF_TYPE, CPI_INDEX),
+        ("https://ex/a", METRIC, OVERFLOWING_CUSIP),
+        ("https://ex/b", METRIC, "12E999"),
+        ("https://ex/c", METRIC, "99E400"),
+        ("https://ex/d", METRIC, "42"),
+    ])
+
+    assert METRIC not in numeric
+
+
+def _stats(spark, rows):
+    df = spark.createDataFrame(
+        rows, schema="predicate STRING, numeric_value DOUBLE"
+    )
+    out = FeatureExtractor(spark, CONFIG)._compute_normalization_stats(df)
+    return {r["predicate"]: (r["mu"], r["sigma"]) for r in out.collect()}
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])
+def test_normalization_stats_fall_back_on_a_non_finite_statistic(spark, bad):
+    """Defence in depth for the guard that let this through.
+
+    NaN is neither null nor equal to 0.0, so the old `isNull() | == 0.0` test
+    passed it along and (value - mu) / sigma was NaN for every row.
+    """
+    mu, sigma = _stats(spark, [("p", bad), ("p", 1.0), ("p", 2.0)])["p"]
+
+    assert np.isfinite(mu) and np.isfinite(sigma)
+    assert sigma != 0.0
+
+
+def test_normalization_stats_keep_real_statistics(spark):
+    """The fallback must not fire on ordinary data."""
+    mu, sigma = _stats(spark, [("p", 10.0), ("p", 20.0), ("p", 30.0)])["p"]
+
+    assert mu == pytest.approx(20.0)
+    assert sigma == pytest.approx(10.0)
+
+
+def test_a_single_valued_predicate_still_falls_back_to_unit_sigma(spark):
+    """One row → stddev is null, the case the original guard was written for."""
+    mu, sigma = _stats(spark, [("p", 7.0)])["p"]
+
+    assert mu == pytest.approx(7.0)
+    assert sigma == pytest.approx(1.0)
