@@ -21,6 +21,7 @@ from spark_jobs.utils.fs_utils import (
     is_local_path,
     join_path,
     local_filesystem_path,
+    path_exists,
     write_bytes,
     write_file,
 )
@@ -53,6 +54,40 @@ def test_uri_paths_are_not_local(path):
 def test_file_uri_strips_its_scheme():
     assert local_filesystem_path("file:///data/x.pt") == "/data/x.pt"
     assert local_filesystem_path("/data/x.pt") == "/data/x.pt"
+
+
+# --------------------------------------------------------------------------- #
+# existence, routed the same way as the writes
+# --------------------------------------------------------------------------- #
+
+def test_path_exists_answers_for_local_paths(tmp_path):
+    present = tmp_path / "thing.pt"
+    present.write_bytes(b"x")
+
+    assert path_exists(str(present))
+    assert not path_exists(str(tmp_path / "absent.pt"))
+
+
+def test_path_exists_sees_directories(tmp_path):
+    """The enriched Parquet is a directory, and its _SUCCESS marker a file
+    inside it — the occupancy preflight tests both shapes."""
+    directory = tmp_path / "triples"
+    directory.mkdir()
+    assert path_exists(str(directory))
+
+
+def test_path_exists_accepts_a_file_uri(tmp_path):
+    present = tmp_path / "thing.pt"
+    present.write_bytes(b"x")
+    assert path_exists(f"file://{present}")
+
+
+def test_path_exists_on_a_uri_without_spark_raises(tmp_path, monkeypatch):
+    """False would be indistinguishable from a real answer, and wrong in the
+    direction that overwrites someone's finished run."""
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match="non-local URI"):
+        path_exists("s3a://bucket/pyg/hetero_data.pt")
 
 
 # --------------------------------------------------------------------------- #
