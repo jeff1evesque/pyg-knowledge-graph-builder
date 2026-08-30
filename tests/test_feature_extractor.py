@@ -1462,3 +1462,136 @@ def test_a_single_valued_predicate_still_falls_back_to_unit_sigma(spark):
 
     assert mu == pytest.approx(7.0)
     assert sigma == pytest.approx(1.0)
+
+
+# ======================================================================
+# slot_mapping.json vs the columns the encoder actually writes
+#
+# The mapping used to recompute every slot on the driver with md5 while the
+# encoder placed values with Spark's hash, so a published column was right
+# about once in 257 (#354). Both sides were tested on their own and passed --
+# the encoder against F.hash here, the writer against a hand-made stub in
+# test_metadata_writer.py. Nothing compared them, which is this seam.
+# ======================================================================
+
+_MAPPING_ROWS = [
+    ("https://ex/n0", RDF_TYPE, CPI_INDEX),
+    ("https://ex/n1", RDF_TYPE, CPI_INDEX),
+    ("https://ex/n2", RDF_TYPE, CPI_INDEX),
+    ("https://ex/n0", METRIC, "10"),
+    ("https://ex/n1", METRIC, "20"),
+    ("https://ex/n2", METRIC, "30"),
+    ("https://ex/n0", SECTOR, "Energy"),
+    ("https://ex/n1", SECTOR, "Mining"),
+    ("https://ex/n2", SECTOR, "Energy"),
+]
+
+
+def _mapping_and_features(spark, rows=_MAPPING_ROWS):
+    """The slot mapping that ships with a build, and the tensors it describes."""
+    triples = spark.createDataFrame(
+        rows, schema="subject STRING, predicate STRING, object STRING"
+    )
+    node_id_df, counts = NodeMapper(spark, CONFIG).build_node_id_table(triples)
+    fx = FeatureExtractor(spark, CONFIG)
+    tensors, _names = fx.build_features(triples, node_id_df, counts)
+    mapping = fx.get_metadata_artifacts()["slot_mapping"]
+    return mapping, {t: v.numpy() for t, v in tensors.items()}
+
+
+def test_published_numeric_slot_is_the_column_the_encoder_writes(spark):
+    """Every published numeric column must be the one the encoder places into."""
+    mapping, _x = _mapping_and_features(spark)
+    L = VectorLayout(VDIM)
+    num_dim, num_start = L.seg3_numeric_dim, L.seg3_numeric_start
+
+    published = {
+        p["predicate_uri"]: p["global_dim"]
+        for p in mapping["numeric_properties"]
+    }
+    assert published, "fixture produced no numeric properties to check"
+
+    mismatched = [
+        (pred, dim, _hash_slot(spark, [pred, 500], num_dim, num_start))
+        for pred, dim in published.items()
+        if dim != _hash_slot(spark, [pred, 500], num_dim, num_start)
+    ]
+    assert not mismatched, "\n".join(
+        f"{p}: slot_mapping says dim {r}, the encoder writes dim {w}"
+        for p, r, w in mismatched
+    )
+
+    # hash_slot is the same column expressed relative to the segment.
+    for p in mapping["numeric_properties"]:
+        assert p["hash_slot"] == p["global_dim"] - num_start
+
+
+def test_published_numeric_slot_holds_the_value(spark):
+    """The same contract read off the tensor rather than off the expression.
+
+    Values 10/20/30 → mean 20, sample std 10 → -1/0/+1 in the published column.
+    """
+    mapping, tensors = _mapping_and_features(spark)
+    x = tensors["cpi_Index"]
+
+    dim = next(
+        p["global_dim"] for p in mapping["numeric_properties"]
+        if p["predicate_uri"] == METRIC
+    )
+    assert [x[i, dim] for i in range(3)] == pytest.approx(
+        [-1.0, 0.0, 1.0], abs=1e-5
+    )
+
+
+def test_categorical_publishes_a_rule_not_per_predicate_columns(spark):
+    """A categorical slot is keyed on the predicate AND the value.
+
+    Four columns per predicate used to be published as though a predicate had
+    fixed columns. It does not: each distinct value lands somewhere different,
+    so those columns named whatever else hashed there (#354).
+    """
+    mapping, tensors = _mapping_and_features(spark)
+
+    entries = mapping["categorical_properties"]
+    assert {e["predicate_uri"] for e in entries} == {SECTOR}
+    for e in entries:
+        assert "hash_slots" not in e and "global_dims" not in e
+
+    # The rule must be usable: computed for a value, it gives the columns that
+    # value sets on a node carrying it.
+    rule = mapping["categorical_slot_rule"]
+    assert rule["keyed_on"] == "{predicate_uri}::{value}"
+
+    x = tensors["cpi_Index"]
+    for seed in rule["seeds"]:
+        dim = _hash_slot(
+            spark,
+            [f"{SECTOR}::Energy", seed],
+            rule["segment_dim"],
+            rule["segment_start"],
+        )
+        assert x[0, dim] == pytest.approx(1.0), (
+            f"node 0 carries {SECTOR}=Energy but column {dim}, which the "
+            f"published rule names for seed {seed}, is {x[0, dim]}"
+        )
+
+
+def test_namespace_publishes_both_columns_it_occupies(spark):
+    """A namespace occupies two columns, and both are now named.
+
+    Membership read from a node's rdf:type lands at `slot`; membership read
+    from the node's own URI lands half a segment away. Only the first was
+    published, so the second looked unclaimed (#354).
+    """
+    mapping, _x = _mapping_and_features(spark)
+    L = VectorLayout(VDIM)
+    os_start, os_dim = L.seg1_ontology_source_start, L.seg1_ontology_source_dim
+
+    entries = mapping["namespaces"]
+    assert entries, "fixture produced no namespaces to check"
+    for e in entries:
+        assert e["global_dim"] == e["slot"] + os_start
+        assert e["node_uri_global_dim"] == e["node_uri_slot"] + os_start
+        assert e["node_uri_slot"] == (e["slot"] + os_dim // 2) % os_dim
+        for dim in (e["global_dim"], e["node_uri_global_dim"]):
+            assert os_start <= dim < os_start + os_dim
