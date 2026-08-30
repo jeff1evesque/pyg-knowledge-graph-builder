@@ -1666,11 +1666,36 @@ than a worker can offer as *unsatisfiable* and waits on it rather than failing �
 the same hang class as prerequisite 1. Erring small costs speed; erring large
 costs the whole run.
 
+**6. Size the driver — there are two limits, and raising one does not raise the
+other.** `--mode full` and `--mode pyg_only` finish on the driver: node features
+arrive as one dense tensor per node type, edge features as one per edge type. Both
+of these are driver-bound in a way the enrichment modes are not, and each runs into
+a different limit.
+
+- **`DRIVER_MEMORY`** is the heap the tensors live in. Node features cost
+  `num_nodes × vector_dim × 4` bytes — on a four-source day (10.3M nodes at
+  `vector_dim` 1024) that is 42.4 GiB before any Arrow buffer or Pandas copy, into
+  a default of 4 GB.
+- **`DRIVER_MAX_RESULT_SIZE`** is Spark's cap on what a *single* `collect` may
+  return, defaulting to 1 GB. It is not raised by raising the heap, which is what
+  makes it confusing in practice: a run given 32 GB of heap after an
+  `OutOfMemoryError` fails again a step later on a limit nobody moved.
+
+Edge-feature batches are sized against `DRIVER_MAX_RESULT_SIZE`, in bytes rather
+than edge count, so leaving it unset also leaves that sizing with nothing to work
+from. Both `bin/profiles/large-run.env` and `bin/profiles/pyg-assembly.env` set it.
+
+```bash
+DRIVER_MEMORY=64g DRIVER_MAX_RESULT_SIZE=8g \
+  bin/submit_spark_job.sh --mode pyg_only ...
+```
+
 | Variable | Default | Applies to |
 |---|---|---|
 | `EXECUTOR_MEMORY` | `4g` | cluster masters only; local mode uses `DRIVER_MEMORY` |
 | `EXECUTOR_CORES` | unset — each executor takes every core on its worker | cluster masters only |
 | `DRIVER_MEMORY` | `4g` | all masters |
+| `DRIVER_MAX_RESULT_SIZE` | unset — Spark caps a single `collect` at 1 GB | all masters; sizes the edge-feature batches |
 | `RAPIDS_GPU_ALLOC_FRACTION` | `0.25` | pool as a fraction of **free** GPU memory |
 | `RAPIDS_GPU_MAX_ALLOC_FRACTION` | `0.4` | hard cap as a fraction of **total** GPU memory |
 | `RAPIDS_PINNED_POOL` | `2G` | host memory staged for host↔device transfer |

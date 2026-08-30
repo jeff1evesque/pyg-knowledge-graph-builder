@@ -309,6 +309,33 @@ fi
 #
 # Local mode has no executor process (the driver is the executor), so --driver-memory
 # already covers it and the flag is omitted rather than set to something misleading.
+# The driver holds the finished graph: node features arrive as one dense tensor per
+# node type and edge features as one per edge type, all collected to this process. So
+# --mode full and --mode pyg_only are driver-bound in a way the enrichment modes are
+# not, and 4g is a floor sized for fixtures (#340).
+#
+# Two independent limits, which is what makes this confusing in the field: the heap
+# above, and spark.driver.maxResultSize below it, which caps what a single collect may
+# return. Raising only the heap leaves the second one exactly where it was, so a run
+# that OOMs at one and is then given 32g fails again at the other.
+#
+# Warned rather than defaulted, for the reason the executor default is warned about:
+# a constant in here cannot know the graph, and a large silent default trades a loud
+# failure for a slow one.
+if [[ -z "${DRIVER_MEMORY:-}" ]]; then
+  echo "WARNING: DRIVER_MEMORY is unset; defaulting the driver to 4g." >&2
+  echo "         --mode full and --mode pyg_only collect every feature tensor to the" >&2
+  echo "         driver, so this is the limit they reach first. Set it to what the" >&2
+  echo "         graph needs, e.g. DRIVER_MEMORY=64g." >&2
+fi
+if [[ -z "${DRIVER_MAX_RESULT_SIZE:-}" ]]; then
+  echo "WARNING: DRIVER_MAX_RESULT_SIZE is unset; Spark caps a single collect at 1g." >&2
+  echo "         This is a separate limit from DRIVER_MEMORY and is not raised with" >&2
+  echo "         it. Edge-feature batches are sized against this cap, so leaving it" >&2
+  echo "         unset also gives that sizing nothing to work from." >&2
+  echo "         e.g. DRIVER_MAX_RESULT_SIZE=8g (both bin/profiles/*.env set this)." >&2
+fi
+
 executor_args=()
 if [[ "$SPARK_MASTER_URL" != local* ]]; then
   executor_args=(--executor-memory "${EXECUTOR_MEMORY:-4g}")
