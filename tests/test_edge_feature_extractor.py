@@ -29,10 +29,10 @@ from spark_jobs.pyg_builder.edge_mapper import EdgeMapper
 from spark_jobs.pyg_builder.edge_feature_extractor import (
     EdgeFeatureExtractor,
     _CHUNK_EDGE_THRESHOLD,
-    _FEATURE_ITEMSIZE,
     _NUMERIC_ROW_BYTES,
     _PropertyRows,
     _RESULT_SIZE_TARGET_FRACTION,
+    _SPARSE_ENTRY_BYTES,
     _classify_relation,
     _parse_byte_string,
 )
@@ -874,23 +874,33 @@ def test_collect_budget_shrinks_as_the_vector_widens():
     wide = _budget("1g", 1024)
 
     assert wide < narrow
-    # 0.6 x 1 GiB / (1024 dims x 4 bytes)
-    assert wide == 157_286
+    # 0.6 x 1 GiB / (1024 dims x 20 bytes per collected row)
+    assert wide == 31_457
     # The old code returned _CHUNK_EDGE_THRESHOLD for both.
     assert narrow == _CHUNK_EDGE_THRESHOLD
 
 
-def test_collect_budget_matches_the_stated_formula():
+def test_collect_budget_is_sized_on_the_sparse_row_not_the_dense_slot():
+    """A collect returns 20 bytes per non-zero slot to deliver 4.
+
+    Sizing on the dense tensor's 4 bytes under-counts what crosses the wire
+    by 5x. Measured on the 2026-08 graph the edge features are 51.6% full, so
+    the dense estimate was ~2.6x too generous in practice.
+    """
     cap = 128 * 1024 ** 2
     dim = 32
 
     expected = (
         int(cap * _RESULT_SIZE_TARGET_FRACTION)
-        // (dim * _FEATURE_ITEMSIZE)
+        // (dim * _SPARSE_ENTRY_BYTES)
     )
     assert _budget("128m", dim) == expected
     assert expected < _CHUNK_EDGE_THRESHOLD, (
         "fixture must pick a cap where bytes bind, or it tests the row cap"
+    )
+    # Sized on the dense slot this would have allowed 5x more.
+    assert _budget("128m", dim) * 5 == pytest.approx(
+        int(cap * _RESULT_SIZE_TARGET_FRACTION) // (dim * 4), rel=1e-6
     )
 
 
@@ -913,6 +923,6 @@ def test_collect_budget_is_cached_per_vector_dim():
     """The split loop asks once per edge type; the conf cannot change mid-build."""
     fx = EdgeFeatureExtractor(_StubSession("1g"), {})
 
-    assert fx._max_edges_per_collect(1024) == 157_286
+    assert fx._max_edges_per_collect(1024) == 31_457
     # A different width must not return the cached answer for the first.
     assert fx._max_edges_per_collect(32) == _CHUNK_EDGE_THRESHOLD
