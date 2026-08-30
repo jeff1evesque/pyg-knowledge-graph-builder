@@ -154,19 +154,19 @@ class BLSIntraSourceLinker:
 
         # Step 1: Link temporal sequences (delegated to sub-enrichers)
         logger.info("\n[Step 1/4] Linking temporal sequences...")
-        self._append(new_dfs, self._link_temporal_sequences())
+        self._append(new_dfs, self._link_temporal_sequences(), "[Step 1/4]")
 
         # Step 2: Apply sector patterns
         logger.info("\n[Step 2/4] Applying sector patterns...")
-        self._append(new_dfs, self._apply_sector_patterns())
+        self._append(new_dfs, self._apply_sector_patterns(), "[Step 2/4]")
 
         # Step 3: Apply known correlations
         logger.info("\n[Step 3/4] Applying known correlations...")
-        self._append(new_dfs, self._apply_known_correlations())
+        self._append(new_dfs, self._apply_known_correlations(), "[Step 3/4]")
 
         # Step 4: Link category hierarchies
         logger.info("\n[Step 4/4] Linking category hierarchies...")
-        self._append(new_dfs, self._link_category_hierarchies())
+        self._append(new_dfs, self._link_category_hierarchies(), "[Step 4/4]")
 
         # Unpersist cached subset
         self._bls_triples.unpersist()
@@ -251,9 +251,17 @@ class BLSIntraSourceLinker:
         )
 
     @staticmethod
-    def _append(lst: list, item: Optional[DataFrame]):
+    def _append(lst: list, item: Optional[DataFrame], step: str):
+        """Keep a step's triples, and say so when it made none.
+
+        Same reason as CrossSourceLinker._append: a step that returns None
+        logged only its opening line, so a missing link family read like a
+        healthy graph (#350).
+        """
         if item is not None:
             lst.append(item)
+            return
+        logger.warning(f"  {step} produced no triples")
 
     # ================================================================
     # Step 1: Temporal sequences (delegated to sub-enrichers)
