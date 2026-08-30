@@ -28,8 +28,11 @@ from spark_jobs.pyg_builder.node_mapper import NodeMapper
 from spark_jobs.pyg_builder.edge_mapper import EdgeMapper
 from spark_jobs.pyg_builder.edge_feature_extractor import (
     EdgeFeatureExtractor,
+    _CHUNK_EDGE_THRESHOLD,
+    _FEATURE_ITEMSIZE,
     _NUMERIC_ROW_BYTES,
     _PropertyRows,
+    _RESULT_SIZE_TARGET_FRACTION,
     _classify_relation,
     _parse_byte_string,
 )
@@ -832,3 +835,84 @@ def test_sizing_leaves_the_encoded_values_unchanged(spark):
         spark.conf.set(conf_key, original)
 
     assert torch.equal(hinted[key], shuffled[key])
+
+
+# ======================================================================
+# Collect budget — bytes, not rows
+#
+# The batcher capped on edge COUNT while spark.driver.maxResultSize counts
+# BYTES, so the same budget meant 32x the bytes at edge_vector_dim 1024 that
+# it meant at 32. A run that fit at one width failed at another and nothing
+# in the failure named the width (#340).
+#
+# No Spark needed: the extractor only stores the session, so a stub conf is
+# enough to drive the sizing.
+# ======================================================================
+
+class _StubConf:
+    def __init__(self, value):
+        self._value = value
+
+    def get(self, key, default=None):
+        assert key == "spark.driver.maxResultSize", key
+        return default if self._value is None else self._value
+
+
+class _StubSession:
+    def __init__(self, value):
+        self.conf = _StubConf(value)
+
+
+def _budget(max_result_size, edge_vector_dim):
+    fx = EdgeFeatureExtractor(_StubSession(max_result_size), {})
+    return fx._max_edges_per_collect(edge_vector_dim)
+
+
+def test_collect_budget_shrinks_as_the_vector_widens():
+    """The whole point: the same cap must buy fewer edges at a wider vector."""
+    narrow = _budget("1g", 32)
+    wide = _budget("1g", 1024)
+
+    assert wide < narrow
+    # 0.6 x 1 GiB / (1024 dims x 4 bytes)
+    assert wide == 157_286
+    # The old code returned _CHUNK_EDGE_THRESHOLD for both.
+    assert narrow == _CHUNK_EDGE_THRESHOLD
+
+
+def test_collect_budget_matches_the_stated_formula():
+    cap = 128 * 1024 ** 2
+    dim = 32
+
+    expected = (
+        int(cap * _RESULT_SIZE_TARGET_FRACTION)
+        // (dim * _FEATURE_ITEMSIZE)
+    )
+    assert _budget("128m", dim) == expected
+    assert expected < _CHUNK_EDGE_THRESHOLD, (
+        "fixture must pick a cap where bytes bind, or it tests the row cap"
+    )
+
+
+@pytest.mark.parametrize("unbounded", [None, "0", "-1", "not-a-size"])
+def test_collect_budget_falls_back_to_the_row_cap(unbounded):
+    """Unset, zero, negative and unreadable all mean "no cap to size against".
+
+    Spark reads 0 as unbounded; an unparseable value is not a licence to
+    treat the cap as zero and collect one edge at a time.
+    """
+    assert _budget(unbounded, 1024) == _CHUNK_EDGE_THRESHOLD
+
+
+def test_collect_budget_never_reaches_zero():
+    """A cap smaller than one edge still has to leave the batch able to move."""
+    assert _budget("1k", 4096) == 1
+
+
+def test_collect_budget_is_cached_per_vector_dim():
+    """The split loop asks once per edge type; the conf cannot change mid-build."""
+    fx = EdgeFeatureExtractor(_StubSession("1g"), {})
+
+    assert fx._max_edges_per_collect(1024) == 157_286
+    # A different width must not return the cached answer for the first.
+    assert fx._max_edges_per_collect(32) == _CHUNK_EDGE_THRESHOLD
