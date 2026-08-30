@@ -183,6 +183,23 @@ _SEG3_CATEGORICAL_FRAC = 0.33
 # demoting the whole property out of the numeric segment.
 _NUMERIC_PREDICATE_MIN_SHARE = 0.5
 
+
+def _is_finite(col):
+    """Whether a double column holds a real, usable number.
+
+    Null, NaN and +/-infinity all mean the same thing here -- there is no
+    magnitude to encode -- but they arrive by different routes and only the
+    first is caught by an ``isNotNull()``. The other two are what let a single
+    overflowing literal reach the arithmetic, where a mean goes infinite, a
+    stddev goes NaN, and every value of that predicate is silently poisoned.
+    """
+    return (
+        col.isNotNull()
+        & ~F.isnan(col)
+        & (F.abs(col) != float("inf"))
+    )
+
+
 # ============================================
 # URI constants
 # ============================================
@@ -1423,8 +1440,25 @@ class FeatureExtractor:
 
     @staticmethod
     def _numeric_cast(col: str = "object"):
-        """Lexical form of a literal cast to double — null when unparseable."""
-        return F.split(F.col(col), r"\^\^").getItem(0).cast("double")
+        """Lexical form of a literal cast to double — null unless it is finite.
+
+        ``cast("double")`` fails to null on a value it cannot read, but it does
+        NOT fail on one it reads as a number too large to hold: Java's parser
+        follows the float64 rules and returns infinity. The CUSIP ``46120E602``
+        is a real identifier and valid scientific notation, so it arrives here
+        as 46120 x 10^602 and lands as ``inf`` -- not null, so it survived the
+        ``isNotNull()`` filter downstream, made that predicate's mean infinite
+        and its stddev NaN, and put NaN in 5,396 node feature rows (#351).
+
+        Infinity is not a measurement whatever produced it, so it is treated
+        exactly like an unparseable value: no number here. Both callers ask
+        this the same question -- the classifier via ``isNotNull()`` and the
+        value extraction via its filter -- so answering it once keeps the share
+        that decides "is this predicate numeric" consistent with the values
+        that are actually encoded.
+        """
+        parsed = F.split(F.col(col), r"\^\^").getItem(0).cast("double")
+        return F.when(_is_finite(parsed), parsed)
 
     def _classify_literal_predicates(
         self,
@@ -1589,6 +1623,14 @@ class FeatureExtractor:
 
         Returns DataFrame(predicate, mu, sigma) — small table, broadcast
         joined downstream.
+
+        The fallbacks reject any statistic that is not a finite number, not
+        merely a null or a zero. NaN is neither null nor equal to 0.0, so the
+        older guard passed it straight through and ``(value - mu) / sigma``
+        produced NaN for every row of that predicate (#351). ``_numeric_cast``
+        now keeps non-finite values out of ``numeric_df`` in the first place,
+        so this should never fire; it stays because the failure it prevents is
+        silent, and a graph full of NaN costs hours to discover downstream.
         """
         stats = (
             numeric_df
@@ -1600,13 +1642,14 @@ class FeatureExtractor:
             .withColumn(
                 "sigma",
                 F.when(
-                    (F.col("sigma").isNull()) | (F.col("sigma") == 0.0),
-                    F.lit(1.0),
-                ).otherwise(F.col("sigma")),
+                    _is_finite(F.col("sigma")) & (F.col("sigma") != 0.0),
+                    F.col("sigma"),
+                ).otherwise(F.lit(1.0)),
             )
             .withColumn(
                 "mu",
-                F.coalesce(F.col("mu"), F.lit(0.0)),
+                F.when(_is_finite(F.col("mu")), F.col("mu"))
+                .otherwise(F.lit(0.0)),
             )
         )
 
