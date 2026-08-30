@@ -139,6 +139,17 @@ fi
 # self-contained run the test supports.
 if [[ -n "${SPARK_MASTER_URL:-}" && -n "${CLUSTER_SMOKE_OUTPUT_PATH:-}" ]]; then
   echo "==> Cluster submit (real job -> ${SPARK_MASTER_URL})"
+  # The cluster test passes its whole environment to bin/submit_spark_job.sh, which
+  # reads PYG_INPUT_MODE. Set to local, the launcher copies this suite's fixtures onto
+  # local disk and the job reads them there: it still passes, but stops covering the
+  # s3a:// read path. Warn, don't override -- on a staged deployment local is how
+  # production submits, so the choice belongs to the caller.
+  if [[ "${PYG_INPUT_MODE:-s3}" == "local" ]]; then
+    echo "    WARNING: PYG_INPUT_MODE=local is set, so this suite will read its"
+    echo "    sources from ${PYG_LOCAL_SOURCE_ROOT:-PYG_LOCAL_SOURCE_ROOT} on local disk"
+    echo "    instead of from object storage. It will still pass. Re-run with"
+    echo "    PYG_INPUT_MODE=s3 to cover the s3a:// read path."
+  fi
   # This is a smoke test, not a benchmark. The pipeline fans out into ~1,300 stages
   # regardless of data size, and Spark's default of 200 shuffle partitions means each
   # of those stages schedules 200 tasks over a few KB of fixtures -- pure scheduling
