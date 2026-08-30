@@ -234,6 +234,19 @@ _RESULT_SIZE_TARGET_FRACTION = 0.6
 # Driver-side width of one feature value: the dense tensors are float32.
 _FEATURE_ITEMSIZE = 4
 
+# What one slot costs on the wire, which is not what it costs in the tensor.
+# A collect returns the SPARSE form -- one row per non-zero slot, carrying
+# edge_idx (8) + dim (4) + value (4) + the batch's type id (4) -- so 20 bytes
+# travel to deliver 4. Sizing a collect by the dense tensor's 4 bytes
+# under-counts it by 5x at worst.
+#
+# Worst case rather than the measured fill rate, deliberately. On the 2026-08
+# graph the edge features are 51.6% full overall and the two market types that
+# carry 99.9% of the edges are ~50-53%, so a measured constant would be about
+# 2x kinder -- and would silently stop being true when the data changes. The
+# cost of assuming full is smaller collects, which is what the chunking is for.
+_SPARSE_ENTRY_BYTES = 20
+
 # Upper bound on how many edge types may be unioned into a single
 # batched collect.
 #
@@ -2592,8 +2605,12 @@ class EdgeFeatureExtractor:
         counts bytes. The same edge budget therefore meant 32x the bytes at
         edge_vector_dim 1024 that it meant at 32, so a run that fit at one
         width failed at another with nothing in the failure naming the width
-        (#340). A batch's dense tensors are edges x edge_vector_dim x 4, so
-        that is the quantity the budget is spent in.
+        (#340).
+
+        Spent in what the collect actually returns -- the sparse rows, at
+        _SPARSE_ENTRY_BYTES each -- and not in what the dense tensor costs
+        afterwards. Those differ by 5x, and only the first is what the cap
+        measures.
 
         The row cap stays as a second, independent ceiling: it bounds the
         Pandas intermediaries, which the byte estimate does not describe.
@@ -2615,7 +2632,7 @@ class EdgeFeatureExtractor:
         if cap is None or cap <= 0:
             budget = rows
         else:
-            per_edge = max(1, edge_vector_dim * _FEATURE_ITEMSIZE)
+            per_edge = max(1, edge_vector_dim * _SPARSE_ENTRY_BYTES)
             by_bytes = int(cap * _RESULT_SIZE_TARGET_FRACTION) // per_edge
             # One edge must stay collectable whatever the cap says, or the
             # batch cannot progress at all.
@@ -2671,9 +2688,9 @@ class EdgeFeatureExtractor:
         logger.info(
             f"    {len(small)} small edge types collected in "
             f"{num_batches} batch(es) "
-            f"(budget {budget:,} edges ~ "
-            f"{budget * edge_vector_dim * _FEATURE_ITEMSIZE / 1024 ** 2:,.0f}"
-            f" MB per batch)"
+            f"(budget {budget:,} edges, at most "
+            f"{budget * edge_vector_dim * _SPARSE_ENTRY_BYTES / 1024 ** 2:,.0f}"
+            f" MB collected per batch)"
         )
 
     def _flush_batch(
