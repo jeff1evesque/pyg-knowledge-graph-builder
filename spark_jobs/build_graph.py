@@ -40,6 +40,8 @@ Launch with spark-submit (see bin/submit_spark_job.sh). Parameters:
     --s3_pyg_key:              optional S3 key for the .pt (metadata prefix
                                is derived from it)
     --enable_ontology_mapping: true | false (default: true)
+    --allow_overwrite: true | false (default: false). Off, the job refuses to
+        start when the artifacts it would write are already present.
     --time_period:             label (e.g. "2024-12") for output naming
     --pyg_config:              optional JSON string with PyG config
     --parquet_partitions:      number of Parquet output partitions (default 200)
@@ -396,6 +398,12 @@ class JobConfig:
         self.enable_ontology_mapping = (
             args.get("enable_ontology_mapping", "true").lower() == "true"
         )
+
+        # Off by default: overwriting a finished run is a deliberate act, and
+        # the artifacts it destroys cost hours to produce.
+        self.allow_overwrite = (
+            args.get("allow_overwrite", "false") or "false"
+        ).lower() == "true"
         self.time_period = args.get("time_period") or datetime.now().strftime(
             "%Y-%m"
         )
@@ -600,7 +608,8 @@ class JobConfig:
             f"s3_archive_bucket={self.s3_archive_bucket or '(none)'}, "
             f"s3_pyg_key={self.s3_pyg_key or '(none)'}, "
             f"ontology_mapping={self.enable_ontology_mapping}, "
-            f"parquet_partitions={self.parquet_partitions})"
+            + ("allow_overwrite=True, " if self.allow_overwrite else "")
+            + f"parquet_partitions={self.parquet_partitions})"
         )
 
 
@@ -650,6 +659,7 @@ def parse_args() -> JobConfig:
     )
     parser.add_argument("--pyg_filename", default=DEFAULT_PYG_FILENAME)
     parser.add_argument("--enable_ontology_mapping", default="true")
+    parser.add_argument("--allow_overwrite", default="false")
     parser.add_argument("--time_period", default="")
     # Names the combination of sources, e.g. "all-sources" or "no-market".
     # Recorded beside the enriched output and carried into the graph schema, so
@@ -2311,6 +2321,80 @@ def print_final_banner(config: JobConfig, result: Dict, elapsed: float):
 
 
 # ============================================
+# Work dir occupancy preflight
+# ============================================
+def check_work_dir_occupancy(config: JobConfig, spark: SparkSession) -> None:
+    """Refuse to start when the artifacts this run would write already exist.
+
+    Two partition schemes decide where a run writes and neither carries run
+    identity: the outer path is whatever ``--local_work_dir`` was given, the
+    inner one is derived from ``--time_period``, which describes the data. Two
+    runs sharing that pair write byte-identical paths. What keeps runs apart
+    today is a convention -- the launcher mints a fresh timestamped work dir --
+    that is load-bearing and unenforced.
+
+    The artifacts do not even fail the same way when it lapses. Spark overwrites
+    the enriched Parquet, the ``.pt`` and its metadata are replaced at fixed
+    keys, and the manifests accumulate -- so the run that survives is a mixture
+    and the provenance beside it describes both.
+
+    Checked per mode, against what that mode WRITES. ``pyg_only`` reads enriched
+    Parquet and is meant to find it -- several ``pyg_only`` legs over one seed is
+    the ordinary experiment loop -- so its input is never occupancy.
+
+    Args:
+        config: Parsed job configuration.
+        spark: Active SparkSession, needed to resolve non-local URIs.
+
+    Raises:
+        FileExistsError: An artifact this mode writes is already present and
+            ``--allow_overwrite`` was not given.
+    """
+    from spark_jobs.utils.fs_utils import join_path, path_exists
+
+    occupied: List[str] = []
+
+    if config.mode in ("full", "enrichment_only"):
+        # _SUCCESS, not the directory: Spark writes the marker last, so its
+        # presence means a previous run finished. A directory that exists
+        # without it is the debris of a run that died mid-write, which is not
+        # something worth refusing to overwrite.
+        if path_exists(
+            join_path(config.enriched_parquet_path, "_SUCCESS"), spark=spark
+        ):
+            occupied.append(
+                f"enriched Parquet at {config.enriched_parquet_path}"
+            )
+
+    if config.mode in ("full", "pyg_only"):
+        # The period copy only. latest_pyg_path is a fixed-key alias whose whole
+        # job is to name the newest build, so it is replaced by design and is
+        # never occupancy. The .pt stands in for the metadata and node index
+        # beside it: they are written after it, so if it is there they are too.
+        if path_exists(config.pyg_output_path, spark=spark):
+            occupied.append(f"PyG graph at {config.pyg_output_path}")
+
+    if not occupied:
+        return
+
+    if config.allow_overwrite:
+        for item in occupied:
+            logger.warning(f"--allow_overwrite: replacing {item}")
+        logger.warning("")
+        return
+
+    raise FileExistsError(
+        f"--local_work_dir {config.local_work_dir} already holds a finished "
+        f"run for --time_period {config.time_period}: "
+        + "; ".join(occupied)
+        + ". Writing here replaces those artifacts in place and leaves a "
+        "manifest history describing both runs. Point --local_work_dir at a "
+        "fresh directory, or pass --allow_overwrite true to replace them "
+        "deliberately."
+    )
+
+
+# ============================================
 # Main entry point
 # ============================================
 def main():
@@ -2360,6 +2444,10 @@ def main():
 
     # Execute pipeline
     try:
+        # Before the handler, so a run that would overwrite a finished one
+        # costs seconds rather than discovering it hours in -- or never.
+        check_work_dir_occupancy(config, spark)
+
         mode_handlers = {
             "full": execute_full_pipeline,
             "enrichment_only": execute_enrichment_only,
@@ -2369,6 +2457,11 @@ def main():
         handler = mode_handlers[config.mode]
         result = handler(config, spark, s3_client)
 
+    except FileExistsError as e:
+        # No traceback: this is a refusal, not a crash, and the message is
+        # the whole of what the operator needs.
+        logger.error(str(e))
+        sys.exit(1)
     except FileNotFoundError as e:
         logger.error(f"File not found: {e}")
         sys.exit(1)
