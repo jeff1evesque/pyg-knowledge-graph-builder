@@ -1,5 +1,5 @@
 """
-Filesystem writes that honor the path's URI scheme.
+Filesystem access that honors the path's URI scheme.
 
 ``local_work_dir`` may be a bare POSIX path (``/data``) or a URI on shared
 storage (``s3a://bucket/prefix``). Every driver-side artifact — the job
@@ -141,6 +141,44 @@ def write_file(src_path: str, path: str, spark=None) -> None:
         jvm.org.apache.hadoop.fs.Path("file://" + os.path.abspath(src_path)),
         jvm.org.apache.hadoop.fs.Path(path),
     )
+
+
+def path_exists(path: str, spark=None) -> bool:
+    """Whether ``path`` exists, routing by the path's URI scheme.
+
+    The read-side counterpart to ``write_bytes``. It matters for the same
+    reason: ``os.path.exists("s3a://bucket/key")`` asks the driver's local disk
+    about a path that was never going to be there and answers False. A caller
+    using that to decide whether a destination is free would conclude every
+    object-store destination is free, every time.
+
+    Args:
+        path: Bare path or URI.
+        spark: Active SparkSession. Required for non-local URIs — it is the only
+            handle to the JVM's Hadoop configuration. Passing None for a
+            non-local URI raises rather than answering False, because False is
+            indistinguishable from a real answer and is wrong in the direction
+            that loses data.
+
+    Raises:
+        ValueError: ``path`` is a non-local URI and no SparkSession was given.
+    """
+    if is_local_path(path):
+        return os.path.exists(local_filesystem_path(path))
+
+    if spark is None:
+        raise ValueError(
+            f"cannot test {path!r} for existence: it is a non-local URI and no "
+            "SparkSession was supplied to resolve it. Answering from the "
+            "driver's local disk would report every object-store path as "
+            "missing."
+        )
+
+    jvm = spark._jvm
+    hadoop_conf = spark._jsc.hadoopConfiguration()
+    juri = jvm.java.net.URI(path)
+    fs = jvm.org.apache.hadoop.fs.FileSystem.get(juri, hadoop_conf)
+    return bool(fs.exists(jvm.org.apache.hadoop.fs.Path(path)))
 
 
 def join_path(prefix: str, name: str) -> str:
