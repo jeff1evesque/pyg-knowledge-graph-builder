@@ -28,6 +28,12 @@ Launch with spark-submit (see bin/submit_spark_job.sh). Parameters:
     --mode:                    full | enrichment_only | pyg_only
     --source_paths:            comma-separated source path(s)/URI(s);
                                local dirs or s3a://... (full, enrichment_only)
+    --input_mode:              s3 | local (default: s3). "local" reads a
+                               staged mirror of the s3a:// sources from
+                               --local_source_root instead of object storage;
+                               see bin/stage_sources.sh
+    --local_source_root:       root of the staged mirror, required when
+                               --input_mode local
     --local_work_dir:          base dir on the shared filesystem for
                                enriched Parquet + local final artifacts
     --s3_archive_bucket:       optional S3 bucket to mirror final artifacts
@@ -60,6 +66,19 @@ Example (Turtle Parquet, s3a source, local only):
         --source_format turtle_parquet \\
         --turtle_column triples \\
         --time_period 2024-12
+
+Example (same sources, read from a staged mirror instead of object storage):
+    bin/stage_sources.sh --dest /srv/pyg-source --nodes worker-a,worker-b \\
+        --source s3a://my-data-lake/raw/sec/filings/2024-12/
+
+    spark_jobs/build_graph.py \\
+        --mode enrichment_only \\
+        --source_paths s3a://my-data-lake/raw/sec/filings/2024-12/ \\
+        --input_mode local \\
+        --local_source_root /srv/pyg-source \\
+        --local_work_dir /data \\
+        --source_format turtle_parquet \\
+        --time_period 2024-12
 """
 import sys
 import json
@@ -68,7 +87,7 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, Tuple, List
+from typing import Dict, Any, Optional, Tuple, List
 
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
@@ -158,6 +177,18 @@ def _utcnow() -> datetime:
 # ============================================
 VALID_MODES = {"full", "enrichment_only", "pyg_only"}
 VALID_SOURCE_FORMATS = {"ntriples", "turtle_parquet"}
+
+# Where the parse reads its input from.
+#
+#   "s3"    -- open every s3a:// source path directly. Right in the cloud, where
+#              the executors sit beside the bucket on an in-region link.
+#   "local" -- read a mirror of those same objects from node-local disk, staged
+#              once by bin/stage_sources.sh. Right on-prem, where the site
+#              uplink is the scarce resource and hundreds of readers can take
+#              the network down (see issue #342).
+#
+# s3 stays the default so nothing changes for a deployment that has not staged.
+VALID_INPUT_MODES = {"s3", "local"}
 
 TRIPLES_SCHEMA = StructType([
     StructField("subject", StringType(), nullable=False),
@@ -252,6 +283,42 @@ def assert_sec_paths_name_the_handled_feed(source_paths: List[str]) -> None:
 DEFAULT_PYG_FILENAME = "hetero_data.pt"
 
 
+def staged_local_path(source_path: str, local_source_root: str) -> str:
+    """Map one object-storage source path onto its staged local mirror.
+
+    ``s3a://bucket/key/...`` becomes ``file://<root>/bucket/key/...``. Carrying
+    the bucket and the whole key under the root is what makes the two input
+    modes interchangeable: source_label() reads the source out of path
+    fragments (``source=sec``, ``quotes``), so a mirror that keeps the key
+    layout reports the same per-source statistics as reading the bucket
+    directly. It also keeps two buckets that share a key prefix apart.
+
+    A path that is already local is returned unchanged, so one run can mix a
+    staged bucket with a directory that was never in object storage.
+
+    The result names its scheme on purpose. A bare path is resolved against
+    fs.defaultFS, so a site that points that at object storage would send a
+    read the operator asked to keep local straight back over the wire.
+    """
+    remainder = None
+    for scheme in ("s3a://", "s3n://", "s3://"):
+        if source_path.startswith(scheme):
+            remainder = source_path[len(scheme):]
+            break
+    if remainder is None:
+        return source_path
+
+    root = local_source_root.rstrip("/")
+    if not root.startswith("/"):
+        raise ValueError(
+            f"local_source_root must be an absolute path, got {root!r}. "
+            f"Every worker opens this path itself, so a relative one would "
+            f"resolve against whatever directory each executor happens to be "
+            f"started in."
+        )
+    return f"file://{root}/{remainder}"
+
+
 class JobConfig:
     """Parsed and validated job configuration."""
 
@@ -289,6 +356,29 @@ class JobConfig:
             p.strip() for p in raw_sources.split(",") if p.strip()
         ]
 
+        # Where those sources are actually opened from. See VALID_INPUT_MODES.
+        # source_paths keeps naming the object-storage locations either way, so
+        # the manifest records what the run was asked for and read_paths records
+        # what it opened -- the two differ only by the staging root.
+        self.input_mode = (args.get("input_mode") or "s3").lower().strip()
+        self.local_source_root = (
+            args.get("local_source_root") or ""
+        ).rstrip("/")
+        if self.input_mode == "local":
+            if not self.local_source_root:
+                raise ValueError(
+                    "local_source_root is required when input_mode is "
+                    "'local'. It is the root bin/stage_sources.sh mirrored "
+                    "the buckets into, and every worker must carry the same "
+                    "one at the same path."
+                )
+            self.read_paths: List[str] = [
+                staged_local_path(p, self.local_source_root)
+                for p in self.source_paths
+            ]
+        else:
+            self.read_paths = list(self.source_paths)
+
         # Source format:
         #   "ntriples":       one triple per line in .nt files
         #   "turtle_parquet": self-contained Turtle blobs in a Parquet column
@@ -309,6 +399,12 @@ class JobConfig:
         self.time_period = args.get("time_period") or datetime.now().strftime(
             "%Y-%m"
         )
+        # A name for this combination of sources, e.g. "all-sources" or
+        # "no-market". Cannot be derived -- which sources belong together under
+        # one name is a judgement, not a fact about the paths -- so it is stated
+        # or it is empty. Recorded in the dataset descriptor and from there in
+        # the published graph schema.
+        self.dataset = args.get("dataset") or ""
         self.pyg_config = self._parse_pyg_config(args.get("pyg_config", ""))
         self.class_mappings = self._parse_json_arg(
             args.get("class_mappings", ""), "class_mappings"
@@ -334,6 +430,20 @@ class JobConfig:
         self.enriched_parquet_path = (
             f"{self.local_work_dir}/enriched/"
             f"{self.period_partition}/triples"
+        )
+        # Where enriched triples are READ from, which is not always where they
+        # were written. Deriving both ends from local_work_dir meant a pyg_only
+        # run could only read enriched output by also writing its graph beside
+        # it -- so reusing a published run's output required copying it into a
+        # scratch directory first, purely to give the job somewhere safe to
+        # write. An explicit input path separates the two: read wherever the
+        # data actually is, write wherever this run should.
+        #
+        # Explicit means explicit -- the path is used verbatim, with no period
+        # partition appended, because data being pointed at may not follow this
+        # pipeline's directory convention.
+        self.enriched_input_path = (
+            args.get("enriched_input_path") or self.enriched_parquet_path
         )
         self.pyg_output_path = (
             f"{self.local_work_dir}/pyg/"
@@ -391,6 +501,36 @@ class JobConfig:
             )
             return {}
 
+    def _assert_staged_mirror_present(self) -> None:
+        """Fail before the job starts when the mirror is missing or empty.
+
+        Checked on the driver, which covers only the driver's own host. The
+        other workers are the staging script's job -- it syncs each node and
+        compares a content digest across them before reporting success. What
+        this catches is the cheap half: a root that was never staged, or staged
+        for a different day, which would otherwise surface as an empty parse
+        or a FileNotFoundError several minutes in.
+        """
+        missing = []
+        for declared, resolved in zip(self.source_paths, self.read_paths):
+            if not resolved.startswith("file://"):
+                continue
+            local = Path(resolved[len("file://"):])
+            if not local.exists():
+                missing.append((declared, local))
+            elif local.is_dir() and not any(local.iterdir()):
+                missing.append((declared, local))
+
+        if missing:
+            listed = "\n".join(f"  {d}\n    -> {p}" for d, p in missing)
+            raise FileNotFoundError(
+                f"input_mode is 'local' but the staged mirror is missing or "
+                f"empty for {len(missing)} source path(s):\n{listed}\n"
+                f"Stage them first:\n"
+                f"  bin/stage_sources.sh --dest {self.local_source_root} "
+                f"--nodes <every worker> --source <each source path>"
+            )
+
     def _validate(self):
         if self.mode not in VALID_MODES:
             raise ValueError(
@@ -400,10 +540,28 @@ class JobConfig:
         if not self.local_work_dir:
             raise ValueError("local_work_dir is required")
 
+        # Warn rather than fail: only pyg_only reads enriched output from disk,
+        # so the flag has no effect in the other modes. Silently ignoring it
+        # would let someone believe a run read from somewhere it never touched.
+        if (
+            self.enriched_input_path != self.enriched_parquet_path
+            and self.mode != "pyg_only"
+        ):
+            logger.warning(
+                f"--enriched_input_path is set but mode is {self.mode}, which "
+                f"does not read enriched output from disk. It will be ignored."
+            )
+
         if self.source_format not in VALID_SOURCE_FORMATS:
             raise ValueError(
                 f"Invalid source_format '{self.source_format}'. "
                 f"Must be one of: {', '.join(VALID_SOURCE_FORMATS)}"
+            )
+
+        if self.input_mode not in VALID_INPUT_MODES:
+            raise ValueError(
+                f"Invalid input_mode '{self.input_mode}'. "
+                f"Must be one of: {', '.join(sorted(VALID_INPUT_MODES))}"
             )
 
         if self.mode in ("full", "enrichment_only"):
@@ -412,6 +570,8 @@ class JobConfig:
                     f"source_paths is required for mode '{self.mode}'"
                 )
             assert_sec_paths_name_the_handled_feed(self.source_paths)
+            if self.input_mode == "local":
+                self._assert_staged_mirror_present()
         if self.mode in ("full", "pyg_only"):
             if not _pyg_builder_available:
                 raise ImportError(
@@ -425,10 +585,17 @@ class JobConfig:
         return (
             f"JobConfig(mode={self.mode}, "
             f"source_paths={self.source_paths}, "
+            f"input_mode={self.input_mode}, "
+            f"local_source_root={self.local_source_root or '(none)'}, "
             f"source_format={self.source_format}, "
             f"turtle_column={self.turtle_column}, "
             f"local_work_dir={self.local_work_dir}, "
             f"enriched_parquet_path={self.enriched_parquet_path}, "
+            + (
+                f"enriched_input_path={self.enriched_input_path}, "
+                if self.enriched_input_path != self.enriched_parquet_path
+                else ""
+            ) +
             f"pyg_output_path={self.pyg_output_path}, "
             f"s3_archive_bucket={self.s3_archive_bucket or '(none)'}, "
             f"s3_pyg_key={self.s3_pyg_key or '(none)'}, "
@@ -451,6 +618,20 @@ def parse_args() -> JobConfig:
         help="Comma-separated source path(s)/URI(s): local dirs or s3a://...",
     )
     parser.add_argument(
+        "--input_mode",
+        choices=sorted(VALID_INPUT_MODES),
+        default="s3",
+        help="Where source_paths are opened from: 's3' reads the s3a:// URIs "
+        "directly (default); 'local' reads the mirror bin/stage_sources.sh "
+        "put under --local_source_root",
+    )
+    parser.add_argument(
+        "--local_source_root",
+        default="",
+        help="Root of the staged mirror, identical on every worker. "
+        "Required when --input_mode local",
+    )
+    parser.add_argument(
         "--local_work_dir",
         required=True,
         help="Shared working directory (visible to all workers) for enriched "
@@ -470,6 +651,14 @@ def parse_args() -> JobConfig:
     parser.add_argument("--pyg_filename", default=DEFAULT_PYG_FILENAME)
     parser.add_argument("--enable_ontology_mapping", default="true")
     parser.add_argument("--time_period", default="")
+    # Names the combination of sources, e.g. "all-sources" or "no-market".
+    # Recorded beside the enriched output and carried into the graph schema, so
+    # a published graph can say what it was built from.
+    parser.add_argument("--dataset", default="")
+    # Read enriched triples from here instead of deriving the location from
+    # --local_work_dir. Used verbatim. Only --mode pyg_only reads enriched
+    # output from disk, so it is ignored elsewhere.
+    parser.add_argument("--enriched_input_path", default="")
     parser.add_argument("--pyg_config", default="")
     parser.add_argument("--class_mappings", default="")
     parser.add_argument(
@@ -1087,17 +1276,19 @@ def load_source_triples(
         ValueError: If turtle_column is not found (turtle_parquet only).
     """
     source_paths = list(config.source_paths)
+    read_paths = list(config.read_paths)
 
     logger.info(
         f"Source format: {config.source_format}, "
-        f"{len(source_paths)} path(s)"
+        f"input mode: {config.input_mode}, "
+        f"{len(read_paths)} path(s)"
     )
-    for path in source_paths:
+    for path in read_paths:
         logger.info(f"  {path}")
 
     loaded: List[DataFrame] = []
 
-    for index, source_path in enumerate(source_paths):
+    for index, source_path in enumerate(read_paths):
         if config.source_format == "ntriples":
             df = load_ntriples_to_dataframe(spark, source_path)
         else:
@@ -1113,7 +1304,15 @@ def load_source_triples(
         # expression, so it does not matter whether rows from different paths are
         # in the same frame yet.
         df = canonicalize_source_triples(df)
-        df = df.withColumn(SOURCE_COLUMN, F.lit(source_label(source_path, index)))
+        # Labelled from the DECLARED path, not the one just read. A staged
+        # mirror keeps the key layout so both spell the source the same way,
+        # but the staging root is chosen by whoever ran the sync -- keying the
+        # label off it would let a root named /srv/sec-mirror relabel every
+        # source in the run, and per-source statistics have to mean the same
+        # thing in both input modes to be comparable at all.
+        df = df.withColumn(
+            SOURCE_COLUMN, F.lit(source_label(source_paths[index], index))
+        )
         loaded.append(df)
         logger.info(f"  Parsed: {source_path}")
 
@@ -1215,6 +1414,84 @@ def save_enriched_parquet(
         f"Saved enriched triples ({num_partitions} partitions) "
         f"to {output_path}"
     )
+
+
+DATASET_DESCRIPTOR_NAME = "dataset.json"
+
+
+def dataset_descriptor_path(enriched_parquet_path: str) -> str:
+    """Where the dataset descriptor sits: beside the Parquet dir, not inside it.
+
+    Inside would put a non-Parquet file in a directory Spark reads as one. A
+    leading underscore would make Spark's reader skip it, but Hadoop's hidden
+    file filter then also hides it from an explicit read -- it could be written
+    and never read back.
+    """
+    parent = enriched_parquet_path.rstrip("/").rsplit("/", 1)[0]
+    return f"{parent}/{DATASET_DESCRIPTOR_NAME}"
+
+
+def save_dataset_descriptor(config: "JobConfig", spark: SparkSession) -> None:
+    """Record which sources produced this enriched output, beside the output.
+
+    The enriched Parquet is subject/predicate/object only -- SOURCE_COLUMN is
+    dropped at the write -- so a later pyg_only run cannot tell what its graph
+    was built from. Without this, that fact lives solely in the enrichment
+    manifest: a different file, under a different prefix, that a reader has to
+    know to go looking for. It is lost outright the moment a graph is copied
+    anywhere else.
+
+    Labels, not paths. source_label() exists so a source can be named without
+    naming a bucket, and what is written here reaches the published graph schema.
+    """
+    labels = sorted({
+        source_label(path, index)
+        for index, path in enumerate(config.source_paths)
+    })
+    body = json.dumps({
+        "dataset": config.dataset,
+        "sources": labels,
+        "time_period": config.time_period,
+        "written": _utcnow().isoformat(),
+    }, indent=2).encode("utf-8")
+
+    path = dataset_descriptor_path(config.enriched_parquet_path)
+    try:
+        _write_manifest_bytes(spark, path, body)
+        logger.info(f"Saved dataset descriptor to {path}")
+        logger.info(f"  dataset: {config.dataset or '(unnamed)'}")
+        logger.info(f"  sources: {', '.join(labels) or '(none)'}")
+    except Exception as e:
+        # Not fatal: the enriched output is already written and correct, and a
+        # graph built without this simply records no sources.
+        logger.warning(f"Failed to save dataset descriptor: {e}")
+
+
+def load_dataset_descriptor(
+    spark: SparkSession, enriched_parquet_path: str
+) -> Dict[str, Any]:
+    """Read the descriptor beside the enriched output, or ``{}`` if absent.
+
+    Absent is normal rather than an error: every enriched directory written
+    before this existed has none, and a graph schema that records nothing is
+    honest where one that guessed would not be.
+    """
+    path = dataset_descriptor_path(enriched_parquet_path)
+    try:
+        # One row per line, not one row per file: the `wholetext` option is
+        # silently ignored here, so a pretty-printed descriptor arrives split
+        # and rows[0] is just "{". Rejoining is safe because the file is well
+        # under a block -- Spark reads it as a single partition and collect()
+        # preserves order within one.
+        rows = spark.read.text(path).collect()
+        if rows:
+            return json.loads("\n".join(row[0] for row in rows))
+    except Exception as e:
+        logger.info(
+            f"No readable dataset descriptor at {path} ({type(e).__name__}: "
+            f"{e}); the graph schema will not name its sources."
+        )
+    return {}
 
 
 def load_enriched_parquet(
@@ -1410,6 +1687,8 @@ def run_pyg_construction(
     triples_df: DataFrame,
     pyg_config: Dict[str, Any] = None,
     time_period: str = "",
+    dataset: str = "",
+    sources: Optional[List[str]] = None,
 ) -> Tuple:
     """
     Run PyG HeteroData construction from enriched triples DataFrame.
@@ -1448,7 +1727,8 @@ def run_pyg_construction(
 
     config = pyg_config or {}
     hetero_data, metadata, node_index_df = build_hetero_data(
-        spark, triples_df, config, time_period=time_period
+        spark, triples_df, config, time_period=time_period,
+        dataset=dataset, sources=sources,
     )
 
     elapsed = time.time() - start_time
@@ -1498,10 +1778,34 @@ def get_spark_session() -> SparkSession:
     ``spark.rapids.sql.enabled=true`` here so GPU acceleration is on even for
     a bare submit; if the RAPIDS plugin jar is not on the classpath this flag
     is simply ignored.
+
+    ``PYG_RAPIDS_SQL_ENABLED=false`` turns it off. Setting the key here rather
+    than reading what spark-submit passed is what made it unreachable: builder
+    options are applied over the submitted conf, so ``--conf
+    spark.rapids.sql.enabled=false`` was accepted, logged, and then overwritten.
+    A benchmark arm for issue #342 ran a whole leg believing RAPIDS was off when
+    the event log says it was on. The parse is a Python UDF that RAPIDS cannot
+    accelerate, so being able to take it out of the query path is the thing #342
+    needs to measure.
     """
+    import os
+
+    rapids_enabled = os.environ.get("PYG_RAPIDS_SQL_ENABLED", "true").strip().lower()
+    if rapids_enabled not in ("true", "false"):
+        raise ValueError(
+            f"PYG_RAPIDS_SQL_ENABLED must be 'true' or 'false', got "
+            f"{os.environ['PYG_RAPIDS_SQL_ENABLED']!r}. Anything else would be "
+            f"read as false by Spark and quietly disable GPU acceleration."
+        )
+    logger.info(f"RAPIDS SQL acceleration requested: {rapids_enabled}")
     return (
         SparkSession.builder.appName("PyG-Knowledge-Graph-Builder")
-        .config("spark.rapids.sql.enabled", "true")
+        .config("spark.rapids.sql.enabled", rapids_enabled)
+        # Each enrichment phase's checkpoint is dead as soon as the next phase
+        # settles, but Spark keeps checkpoint files until the job ends unless
+        # told otherwise. A month's run settles six times over 13.8 GB, so
+        # without this the work dir carries tens of GB nothing reads.
+        .config("spark.cleaner.referenceTracking.cleanCheckpoints", "true")
         .getOrCreate()
     )
 
@@ -1675,11 +1979,17 @@ def execute_full_pipeline(
     save_enriched_parquet(
         enriched_df, config.enriched_parquet_path, config.parquet_partitions
     )
+    save_dataset_descriptor(config, spark)
 
     # Step 4: Build PyG (executors → compact tensors → driver)
     hetero_data, metadata, node_index_df = run_pyg_construction(
         spark, enriched_df, config.pyg_config,
         time_period=config.time_period,
+        dataset=config.dataset,
+        sources=sorted({
+            source_label(path, index)
+            for index, path in enumerate(config.source_paths)
+        }),
     )
 
     # Step 5: Save final artifacts (local + optional S3)
@@ -1749,6 +2059,7 @@ def execute_enrichment_only(
     save_enriched_parquet(
         enriched_df, config.enriched_parquet_path, config.parquet_partitions
     )
+    save_dataset_descriptor(config, spark)
 
     return {
         "mode": "enrichment_only",
@@ -1789,7 +2100,9 @@ def execute_pyg_only(
     logger.info("=" * 80)
     start_time = time.time()
 
-    enriched_path = config.enriched_parquet_path
+    # The input path, not the derived one: this run may be reading a previous
+    # run's published output and writing its graph somewhere else entirely.
+    enriched_path = config.enriched_input_path
     triples_df = load_enriched_parquet(spark, enriched_path)
     triples_df = triples_df.cache()
     triple_count = triples_df.count()
@@ -1801,9 +2114,16 @@ def execute_pyg_only(
     logger.info("")
 
     # Step 2: Build PyG (executors → compact tensors → driver)
+    # What this enriched output was built from. pyg_only never sees
+    # source_paths -- it reads Parquet a previous run wrote -- so the descriptor
+    # beside that Parquet is the only way the graph can name its own sources.
+    descriptor = load_dataset_descriptor(spark, config.enriched_input_path)
+
     hetero_data, metadata, node_index_df = run_pyg_construction(
         spark, triples_df, config.pyg_config,
         time_period=config.time_period,
+        dataset=config.dataset or descriptor.get("dataset", ""),
+        sources=descriptor.get("sources"),
     )
 
     # Step 3: Save final artifacts (local + optional S3)
@@ -1855,6 +2175,12 @@ def save_job_manifest(
         "mode": config.mode,
         "config": {
             "source_paths": config.source_paths,
+            # Recorded because it changes nothing about the graph and
+            # everything about how a run's timings should be read: an s3 leg
+            # is bounded by the site uplink and a local leg is not, so the two
+            # are not comparable without knowing which this was. The root
+            # itself is deployment detail and stays out, like the paths above.
+            "input_mode": config.input_mode,
             "source_format": config.source_format,
             "turtle_column": config.turtle_column,
             "local_work_dir": config.local_work_dir,
@@ -2015,6 +2341,12 @@ def main():
     # Initialize Spark. Create an S3 client only when the job needs S3
     # (archiving final artifacts or reading external definitions from S3).
     spark = get_spark_session()
+    # Where EnrichmentPipeline._settle puts its per-phase copies. Under the work
+    # dir so it shares the run's storage and lifetime -- the shared mount on a
+    # cluster run, the same object store when the work dir is an s3a:// URI.
+    # Without a dir set, _settle falls back to localCheckpoint, which is what
+    # let one evicted executor abort the 2026-08-29 run at 47 minutes.
+    spark.sparkContext.setCheckpointDir(f"{config.local_work_dir}/checkpoints")
     needs_s3 = bool(
         config.archive_to_s3 or config.market_sector_definitions_bucket
     )

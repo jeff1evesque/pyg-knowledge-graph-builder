@@ -68,7 +68,7 @@ Scaling:
 """
 import gc
 import logging
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple
 
 from pyspark.sql import SparkSession, DataFrame
 
@@ -96,6 +96,8 @@ def build_hetero_data(
     triples_df: DataFrame,
     config: Optional[Dict[str, Any]] = None,
     time_period: str = "",
+    dataset: str = "",
+    sources: Optional[List[str]] = None,
 ) -> Tuple[Any, MetadataCollector, DataFrame]:
     """
     Build a PyTorch Geometric HeteroData object from an enriched triples
@@ -172,6 +174,8 @@ def build_hetero_data(
         edge_vector_dim=edge_vector_dim,
         edge_features_enabled=edge_features_enabled,
         config=config,
+        dataset=dataset,
+        sources=sources,
     )
 
     # Ensure triples_df is cached — if already cached, this is a no-op

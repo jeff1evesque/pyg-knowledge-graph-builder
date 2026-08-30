@@ -219,6 +219,34 @@ def test_graph_schema_build_metadata_and_config_sanitized():
     json.dumps(schema, default=str)
 
 
+def test_graph_schema_records_dataset_and_sources():
+    """The graph names what it was built from, by label."""
+    c = MetadataCollector(
+        "2099-01", 1024, 64, True, {},
+        dataset="all-sources", sources=["market", "bls", "sec"],
+    )
+    meta = c._build_graph_schema()["build_metadata"]
+    assert meta["dataset"] == "all-sources"
+    # Sorted, so two builds over the same sources compare equal whatever order
+    # the paths were passed in.
+    assert meta["sources"] == ["bls", "market", "sec"]
+
+
+def test_graph_schema_sources_absent_is_empty_not_guessed():
+    """A build that was told nothing records nothing.
+
+    Enriched output written before the dataset descriptor existed carries no
+    source information, and every graph built from it lands here. Empty has to
+    stay distinguishable from a real answer -- a consumer that saw a guess
+    would have no way to know it was one.
+    """
+    meta = MetadataCollector(
+        "2099-01", 1024, 64, True, {}
+    )._build_graph_schema()["build_metadata"]
+    assert meta["dataset"] == ""
+    assert meta["sources"] == []
+
+
 def test_graph_schema_unregistered_literal_features_defaults_to_false():
     """A collector that never reached feature building reports False, not True.
 
@@ -278,8 +306,13 @@ def test_graph_schema_version_is_bumped_for_the_new_semantics():
     1.2 adds relation_groups and the index fields. Additive, but a consumer
     that ties weights needs to know whether the grouping is there at all --
     absent it must fall back to one weight matrix per edge type.
+
+    1.3 adds build_metadata.dataset and build_metadata.sources. Also additive,
+    and also load-bearing for a consumer: at 1.2 and below a graph cannot say
+    what it was built from, so an empty sources list means "this build did not
+    record it", not "no sources".
     """
-    assert _fully_registered_collector()._build_graph_schema()["version"] == "1.2"
+    assert _fully_registered_collector()._build_graph_schema()["version"] == "1.3"
 
 
 # ======================================================================

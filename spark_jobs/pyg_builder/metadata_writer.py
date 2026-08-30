@@ -80,12 +80,20 @@ class MetadataCollector:
         edge_vector_dim: int,
         edge_features_enabled: bool,
         config: Dict[str, Any],
+        dataset: str = "",
+        sources: Optional[List[str]] = None,
     ):
         self._time_period = time_period
         self._vector_dim = vector_dim
         self._edge_vector_dim = edge_vector_dim
         self._edge_features_enabled = edge_features_enabled
         self._config = config
+        # Which sources the graph was built from, and the name of that
+        # combination. Both default to empty because a graph built from enriched
+        # output written before the dataset descriptor existed cannot know them,
+        # and "unknown" must stay distinguishable from "none".
+        self._dataset = dataset
+        self._sources = sorted(sources) if sources else []
         self._build_timestamp = datetime.now(timezone.utc).isoformat()
 
         # Populated by register_* methods during construction
@@ -436,6 +444,11 @@ class MetadataCollector:
         edge_types_with_features = len(self._edge_types_with_features)
 
         return {
+            # 1.3: adds `build_metadata.dataset` and `build_metadata.sources`.
+            # Additive only; both are empty strings/lists when the enriched
+            # output carries no dataset descriptor, which is every graph built
+            # before this field existed.
+            #
             # 1.2: adds `relation_groups`, per-edge `relation_group` /
             # `src_type_index` / `dst_type_index`, and per-node `index`.
             # Additive only -- every 1.1 field keeps its name and meaning.
@@ -444,9 +457,22 @@ class MetadataCollector:
             # features". Through 1.0 it was `count > 0` -- the node count --
             # which made it, and summary.node_types_with_literal_features,
             # true/total for every build. See _build_graph_schema's docstring.
-            "version": "1.2",
+            "version": "1.3",
             "build_metadata": {
                 "time_period": self._time_period,
+                # What the graph was built from. Until 1.3 this file recorded the
+                # period and the feature config but nothing about its inputs, so
+                # "does this graph include market data?" could only be answered by
+                # finding the enrichment manifest in a sibling directory -- a fact
+                # the file should own, since files get copied and paths do not
+                # travel with them.
+                #
+                # Short labels from source_label(), never the source URIs: this
+                # file is published, and the URIs carry deployment detail that
+                # config.source_paths already records in a field readers know to
+                # treat as sensitive.
+                "dataset": self._dataset,
+                "sources": self._sources,
                 "build_timestamp": self._build_timestamp,
                 "pipeline_config": _sanitize_config(self._config),
             },

@@ -172,3 +172,48 @@ def test_ontology_mapping_can_still_be_disabled():
     assert _config(enable_ontology_mapping="FALSE").enable_ontology_mapping is (
         False
     )
+
+
+# ======================================================================
+# JobConfig — reading enriched output from somewhere other than the work dir
+# ======================================================================
+
+def test_enriched_input_defaults_to_the_derived_write_path():
+    """Unset, the two ends stay together and nothing changes."""
+    c = _config()
+    assert c.enriched_input_path == c.enriched_parquet_path
+    assert c.enriched_input_path == "/work/enriched/year=2024/month=12/triples"
+
+
+def test_enriched_input_path_overrides_only_the_read_end():
+    """The point of the flag: read from one place, write to another.
+
+    Deriving both ends from local_work_dir meant a run reusing a previous run's
+    enriched output had to write its graph beside that output. Where the output
+    is published and cannot be deleted, that turns a rebuild into a permanent
+    addition to somebody's stable location.
+    """
+    c = _config(
+        mode="pyg_only",
+        enriched_input_path="s3a://b/run-1/enriched/triples",
+    )
+    assert c.enriched_input_path == "s3a://b/run-1/enriched/triples"
+    # The write end is untouched, still under this run's own work dir.
+    assert c.enriched_parquet_path == "/work/enriched/year=2024/month=12/triples"
+    assert c.pyg_output_path.startswith("/work/pyg/")
+
+
+def test_enriched_input_path_is_used_verbatim():
+    """No period partition is appended.
+
+    Data worth pointing at may predate this pipeline's directory convention or
+    have been copied somewhere flatter -- as the 2026-08 publish was, landing at
+    enriched/triples with no year=/month= segment. Appending a partition would
+    make exactly that case unreachable, which is the case the flag exists for.
+    """
+    c = _config(
+        mode="pyg_only",
+        enriched_input_path="/somewhere/flat/triples",
+    )
+    assert c.enriched_input_path == "/somewhere/flat/triples"
+    assert "year=" not in c.enriched_input_path

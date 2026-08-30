@@ -1338,6 +1338,8 @@ When config is empty, sensible defaults are inferred from the data.
 |-----------|----------|---------|-------------|
 | `--mode` | Yes | `full` | `full`, `enrichment_only`, or `pyg_only` |
 | `--source_paths` | Modes 1,2 | — | Comma-separated source path(s)/URI(s): local directories or `s3a://...`. Each is loaded independently and the results are unioned into a single triples DataFrame before enrichment. A path naming the archive's `source=sec` partition must also name `feed=filings`: that is the only SEC feed carrying RDF, and the job rejects the other seven up front rather than failing later on a missing Turtle column |
+| `--input_mode` | No | `s3` | Where `--source_paths` are opened from. `s3` reads the `s3a://` URIs directly — correct in the cloud, where executors sit beside the bucket. `local` reads a mirror of those same objects from node-local disk instead; see [Reading sources from local disk](#reading-sources-from-local-disk) |
+| `--local_source_root` | When `--input_mode local` | — | Root of the staged mirror. Must exist at the same path on every worker |
 | `--local_work_dir` | Yes | — | Working directory for the interim enriched Parquet and the final artifacts. Must be reachable by every worker — a shared mount (e.g. NFS) or a URI on shared storage (`s3a://...`); on a multi-node cluster a driver-local path won't do |
 | `--s3_archive_bucket` | No | `""` | Optional S3 bucket to *additionally* mirror the final artifacts (`.pt` + metadata + manifest). When empty, artifacts are written only to `--local_work_dir` (which may itself be an `s3a://` path) |
 | `--s3_pyg_key` | No | `pyg/{time_period}/{pyg_filename}` | Optional S3 key for the archived `.pt`; the metadata prefix is derived from it |
@@ -1475,6 +1477,92 @@ SPARK_MASTER_URL=spark://<host>:7077 \
     --parquet_partitions 200 \
     --pyg_config '{"feature_config": {"normalize": true, "vector_dim": 1024}}'
 ```
+
+### Reading sources from local disk
+
+The Turtle parse is a Python UDF running rdflib, so RAPIDS cannot place it on a
+GPU — but Spark applies one resource profile to the whole SQL job, and that
+profile reserves a quarter GPU per task. With one GPU per executor and two
+executors, the parse was pinned at **8 concurrent tasks while holding 144 cores**.
+Removing the reservation is the right fix and it is what `GPU_PER_TASK=0` does.
+
+It also takes the phase from 8 to 144 concurrent object-storage readers, and on a
+deployment whose workers reach the bucket over a site uplink rather than an
+in-region link, that is enough to take the network down. Measured twice on a
+two-node cluster: within 60 seconds the gateway's flow table went from ~330 to
+~1,900 tracked connections and both nodes lost their default route within a second
+of each other, mid-parse.
+
+The count of *established* connections was not the problem — it stayed flat at
+around 155. **Churn** was. Reads slower than `fs.s3a.connection.timeout` are
+aborted and redialled, so the more congested the link becomes, the faster new
+connections are created.
+
+`--input_mode local` removes the uplink from the job's critical path. Mirror the
+source prefixes to every worker once, then run the parse against local disk:
+
+```bash
+# once per cluster: the mirror is written by the account that runs the staging
+# script and read by the account the executors run as, which is usually not the
+# same one
+sudo install -d -o "$(id -un)" -g "$(id -gn)" -m 755 /srv/pyg-source   # on every worker
+
+# once per dataset; incremental afterwards
+bin/stage_sources.sh \
+  --dest /srv/pyg-source \
+  --nodes worker-a,worker-b \
+  --source s3a://my-data-lake/raw/source=sec/feed=filings/2024-12/
+
+# then submit as usual, naming the same s3a:// URIs
+SPARK_MASTER_URL=spark://<host>:7077 \
+PYG_INPUT_MODE=local PYG_LOCAL_SOURCE_ROOT=/srv/pyg-source \
+PYG_STAGE_NODES=worker-a,worker-b \
+  bin/submit_spark_job.sh \
+    --mode full \
+    --source_paths s3a://my-data-lake/raw/source=sec/feed=filings/2024-12/ \
+    --local_work_dir /data \
+    --source_format turtle_parquet \
+    --time_period 2024-12
+```
+
+With `PYG_INPUT_MODE=local` the launcher stages before it submits and appends
+`--input_mode local --local_source_root ...` for you, so the mode is stated once.
+`PYG_STAGE_ENABLED=false` skips the sync and reads a mirror staged earlier.
+
+Points worth knowing:
+
+- **The job keeps naming the `s3a://` URIs.** `bin/stage_sources.sh` and
+  `build_graph.py` derive the same local path from them
+  (`<root>/<bucket>/<key>`), so both modes read the same layout and report the
+  same per-source statistics. Switching modes does not change the graph.
+- **Every worker needs its own copy at the same path.** No shared filesystem is
+  wanted here — one shared device would serialize reads that are otherwise
+  parallel per node. Spark lists the input on the driver and each task then opens
+  the path on whichever node it landed on, so divergent copies do not fail loudly;
+  they build a graph from a mixture. The staging script compares a content digest
+  across nodes and refuses to report success if they differ.
+- **The staging step is not a Spark job.** A distributed copy is the same failure
+  with a different label. It transfers one node at a time with a bounded number of
+  connections (`--concurrency`, default 4, hard-capped at 16), and watches
+  round-trip time to the default gateway — three consecutive samples above
+  `--rtt-limit-ms` and it kills the transfer. `aws s3 sync` is incremental, so a
+  retry resumes.
+- **Re-running downloads nothing.** `aws s3 sync` is incremental on its own, but
+  the script skips even the per-object comparison: the preflight `LIST` already
+  knows the prefix's object count and total size, so one local walk per node
+  decides whether there is anything to fetch. Ten runs against the same day cost
+  one transfer and nine listings — measured at 4.5s cold and 0.49s warm on an
+  89-object prefix. Immutable snapshots are the assumption; pass `--force` for a
+  prefix that gets rewritten in place.
+- **`s3` stays the default.** Nothing changes for a deployment that has not staged,
+  and reading object storage directly remains correct where compute sits beside
+  the bucket.
+
+`notebook/multi_experiment.ipynb` needs no change: it submits through
+`bin/submit_spark_job.sh` with the inherited environment, so exporting
+`PYG_INPUT_MODE` and `PYG_LOCAL_SOURCE_ROOT` before starting Jupyter is enough.
+The seed leg stages and reads locally; the `pyg_only` experiment legs pass no
+`--source_paths`, so they skip staging and read the enriched Parquet as before.
 
 ### Cluster prerequisites for GPU runs
 

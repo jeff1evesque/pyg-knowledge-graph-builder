@@ -230,3 +230,49 @@ def test_max_alloc_fraction_is_emitted(tmp_path):
 
     assert conf.get("spark.rapids.memory.gpu.maxAllocFraction") == "0.4"
     assert conf.get("spark.rapids.memory.gpu.allocFraction") == "0.25"
+
+
+# ======================================================================
+# RAPIDS batch size — what actually decides how many tasks fit in host RAM
+# ======================================================================
+
+def test_batch_size_defaults_to_the_rapids_default(tmp_path):
+    """Unset, the launcher must not change behaviour for existing callers.
+
+    1g is RAPIDS' own default. Stating it explicitly rather than omitting the
+    conf makes the value visible in the submitted command, which is where
+    anyone debugging a memory failure will look for it.
+    """
+    _, argv, _ = _run(tmp_path, CLUSTER_MASTER)
+    assert _conf(argv)["spark.rapids.sql.batchSizeBytes"] == "1g"
+
+
+def test_batch_size_is_configurable(tmp_path):
+    """The setting that makes high task concurrency survivable.
+
+    It is per CONCURRENT TASK, so on a unified-memory host -- where the RMM pool
+    comes out of system RAM -- it, not the slot count, decides how many tasks
+    fit. Measured 2026-08-29: ~1.0 GB of host RAM per task at the 1g default, so
+    144 concurrent tasks want ~170 GB on a 121 GiB host and the run dies. At
+    256m all 144 held with 44 GB free.
+    """
+    _, argv, _ = _run(tmp_path, CLUSTER_MASTER, RAPIDS_BATCH_SIZE_BYTES="256m")
+    assert _conf(argv)["spark.rapids.sql.batchSizeBytes"] == "256m"
+
+
+def test_extra_conf_can_still_override_the_batch_size(tmp_path):
+    """SPARK_EXTRA_CONF is emitted last, so it wins on duplicate keys.
+
+    Pinned because a run in flight sets the batch size that way, and a launcher
+    change that moved SPARK_EXTRA_CONF earlier would silently revert it to the
+    default mid-run -- the job would keep going and die of memory an hour later.
+    """
+    _, argv, _ = _run(
+        tmp_path, CLUSTER_MASTER,
+        SPARK_EXTRA_CONF="--conf spark.rapids.sql.batchSizeBytes=128m",
+    )
+    pairs = [p for f, p in zip(argv, argv[1:])
+             if f == "--conf" and p.startswith("spark.rapids.sql.batchSizeBytes=")]
+    assert pairs[-1] == "spark.rapids.sql.batchSizeBytes=128m", (
+        "SPARK_EXTRA_CONF must be emitted after the launcher's own defaults"
+    )

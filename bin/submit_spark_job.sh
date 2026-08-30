@@ -24,6 +24,18 @@
 #   GPU_PER_EXECUTOR            (optional, default 1)
 #   GPU_PER_TASK                (optional, default 0.125 -> up to 8 tasks/GPU)
 #   RAPIDS_CONCURRENT_GPU_TASKS (optional, default 2)
+#   RAPIDS_BATCH_SIZE_BYTES     (optional, default 1g -- RAPIDS' own default, stated here
+#                               rather than left implicit because it is per CONCURRENT
+#                               TASK, which makes it the setting that decides how many
+#                               tasks fit in host memory. Measured 2026-08-29 on a
+#                               unified-memory host, where the RMM pool comes out of
+#                               system RAM: ~1.0 GB of host RAM per concurrent task at
+#                               this default, on a ~26 GB base. At 144 concurrent tasks
+#                               that asks for ~170 GB on a 121 GiB host and the run dies.
+#                               At 256m all 144 held with 44 GB still free -- more
+#                               headroom than 64 tasks had at 1g. Lower this before
+#                               lowering concurrency; concurrency is not what costs the
+#                               memory.)
 #   RAPIDS_PINNED_POOL          (optional, default 2G)
 #   RAPIDS_EXPLAIN              (optional, default NONE; set ALL to log which
 #                               operators run on GPU vs fall back to CPU)
@@ -60,6 +72,16 @@
 #                               assembly wants -- see the note below. Passed only when
 #                               set, so it cannot alter a run that did not ask for it.
 #   SPARK_EXTRA_CONF            (optional) extra "--conf k=v" flags, space-separated
+#   PYG_INPUT_MODE              (optional, default s3) "local" mirrors the s3a:// source
+#                               prefixes to every worker's disk before submitting, then
+#                               tells the job to read the mirror instead of the bucket.
+#                               See the note below and bin/stage_sources.sh.
+#   PYG_LOCAL_SOURCE_ROOT       (required when PYG_INPUT_MODE=local) mirror root,
+#                               identical on every worker
+#   PYG_STAGE_NODES             (optional) comma-separated workers to stage; defaults to
+#                               this host alone, which is right only on a one-node cluster
+#   PYG_STAGE_ENABLED           (optional, default true) "false" skips the sync and reads
+#                               a mirror staged earlier
 #
 # For a large run, source a profile before setting the cluster's own variables:
 #   . bin/profiles/large-run.env
@@ -103,6 +125,17 @@
 # trade: a genuinely dead executor also goes undetected for that much longer, which is
 # why the default stays at Spark's own value and the large-run profile raises it.
 #
+# PYG_INPUT_MODE: the Turtle parse is a CPU-only Python UDF, and until issue #342 it was
+# held to eight concurrent tasks because Spark schedules every stage under one resource
+# profile and that profile reserves a quarter GPU per task. Lifting the reservation is
+# correct -- the parse never touches the GPU -- but it takes the phase from 8 to 144
+# concurrent object-storage readers. Where the workers reach the bucket over a site
+# uplink rather than an in-region link, that has twice been enough to fill the gateway's
+# flow table and take every node's default route down with it. Staging the sources to
+# local disk first removes the uplink from the job's critical path, and lets the parse
+# run at full width against NVMe instead of contending for one pipe. In a cloud
+# deployment, where compute sits beside the bucket, leave this at s3.
+#
 # PYSPARK_ARROW_ENABLED: the PyG build ends by pulling integer columns to the driver
 # with toPandas(), and several comments in that code describe the transfer as
 # "Arrow-optimized". It is not, unless this is set: Spark's own default is off, so
@@ -136,6 +169,63 @@ if [[ -x "${SPARK_HOME:-}/bin/spark-submit" ]]; then
 elif ! command -v spark-submit >/dev/null 2>&1; then
   echo "spark-submit not found on PATH; set SPARK_HOME (e.g. SPARK_HOME=/opt/spark)" >&2
   exit 1
+fi
+
+# STAGE THE SOURCES TO LOCAL DISK, when asked to. See the PYG_INPUT_MODE note above.
+#
+# Driven by environment rather than by a flag on this script, because it belongs to the
+# deployment, not to the run: the same --mode/--source_paths line is correct in cloud
+# and on-prem, and only the site knows which side of that it is on.
+#
+# The job flags are appended here rather than expected from the caller, so the mode is
+# stated once. A caller that passes them itself has staged on its own terms; that is a
+# supported way to use this and gets no second sync, but stating it both ways is a
+# contradiction worth failing on rather than resolving silently.
+job_input_args=()
+if [[ "${PYG_INPUT_MODE:-s3}" == "local" ]]; then
+  : "${PYG_LOCAL_SOURCE_ROOT:?set PYG_LOCAL_SOURCE_ROOT when PYG_INPUT_MODE=local}"
+
+  if [[ " $* " == *" --input_mode "* || " $* " == *" --local_source_root "* ]]; then
+    echo "ERROR: PYG_INPUT_MODE=local is set AND --input_mode/--local_source_root was" >&2
+    echo "       passed as a job argument. Use one or the other: the environment" >&2
+    echo "       variables stage and then read, the flags only read." >&2
+    exit 2
+  fi
+
+  # Read out of the arguments rather than from another variable, so the paths that get
+  # staged are by construction the paths the job is about to open.
+  source_paths=""
+  prev=""
+  for arg in "$@"; do
+    case "$arg" in
+      --source_paths=*) source_paths="${arg#--source_paths=}" ;;
+      *) if [[ "$prev" == "--source_paths" ]]; then source_paths="$arg"; fi ;;
+    esac
+    prev="$arg"
+  done
+  # No --source_paths means this submission does not read sources at all: that is
+  # --mode pyg_only, which reads enriched Parquet the seed leg already wrote. The
+  # variable is exported for a whole session, and the notebook's experiment loop
+  # is N pyg_only submissions after one seed -- so treating a missing value as an
+  # error would fail every one of them.
+  if [[ -z "$source_paths" ]]; then
+    # The flags are left off too, so this run's manifest does not claim an input
+    # mode for input it never read.
+    echo "PYG_INPUT_MODE=local: no --source_paths on this submission, nothing to stage."
+  else
+    if [[ "${PYG_STAGE_ENABLED:-true}" == "true" ]]; then
+      "$REPO_ROOT/bin/stage_sources.sh" \
+        --dest "$PYG_LOCAL_SOURCE_ROOT" \
+        --sources "$source_paths"
+    else
+      echo "PYG_STAGE_ENABLED=false: reading the mirror already at ${PYG_LOCAL_SOURCE_ROOT}."
+    fi
+
+    job_input_args=(
+      --input_mode local
+      --local_source_root "$PYG_LOCAL_SOURCE_ROOT"
+    )
+  fi
 fi
 
 # Ship the Python environment to the executors.
@@ -292,6 +382,7 @@ fi
   --conf spark.plugins=com.nvidia.spark.SQLPlugin \
   --conf spark.rapids.sql.enabled=true \
   --conf spark.rapids.sql.concurrentGpuTasks="${RAPIDS_CONCURRENT_GPU_TASKS:-2}" \
+  --conf spark.rapids.sql.batchSizeBytes="${RAPIDS_BATCH_SIZE_BYTES:-1g}" \
   --conf spark.rapids.memory.pinnedPool.size="${RAPIDS_PINNED_POOL:-2G}" \
   --conf spark.rapids.memory.gpu.allocFraction="${RAPIDS_GPU_ALLOC_FRACTION}" \
   --conf spark.rapids.memory.gpu.minAllocFraction="${RAPIDS_GPU_MIN_ALLOC_FRACTION:-0}" \
@@ -308,4 +399,4 @@ fi
   --conf spark.hadoop.fs.s3a.attempts.maximum=3 \
   --conf spark.hadoop.fs.s3a.retry.limit=3 \
   ${SPARK_EXTRA_CONF:-} \
-  spark_jobs/build_graph.py "$@"
+  spark_jobs/build_graph.py "$@" "${job_input_args[@]}"
