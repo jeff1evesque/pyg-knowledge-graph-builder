@@ -90,6 +90,88 @@ def test_path_exists_on_a_uri_without_spark_raises(tmp_path, monkeypatch):
         path_exists("s3a://bucket/pyg/hetero_data.pt")
 
 
+def _fake_spark(answer, record):
+    """A JVM handle that records what it was asked and returns ``answer``.
+
+    Same shape as the write test above, and for the same reason: the assertion
+    is about which code path runs and with what arguments, which needs no JVM.
+    """
+    class _FileSystem:
+        @staticmethod
+        def get(uri, conf):
+            record["uri"] = uri
+            record["conf"] = conf
+            return _FileSystem()
+
+        def exists(self, path):
+            record["path"] = path
+            return answer
+
+    class _JVM:
+        class java:
+            class net:
+                URI = staticmethod(lambda s: f"URI({s})")
+
+        class org:
+            class apache:
+                class hadoop:
+                    class fs:
+                        FileSystem = _FileSystem
+                        Path = staticmethod(lambda s: f"Path({s})")
+
+    class _FakeSpark:
+        _jvm = _JVM
+
+        class _jsc:
+            @staticmethod
+            def hadoopConfiguration():
+                return "hadoop-conf"
+
+    return _FakeSpark
+
+
+@pytest.mark.parametrize("answer", [True, False])
+def test_path_exists_on_a_uri_asks_hadoop_not_the_local_disk(
+    tmp_path, monkeypatch, answer
+):
+    """The URI branch must go through Hadoop's FileSystem, both ways.
+
+    This is the branch that decides whether an object-store work dir looks
+    occupied. Answering it from the driver's local disk would report every
+    s3a:// destination as free and overwrite a finished run.
+    """
+    monkeypatch.chdir(tmp_path)
+    record = {}
+
+    result = path_exists(
+        "s3a://bucket/pyg/hetero_data.pt",
+        spark=_fake_spark(answer, record),
+    )
+
+    assert result is answer
+    assert record["uri"] == "URI(s3a://bucket/pyg/hetero_data.pt)"
+    assert record["path"] == "Path(s3a://bucket/pyg/hetero_data.pt)"
+    assert record["conf"] == "hadoop-conf"
+
+    # Nothing consulted, or created on, the driver's own filesystem.
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_path_exists_returns_a_real_bool_not_a_java_object(tmp_path, monkeypatch):
+    """``fs.exists`` comes back through Py4J; the caller branches on it, so it
+    has to be a Python bool rather than something merely truthy."""
+    monkeypatch.chdir(tmp_path)
+
+    class _Truthy:
+        def __bool__(self):
+            return True
+
+    result = path_exists(
+        "s3a://bucket/pyg/hetero_data.pt", spark=_fake_spark(_Truthy(), {})
+    )
+    assert result is True
+
+
 # --------------------------------------------------------------------------- #
 # local writes
 # --------------------------------------------------------------------------- #
