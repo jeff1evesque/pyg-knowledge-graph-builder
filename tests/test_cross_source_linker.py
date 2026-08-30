@@ -20,6 +20,7 @@ import pytest
 from rdflib.namespace import OWL, RDF, RDFS
 
 from spark_jobs.enrichment.cross_source_linker import CrossSourceLinker
+from spark_jobs.enrichment.intra_source.bls_linker import BLSIntraSourceLinker
 from spark_jobs.enrichment.intra_source.market.patterns import (
     _gics_sector_to_pascal,
 )
@@ -917,6 +918,47 @@ def test_a_bls_indicator_reaches_a_market_entity_through_the_crosswalk(
         "the BLS indicator did not reach the market entity; the two sides are "
         "keyed on different sector vocabularies and must meet through "
         "relatedToEconomicSector"
+    )
+
+
+def test_the_bls_side_of_the_causal_link_arrives_from_the_intra_source_leg(
+    spark, make_triples
+):
+    """The BLS half is written by another job, not handed in as a row.
+
+    The two tests around this one build ``bls:belongsToSector`` directly, so
+    they pass whatever the intra-source leg does. On a real run that triple
+    comes from BLSIntraSourceLinker, and the pipeline unions its output into
+    triples_df before this module reads it. When that leg was skipped, this
+    step found an empty BLS side, returned None and logged nothing (#350).
+
+    So this runs both halves in the order the pipeline runs them, which is the
+    seam neither half's own tests cover.
+    """
+    equity_sector = _equity_sector("Energy")
+    snapshot = str(MARKET_QUOTES) + "snapshot/XOM/2026-07-02"
+    # The category entity the CPI mappers emit. "Gasoline (all types)" is an
+    # energy_sector keyword, so the intra-source sector step classifies it.
+    category = identifier_namespace(str(CPI)) + "Gasoline_all_types_Entity"
+
+    rows = _snapshot_rows(snapshot, "XOM") + [
+        (equity_sector, RDF_TYPE, EQUITY_SECTOR_TYPE),
+        (snapshot, str(MARKET_ENRICHMENT.belongsToSector), equity_sector),
+        (category, RDFS_LABEL, "Gasoline (all types)"),
+    ]
+
+    source_df = make_triples(rows)
+    bls_new = BLSIntraSourceLinker(spark).enrich(source_df)
+    enriched = source_df.unionByName(bls_new)
+
+    assert (category, BELONGS_TO_SECTOR, str(BLS_ENRICHMENT.EnergySector)) in \
+        _triple_set(bls_new), "the intra-source leg did not classify the category"
+
+    triples = _triple_set(CrossSourceLinker(spark, enriched).enrich())
+
+    assert (category, LEADS_TO, snapshot) in triples, (
+        "the causal step did not see the belongsToSector the intra-source leg "
+        "wrote, so the BLS side of the join was empty"
     )
 
 
