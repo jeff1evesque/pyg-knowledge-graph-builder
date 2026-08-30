@@ -226,6 +226,14 @@ _EDGE_HASH_SEEDS = [0, 7, 13, 31]
 # ============================================
 _CHUNK_EDGE_THRESHOLD = 1_000_000
 
+# Fraction of spark.driver.maxResultSize one collect may aim for. The estimate
+# below counts tensor bytes, not the serialized row overhead Spark actually
+# measures, so the remainder is headroom for what it does not model.
+_RESULT_SIZE_TARGET_FRACTION = 0.6
+
+# Driver-side width of one feature value: the dense tensors are float32.
+_FEATURE_ITEMSIZE = 4
+
 # Upper bound on how many edge types may be unioned into a single
 # batched collect.
 #
@@ -731,6 +739,10 @@ class EdgeFeatureExtractor:
         self._max_types_per_batch = edge_feat_config.get(
             "max_edge_types_per_batch", _MAX_EDGE_TYPES_PER_BATCH
         )
+        # (edge_vector_dim, budget) from the last _max_edges_per_collect call.
+        # The split loop asks once per edge type -- hundreds of py4j round
+        # trips to read a conf value that cannot change mid-build.
+        self._edges_per_collect: Optional[Tuple[int, int]] = None
 
         # Which categories of edge types to featurize. Validated here so a
         # name that can never match fails at construction, not after an
@@ -1149,7 +1161,11 @@ class EdgeFeatureExtractor:
                 )
                 continue
 
-            if num_edges > self._chunk_threshold:
+            # "Large" is whatever will not fit in one collect, which is a
+            # question about bytes rather than rows -- the same edge count is
+            # a different amount of driver memory at a different
+            # edge_vector_dim (#340).
+            if num_edges > self._max_edges_per_collect(edge_vector_dim):
                 large.append((edge_type_key, num_edges, entries))
             else:
                 small.append((edge_type_key, num_edges, entries))
@@ -2569,6 +2585,45 @@ class EdgeFeatureExtractor:
             )
         )
 
+    def _max_edges_per_collect(self, edge_vector_dim: int) -> int:
+        """How many edges one collect may carry, sized in bytes not rows.
+
+        The cap used to be a row count alone, but spark.driver.maxResultSize
+        counts bytes. The same edge budget therefore meant 32x the bytes at
+        edge_vector_dim 1024 that it meant at 32, so a run that fit at one
+        width failed at another with nothing in the failure naming the width
+        (#340). A batch's dense tensors are edges x edge_vector_dim x 4, so
+        that is the quantity the budget is spent in.
+
+        The row cap stays as a second, independent ceiling: it bounds the
+        Pandas intermediaries, which the byte estimate does not describe.
+        Spark reads maxResultSize 0 as unbounded and -1 as unset; either way
+        there is no cap to size against and the row cap is the only one left.
+        """
+        cached = self._edges_per_collect
+        if cached is not None and cached[0] == edge_vector_dim:
+            return cached[1]
+
+        rows = max(1, self._chunk_threshold)
+        configured = self.spark.conf.get(
+            "spark.driver.maxResultSize", None
+        )
+        cap = (
+            None if configured is None
+            else _parse_byte_string(configured)
+        )
+        if cap is None or cap <= 0:
+            budget = rows
+        else:
+            per_edge = max(1, edge_vector_dim * _FEATURE_ITEMSIZE)
+            by_bytes = int(cap * _RESULT_SIZE_TARGET_FRACTION) // per_edge
+            # One edge must stay collectable whatever the cap says, or the
+            # batch cannot progress at all.
+            budget = max(1, min(by_bytes, rows))
+
+        self._edges_per_collect = (edge_vector_dim, budget)
+        return budget
+
     def _collect_small_batches(
         self,
         small: List[Tuple[Tuple[str, str, str], int, DataFrame]],
@@ -2579,15 +2634,15 @@ class EdgeFeatureExtractor:
         Collect small edge types in bounded batches — one grouped
         toPandas per batch instead of one per edge type.
 
-        Batches are capped on two independent axes: total edges (so a
-        batch's collect stays bounded in driver memory) and type count
-        (so the batch's Catalyst plan stays bounded in width). Either
+        Batches are capped on two independent axes: estimated bytes (so a
+        batch's collect stays inside spark.driver.maxResultSize) and type
+        count (so the batch's Catalyst plan stays bounded in width). Either
         cap alone is insufficient — see _MAX_EDGE_TYPES_PER_BATCH.
         """
         if not small:
             return
 
-        budget = max(1, self._chunk_threshold)
+        budget = self._max_edges_per_collect(edge_vector_dim)
         max_types = max(1, self._max_types_per_batch)
 
         batch: List[Tuple[Tuple[str, str, str], int, DataFrame]] = []
@@ -2615,7 +2670,10 @@ class EdgeFeatureExtractor:
 
         logger.info(
             f"    {len(small)} small edge types collected in "
-            f"{num_batches} batch(es)"
+            f"{num_batches} batch(es) "
+            f"(budget {budget:,} edges ~ "
+            f"{budget * edge_vector_dim * _FEATURE_ITEMSIZE / 1024 ** 2:,.0f}"
+            f" MB per batch)"
         )
 
     def _flush_batch(
@@ -2702,7 +2760,7 @@ class EdgeFeatureExtractor:
         and immediately freed. This bounds peak Pandas memory to
         ~chunk_size edges' sparse entries regardless of total edge count.
         """
-        chunk_size = self._chunk_threshold
+        chunk_size = self._max_edges_per_collect(edge_vector_dim)
 
         combined = combined.cache()
         total_entries = combined.count()
