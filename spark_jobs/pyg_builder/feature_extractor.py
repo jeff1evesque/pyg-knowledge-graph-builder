@@ -417,6 +417,42 @@ _PROVENANCE_EDGE_LIMIT = 500
 _HASH_SEEDS = [0, 7, 13, 31]
 
 
+def _slot_dim(col, seed: int, dim: int, start: int):
+    """The vector column a hashed value lands in.
+
+    Every hashed placement goes through here, and so does the slot mapping
+    that publishes those columns, so the two cannot disagree.
+
+    They used to. The mapping recomputed each slot on the driver with md5
+    while the encoder placed values with Spark's hash, and the published
+    column was right only by coincidence -- about one predicate in 257. A
+    reader of slot_mapping.json was looking at the wrong feature (#354).
+    """
+    return F.abs(F.hash(col, F.lit(seed))) % F.lit(dim) + F.lit(start)
+
+
+# What a categorical slot is keyed on. Joined into the key, not hashed apart.
+_CATEGORICAL_KEY_SEP = "::"
+
+
+def _categorical_key():
+    """The value a categorical slot is keyed on: the predicate AND its value.
+
+    A categorical property does not occupy a fixed set of columns the way a
+    numeric one does -- every distinct predicate/value pair gets its own.
+    slot_mapping.json used to publish four columns per predicate as though it
+    did, which named columns holding some other value entirely (#354).
+    """
+    return F.concat(
+        F.col("predicate"), F.lit(_CATEGORICAL_KEY_SEP), F.col("cat_value")
+    )
+
+
+def _local_name(uri: str) -> str:
+    """The trailing name of a URI, after the last ``/`` or ``#``."""
+    return uri.rsplit("/", 1)[-1].rsplit("#", 1)[-1]
+
+
 class VectorLayout:
     """
     Computes all segment and sub-segment boundaries from a given
@@ -2264,79 +2300,73 @@ class FeatureExtractor:
         - type URIs: typically <500
         - superclass URIs: typically <200
 
-        Hash computation is done on the driver using a Python
-        approximation of Spark's murmur3. This is NOT used during
-        encoding (which uses Spark's F.hash on executors). The
-        slot_mapping file is for interpretability only — training
-        and inference code never depends on it.
+        Slots are resolved by evaluating the encoder's own expression
+        (``_slot_dim``) over the distinct values, so a published column is the
+        column the value is in. They used to be recomputed here on the driver
+        with md5, which matched Spark's hash only by coincidence and named the
+        wrong column for most properties (#354).
         """
         layout = self._layout
 
         # --- Numeric property slots ---
         numeric_slots = []
         if numeric_df is not None:
-            pred_rows = (
-                collect_sorted(
-                    numeric_df.select("predicate").distinct()
-                )
-            )
-            for row in pred_rows:
-                pred = row.predicate
-                local_name = (
-                    pred.rsplit("/", 1)[-1].rsplit("#", 1)[-1]
-                )
-                slot = (
-                    abs(_hash_approx(pred, 500))
-                    % layout.seg3_numeric_dim
-                )
-                global_dim = slot + layout.seg3_numeric_start
+            for pred, dims in self._resolve_slots(
+                numeric_df,
+                "predicate",
+                [500],
+                layout.seg3_numeric_dim,
+                layout.seg3_numeric_start,
+            ):
                 numeric_slots.append({
                     "predicate_uri": pred,
-                    "local_name": local_name,
-                    "hash_slot": slot,
-                    "global_dim": global_dim,
+                    "local_name": _local_name(pred),
+                    "hash_slot": dims[0] - layout.seg3_numeric_start,
+                    "global_dim": dims[0],
                 })
 
         # --- Categorical property slots ---
+        # No columns per predicate here. The encoder keys a categorical slot on
+        # "predicate::value", so every distinct value of a predicate lands
+        # somewhere different and a predicate has no fixed set of columns to
+        # publish. Four were published per predicate anyway, naming columns
+        # that hold some other value (#354).
+        #
+        # The rule below lets a reader work out the columns for a value they
+        # care about. Listing every value instead would mean collecting the
+        # whole categorical vocabulary to the driver, which does not fit.
         categorical_slots = []
         if categorical_df is not None:
-            cat_pred_rows = (
-                collect_sorted(
-                    categorical_df.select("predicate").distinct()
-                )
-            )
-            for row in cat_pred_rows:
-                pred = row.predicate
-                local_name = (
-                    pred.rsplit("/", 1)[-1].rsplit("#", 1)[-1]
-                )
-                slots = []
-                global_dims = []
-                for seed_offset in _HASH_SEEDS:
-                    slot = (
-                        abs(_hash_approx(
-                            pred, seed_offset + 600
-                        ))
-                        % layout.seg3_categorical_dim
-                    )
-                    slots.append(slot)
-                    global_dims.append(
-                        slot + layout.seg3_categorical_start
-                    )
+            for row in collect_sorted(
+                categorical_df.select("predicate").distinct()
+            ):
                 categorical_slots.append({
-                    "predicate_uri": pred,
-                    "local_name": local_name,
-                    "hash_slots": slots,
-                    "global_dims": global_dims,
+                    "predicate_uri": row.predicate,
+                    "local_name": _local_name(row.predicate),
                 })
+        categorical_rule = {
+            "keyed_on": (
+                "{predicate_uri}" + _CATEGORICAL_KEY_SEP + "{value}"
+            ),
+            "seeds": [s + 600 for s in _HASH_SEEDS],
+            "segment_start": layout.seg3_categorical_start,
+            "segment_dim": layout.seg3_categorical_dim,
+            "expression": (
+                "abs(spark_hash(keyed_on, seed)) "
+                "% segment_dim + segment_start"
+            ),
+        }
 
         # --- Class identity slots ---
+        ci_start = layout.seg1_class_identity_start
         class_slots = []
-        class_uri_rows = (
-            collect_sorted(type_uri_df.select("type_uri").distinct())
-        )
-        for row in class_uri_rows:
-            uri = row.type_uri
+        for uri, dims in self._resolve_slots(
+            type_uri_df,
+            "type_uri",
+            _HASH_SEEDS,
+            layout.seg1_class_identity_dim,
+            ci_start,
+        ):
             pyg_name = ""
             for ns, prefix in NAMESPACE_PREFIXES:
                 if uri.startswith(ns):
@@ -2345,25 +2375,25 @@ class FeatureExtractor:
                         pyg_name = f"{prefix}_{local}"
                     break
 
-            slots = []
-            global_dims = []
-            for seed_offset in _HASH_SEEDS:
-                slot = (
-                    abs(_hash_approx(uri, seed_offset))
-                    % layout.seg1_class_identity_dim
-                )
-                slots.append(slot)
-                global_dims.append(
-                    slot + layout.seg1_class_identity_start
-                )
             class_slots.append({
                 "class_uri": uri,
                 "pyg_name": pyg_name,
-                "hash_slots": slots,
-                "global_dims": global_dims,
+                "hash_slots": [d - ci_start for d in dims],
+                "global_dims": dims,
             })
 
         # --- Namespace slots ---
+        # A namespace occupies two columns, not one. Membership read from a
+        # node's rdf:type lands at `slot` with weight 1.0; membership read
+        # from the node's own URI lands half a segment away with weight 0.5
+        # (_encode_node_uri_namespace). Only the first was ever published, so
+        # the second column looked unclaimed (#354).
+        #
+        # These are index-based, not hashed, so they were already correct as
+        # far as they went -- the gap here is the missing column, not a wrong
+        # one.
+        os_start = layout.seg1_ontology_source_start
+        os_dim = layout.seg1_ontology_source_dim
         namespace_slots = []
         for namespace, onto_idx in ONTOLOGY_NAMESPACE_INDICES:
             prefix = ""
@@ -2371,40 +2401,32 @@ class FeatureExtractor:
                 if ns == namespace:
                     prefix = p
                     break
-            slot = onto_idx % layout.seg1_ontology_source_dim
-            global_dim = slot + layout.seg1_ontology_source_start
+            slot = onto_idx % os_dim
+            node_uri_slot = (onto_idx + os_dim // 2) % os_dim
             namespace_slots.append({
                 "namespace": namespace,
                 "prefix": prefix,
                 "slot": slot,
-                "global_dim": global_dim,
+                "global_dim": slot + os_start,
+                "node_uri_slot": node_uri_slot,
+                "node_uri_global_dim": node_uri_slot + os_start,
             })
 
         # --- Superclass hierarchy slots ---
+        ch_start = layout.seg1_class_hierarchy_start
         hierarchy_slots = []
         if class_hierarchy_df.head(1):
-            super_rows = (
-                collect_sorted(
-                    class_hierarchy_df.select("superclass_uri").distinct()
-                )
-            )
-            for row in super_rows:
-                uri = row.superclass_uri
-                slots = []
-                global_dims = []
-                for seed_offset in _HASH_SEEDS[:2]:
-                    slot = (
-                        abs(_hash_approx(uri, seed_offset + 100))
-                        % layout.seg1_class_hierarchy_dim
-                    )
-                    slots.append(slot)
-                    global_dims.append(
-                        slot + layout.seg1_class_hierarchy_start
-                    )
+            for uri, dims in self._resolve_slots(
+                class_hierarchy_df,
+                "superclass_uri",
+                [s + 100 for s in _HASH_SEEDS[:2]],
+                layout.seg1_class_hierarchy_dim,
+                ch_start,
+            ):
                 hierarchy_slots.append({
                     "superclass_uri": uri,
-                    "hash_slots": slots,
-                    "global_dims": global_dims,
+                    "hash_slots": [d - ch_start for d in dims],
+                    "global_dims": dims,
                 })
 
         # --- Collision report ---
@@ -2426,9 +2448,20 @@ class FeatureExtractor:
             # `collision_rate` counted multi-hot slot reuse, which pigeonhole
             # forces high on a healthy code -- they are now `slot_reuse` /
             # `slot_reuse_rate` so the number cannot be read as lost identity.
-            "version": "1.1",
+            #
+            # 1.2: every published column now comes from the encoder's own
+            # expression instead of a driver-side md5, so the columns named
+            # here are the columns the values are in. Three shape changes came
+            # with it: `categorical_properties` entries no longer carry
+            # `hash_slots` / `global_dims` (a categorical slot is keyed on
+            # predicate AND value, so a predicate has no fixed columns -- see
+            # `categorical_slot_rule`), and `namespaces` entries gained
+            # `node_uri_slot` / `node_uri_global_dim` for the second column
+            # each namespace occupies (#354).
+            "version": "1.2",
             "numeric_properties": numeric_slots,
             "categorical_properties": categorical_slots,
+            "categorical_slot_rule": categorical_rule,
             "classes": class_slots,
             "superclasses": hierarchy_slots,
             "namespaces": namespace_slots,
@@ -2443,6 +2476,40 @@ class FeatureExtractor:
             f"{len(hierarchy_slots)} superclasses, "
             f"{len(namespace_slots)} namespaces"
         )
+
+    def _resolve_slots(
+        self,
+        df: DataFrame,
+        value_col: str,
+        seeds: List[int],
+        dim: int,
+        start: int,
+    ) -> List[Tuple[str, List[int]]]:
+        """Each distinct value and the columns it lands in, one per seed.
+
+        Evaluated by Spark through ``_slot_dim`` -- the same expression the
+        encoder places values with -- so the published column is the column
+        holding the value, rather than a second guess at it.
+
+        One ``collect()`` per slot kind, same as before, on a distinct
+        single-column frame of at most a few thousand rows. Ordered by
+        ``collect_sorted`` because entry order drifting between runs is its
+        own reproducibility bug (#221).
+        """
+        distinct = df.select(value_col).distinct()
+        projected = distinct.select(
+            F.col(value_col).alias("value"),
+            F.array(
+                *[
+                    _slot_dim(F.col(value_col), seed, dim, start)
+                    for seed in seeds
+                ]
+            ).alias("dims"),
+        )
+        return [
+            (row["value"], [int(d) for d in row["dims"]])
+            for row in collect_sorted(projected)
+        ]
 
     # ================================================================
     # Segment 1: Ontology Structure encoding
@@ -2485,10 +2552,8 @@ class FeatureExtractor:
             ci_encoded = class_identity.select(
                 F.col("node_type"),
                 F.col("node_id"),
-                (
-                    F.abs(F.hash(F.col("type_uri"), F.lit(seed_offset)))
-                    % F.lit(ci_dim)
-                    + F.lit(ci_start)
+                _slot_dim(
+                    F.col("type_uri"), seed_offset, ci_dim, ci_start
                 ).alias("dim"),
                 F.lit(1.0).alias("value"),
             )
@@ -2520,15 +2585,11 @@ class FeatureExtractor:
                     hier_encoded = node_supers.select(
                         F.col("node_type"),
                         F.col("node_id"),
-                        (
-                            F.abs(
-                                F.hash(
-                                    F.col("superclass_uri"),
-                                    F.lit(seed_offset + 100),
-                                )
-                            )
-                            % F.lit(ch_dim)
-                            + F.lit(ch_start)
+                        _slot_dim(
+                            F.col("superclass_uri"),
+                            seed_offset + 100,
+                            ch_dim,
+                            ch_start,
                         ).alias("dim"),
                         F.col("weight").alias("value"),
                     )
@@ -2646,15 +2707,11 @@ class FeatureExtractor:
                 pp_encoded = all_node_props.select(
                     F.col("node_type"),
                     F.col("node_id"),
-                    (
-                        F.abs(
-                            F.hash(
-                                F.col("predicate"),
-                                F.lit(seed_offset + 200),
-                            )
-                        )
-                        % F.lit(pp_dim)
-                        + F.lit(pp_start)
+                    _slot_dim(
+                        F.col("predicate"),
+                        seed_offset + 200,
+                        pp_dim,
+                        pp_start,
                     ).alias("dim"),
                     F.lit(1.0).alias("value"),
                 )
@@ -2685,12 +2742,8 @@ class FeatureExtractor:
                     .select(
                         F.col("node_type"),
                         F.col("node_id"),
-                        (
-                            F.abs(
-                                F.hash(F.col("domain_uri"), F.lit(300))
-                            )
-                            % F.lit(dr_half)
-                            + F.lit(dr_start)
+                        _slot_dim(
+                            F.col("domain_uri"), 300, dr_half, dr_start
                         ).alias("dim"),
                         F.lit(1.0).alias("value"),
                     )
@@ -2703,12 +2756,11 @@ class FeatureExtractor:
                     .select(
                         F.col("node_type"),
                         F.col("node_id"),
-                        (
-                            F.abs(
-                                F.hash(F.col("range_uri"), F.lit(301))
-                            )
-                            % F.lit(dr_dim - dr_half)
-                            + F.lit(dr_start + dr_half)
+                        _slot_dim(
+                            F.col("range_uri"),
+                            301,
+                            dr_dim - dr_half,
+                            dr_start + dr_half,
                         ).alias("dim"),
                         F.lit(1.0).alias("value"),
                     )
@@ -2737,15 +2789,11 @@ class FeatureExtractor:
                     ph_encoded = prop_with_super.select(
                         F.col("node_type"),
                         F.col("node_id"),
-                        (
-                            F.abs(
-                                F.hash(
-                                    F.col("super_property_uri"),
-                                    F.lit(seed_offset + 400),
-                                )
-                            )
-                            % F.lit(ph_dim)
-                            + F.lit(ph_start)
+                        _slot_dim(
+                            F.col("super_property_uri"),
+                            seed_offset + 400,
+                            ph_dim,
+                            ph_start,
                         ).alias("dim"),
                         F.lit(1.0).alias("value"),
                     )
@@ -2823,10 +2871,8 @@ class FeatureExtractor:
             num_encoded = all_numeric.select(
                 F.col("node_type"),
                 F.col("node_id"),
-                (
-                    F.abs(F.hash(F.col("predicate"), F.lit(500)))
-                    % F.lit(num_dim)
-                    + F.lit(num_start)
+                _slot_dim(
+                    F.col("predicate"), 500, num_dim, num_start
                 ).alias("dim"),
                 F.col(value_col).alias("value"),
             )
@@ -2841,19 +2887,11 @@ class FeatureExtractor:
                 cat_encoded = categorical_df.select(
                     F.col("node_type"),
                     F.col("node_id"),
-                    (
-                        F.abs(
-                            F.hash(
-                                F.concat(
-                                    F.col("predicate"),
-                                    F.lit("::"),
-                                    F.col("cat_value"),
-                                ),
-                                F.lit(seed_offset + 600),
-                            )
-                        )
-                        % F.lit(cat_dim)
-                        + F.lit(cat_start)
+                    _slot_dim(
+                        _categorical_key(),
+                        seed_offset + 600,
+                        cat_dim,
+                        cat_start,
                     ).alias("dim"),
                     F.lit(1.0).alias("value"),
                 )
@@ -2876,27 +2914,6 @@ class FeatureExtractor:
 # ================================================================
 # Module-level helpers for metadata collection
 # ================================================================
-
-def _hash_approx(value: str, seed: int) -> int:
-    """
-    Approximate Spark's murmur3 hash on the driver side for slot
-    mapping metadata.
-
-    This is NOT used during encoding (which uses Spark's F.hash on
-    executors). It's used only for the slot_mapping metadata file to
-    predict which slots each property/class occupies.
-
-    Note: Spark's hash() uses a specific murmur3 variant. This Python
-    approximation may not match exactly for all inputs. The slot_mapping
-    file is for interpretability only — training and inference code
-    never depends on it.
-    """
-    import hashlib
-
-    combined = f"{value}:{seed}"
-    h = hashlib.md5(combined.encode("utf-8")).hexdigest()
-    return int(h[:8], 16)
-
 
 class ClassIdentityCapacityError(RuntimeError):
     """The class_identity segment cannot separate this build's classes."""
