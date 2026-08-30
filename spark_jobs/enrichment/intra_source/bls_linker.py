@@ -131,9 +131,14 @@ class BLSIntraSourceLinker:
             [], "subject STRING, predicate STRING, object STRING"
         )
 
-        # Detect which BLS datasets are present
+        # Filter BEFORE detecting. Detection reads the filtered frame, so it
+        # cannot report a dataset the steps below would find nothing for, and
+        # it cannot miss one they would.
+        self._bls_triples = self._filter_bls_triples().cache()
+
         self.available_datasets = self._detect_datasets()
         if not self.available_datasets:
+            self._bls_triples.unpersist()
             logger.info("No BLS data detected, skipping enrichment")
             return empty
 
@@ -141,9 +146,6 @@ class BLSIntraSourceLinker:
         logger.info("Starting BLS Intra-Source Enrichment (PySpark)")
         logger.info(f"Detected BLS datasets: {', '.join(sorted(self.available_datasets))}")
         logger.info("=" * 60)
-
-        # Cache the BLS-relevant subset for performance
-        self._bls_triples = self._filter_bls_triples().cache()
 
         # Initialize per-dataset sub-enrichers
         self._initialize_sub_enrichers()
@@ -191,27 +193,34 @@ class BLSIntraSourceLinker:
     # ================================================================
 
     def _detect_datasets(self) -> Set[str]:
-        """Detect which BLS datasets are present. Bounded collect."""
-        datasets = set()
+        """Which BLS datasets are present. Reads every BLS row, not a sample.
 
-        # Sample subjects to detect which BLS namespaces are present
-        sample = (
-            self.triples_df
-            .select("subject")
-            .limit(200000)
+        This used to sample the first 200,000 rows of triples_df. Market is
+        99.5% of a four-source run, so that sample held no BLS subject at all,
+        detection returned an empty set, and the whole BLS leg was skipped on
+        every run from 2026-08-24 on. Which rows the sample got decided the
+        answer, not whether BLS was there.
+
+        Naming the dataset in one column and taking the distinct values reads
+        the data once, collects at most one row per dataset, and fills the
+        cache the four steps below need anyway.
+        """
+        names = list(DATASET_NS_MAP)
+        dataset = F.when(
+            F.col("subject").startswith(DATASET_NS_MAP[names[0]]), names[0]
+        )
+        for name in names[1:]:
+            dataset = dataset.when(
+                F.col("subject").startswith(DATASET_NS_MAP[name]), name
+            )
+
+        rows = (
+            self._bls_triples
+            .select(dataset.alias("dataset"))
             .distinct()
             .collect()
         )
-
-        for row in sample:
-            s = row.subject
-            for dataset_name, ns in DATASET_NS_MAP.items():
-                if s.startswith(ns):
-                    datasets.add(dataset_name)
-            if len(datasets) == len(DATASET_NS_MAP):
-                break  # Found all possible datasets
-
-        return datasets
+        return {row.dataset for row in rows if row.dataset is not None}
 
     def _filter_bls_triples(self) -> DataFrame:
         """Filter triples to only BLS-relevant subjects."""
