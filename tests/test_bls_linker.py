@@ -11,6 +11,7 @@ Covered:
   - BLSDatasetEnricher.link_temporal_sequences (precedes chains, per-category
     partitioning, chronological ordering)
   - BLSIntraSourceLinker.enrich end-to-end (temporal + sector + hierarchy)
+  - BLS is still found when another source outnumbers it
   - No-BLS input short-circuits to an empty result
 """
 from rdflib.namespace import RDF, RDFS
@@ -40,6 +41,7 @@ HAS_PARENT = str(BLS_ENRICHMENT.hasParent)
 
 
 CPI_ID = identifier_namespace(str(CPI))
+MARKET_ID = identifier_namespace(str(MARKET_QUOTES))
 
 
 def _cpi(local):
@@ -177,6 +179,43 @@ def test_enrich_produces_temporal_sector_and_hierarchy(spark, make_triples):
     assert (child, BELONGS_TO_SECTOR, FOOD_SECTOR) in triples
     # Hierarchy: child -> parent (immediate parent via path structure).
     assert (child, HAS_PARENT, parent) in triples
+
+
+def test_enrich_finds_bls_behind_a_wall_of_market_rows(spark, make_triples):
+    """A few BLS rows after many market ones still run the whole BLS leg.
+
+    Dataset detection used to read the first 200,000 rows of the frame and
+    decide from those. Market is 99.5% of a four-source run, so no BLS row was
+    ever in that sample: the linker logged "No BLS data detected", skipped all
+    four steps, and left the cross-source causal step nothing to read (#350).
+
+    The wall below is one row longer than that old sample, and the BLS rows sit
+    behind it, so this fails on the sampling version and passes on the one that
+    reads every row.
+    """
+    parent = _cpi("All_items_Entity")
+    child = _cpi("All_items_Food_Entity")
+
+    bls_rows = [
+        (parent, RDFS_LABEL, "All items"),
+        (child, RDFS_LABEL, "Food"),
+    ]
+    _index_entity(bls_rows, "Food_Nov2024_Index", child, "November", "2024")
+    _index_entity(bls_rows, "Food_Dec2024_Index", child, "December", "2024")
+
+    market = spark.range(200_001).selectExpr(
+        f"concat('{MARKET_ID}', id) AS subject",
+        f"'{RDF_TYPE}' AS predicate",
+        f"'{str(MARKET_QUOTES.EquitySnapshot)}' AS object",
+    )
+    df = market.unionAll(make_triples(bls_rows))
+
+    result = BLSIntraSourceLinker(spark).enrich(df)
+    triples = {(r["subject"], r["predicate"], r["object"]) for r in result.collect()}
+
+    assert (child, BELONGS_TO_SECTOR, FOOD_SECTOR) in triples
+    assert (child, HAS_PARENT, parent) in triples
+    assert (_cpi("Food_Nov2024_Index"), PRECEDES, _cpi("Food_Dec2024_Index")) in triples
 
 
 def test_enrich_returns_empty_for_non_bls_data(spark, make_triples):
