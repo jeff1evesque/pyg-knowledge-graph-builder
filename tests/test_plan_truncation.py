@@ -42,9 +42,15 @@ that has already cost three incidents, so they must run on every push, not only
 in the manual e2e job.
 """
 
+import ast
+import logging
+from pathlib import Path
+
+from pyspark import SparkContext
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
+from spark_jobs.enrichment.settle import settle
 from spark_jobs.pyg_builder.edge_feature_extractor import EdgeFeatureExtractor
 from spark_jobs.pyg_builder.edge_mapper import EdgeMapper
 from spark_jobs.pyg_builder.node_mapper import NodeMapper
@@ -256,4 +262,133 @@ def test_settle_keeps_plan_flat_across_successive_phases(spark):
         f"plan node count compounded across phases: {sizes}. Each phase must "
         f"start from a truncated plan; growth here is the super-linear "
         f"constraint-inference blowup that OOMed the driver at 4g and 8g."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# settle() is the ONLY place that decides how a frame is materialized
+# --------------------------------------------------------------------------- #
+
+_ENRICHMENT_DIR = (
+    Path(__file__).resolve().parent.parent / "spark_jobs" / "enrichment"
+)
+
+
+def _local_checkpoint_calls(path: Path):
+    """Line numbers of real ``.localCheckpoint(...)`` calls in a source file.
+
+    Parsed, not grepped, so the prose in settle()'s own docstring -- which has
+    to name the method it is replacing -- cannot trip the guard.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return sorted(
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "localCheckpoint"
+    )
+
+
+def test_only_settle_chooses_the_checkpoint_kind():
+    """No enrichment module may call ``localCheckpoint`` for itself.
+
+    This is the guard for the defect that actually happened, and a behavioural
+    test could not have caught it. ``_settle`` moved to reliable
+    ``checkpoint()`` so a lost executor could not destroy unrecoverable work --
+    but two other copies of the same idea, in ``temporal_unifier`` (twice) and
+    ``cross_source_linker``, kept calling ``localCheckpoint`` and nobody
+    noticed. Nothing in the unit suite reaches those lines; they only run on a
+    real multi-source job.
+
+    So it stayed green until 2026-08-30, when a four-source run lost two
+    executors inside temporal unification's ``dated`` frame and died on
+    ``Checkpoint block rdd_23348_23 not found`` at 157 minutes, taking both
+    downstream legs with it. ``localCheckpoint`` truncates the plan, so once
+    the blocks are gone there is nothing left to recompute from.
+
+    The invariant is structural, so assert it structurally: exactly one module
+    picks the storage level, and every caller goes through it.
+    """
+    offenders = {
+        path.relative_to(_ENRICHMENT_DIR.parent.parent): lines
+        for path in sorted(_ENRICHMENT_DIR.rglob("*.py"))
+        if path.name != "settle.py"
+        for lines in [_local_checkpoint_calls(path)]
+        if lines
+    }
+
+    assert not offenders, (
+        f"localCheckpoint called outside settle(): "
+        f"{ {str(p): ls for p, ls in offenders.items()} }. Route it through "
+        f"spark_jobs.enrichment.settle instead. A memory-only checkpoint is "
+        f"destroyed with the executor holding it, and because it truncates the "
+        f"plan there is nothing left to recompute -- the task fails four times "
+        f"and the whole job aborts."
+    )
+
+
+def test_settle_writes_a_reliable_checkpoint_when_a_dir_is_set(
+    spark, monkeypatch
+):
+    """With a checkpoint dir, settle() must not choose the memory-only copy.
+
+    ``build_graph`` sets the dir to the run's work dir, so this is the path
+    every cluster run takes. Patched rather than driven against a real dir: the
+    ``spark`` fixture is session-scoped and PySpark offers no way to unset a
+    checkpoint dir, so setting one for real would leak into every test after.
+    """
+    df = spark.createDataFrame(
+        _temporal_rows(), schema="subject STRING, predicate STRING, object STRING"
+    )
+    calls = []
+    monkeypatch.setattr(
+        SparkContext, "getCheckpointDir", lambda self: "/tmp/checkpoints"
+    )
+    monkeypatch.setattr(
+        DataFrame, "checkpoint", lambda self, eager=True: calls.append("reliable") or self
+    )
+    monkeypatch.setattr(
+        DataFrame, "localCheckpoint", lambda self, eager=True: calls.append("local") or self
+    )
+
+    settle(df)
+
+    assert calls == ["reliable"], (
+        f"settle() made {calls or 'no checkpoint'} with a checkpoint dir set; "
+        f"it must call checkpoint(eager=True). localCheckpoint here is what "
+        f"turns one evicted executor into an aborted run."
+    )
+
+
+def test_settle_falls_back_to_local_and_says_so_without_a_dir(
+    spark, monkeypatch, caplog
+):
+    """No dir means no reliable option, but it must not pass silently.
+
+    The unit suite sets no checkpoint dir, so this is the path the tests
+    themselves take -- the fallback exists to keep them running unchanged. The
+    warning is the part worth asserting: it is the only signal that a cluster
+    run has lost its safety net.
+    """
+    df = spark.createDataFrame(
+        _temporal_rows(), schema="subject STRING, predicate STRING, object STRING"
+    )
+    calls = []
+    monkeypatch.setattr(SparkContext, "getCheckpointDir", lambda self: None)
+    monkeypatch.setattr(
+        DataFrame, "checkpoint", lambda self, eager=True: calls.append("reliable") or self
+    )
+    monkeypatch.setattr(
+        DataFrame, "localCheckpoint", lambda self, eager=True: calls.append("local") or self
+    )
+
+    with caplog.at_level(logging.WARNING, logger="spark_jobs.enrichment.settle"):
+        settle(df)
+
+    assert calls == ["local"], f"settle() made {calls} with no checkpoint dir"
+    assert "does not survive losing an executor" in caplog.text, (
+        "the fallback must warn; without a checkpoint dir a cluster run loses "
+        "every settled phase to a single evicted executor, and the log is the "
+        "only place that is visible"
     )
