@@ -231,9 +231,6 @@ _CHUNK_EDGE_THRESHOLD = 1_000_000
 # measures, so the remainder is headroom for what it does not model.
 _RESULT_SIZE_TARGET_FRACTION = 0.6
 
-# Driver-side width of one feature value: the dense tensors are float32.
-_FEATURE_ITEMSIZE = 4
-
 # What one slot costs on the wire, which is not what it costs in the tensor.
 # A collect returns the SPARSE form -- one row per non-zero slot, carrying
 # edge_idx (8) + dim (4) + value (4) + the batch's type id (4) -- so 20 bytes
