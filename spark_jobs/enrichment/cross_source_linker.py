@@ -304,29 +304,39 @@ class CrossSourceLinker:
         # the regex would still leave two implementations minting the same
         # unified:{Month} URIs.
         logger.info("\n[Step 1/8] Creating sector-based links...")
-        self._append(new_dfs, self._link_by_sector())
+        self._append(new_dfs, self._link_by_sector(), "[Step 1/8]")
 
         logger.info("\n[Step 2/8] Relating equity sectors to economic sectors...")
-        self._append(new_dfs, self._link_equity_to_economic_sectors())
+        self._append(
+            new_dfs, self._link_equity_to_economic_sectors(), "[Step 2/8]"
+        )
 
         logger.info("\n[Step 3/8] Linking by company/ticker...")
         if 'sec' in self.available_sources and 'market' in self.available_sources:
-            self._append(new_dfs, self._link_by_company())
+            self._append(new_dfs, self._link_by_company(), "[Step 3/8]")
 
             logger.info("\n[Step 4/8] Linking constituents by sub-industry...")
-            self._append(new_dfs, self._link_by_sub_industry())
+            self._append(new_dfs, self._link_by_sub_industry(), "[Step 4/8]")
 
             logger.info("\n[Step 5/8] Linking filings to sectors by SIC code...")
-            self._append(new_dfs, self._link_filings_by_sic())
+            self._append(new_dfs, self._link_filings_by_sic(), "[Step 5/8]")
+        else:
+            # Steps 4 and 5 print their headers inside the branch, so without
+            # this the log jumps from step 3 to step 6 and three link families
+            # go missing with nothing said.
+            logger.warning(
+                "  [Steps 3-5/8] skipped: both sec and market are needed, "
+                f"detected {', '.join(sorted(self.available_sources))}"
+            )
 
         logger.info("\n[Step 6/8] Linking by geographic region...")
-        self._append(new_dfs, self._link_by_geography())
+        self._append(new_dfs, self._link_by_geography(), "[Step 6/8]")
 
         logger.info("\n[Step 7/8] Creating causal relationships...")
-        self._append(new_dfs, self._create_causal_links())
+        self._append(new_dfs, self._create_causal_links(), "[Step 7/8]")
 
         logger.info("\n[Step 8/8] Aligning measurement types...")
-        self._append(new_dfs, self._align_measurement_types())
+        self._append(new_dfs, self._align_measurement_types(), "[Step 8/8]")
 
         if not new_dfs:
             return self.spark.createDataFrame([], schema=self.triples_df.schema)
@@ -353,9 +363,17 @@ class CrossSourceLinker:
         return all_new
 
     @staticmethod
-    def _append(lst: list, item: Optional[DataFrame]):
+    def _append(lst: list, item: Optional[DataFrame], step: str):
+        """Keep a step's triples, and say so when it made none.
+
+        A step that returns None used to log only its opening line. The graph
+        then came out missing a whole link family and read exactly like a
+        healthy one -- that is how the causal step went unnoticed (#350).
+        """
         if item is not None:
             lst.append(item)
+            return
+        logger.warning(f"  {step} produced no triples")
 
     # ================================================================
     # Step 2: Sector Linking
