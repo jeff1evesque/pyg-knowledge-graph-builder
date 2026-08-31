@@ -2410,6 +2410,8 @@ CLUSTER_SMOKE_OUTPUT_PATH=s3a://<bucket>/<prefix> \
   bin/generate_report.sh
 ```
 
+One variable has to be **absent**: `PYG_INPUT_MODE` must not be `local`. The cluster test passes its whole environment to `bin/submit_spark_job.sh`. If that variable says `local` — left over from a [staged run](#reading-sources-from-local-disk) — the launcher copies this suite's fixtures onto local disk and the job reads them from there. The suite still passes, but it stops testing the `s3a://` read path, which no other suite covers. Set `PYG_INPUT_MODE=s3` for the report run. `bin/generate_report.sh` warns when it sees this.
+
 This is **local-only and not committed** — `reports/tests/` is gitignored. The e2e suite is too heavy for the GitHub Actions runners, so the report can't be produced in CI; instead each developer runs `bin/generate_report.sh` on their own branch to verify locally (the **tests** badge covers the fast suite in CI). The report always includes the fast unit suite and the CPU e2e run; it adds the GPU (RAPIDS) e2e run when the hardware is available, and the [cluster smoke test](#cluster-smoke-test-a-real-cluster-not-local) when `SPARK_MASTER_URL` and `CLUSTER_SMOKE_OUTPUT_PATH` are set (source data auto-stages, so `CLUSTER_SMOKE_SOURCE_PATH` is optional). [`bin/generate_test_report.py`](bin/generate_test_report.py) is the underlying renderer (reads pytest JUnit XML).
 
 ---

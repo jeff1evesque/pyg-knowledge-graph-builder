@@ -222,29 +222,25 @@ class MarketIntraSourceLinker:
         new_dfs: List[DataFrame] = []
 
         logger.info("[Step 1/5] Linking snapshot temporal sequences...")
-        df = self._link_snapshot_sequences(triples_df)
-        if df is not None:
-            new_dfs.append(df)
+        self._append(
+            new_dfs, self._link_snapshot_sequences(triples_df), "[Step 1/5]"
+        )
 
         logger.info("[Step 2/5] Linking options to underlying equities...")
-        df = self._link_options_to_underlying(triples_df)
-        if df is not None:
-            new_dfs.append(df)
+        self._append(
+            new_dfs, self._link_options_to_underlying(triples_df), "[Step 2/5]"
+        )
 
         logger.info("[Step 3/5] Identifying option strategies...")
-        df = self._identify_option_strategies(triples_df)
-        if df is not None:
-            new_dfs.append(df)
+        self._append(
+            new_dfs, self._identify_option_strategies(triples_df), "[Step 3/5]"
+        )
 
         logger.info("[Step 4/5] Applying sector patterns...")
-        df = self._classify_sectors(triples_df)
-        if df is not None:
-            new_dfs.append(df)
+        self._append(new_dfs, self._classify_sectors(triples_df), "[Step 4/5]")
 
         logger.info("[Step 5/5] Computing option moneyness...")
-        df = self._compute_moneyness(triples_df)
-        if df is not None:
-            new_dfs.append(df)
+        self._append(new_dfs, self._compute_moneyness(triples_df), "[Step 5/5]")
 
         if not new_dfs:
             logger.info("No enrichment triples produced")
@@ -258,6 +254,19 @@ class MarketIntraSourceLinker:
         logger.info("=" * 60)
 
         return result
+
+    @staticmethod
+    def _append(lst: list, item: Optional[DataFrame], step: str):
+        """Keep a step's triples, and say so when it made none.
+
+        Same reason as CrossSourceLinker._append: a step that returns None
+        logged only its opening line, so a missing link family read like a
+        healthy graph (#350).
+        """
+        if item is not None:
+            lst.append(item)
+            return
+        logger.warning(f"  {step} produced no triples")
 
     # ================================================================
     # Step 1: Snapshot Temporal Sequences

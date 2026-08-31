@@ -239,27 +239,30 @@ class SECIntraSourceLinker:
 
         new_dfs: List[DataFrame] = []
 
+        # Four steps, not six. The old numbering announced "[Step 4/6]
+        # Applying sector patterns" and "[Step 6/6] Applying known
+        # correlations" and then called nothing -- there are no such methods
+        # here. Two headers over no work is the same reporting problem as a
+        # step that returns nothing quietly (#350).
+        #
+        # Filings reach a sector through CrossSourceLinker._link_filings_by_sic
+        # instead, on the SIC code upstream states on the filing.
+
         # Step 1: Unify company entities
-        logger.info("\n[Step 1/6] Unifying company entities...")
-        self._append(new_dfs, self._unify_company_entities())
+        logger.info("\n[Step 1/4] Unifying company entities...")
+        self._append(new_dfs, self._unify_company_entities(), "[Step 1/4]")
 
         # Step 2: Unify person entities
-        logger.info("\n[Step 2/6] Unifying person entities...")
-        self._append(new_dfs, self._unify_person_entities())
+        logger.info("\n[Step 2/4] Unifying person entities...")
+        self._append(new_dfs, self._unify_person_entities(), "[Step 2/4]")
 
         # Step 3: Link temporal sequences
-        logger.info("\n[Step 3/6] Linking temporal sequences...")
-        self._append(new_dfs, self._link_temporal_sequences())
+        logger.info("\n[Step 3/4] Linking temporal sequences...")
+        self._append(new_dfs, self._link_temporal_sequences(), "[Step 3/4]")
 
-        # Step 4: Apply sector patterns
-        logger.info("\n[Step 4/6] Applying sector patterns...")
-
-        # Step 5: Apply violation patterns
-        logger.info("\n[Step 5/6] Applying violation patterns...")
-        self._append(new_dfs, self._apply_violation_patterns())
-
-        # Step 6: Apply known correlations
-        logger.info("\n[Step 6/6] Applying known correlations...")
+        # Step 4: Apply violation patterns
+        logger.info("\n[Step 4/4] Applying violation patterns...")
+        self._append(new_dfs, self._apply_violation_patterns(), "[Step 4/4]")
 
         # Unpersist cached subset
         self._sec_triples.unpersist()
@@ -337,9 +340,17 @@ class SECIntraSourceLinker:
         )
 
     @staticmethod
-    def _append(lst: list, item: Optional[DataFrame]):
+    def _append(lst: list, item: Optional[DataFrame], step: str):
+        """Keep a step's triples, and say so when it made none.
+
+        Same reason as CrossSourceLinker._append: a step that returns None
+        logged only its opening line, so a missing link family read like a
+        healthy graph (#350).
+        """
         if item is not None:
             lst.append(item)
+            return
+        logger.warning(f"  {step} produced no triples")
 
     # ================================================================
     # Helper: resolve date through intermediate node
@@ -601,9 +612,15 @@ class SECIntraSourceLinker:
         """Link temporal sequences across all SEC datasets."""
         new_dfs: List[DataFrame] = []
 
-        self._append(new_dfs, self._link_ownership_filing_sequences())
-        self._append(new_dfs, self._link_periodic_reporting_sequences())
-        self._append(new_dfs, self._link_transaction_sequences())
+        self._append(
+            new_dfs, self._link_ownership_filing_sequences(), "Ownership filings"
+        )
+        self._append(
+            new_dfs, self._link_periodic_reporting_sequences(), "Periodic reports"
+        )
+        self._append(
+            new_dfs, self._link_transaction_sequences(), "Transactions"
+        )
 
         if not new_dfs:
             return None

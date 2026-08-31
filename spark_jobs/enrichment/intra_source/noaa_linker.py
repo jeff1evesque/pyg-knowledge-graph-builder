@@ -214,29 +214,35 @@ class NOAAIntraSourceLinker:
         new_dfs: List[DataFrame] = []
 
         logger.info("[Step 1/5] Linking temporal sequences...")
-        df = self._link_temporal_sequences(alert_info_df, alert_geo_df)
-        if df is not None:
-            new_dfs.append(df)
+        self._append(
+            new_dfs,
+            self._link_temporal_sequences(alert_info_df, alert_geo_df),
+            "[Step 1/5]",
+        )
 
         logger.info("[Step 2/5] Linking geographic relationships...")
-        df = self._link_geographic_relationships(alert_geo_df)
-        if df is not None:
-            new_dfs.append(df)
+        self._append(
+            new_dfs,
+            self._link_geographic_relationships(alert_geo_df),
+            "[Step 2/5]",
+        )
 
         logger.info("[Step 3/5] Linking event type relationships...")
-        df = self._link_event_relationships(alert_info_df)
-        if df is not None:
-            new_dfs.append(df)
+        self._append(
+            new_dfs, self._link_event_relationships(alert_info_df), "[Step 3/5]"
+        )
 
         logger.info("[Step 4/5] Linking severity escalations...")
-        df = self._link_severity_escalations(alert_info_df, alert_geo_df)
-        if df is not None:
-            new_dfs.append(df)
+        self._append(
+            new_dfs,
+            self._link_severity_escalations(alert_info_df, alert_geo_df),
+            "[Step 4/5]",
+        )
 
         logger.info("[Step 5/5] Classifying alerts by event category...")
-        df = self._classify_event_categories(alert_info_df)
-        if df is not None:
-            new_dfs.append(df)
+        self._append(
+            new_dfs, self._classify_event_categories(alert_info_df), "[Step 5/5]"
+        )
 
         alert_info_df.unpersist()
         alert_geo_df.unpersist()
@@ -254,6 +260,19 @@ class NOAAIntraSourceLinker:
         logger.info("=" * 60)
 
         return result
+
+    @staticmethod
+    def _append(lst: list, item: Optional[DataFrame], step: str):
+        """Keep a step's triples, and say so when it made none.
+
+        Same reason as CrossSourceLinker._append: a step that returns None
+        logged only its opening line, so a missing link family read like a
+        healthy graph (#350).
+        """
+        if item is not None:
+            lst.append(item)
+            return
+        logger.warning(f"  {step} produced no triples")
 
     # ================================================================
     # Shared: narrow the graph to NOAA's triples, once

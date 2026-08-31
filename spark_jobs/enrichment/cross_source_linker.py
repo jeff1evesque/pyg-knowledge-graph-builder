@@ -21,6 +21,7 @@ from spark_jobs.utils.rdf_utils import (
     ALERT,
     identifier_namespace,
 )
+from spark_jobs.enrichment.settle import settle
 from spark_jobs.enrichment.intra_source.bls.patterns import (
     BLS_SECTOR_PATTERNS,
 )
@@ -238,42 +239,46 @@ class CrossSourceLinker:
         logger.info(f"Detected data sources: {', '.join(self.available_sources)}")
 
     def _detect_sources(self) -> Set[str]:
-        """Detect which data sources are present (collects at most ~10 rows)."""
-        sources = set()
+        """Which sources are present. Reads every row, not a sample.
 
-        bls_prefixes = _BLS_ENTITY_PREFIXES
-        sec_prefixes = _SEC_ENTITY_PREFIXES
-        market_prefixes = _MARKET_ENTITY_PREFIXES
-        # NOAA alert instances use the ALERT namespace
-        # (https://api.weather.gov/alerts/) — a real publisher namespace, so it
-        # has no id/ counterpart and is matched as-is. CAP/WEATHER are checked
-        # too, for type triples.
-        noaa_prefixes = [str(ALERT), *_entity_prefixes(CAP, WEATHER)]
+        This used to read the first 100,000 subjects and decide from those.
+        Whether a source turned up in that window depended on how the rows
+        happened to be laid out, not on whether the source was there. The same
+        shape in bls_linker skipped the whole BLS leg on every four-source run
+        (#350); here it would skip the steps gated on a source instead.
 
-        # Sample subjects to detect sources — bounded, fast
-        sample = (
+        Naming the source in one column and taking the distinct values reads
+        the data once and collects at most one row per source.
+        """
+        by_source = (
+            ('bls', _BLS_ENTITY_PREFIXES),
+            ('sec', _SEC_ENTITY_PREFIXES),
+            ('market', _MARKET_ENTITY_PREFIXES),
+            # NOAA alert instances use the ALERT namespace
+            # (https://api.weather.gov/alerts/) — a real publisher namespace, so
+            # it has no id/ counterpart and is matched as-is. CAP/WEATHER are
+            # checked too, for type triples.
+            ('noaa', [str(ALERT), *_entity_prefixes(CAP, WEATHER)]),
+        )
+
+        def _starts_with_any(prefixes: List[str]) -> Column:
+            test = F.col("subject").startswith(prefixes[0])
+            for p in prefixes[1:]:
+                test = test | F.col("subject").startswith(p)
+            return test
+
+        # First match wins, so the branch order is the old if/elif order.
+        source = F.when(_starts_with_any(by_source[0][1]), by_source[0][0])
+        for name, prefixes in by_source[1:]:
+            source = source.when(_starts_with_any(prefixes), name)
+
+        rows = (
             self.triples_df
-            .select("subject")
-            .limit(100000)
+            .select(source.alias("source"))
             .distinct()
             .collect()
         )
-
-        for row in sample:
-            s = row.subject
-            if any(s.startswith(p) for p in bls_prefixes):
-                sources.add('bls')
-            elif any(s.startswith(p) for p in sec_prefixes):
-                sources.add('sec')
-            elif any(s.startswith(p) for p in market_prefixes):
-                sources.add('market')
-            elif any(s.startswith(p) for p in noaa_prefixes):
-                sources.add('noaa')
-
-            if len(sources) == 4:
-                break
-
-        return sources
+        return {row.source for row in rows if row.source is not None}
 
     def enrich(self) -> DataFrame:
         """Run all cross-source enrichment. Returns new triples only."""
@@ -304,29 +309,39 @@ class CrossSourceLinker:
         # the regex would still leave two implementations minting the same
         # unified:{Month} URIs.
         logger.info("\n[Step 1/8] Creating sector-based links...")
-        self._append(new_dfs, self._link_by_sector())
+        self._append(new_dfs, self._link_by_sector(), "[Step 1/8]")
 
         logger.info("\n[Step 2/8] Relating equity sectors to economic sectors...")
-        self._append(new_dfs, self._link_equity_to_economic_sectors())
+        self._append(
+            new_dfs, self._link_equity_to_economic_sectors(), "[Step 2/8]"
+        )
 
         logger.info("\n[Step 3/8] Linking by company/ticker...")
         if 'sec' in self.available_sources and 'market' in self.available_sources:
-            self._append(new_dfs, self._link_by_company())
+            self._append(new_dfs, self._link_by_company(), "[Step 3/8]")
 
             logger.info("\n[Step 4/8] Linking constituents by sub-industry...")
-            self._append(new_dfs, self._link_by_sub_industry())
+            self._append(new_dfs, self._link_by_sub_industry(), "[Step 4/8]")
 
             logger.info("\n[Step 5/8] Linking filings to sectors by SIC code...")
-            self._append(new_dfs, self._link_filings_by_sic())
+            self._append(new_dfs, self._link_filings_by_sic(), "[Step 5/8]")
+        else:
+            # Steps 4 and 5 print their headers inside the branch, so without
+            # this the log jumps from step 3 to step 6 and three link families
+            # go missing with nothing said.
+            logger.warning(
+                "  [Steps 3-5/8] skipped: both sec and market are needed, "
+                f"detected {', '.join(sorted(self.available_sources))}"
+            )
 
         logger.info("\n[Step 6/8] Linking by geographic region...")
-        self._append(new_dfs, self._link_by_geography())
+        self._append(new_dfs, self._link_by_geography(), "[Step 6/8]")
 
         logger.info("\n[Step 7/8] Creating causal relationships...")
-        self._append(new_dfs, self._create_causal_links())
+        self._append(new_dfs, self._create_causal_links(), "[Step 7/8]")
 
         logger.info("\n[Step 8/8] Aligning measurement types...")
-        self._append(new_dfs, self._align_measurement_types())
+        self._append(new_dfs, self._align_measurement_types(), "[Step 8/8]")
 
         if not new_dfs:
             return self.spark.createDataFrame([], schema=self.triples_df.schema)
@@ -335,13 +350,13 @@ class CrossSourceLinker:
         for df in new_dfs[1:]:
             all_new = all_new.unionByName(df)
 
-        # Truncate the plan before the dedup pass (see EnrichmentPipeline._settle).
+        # Truncate the plan before the dedup pass (see spark_jobs.enrichment.settle).
         # Each step above is a join over triples_df, so this union carries five of
         # those subtrees; feeding it straight into dropDuplicates + the anti-join
         # against triples_df makes Catalyst's constraint inference blow the driver
         # heap while *planning* (OutOfMemoryError inside .cache(), before any task
         # runs). Materializing here replaces the six subtrees with one scan.
-        all_new = all_new.localCheckpoint(eager=True)
+        all_new = settle(all_new)
 
         all_new = all_new.dropDuplicates(["subject", "predicate", "object"])
         all_new = deduplicate_against_existing(all_new, self.triples_df)
@@ -353,9 +368,17 @@ class CrossSourceLinker:
         return all_new
 
     @staticmethod
-    def _append(lst: list, item: Optional[DataFrame]):
+    def _append(lst: list, item: Optional[DataFrame], step: str):
+        """Keep a step's triples, and say so when it made none.
+
+        A step that returns None used to log only its opening line. The graph
+        then came out missing a whole link family and read exactly like a
+        healthy one -- that is how the causal step went unnoticed (#350).
+        """
         if item is not None:
             lst.append(item)
+            return
+        logger.warning(f"  {step} produced no triples")
 
     # ================================================================
     # Step 2: Sector Linking

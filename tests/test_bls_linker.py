@@ -11,8 +11,13 @@ Covered:
   - BLSDatasetEnricher.link_temporal_sequences (precedes chains, per-category
     partitioning, chronological ordering)
   - BLSIntraSourceLinker.enrich end-to-end (temporal + sector + hierarchy)
+  - BLS is still found when another source outnumbers it
   - No-BLS input short-circuits to an empty result
+  - The per-dataset config maps agree with each other, and detection names
+    every dataset in them
 """
+import itertools
+
 from rdflib.namespace import RDF, RDFS
 
 from spark_jobs.utils.rdf_utils import (
@@ -20,9 +25,13 @@ from spark_jobs.utils.rdf_utils import (
 )
 from spark_jobs.enrichment.intra_source.bls_linker import (
     BLSIntraSourceLinker,
+    DATASET_NS_MAP,
     normalize_keyword_for_uri_matching,
 )
-from spark_jobs.enrichment.intra_source.bls.base_enricher import BLSDatasetEnricher
+from spark_jobs.enrichment.intra_source.bls.base_enricher import (
+    BLSDatasetEnricher, DATASET_ENRICHERS,
+)
+from spark_jobs.enrichment.intra_source.bls.measurements import MEASUREMENT_TYPES
 
 # ---- URI string constants (mirror what the RML mappers emit) ----
 RDF_TYPE = str(RDF.type)
@@ -40,6 +49,7 @@ HAS_PARENT = str(BLS_ENRICHMENT.hasParent)
 
 
 CPI_ID = identifier_namespace(str(CPI))
+MARKET_ID = identifier_namespace(str(MARKET_QUOTES))
 
 
 def _cpi(local):
@@ -179,6 +189,43 @@ def test_enrich_produces_temporal_sector_and_hierarchy(spark, make_triples):
     assert (child, HAS_PARENT, parent) in triples
 
 
+def test_enrich_finds_bls_behind_a_wall_of_market_rows(spark, make_triples):
+    """A few BLS rows after many market ones still run the whole BLS leg.
+
+    Dataset detection used to read the first 200,000 rows of the frame and
+    decide from those. Market is 99.5% of a four-source run, so no BLS row was
+    ever in that sample: the linker logged "No BLS data detected", skipped all
+    four steps, and left the cross-source causal step nothing to read (#350).
+
+    The wall below is one row longer than that old sample, and the BLS rows sit
+    behind it, so this fails on the sampling version and passes on the one that
+    reads every row.
+    """
+    parent = _cpi("All_items_Entity")
+    child = _cpi("All_items_Food_Entity")
+
+    bls_rows = [
+        (parent, RDFS_LABEL, "All items"),
+        (child, RDFS_LABEL, "Food"),
+    ]
+    _index_entity(bls_rows, "Food_Nov2024_Index", child, "November", "2024")
+    _index_entity(bls_rows, "Food_Dec2024_Index", child, "December", "2024")
+
+    market = spark.range(200_001).selectExpr(
+        f"concat('{MARKET_ID}', id) AS subject",
+        f"'{RDF_TYPE}' AS predicate",
+        f"'{str(MARKET_QUOTES.EquitySnapshot)}' AS object",
+    )
+    df = market.unionAll(make_triples(bls_rows))
+
+    result = BLSIntraSourceLinker(spark).enrich(df)
+    triples = {(r["subject"], r["predicate"], r["object"]) for r in result.collect()}
+
+    assert (child, BELONGS_TO_SECTOR, FOOD_SECTOR) in triples
+    assert (child, HAS_PARENT, parent) in triples
+    assert (_cpi("Food_Nov2024_Index"), PRECEDES, _cpi("Food_Dec2024_Index")) in triples
+
+
 def test_enrich_returns_empty_for_non_bls_data(spark, make_triples):
     """Data with no BLS-namespaced subjects short-circuits to zero new triples."""
     rows = [
@@ -187,3 +234,90 @@ def test_enrich_returns_empty_for_non_bls_data(spark, make_triples):
     ]
     result = BLSIntraSourceLinker(spark).enrich(make_triples(rows))
     assert result.count() == 0
+
+
+# ======================================================================
+# Per-dataset configuration
+#
+# Ten datasets share one BLSDatasetEnricher, so the tests above drive cpi
+# and cover the code all ten run. What is NOT shared is the config: each
+# dataset needs a namespace, a registry entry, and measurement types. Get
+# one wrong and nothing raises -- the dataset is quietly missing from the
+# output. That is the shape of #350, one dataset at a time.
+# ======================================================================
+
+def test_every_dataset_is_wired_into_all_three_config_maps():
+    """A dataset needs a namespace, an enricher, and measurement types.
+
+    Without the namespace, detection never names it. Without measurement
+    types, the enricher returns None at its first guard and logs nothing.
+    Either way the dataset contributes nothing and the run still passes.
+    """
+    namespaces = set(DATASET_NS_MAP)
+    registry = set(DATASET_ENRICHERS)
+    measurements = set(MEASUREMENT_TYPES)
+
+    assert namespaces == registry, (
+        "namespace map and enricher registry disagree on: "
+        f"{sorted(namespaces ^ registry)}"
+    )
+    assert namespaces == measurements, (
+        "namespace map and measurement types disagree on: "
+        f"{sorted(namespaces ^ measurements)}"
+    )
+
+
+def test_every_measurement_config_has_what_the_enricher_reads():
+    """Each config carries the keys _link_single_measurement_type uses.
+
+    'class' is read with a plain subscript, so a config missing it raises
+    KeyError part-way through a run rather than failing here. One with no
+    category or no temporal property links nothing and says nothing.
+    """
+    for dataset, configs in MEASUREMENT_TYPES.items():
+        assert configs, f"{dataset} has an empty measurement type map"
+        for name, config in configs.items():
+            where = f"{dataset}.{name}"
+            assert 'class' in config, f"{where} has no 'class'"
+            assert config.get('category_property'), \
+                f"{where} has no category_property"
+            assert config.get('month_property') or config.get('quarter_property'), \
+                f"{where} has neither a month nor a quarter property"
+
+
+def test_dataset_namespaces_are_distinct_and_non_overlapping():
+    """No dataset's namespace may start with another's.
+
+    Detection is a chain of startswith tests and keeps the first match, so
+    an overlapping pair would file one dataset's rows under the other's
+    name, and which one won would depend on dict order.
+    """
+    for (name_a, prefix_a), (name_b, prefix_b) in itertools.permutations(
+        DATASET_NS_MAP.items(), 2
+    ):
+        assert not prefix_b.startswith(prefix_a), (
+            f"{name_b}'s namespace starts with {name_a}'s ({prefix_a}); "
+            f"detection would attribute {name_b} rows to {name_a}"
+        )
+
+
+def test_detect_datasets_finds_every_registered_dataset(spark, make_triples):
+    """One row per dataset, and detection names all of them.
+
+    Everything above drives cpi, so a dataset that the when/otherwise chain
+    cannot reach -- registered but never matched -- would go unnoticed.
+
+    It does not prove a namespace is the one the mappers emit: the rows are
+    built from the same map the assertion reads. Only real data shows that,
+    which is what the cluster run is for.
+    """
+    rows = [
+        (f"{prefix}Entity", RDF_TYPE, "https://example.org/Measurement")
+        for prefix in DATASET_NS_MAP.values()
+    ]
+
+    linker = BLSIntraSourceLinker(spark)
+    linker.triples_df = make_triples(rows)
+    linker._bls_triples = linker._filter_bls_triples()
+
+    assert linker._detect_datasets() == set(DATASET_NS_MAP)

@@ -771,35 +771,35 @@ MEASUREMENT_TYPES = {
         }
     },
 
-        'metro': {
-        # ============================================
-        # Tables 1, 2: Civilian Labor Force Data container
-        # Contains embedded CivilianLaborForce, UnemployedNumber,
-        # UnemploymentRate as BNodes. Only the container has
-        # hasRegion/hasMonth/hasYear.
-        # Partitioned by region (state, metro area, or metro division).
-        # ============================================
-        'CivilianLaborForceData': {
-            'class': METRO.CivilianLaborForceData,
-            'category_property': METRO.hasRegion,
-            'month_property': METRO.hasMonth,
-            'year_property': METRO.hasYear
-        },
-
-        # ============================================
-        # Tables 3, 4: Nonfarm Payroll Data container
-        # Contains embedded NonfarmPayrollEmployment, EmploymentChange,
-        # EmploymentChangePercent as BNodes. Only the container has
-        # hasRegion/hasMonth/hasYear.
-        # Partitioned by region (state, metro area, or metro division).
-        # ============================================
-        'NonfarmPayrollData': {
-            'class': METRO.NonfarmPayrollData,
-            'category_property': METRO.hasRegion,
-            'month_property': METRO.hasMonth,
-            'year_property': METRO.hasYear
-        },
+    'metro': {
+    # ============================================
+    # Tables 1, 2: Civilian Labor Force Data container
+    # Contains embedded CivilianLaborForce, UnemployedNumber,
+    # UnemploymentRate as BNodes. Only the container has
+    # hasRegion/hasMonth/hasYear.
+    # Partitioned by region (state, metro area, or metro division).
+    # ============================================
+    'CivilianLaborForceData': {
+        'class': METRO.CivilianLaborForceData,
+        'category_property': METRO.hasRegion,
+        'month_property': METRO.hasMonth,
+        'year_property': METRO.hasYear
     },
+
+    # ============================================
+    # Tables 3, 4: Nonfarm Payroll Data container
+    # Contains embedded NonfarmPayrollEmployment, EmploymentChange,
+    # EmploymentChangePercent as BNodes. Only the container has
+    # hasRegion/hasMonth/hasYear.
+    # Partitioned by region (state, metro area, or metro division).
+    # ============================================
+    'NonfarmPayrollData': {
+        'class': METRO.NonfarmPayrollData,
+        'category_property': METRO.hasRegion,
+        'month_property': METRO.hasMonth,
+        'year_property': METRO.hasYear
+    },
+},
 
     'realer': {
         'MonthlyEarningsData': {
