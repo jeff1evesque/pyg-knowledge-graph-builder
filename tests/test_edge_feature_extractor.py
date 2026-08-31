@@ -251,12 +251,14 @@ def test_default_enabled_categories_are_the_documented_set(spark):
     "correlation" is in the set because the cross-source linkers make it the
     dominant relation family on real data (542 of 704 edge types on a
     two-source build); without it the default produced a graph with no
-    edge_attr anywhere. "generic" stays out -- it is the no-fragment-matched
-    fallback and would featurize nearly every edge type.
+    edge_attr anywhere. "causal" joined it in #359, once leadsTo stopped being
+    either empty or an edge per market snapshot: 570 edges in two edge types.
+    "generic" stays out -- it is the no-fragment-matched fallback and would
+    featurize nearly every edge type.
     """
     efe = EdgeFeatureExtractor(spark, {})
     assert efe._enabled_categories == {
-        "temporal", "option_stock", "escalation", "correlation",
+        "temporal", "option_stock", "escalation", "correlation", "causal",
     }
     assert "generic" not in efe._enabled_categories
 

@@ -214,8 +214,24 @@ _FEATURIZABLE_CATEGORIES = frozenset({
 # make correlation the dominant relation family on real data (22 of 46 relations
 # and 542 of 704 edge types on a two-source build), so leaving it out meant the
 # default config produced a graph with no edge features at all.
+#
+# "causal" is IN as of #359, and the reason it was not before is that it had
+# nothing to featurize. leadsTo is the only relation that classifies causal, and
+# it emitted zero triples until #350 woke the BLS leg, then 393,860,192 -- an
+# edge per market snapshot -- until #359 moved it onto the sector. It is now 570
+# edges in exactly two edge types on the 2026-08-30 graph:
+#
+#     Grouping -leadsTo-> EquitySector   300
+#     Category -leadsTo-> EquitySector   270
+#
+# Note that enabling a category does not create edge types. Those edges are in
+# the graph either way; the category only decides whether they carry an
+# edge_attr, so the cost here is two small tensors against the 2,401.9 MB of
+# edge features that build already writes. Causal is also the directional
+# sibling of correlation, and having one in the default set and not the other
+# was only ever an accident of leadsTo being dead.
 _DEFAULT_ENABLED_CATEGORIES = (
-    "temporal", "option_stock", "escalation", "correlation",
+    "temporal", "option_stock", "escalation", "correlation", "causal",
 )
 
 # Hash seeds for deterministic encoding
