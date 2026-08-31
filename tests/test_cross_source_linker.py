@@ -871,7 +871,7 @@ def test_no_census_region_is_minted_when_nothing_reaches_one(spark, make_triples
 
 
 # ======================================================================
-# Deep: BLS indicator -> market entity, through the sector crosswalk
+# Deep: BLS indicator -> equity sector, through the sector crosswalk
 # ======================================================================
 
 def _causal_rows(gics):
@@ -894,7 +894,7 @@ def _causal_rows(gics):
     )
 
 
-def test_a_bls_indicator_reaches_a_market_entity_through_the_crosswalk(
+def test_a_bls_indicator_reaches_the_equity_sector_through_the_crosswalk(
     spark, make_triples
 ):
     """The link that never fired once.
@@ -907,17 +907,57 @@ def test_a_bls_indicator_reaches_a_market_entity_through_the_crosswalk(
 
     Energy -> EnergySector is the strongest row in the crosswalk, which is why
     it is the fixture: oil and gas companies ARE the energy prices.
+
+    The object is the GICS sector, not the snapshot that classified into it;
+    see the fan-out test below for why.
     """
-    snapshot, bls_series, rows = _causal_rows("Energy")
+    _snapshot, bls_series, rows = _causal_rows("Energy")
 
     triples = _triple_set(
         CrossSourceLinker(spark, make_triples(rows)).enrich()
     )
 
-    assert (bls_series, LEADS_TO, snapshot) in triples, (
-        "the BLS indicator did not reach the market entity; the two sides are "
+    assert (bls_series, LEADS_TO, _equity_sector("Energy")) in triples, (
+        "the BLS indicator did not reach the equity sector; the two sides are "
         "keyed on different sector vocabularies and must meet through "
         "relatedToEconomicSector"
+    )
+
+
+def test_the_causal_link_does_not_fan_out_over_snapshots(spark, make_triples):
+    """The #359 guard: one edge per sector, whatever the snapshot count.
+
+    This step used to emit one edge per market entity in the sector. On the
+    first run where the BLS side was not empty that was 393,860,192 edges from
+    499 BLS subjects -- 46% of the whole graph -- because the market side
+    states its sector once per snapshot, and a snapshot is one contract at one
+    timestamp. The claim never had anything to do with the strike or the time.
+
+    Ten snapshots here, one edge expected. The old code returns ten.
+    """
+    equity_sector = _equity_sector("Energy")
+    bls_series = str(identifier_namespace(str(CPI))) + "Gasoline_all_types_June2026_Index"
+
+    rows = [
+        (equity_sector, RDF_TYPE, EQUITY_SECTOR_TYPE),
+        (bls_series, RDF_TYPE, str(CPI.Index)),
+        (bls_series, BELONGS_TO_SECTOR, str(BLS_ENRICHMENT.EnergySector)),
+    ]
+    for i in range(10):
+        snapshot = str(MARKET_QUOTES) + f"snapshot/XOM/2026-07-02T00%3A0{i}%3A00Z"
+        rows += _snapshot_rows(snapshot, "XOM")
+        rows.append(
+            (snapshot, str(MARKET_ENRICHMENT.belongsToSector), equity_sector)
+        )
+
+    triples = _triple_set(
+        CrossSourceLinker(spark, make_triples(rows)).enrich()
+    )
+
+    causal = [t for t in triples if t[1] == LEADS_TO]
+    assert causal == [(bls_series, LEADS_TO, equity_sector)], (
+        f"expected exactly one causal edge, at the sector; got {len(causal)}. "
+        f"An edge per snapshot is the cartesian product of #359: {causal[:3]}"
     )
 
 
@@ -956,7 +996,7 @@ def test_the_bls_side_of_the_causal_link_arrives_from_the_intra_source_leg(
 
     triples = _triple_set(CrossSourceLinker(spark, enriched).enrich())
 
-    assert (category, LEADS_TO, snapshot) in triples, (
+    assert (category, LEADS_TO, equity_sector) in triples, (
         "the causal step did not see the belongsToSector the intra-source leg "
         "wrote, so the BLS side of the join was empty"
     )
