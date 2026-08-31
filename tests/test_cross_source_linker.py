@@ -394,6 +394,42 @@ def test_a_sector_node_is_not_classified_into_a_sector(spark, make_triples):
     )
 
 
+def test_enrichment_emits_no_self_loops(spark, make_triples):
+    """A node may not be its own object.
+
+    Guards the outcome rather than the cause. The test above catches the
+    keyword classifier specifically; this one catches any future step that
+    joins a frame to itself without excluding the diagonal, which is how the
+    11 self-loops on the 2026-08-30 graph were built.
+
+    Note this is subject == object, not src_type == dst_type. A same-type edge
+    between two different nodes is ordinary and wanted -- sec:precedes runs
+    DerivativeTransaction to DerivativeTransaction, and straddleWith runs
+    OptionSnapshot to OptionSnapshot.
+
+    The fixture is deliberately wide: sectors in both vocabularies, a snapshot,
+    an issuer and a BLS series, so every step of enrich() has something to
+    work with rather than returning None before it can misbehave.
+    """
+    energy_econ = str(BLS_ENRICHMENT.EnergySector)
+    series = str(identifier_namespace(str(CPI))) + "Gasoline_all_types_Entity"
+
+    rows = _sector_rows("Energy", "Information Technology", "Utilities") + [
+        (energy_econ, RDF_TYPE, str(BLS_ENRICHMENT.EconomicSector)),
+        (series, RDF_TYPE, str(CPI.Index)),
+        (series, RDFS_LABEL, "Gasoline (all types)"),
+        (series, BELONGS_TO_SECTOR, energy_econ),
+    ]
+
+    triples = _triple_set(CrossSourceLinker(spark, make_triples(rows)).enrich())
+
+    loops = sorted(t for t in triples if t[0] == t[2])
+    assert not loops, (
+        f"enrichment emitted {len(loops)} self-loop(s); a node was made its "
+        f"own object: {loops[:5]}"
+    )
+
+
 def test_the_unmapped_gics_sectors_get_no_membership_edge(spark, make_triples):
     """The keyword classifier undid all three deliberate gaps.
 
