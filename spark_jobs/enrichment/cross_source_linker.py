@@ -438,6 +438,39 @@ class CrossSourceLinker:
             sec_match = sec_match | F.col("subject").startswith(prefix)
         entities = entities.filter(~sec_match)
 
+        # The vocabulary this pipeline mints is excluded too, for the same
+        # reason and with a worse symptom.
+        #
+        # This classifier reads a URI's last path segment. The sector nodes are
+        # NAMED after the keywords, so they matched themselves: bls:EnergySector
+        # has the local name "energysector", which contains "energy", so the
+        # graph carried bls:EnergySector belongsToSector bls:EnergySector. On
+        # the 2026-08-30 run that was 11 self-loops, plus junk between unrelated
+        # economic sectors (bls:ApparelSector -> ManufacturingSector).
+        #
+        # It also reached the GICS sectors and undid the crosswalk. All three
+        # sectors enrichment/sector_crosswalk.py deliberately maps to NOTHING
+        # were mapped anyway, under the STRONGER predicate:
+        #
+        #     market:InformationTechnologySector -> bls:InformationSector
+        #     market:CommunicationServicesSector -> bls:InformationSector
+        #     market:UtilitiesSector             -> bls:EnergySector
+        #
+        # which is the chip-maker-to-telephone-price link that module names as
+        # the reason those rows are blank, asserted as membership rather than
+        # the similarity the curated table states. A GICS sector reaches an
+        # economic sector through that table or not at all.
+        #
+        # Scoped to the two ontology namespaces, not to a "Sector" suffix:
+        # id/eci/State_and_local_government_workers_WorkerSector is real source
+        # data and must still be classified.
+        vocabulary_match = F.lit(False)
+        for namespace in (str(BLS_ENRICHMENT), str(MARKET_ENRICHMENT)):
+            vocabulary_match = (
+                vocabulary_match | F.col("subject").startswith(namespace)
+            )
+        entities = entities.filter(~vocabulary_match)
+
         # Join: entity local name contains sector keyword
         # Use broadcast for the small sector lookup
         matched = entities.join(
