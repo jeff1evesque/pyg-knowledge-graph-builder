@@ -9,7 +9,9 @@ step emits "X precedes X" -- an edge saying a thing came before itself.
 
 Duplicates are easy to introduce upstream. BLS resolves each entity's month and
 year with two inner joins, and either one fans a row out when an entity carries
-more than one value for that property.
+more than one value for that property. Market does the same to reach a
+snapshot's symbol and capture time, and NOAA deduplicates an alert on its sent
+time, which keeps both rows when a source states two.
 
 This module is the one place that shape lives. It drops duplicates first, so
 the window sees each entity once per partition, then rejects any pair whose
@@ -17,7 +19,7 @@ ends are equal. The second guard is redundant while the first is correct, and
 it is what fails loudly if a caller partitions on columns that do not determine
 the dedupe grain.
 """
-from typing import Sequence, Union
+from typing import Mapping, Optional, Sequence, Union
 
 from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F
@@ -33,6 +35,7 @@ def sequence_within_partitions(
     partition_cols: Sequence[str],
     order_cols: Sequence[Union[str, Column]],
     next_col: str = "next_entity",
+    extra_lead_cols: Optional[Mapping[str, str]] = None,
 ) -> DataFrame:
     """Pair each row with the next entity in its partition.
 
@@ -42,10 +45,15 @@ def sequence_within_partitions(
         partition_cols: columns that define one chain
         order_cols: columns that order a chain, most significant first
         next_col: name for the added column holding the next entity
+        extra_lead_cols: more values to read from the next row, given as
+            {new column name: column to read}. NOAA weighs the next alert's
+            severity against this one's, so it needs those values beside the
+            URI.
 
     Returns:
-        DataFrame of the input columns plus `next_col`, keeping only rows that
-        have a successor. No row has its own entity as its successor.
+        DataFrame of the input columns plus `next_col` and any
+        `extra_lead_cols`, keeping only rows that have a successor. No row has
+        its own entity as its successor.
     """
     partition_cols = list(partition_cols)
     order_cols = list(order_cols)
@@ -69,9 +77,19 @@ def sequence_within_partitions(
 
     sequence_window = Window.partitionBy(*partition_cols).orderBy(*order_cols)
 
+    sequenced = deduped.withColumn(
+        next_col, F.lead(entity_col).over(sequence_window)
+    )
+
+    for new_name, source_col in (extra_lead_cols or {}).items():
+        sequenced = sequenced.withColumn(
+            new_name, F.lead(source_col).over(sequence_window)
+        )
+
+    # Every lead reads the same row, so next_col being set means the extra
+    # columns were read too. Callers do not need to check them separately.
     return (
-        deduped
-        .withColumn(next_col, F.lead(entity_col).over(sequence_window))
+        sequenced
         .filter(F.col(next_col).isNotNull())
         .filter(F.col(entity_col) != F.col(next_col))
     )
