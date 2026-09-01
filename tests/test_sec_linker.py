@@ -280,3 +280,28 @@ def test_a_transaction_with_no_reachable_owner_is_not_chained(spark, make_triple
     triples = _triple_set(SECIntraSourceLinker(spark).enrich(make_triples(rows)))
 
     assert _precedes_pairs(triples) == set()
+
+
+def test_a_transaction_dated_twice_does_not_precede_itself(spark, make_triples):
+    """A transaction stating two dates must not precede its own copy (#360).
+
+    The date is reached by a join on the transaction, so two date triples put
+    it in its owner's chain twice. Appending the entity URI to the sort keys
+    gives the chain a total order but still sorts the copies next to each
+    other, which is what let lead() return the transaction to itself.
+    """
+    rows = [
+        *_ownership_filing("0000000001-26-000001", "0000000001"),
+        *_reports("0000000001-26-000001", "NonDerivative", 0, "2026-08-10"),
+        *_ownership_filing("0000000001-26-000002", "0000000001"),
+        *_reports("0000000001-26-000002", "NonDerivative", 0, "2026-08-20"),
+    ]
+    dup = _transaction("0000000001-26-000001", "NonDerivative", 0)
+    later = _transaction("0000000001-26-000002", "NonDerivative", 0)
+    rows.append((dup, _FILINGS_HAS_TRANSACTION_DATE, "2026-08-13"))
+
+    triples = _triple_set(SECIntraSourceLinker(spark).enrich(make_triples(rows)))
+
+    pairs = _precedes_pairs(triples)
+    assert (dup, dup) not in pairs
+    assert pairs == {(dup, later)}
