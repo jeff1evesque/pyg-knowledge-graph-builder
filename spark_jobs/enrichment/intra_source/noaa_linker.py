@@ -34,7 +34,6 @@ in pipeline.py Phase 2 — not called from here.
 """
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.window import Window
 from functools import reduce
 from typing import List, Optional
 
@@ -45,6 +44,10 @@ from spark_jobs.enrichment.intra_source.noaa.patterns import (
     NOAA_EVENT_PATTERNS,
     SEVERITY_HIERARCHY,
     URGENCY_HIERARCHY,
+)
+from spark_jobs.enrichment.intra_source.sequencing import (
+    sequence_to_triples,
+    sequence_within_partitions,
 )
 
 import logging
@@ -527,19 +530,22 @@ class NOAAIntraSourceLinker:
             logger.info("  No alerts with a geocode and a sent time")
             return None
 
-        w = Window.partitionBy("geo_code").orderBy("sent_time", "alert")
-        sequenced = sequenceable.withColumn(
-            "next_alert", F.lead("alert").over(w)
-        ).filter(F.col("next_alert").isNotNull())
-
-        if sequenced.head(1) == []:
-            return None
-
-        result = sequenced.select(
-            F.col("alert").alias("subject"),
-            F.lit(PRECEDES_PRED).alias("predicate"),
-            F.col("next_alert").alias("object"),
+        # Sequence each county's alerts.
+        #
+        # The dropDuplicates above works on (alert, sent_time), so an alert
+        # that carries two sent times still reaches the window twice. Left in,
+        # the copies sorted next to each other and lead() made the alert
+        # precede itself (#360).
+        result = sequence_to_triples(
+            sequenceable,
+            entity_col="alert",
+            predicate=PRECEDES_PRED,
+            partition_cols=["geo_code"],
+            order_cols=["sent_time", "alert"],
         ).dropDuplicates()
+
+        if result.head(1) == []:
+            return None
 
         logger.info("  Temporal sequence linking complete")
         return result
@@ -731,22 +737,31 @@ class NOAAIntraSourceLinker:
             logger.info("  No alerts with a geocode, a sent time and a severity")
             return None
 
-        # Window: partition by geographic code, order by time.
+        # Sequence each county's alerts, carrying the next alert's levels
+        # alongside its URI so the escalation test below can read them.
+        #
         # The tie-break on the alert URI matters for the same reason it does in
         # Step 1 -- sent_time alone is not a total order, alerts are issued in
         # the same second, and lead() over a non-deterministic order would make
-        # the output vary between runs.
-        w = Window.partitionBy("geo_code").orderBy("sent_time", "alert")
-
-        with_next = escalatable.withColumn(
-            "next_alert", F.lead("alert").over(w)
-        ).withColumn(
-            "next_severity", F.lead("severity_level").over(w)
-        ).withColumn(
-            "next_urgency", F.lead("urgency_level").over(w)
-        ).filter(
-            F.col("next_alert").isNotNull()
-            & F.col("next_severity").isNotNull()
+        # the output vary between runs. Severity descending settles the last
+        # tie: an alert stating two severities reaches the window twice, and
+        # the helper keeps the first row, so without this the surviving copy
+        # would differ between runs. Keeping the higher one is the reading that
+        # does not hide an escalation.
+        #
+        # The helper drops the duplicate copies before the window. Left in,
+        # they sorted next to each other and an alert escalated to itself
+        # whenever its copies disagreed on severity (#360).
+        with_next = sequence_within_partitions(
+            escalatable,
+            entity_col="alert",
+            partition_cols=["geo_code"],
+            order_cols=["sent_time", "alert", F.col("severity_level").desc()],
+            next_col="next_alert",
+            extra_lead_cols={
+                "next_severity": "severity_level",
+                "next_urgency": "urgency_level",
+            },
         )
 
         # Keep pairs where severity increases, OR severity is same but
