@@ -28,7 +28,7 @@ from spark_jobs.enrichment.sector_crosswalk import (
     EQUITY_SECTOR_TYPE, RELATED_TO_ECONOMIC_SECTOR,
 )
 from spark_jobs.utils.rdf_utils import (
-    ALERT, BLS_ENRICHMENT, CAP, CPI, JOLTS, LAUS, MARKET_ENRICHMENT,
+    ALERT, BLS_ENRICHMENT, CAP, CPI, ECI, JOLTS, LAUS, MARKET_ENRICHMENT,
     MARKET_QUOTES, SEC_ENRICHMENT, WEATHER, SEC_FILINGS, UNIFIED,
     identifier_namespace,
 )
@@ -358,6 +358,131 @@ def _sector_rows(*gics_names):
     for gics in gics_names:
         rows.append((_equity_sector(gics), RDF_TYPE, EQUITY_SECTOR_TYPE))
     return rows
+
+
+# ======================================================================
+# The keyword classifier must not read this pipeline's own vocabulary
+# ======================================================================
+
+def test_a_sector_node_is_not_classified_into_a_sector(spark, make_triples):
+    """A sector node matched its own name and belonged to itself.
+
+    _link_by_sector matches BLS sector keywords against a URI's last path
+    segment, and the sector nodes are NAMED after those keywords, so they
+    matched themselves. bls:EnergySector has the local name "energysector",
+    which contains "energy". The 2026-08-30 graph carried 11 of these, plus
+    junk between unrelated economic sectors (bls:ApparelSector belonging to
+    ManufacturingSector).
+
+    A sector node has no membership in another sector. Where a real relation
+    exists between two taxonomies it is the curated crosswalk, and it is
+    similarity rather than membership.
+    """
+    energy = str(BLS_ENRICHMENT.EnergySector)
+    rows = _sector_rows("Energy") + [
+        (energy, RDF_TYPE, str(BLS_ENRICHMENT.EconomicSector)),
+    ]
+
+    triples = _triple_set(CrossSourceLinker(spark, make_triples(rows)).enrich())
+
+    offenders = [
+        t for t in triples
+        if t[1] == BELONGS_TO_SECTOR and t[0].startswith(str(BLS_ENRICHMENT))
+    ]
+    assert not offenders, (
+        f"a bls vocabulary node was classified into a sector: {offenders}"
+    )
+
+
+def test_enrichment_emits_no_self_loops(spark, make_triples):
+    """A node may not be its own object.
+
+    Guards the outcome rather than the cause. The test above catches the
+    keyword classifier specifically; this one catches any future step that
+    joins a frame to itself without excluding the diagonal, which is how the
+    11 self-loops on the 2026-08-30 graph were built.
+
+    Note this is subject == object, not src_type == dst_type. A same-type edge
+    between two different nodes is ordinary and wanted -- sec:precedes runs
+    DerivativeTransaction to DerivativeTransaction, and straddleWith runs
+    OptionSnapshot to OptionSnapshot.
+
+    The fixture is deliberately wide: sectors in both vocabularies, a snapshot,
+    an issuer and a BLS series, so every step of enrich() has something to
+    work with rather than returning None before it can misbehave.
+    """
+    energy_econ = str(BLS_ENRICHMENT.EnergySector)
+    series = str(identifier_namespace(str(CPI))) + "Gasoline_all_types_Entity"
+
+    rows = _sector_rows("Energy", "Information Technology", "Utilities") + [
+        (energy_econ, RDF_TYPE, str(BLS_ENRICHMENT.EconomicSector)),
+        (series, RDF_TYPE, str(CPI.Index)),
+        (series, RDFS_LABEL, "Gasoline (all types)"),
+        (series, BELONGS_TO_SECTOR, energy_econ),
+    ]
+
+    triples = _triple_set(CrossSourceLinker(spark, make_triples(rows)).enrich())
+
+    loops = sorted(t for t in triples if t[0] == t[2])
+    assert not loops, (
+        f"enrichment emitted {len(loops)} self-loop(s); a node was made its "
+        f"own object: {loops[:5]}"
+    )
+
+
+def test_the_unmapped_gics_sectors_get_no_membership_edge(spark, make_triples):
+    """The keyword classifier undid all three deliberate gaps.
+
+    sector_crosswalk maps Information Technology, Communication Services and
+    Utilities to NOTHING, on purpose. The keyword classifier reached those
+    nodes by name anyway and asserted the link under belongsToSector -- the
+    STRONGER of the two predicates, the one that means membership:
+
+        market:InformationTechnologySector -> bls:InformationSector
+        market:CommunicationServicesSector -> bls:InformationSector
+        market:UtilitiesSector             -> bls:EnergySector
+
+    That is exactly the chip-maker-to-telephone-price link the crosswalk names
+    as its reason for leaving those rows blank.
+    """
+    rows = _sector_rows(
+        "Information Technology", "Communication Services", "Utilities"
+    )
+
+    triples = _triple_set(CrossSourceLinker(spark, make_triples(rows)).enrich())
+
+    offenders = [
+        t for t in triples
+        if t[1] == BELONGS_TO_SECTOR and t[0].startswith(str(MARKET_ENRICHMENT))
+    ]
+    assert not offenders, (
+        "a deliberately unmapped GICS sector was given a membership edge into "
+        f"the economic vocabulary: {offenders}"
+    )
+
+
+def test_real_source_data_named_sector_is_still_classified(spark, make_triples):
+    """The exclusion is scoped to the vocabulary, not to a "Sector" suffix.
+
+    id/eci/State_and_local_government_workers_WorkerSector is a real ECI
+    category and must still reach a sector. Excluding on the name rather than
+    the namespace would drop it along with the vocabulary nodes.
+    """
+    worker = (
+        identifier_namespace(str(ECI))
+        + "State_and_local_government_workers_WorkerSector"
+    )
+    rows = _sector_rows("Energy") + [
+        (worker, RDF_TYPE, str(ECI.WorkerSector)),
+        (worker, RDFS_LABEL, "State and local government workers"),
+    ]
+
+    triples = _triple_set(CrossSourceLinker(spark, make_triples(rows)).enrich())
+
+    assert [t for t in triples if t[0] == worker and t[1] == BELONGS_TO_SECTOR], (
+        "a real source entity whose name ends in Sector was excluded along "
+        "with the pipeline's own vocabulary"
+    )
 
 
 def test_a_mapped_equity_sector_reaches_the_economic_hub(spark, make_triples):
@@ -871,7 +996,7 @@ def test_no_census_region_is_minted_when_nothing_reaches_one(spark, make_triples
 
 
 # ======================================================================
-# Deep: BLS indicator -> market entity, through the sector crosswalk
+# Deep: BLS indicator -> equity sector, through the sector crosswalk
 # ======================================================================
 
 def _causal_rows(gics):
@@ -894,7 +1019,7 @@ def _causal_rows(gics):
     )
 
 
-def test_a_bls_indicator_reaches_a_market_entity_through_the_crosswalk(
+def test_a_bls_indicator_reaches_the_equity_sector_through_the_crosswalk(
     spark, make_triples
 ):
     """The link that never fired once.
@@ -907,17 +1032,57 @@ def test_a_bls_indicator_reaches_a_market_entity_through_the_crosswalk(
 
     Energy -> EnergySector is the strongest row in the crosswalk, which is why
     it is the fixture: oil and gas companies ARE the energy prices.
+
+    The object is the GICS sector, not the snapshot that classified into it;
+    see the fan-out test below for why.
     """
-    snapshot, bls_series, rows = _causal_rows("Energy")
+    _snapshot, bls_series, rows = _causal_rows("Energy")
 
     triples = _triple_set(
         CrossSourceLinker(spark, make_triples(rows)).enrich()
     )
 
-    assert (bls_series, LEADS_TO, snapshot) in triples, (
-        "the BLS indicator did not reach the market entity; the two sides are "
+    assert (bls_series, LEADS_TO, _equity_sector("Energy")) in triples, (
+        "the BLS indicator did not reach the equity sector; the two sides are "
         "keyed on different sector vocabularies and must meet through "
         "relatedToEconomicSector"
+    )
+
+
+def test_the_causal_link_does_not_fan_out_over_snapshots(spark, make_triples):
+    """The #359 guard: one edge per sector, whatever the snapshot count.
+
+    This step used to emit one edge per market entity in the sector. On the
+    first run where the BLS side was not empty that was 393,860,192 edges from
+    499 BLS subjects -- 46% of the whole graph -- because the market side
+    states its sector once per snapshot, and a snapshot is one contract at one
+    timestamp. The claim never had anything to do with the strike or the time.
+
+    Ten snapshots here, one edge expected. The old code returns ten.
+    """
+    equity_sector = _equity_sector("Energy")
+    bls_series = str(identifier_namespace(str(CPI))) + "Gasoline_all_types_June2026_Index"
+
+    rows = [
+        (equity_sector, RDF_TYPE, EQUITY_SECTOR_TYPE),
+        (bls_series, RDF_TYPE, str(CPI.Index)),
+        (bls_series, BELONGS_TO_SECTOR, str(BLS_ENRICHMENT.EnergySector)),
+    ]
+    for i in range(10):
+        snapshot = str(MARKET_QUOTES) + f"snapshot/XOM/2026-07-02T00%3A0{i}%3A00Z"
+        rows += _snapshot_rows(snapshot, "XOM")
+        rows.append(
+            (snapshot, str(MARKET_ENRICHMENT.belongsToSector), equity_sector)
+        )
+
+    triples = _triple_set(
+        CrossSourceLinker(spark, make_triples(rows)).enrich()
+    )
+
+    causal = [t for t in triples if t[1] == LEADS_TO]
+    assert causal == [(bls_series, LEADS_TO, equity_sector)], (
+        f"expected exactly one causal edge, at the sector; got {len(causal)}. "
+        f"An edge per snapshot is the cartesian product of #359: {causal[:3]}"
     )
 
 
@@ -956,9 +1121,41 @@ def test_the_bls_side_of_the_causal_link_arrives_from_the_intra_source_leg(
 
     triples = _triple_set(CrossSourceLinker(spark, enriched).enrich())
 
-    assert (category, LEADS_TO, snapshot) in triples, (
+    assert (category, LEADS_TO, equity_sector) in triples, (
         "the causal step did not see the belongsToSector the intra-source leg "
         "wrote, so the BLS side of the join was empty"
+    )
+
+
+def test_one_causal_edge_when_several_economic_sectors_share_a_gics_one(
+    spark, make_triples
+):
+    """The other half of #359's fan-out, on the BLS side.
+
+    Industrials maps to three economic sectors -- manufacturing, transportation
+    and construction trades. An indicator sitting in two of them reaches the
+    same Industrials node by two routes, so the join returns the pair twice.
+    Without the distinct() that is a duplicate edge, which is a second message
+    along an identical path rather than a second fact.
+    """
+    equity_sector = _equity_sector("Industrials")
+    series = str(identifier_namespace(str(CPI))) + "Freight_Trucking_Entity"
+    snapshot = str(MARKET_QUOTES) + "snapshot/UNP/2026-07-02"
+
+    rows = _snapshot_rows(snapshot, "UNP") + [
+        (equity_sector, RDF_TYPE, EQUITY_SECTOR_TYPE),
+        (snapshot, str(MARKET_ENRICHMENT.belongsToSector), equity_sector),
+        (series, RDF_TYPE, str(CPI.Index)),
+        (series, BELONGS_TO_SECTOR, str(BLS_ENRICHMENT.ManufacturingSector)),
+        (series, BELONGS_TO_SECTOR, str(BLS_ENRICHMENT.TransportationSector)),
+    ]
+
+    triples = _triple_set(CrossSourceLinker(spark, make_triples(rows)).enrich())
+
+    causal = [t for t in triples if t[1] == LEADS_TO and t[0] == series]
+    assert causal == [(series, LEADS_TO, equity_sector)], (
+        f"expected one edge, got {len(causal)}: {causal}. Two economic sectors "
+        f"mapping to one GICS sector must not produce two identical edges"
     )
 
 

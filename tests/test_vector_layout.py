@@ -132,6 +132,69 @@ def test_exact_layout_512():
     }
 
 
+def test_exact_layout_1024_with_class_identity_override():
+    """The #359 configuration, pinned.
+
+    The 2026-08-30 graph carries 184 classes and the default split gives
+    class_identity 160 dims, so both PyG legs died on the capacity guard. 192
+    is the practical ceiling at this width: class_hierarchy keeps its
+    fraction-derived 48, and everything above 192 comes out of ontology_source,
+    which is down to 16 for a 26-entry namespace table already.
+
+    Only segment 1 is redistributed. Every other boundary, and the vector
+    width, must be identical to test_exact_layout_1024 -- that is the whole
+    reason this lever exists rather than raising vector_dim, which would double
+    the driver memory the feature tensors are collected into.
+    """
+    L = VectorLayout(1024, class_identity_dim=192)
+    assert (L.seg1_total, L.seg2_total, L.seg3_total) == (256, 384, 384)
+    assert _labelled(L) == {
+        "class_identity": (0, 192),
+        "class_hierarchy": (192, 48),
+        "ontology_source": (240, 16),
+        # unchanged from the default layout
+        "property_presence": (256, 192),
+        "domain_range": (448, 111),
+        "property_hierarchy": (559, 81),
+        "numeric": (640, 257),
+        "categorical": (897, 127),
+    }
+    assert L.vector_dim == 1024
+
+
+@pytest.mark.parametrize("ci_dim", [1, 100, 254])
+def test_class_identity_override_still_tiles_the_vector(ci_dim):
+    """An override must not open a gap or an overlap."""
+    L = VectorLayout(1024, class_identity_dim=ci_dim)
+    subsegments = _subsegments(L)
+    assert L.seg1_class_identity_dim == ci_dim
+    cursor = 0
+    for start, dim in subsegments:
+        assert start == cursor, f"gap or overlap at {start}, expected {cursor}"
+        assert dim >= 1, "a sub-segment may not be zero-width"
+        cursor += dim
+    assert cursor == 1024
+
+
+@pytest.mark.parametrize("ci_dim", [0, -1, 255, 1024])
+def test_class_identity_override_out_of_range_is_rejected(ci_dim):
+    """Rejected, not clamped.
+
+    The point of the override is to guarantee a class budget, so a build that
+    asks for a capacity the vector cannot hold must not quietly get a smaller
+    one. 254 is the maximum at vector_dim=1024: class_hierarchy and
+    ontology_source are indexed into and need at least one dim each.
+    """
+    with pytest.raises(ValueError, match="class_identity_dim"):
+        VectorLayout(1024, class_identity_dim=ci_dim)
+
+
+def test_class_identity_override_carries_the_class_count_that_failed():
+    """184 classes fit in the override and do not fit in the default."""
+    assert VectorLayout(1024).seg1_class_identity_dim < 184
+    assert VectorLayout(1024, class_identity_dim=192).seg1_class_identity_dim >= 184
+
+
 def test_halving_dim_halves_segment_totals():
     """Proportional scaling: 1024 -> 512 halves each segment total."""
     big = VectorLayout(1024)
