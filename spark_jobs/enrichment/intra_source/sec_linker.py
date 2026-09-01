@@ -24,7 +24,6 @@ litigation or trading suspensions, and none paired filings with itself.
 """
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql import Window
 from functools import reduce
 from typing import List, Optional, Sequence, Set, Union
 
@@ -38,6 +37,7 @@ from spark_jobs.utils.rdf_utils import (
 from spark_jobs.enrichment.intra_source.sec.patterns import (
     SEC_VIOLATION_PATTERNS,
 )
+from spark_jobs.enrichment.intra_source.sequencing import sequence_to_triples
 from spark_jobs.utils.spark_rdf_utils import (
     deduplicate_against_existing,
 )
@@ -666,24 +666,16 @@ class SECIntraSourceLinker:
 
         group_cols = [group_col] if isinstance(group_col, str) else list(group_col)
 
-        # Window: partition by group, order by date and then to a total order
-        w = Window.partitionBy(*group_cols).orderBy(
-            "date_value", *order_cols, entity_col
+        # Order by date, then the caller's tie-breaks, then the entity URI so
+        # the chain has a total order. The helper drops duplicate entities
+        # before the window, so a filing cannot precede its own copy (#360).
+        return sequence_to_triples(
+            entities_with_dates,
+            entity_col=entity_col,
+            predicate=_PRECEDES,
+            partition_cols=group_cols,
+            order_cols=["date_value", *order_cols, entity_col],
         )
-
-        with_next = (
-            entities_with_dates
-            .withColumn("next_entity", F.lead(entity_col).over(w))
-            .filter(F.col("next_entity").isNotNull())
-        )
-
-        precedes_triples = with_next.select(
-            F.col(entity_col).alias("subject"),
-            F.lit(_PRECEDES).alias("predicate"),
-            F.col("next_entity").alias("object"),
-        )
-
-        return precedes_triples
 
     def _link_ownership_filing_sequences(self) -> Optional[DataFrame]:
         """Link an owner's ownership filings into a dated sequence.
