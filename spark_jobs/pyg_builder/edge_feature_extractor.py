@@ -2668,35 +2668,52 @@ class EdgeFeatureExtractor:
         batch's collect stays inside spark.driver.maxResultSize) and type
         count (so the batch's Catalyst plan stays bounded in width). Either
         cap alone is insufficient — see _MAX_EDGE_TYPES_PER_BATCH.
+
+        The entries are aggregated and materialised ONCE before any of that
+        batching happens. Each type's entries frame carries its own join
+        against the endpoint property frames, which run to hundreds of
+        millions of rows, so a batch that collects straight from those
+        frames re-runs the join. #362 measured the cost: every batch read
+        the same 23,184 MB and returned 0.53 MB, about 1.7 TB of repeated
+        scanning to collect 41 MB. One eager checkpoint pays for the scan
+        once; the batched collects then read only the aggregated entries,
+        which are small by construction.
         """
         if not small:
+            return
+
+        materialised = self._materialise_small_entries(small)
+        if materialised is None:
             return
 
         budget = self._max_edges_per_collect(edge_vector_dim)
         max_types = max(1, self._max_types_per_batch)
 
-        batch: List[Tuple[Tuple[str, str, str], int, DataFrame]] = []
+        batch: List[Tuple[int, Tuple[str, str, str], int]] = []
         batch_edges = 0
         num_batches = 0
 
-        for item in small:
-            num_edges = item[1]
+        for type_id, (edge_type_key, num_edges, _) in enumerate(small):
             if batch and (
                 batch_edges + num_edges > budget
                 or len(batch) >= max_types
             ):
                 self._flush_batch(
-                    batch, edge_features, edge_vector_dim
+                    materialised, batch, edge_features, edge_vector_dim
                 )
                 num_batches += 1
                 batch = []
                 batch_edges = 0
-            batch.append(item)
+            batch.append((type_id, edge_type_key, num_edges))
             batch_edges += num_edges
 
         if batch:
-            self._flush_batch(batch, edge_features, edge_vector_dim)
+            self._flush_batch(
+                materialised, batch, edge_features, edge_vector_dim
+            )
             num_batches += 1
+
+        materialised.unpersist(blocking=False)
 
         logger.info(
             f"    {len(small)} small edge types collected in "
@@ -2706,43 +2723,74 @@ class EdgeFeatureExtractor:
             f" MB collected per batch)"
         )
 
+    def _materialise_small_entries(
+        self,
+        small: List[Tuple[Tuple[str, str, str], int, DataFrame]],
+    ) -> Optional[DataFrame]:
+        """
+        Tag every small type's entries with its index, union them, and
+        aggregate and materialise the result in one Spark job.
+
+        This is the whole point of #362. The per-type entries frames are
+        lazy joins against the endpoint property frames; collecting from
+        them in N batches scans those frames N times. Aggregating first
+        collapses the sparse entries to at most one row per (type, edge,
+        dim), and the eager checkpoint pins that small result so the
+        batched collects never touch the big frames again.
+
+        The union is wide — one subtree per type — but it is planned and
+        run exactly once here, rather than once per batch, which is the
+        trade _MAX_EDGE_TYPES_PER_BATCH was guarding against on the
+        collect path.
+        """
+        tagged: Optional[DataFrame] = None
+        for type_id, (_, _, entries) in enumerate(small):
+            part = entries.select(
+                F.lit(type_id).cast("int").alias(self._TYPE_COL),
+                F.col("edge_idx"),
+                F.col("dim"),
+                F.col("value"),
+            )
+            tagged = part if tagged is None else tagged.unionAll(part)
+
+        if tagged is None:
+            return None
+
+        return self._aggregate_entries(
+            tagged, (self._TYPE_COL,)
+        ).localCheckpoint(eager=True)
+
     def _flush_batch(
         self,
-        batch: List[Tuple[Tuple[str, str, str], int, DataFrame]],
+        materialised: DataFrame,
+        batch: List[Tuple[int, Tuple[str, str, str], int]],
         edge_features: Dict[Tuple[str, str, str], torch.Tensor],
         edge_vector_dim: int,
     ) -> None:
         """
-        Union one batch of edge types, aggregate and collect once, then
-        scatter into per-type dense tensors on the driver.
+        Collect one batch of edge types from the materialised entries and
+        scatter them into per-type dense tensors on the driver.
 
         edge_idx is per-type 0-based (assigned by a window partitioned
         on the type triple), so a type key has to travel with every row
         and the scatter has to be done per group — unlike the node side,
         where node_id alone identifies the row.
 
-        The key is the type's position in this batch, as one int, not the
-        three strings of the type triple. Those strings repeat on every
-        sparse entry, and a batch holds up to _chunk_threshold edges times
-        their non-zero dims — millions of string objects for the driver to
-        build, where an int costs 4 bytes. Same reasoning as the edge-index
-        collect in edge_mapper.py.
-        """
-        unioned: Optional[DataFrame] = None
-        for type_id, (_, _, entries) in enumerate(batch):
-            tagged = entries.select(
-                F.lit(type_id).cast("int").alias(self._TYPE_COL),
-                F.col("edge_idx"),
-                F.col("dim"),
-                F.col("value"),
-            )
-            unioned = (
-                tagged if unioned is None
-                else unioned.unionAll(tagged)
-            )
+        The key is the type's index in the whole small list, as one int,
+        not the three strings of the type triple. Those strings repeat on
+        every sparse entry, and a batch holds up to _chunk_threshold edges
+        times their non-zero dims — millions of string objects for the
+        driver to build, where an int costs 4 bytes. Same reasoning as the
+        edge-index collect in edge_mapper.py.
 
-        pdf = self._aggregate_entries(
-            unioned, (self._TYPE_COL,)
+        The filter is what keeps the batch bounded. It reads the checkpoint
+        written by _materialise_small_entries, so it costs a scan of the
+        aggregated entries and never touches the endpoint frames (#362).
+        """
+        type_ids = [type_id for type_id, _, _ in batch]
+
+        pdf = materialised.filter(
+            F.col(self._TYPE_COL).isin(type_ids)
         ).toPandas()
 
         groups = (
@@ -2750,7 +2798,7 @@ class EdgeFeatureExtractor:
             if not pdf.empty else {}
         )
 
-        for type_id, (edge_type_key, num_edges, _) in enumerate(batch):
+        for type_id, edge_type_key, num_edges in batch:
             tensor = np.zeros(
                 (num_edges, edge_vector_dim), dtype=np.float32
             )
