@@ -212,6 +212,54 @@ def test_sequence_to_triples_shape(make_rows):
     assert rows[0]["object"] == "july"
 
 
+def test_extra_lead_cols_read_the_row_lead_picked(spark):
+    """Values asked for beside the URI come from the successor, not elsewhere.
+
+    NOAA's escalation step weighs the next alert's severity against this one's,
+    so the levels have to travel with the URI.
+    """
+    df = spark.createDataFrame(
+        [("jobs", "june", "2026-06", 1), ("jobs", "july", "2026-07", 3)],
+        schema="category STRING, entity STRING, sort_key STRING, level INT",
+    )
+
+    rows = sequence_within_partitions(
+        df,
+        entity_col="entity",
+        partition_cols=["category"],
+        order_cols=["sort_key"],
+        extra_lead_cols={"next_level": "level"},
+    ).collect()
+
+    assert len(rows) == 1
+    assert (rows[0]["entity"], rows[0]["next_entity"]) == ("june", "july")
+    assert rows[0]["level"] == 1
+    assert rows[0]["next_level"] == 3
+
+
+def test_extra_lead_cols_do_not_survive_a_dropped_duplicate(spark):
+    """Copies that disagree on the carried value still make no self-pair.
+
+    This is the NOAA escalation defect in miniature: one alert stating two
+    severities used to compare its copies against each other and escalate to
+    itself.
+    """
+    df = spark.createDataFrame(
+        [("jobs", "july", "2026-07", 1), ("jobs", "july", "2026-07", 3)],
+        schema="category STRING, entity STRING, sort_key STRING, level INT",
+    )
+
+    result = sequence_within_partitions(
+        df,
+        entity_col="entity",
+        partition_cols=["category"],
+        order_cols=["sort_key"],
+        extra_lead_cols={"next_level": "level"},
+    )
+
+    assert result.count() == 0
+
+
 def test_sequence_to_triples_drops_self_edges(make_rows):
     """No triple may have the same subject and object."""
     df = make_rows([
