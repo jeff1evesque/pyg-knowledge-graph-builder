@@ -1135,6 +1135,18 @@ class EdgeFeatureExtractor:
         # phase rather than once per edge type.
         property_rows = self._endpoint_property_rows(numeric_props_df)
 
+        # The encoders filter the numeric frame by endpoint type, and
+        # every one of those filters is a scan. Narrow it once so they
+        # scan something small -- see _narrow_numeric_props.
+        endpoint_types: Set[str] = set()
+        for (src_type, _, dst_type), _ in eligible_types:
+            endpoint_types.add(src_type)
+            endpoint_types.add(dst_type)
+
+        narrow_props_df, narrow_types = self._narrow_numeric_props(
+            numeric_props_df, property_rows, endpoint_types
+        )
+
         # ============================================
         # Build features for all eligible edge types
         #
@@ -1166,11 +1178,18 @@ class EdgeFeatureExtractor:
                 )
                 continue
 
+            props_df = self._props_for(
+                edge_type_key,
+                narrow_props_df,
+                narrow_types,
+                numeric_props_df,
+            )
+
             entries = self._build_edge_type_entries(
                 edge_type_key=edge_type_key,
                 category=category,
                 edges_with_idx=edges_with_idx,
-                numeric_props_df=numeric_props_df,
+                numeric_props_df=props_df,
                 label_df=label_df,
                 has_shared_numerics=(
                     edge_type_key in shared_numeric_types
@@ -1231,7 +1250,7 @@ class EdgeFeatureExtractor:
 
         # Cleanup cached intermediates
         edges_with_idx.unpersist()
-        for df in [numeric_props_df, label_df]:
+        for df in [numeric_props_df, narrow_props_df, label_df]:
             if df is not None:
                 try:
                     df.unpersist()
@@ -1394,6 +1413,98 @@ class EdgeFeatureExtractor:
             )
 
         return sizes
+
+    def _narrow_numeric_props(
+        self,
+        numeric_props_df: DataFrame,
+        property_rows: Dict[str, _PropertyRows],
+        endpoint_types: Set[str],
+    ) -> Tuple[Optional[DataFrame], Set[str]]:
+        """
+        Materialise one small frame holding every endpoint type whose
+        properties the encoders were already going to broadcast.
+
+        The encoders filter the numeric property frame by endpoint type,
+        and each filter is a full scan of it: segment 1 takes four per
+        temporal edge type, segment 2 two more. That was affordable while
+        the collect ran one edge type at a time, because each scan was
+        its own small job. It stopped being affordable when the small
+        types were unioned into a single job -- 61 types put several
+        hundred scans of a 305,127,393-row frame into one plan, which is
+        the ~380 stages the 2026-09-01 run spent 83 minutes on without
+        finishing.
+
+        Narrowing does not make the plan narrower; the per-type filters
+        still happen. It makes them cheap, by giving them a frame of a
+        few hundred thousand rows to scan instead of three hundred
+        million.
+
+        A type is included when its rows fit the broadcast bar -- the
+        same measured test _maybe_broadcast applies -- so the frame holds
+        exactly the types whose joins were meant to be broadcasts. The
+        few above the bar (on the 2026-08 graph only
+        market_quotes_OptionSnapshot, at 304,600,530 rows) keep the full
+        frame and the shuffle joins they were already planning.
+
+        Returns (frame, the types it holds). The frame is None when no
+        type qualifies, and the caller then uses the full frame
+        throughout.
+        """
+        if self._broadcast_limit <= 0:
+            return None, set()
+
+        # A type absent from property_rows contributes no rows, so it
+        # reads as zero here and is included -- the narrow frame holds
+        # nothing for it, which is what the full frame holds too.
+        small_types = {
+            node_type
+            for node_type in endpoint_types
+            if property_rows.get(node_type, _PropertyRows()).total
+            * _NUMERIC_ROW_BYTES <= self._broadcast_limit
+        }
+
+        if not small_types:
+            return None, set()
+
+        narrow = numeric_props_df.filter(
+            F.col("node_type").isin(sorted(small_types))
+        ).localCheckpoint(eager=True)
+
+        kept = narrow.count()
+        logger.info(
+            f"    Endpoint numeric properties narrowed to "
+            f"{len(small_types)} of {len(endpoint_types)} endpoint "
+            f"type(s): {kept:,} rows, which is what the per-type filters "
+            f"now scan"
+        )
+
+        return narrow, small_types
+
+    def _props_for(
+        self,
+        edge_type_key: Tuple[str, str, str],
+        narrow_props_df: Optional[DataFrame],
+        narrow_types: Set[str],
+        numeric_props_df: DataFrame,
+    ) -> DataFrame:
+        """
+        Pick the numeric property frame one edge type is allowed to read.
+
+        Both endpoints have to be in the narrow frame. A type that is
+        missing from it reads as having no properties at all, so this
+        edge type's segment-1 and segment-2 features would come back
+        zeros -- wrong, and with nothing in the log to say so. Falling
+        back to the full frame costs that one type its scans and keeps
+        the answer right.
+        """
+        if narrow_props_df is None:
+            return numeric_props_df
+
+        src_type, _, dst_type = edge_type_key
+        if src_type in narrow_types and dst_type in narrow_types:
+            return narrow_props_df
+
+        return numeric_props_df
 
     def _extract_node_labels(
         self,
@@ -2756,9 +2867,27 @@ class EdgeFeatureExtractor:
         if tagged is None:
             return None
 
-        return self._aggregate_entries(
+        # This is the one expensive action on the small-type path, and it
+        # used to run without saying anything. The 2026-09-01 run spent 83
+        # minutes inside it, and the notebook's watchdog -- seeing no log
+        # line move -- killed it as a hang while its tasks were still
+        # finishing normally. Say when it starts and what it cost.
+        logger.info(
+            f"    Materialising entries for {len(small)} small edge "
+            f"type(s) in one pass..."
+        )
+        started = time.monotonic()
+
+        materialised = self._aggregate_entries(
             tagged, (self._TYPE_COL,)
         ).localCheckpoint(eager=True)
+
+        logger.info(
+            f"    Materialised {materialised.count():,} aggregated "
+            f"entries in {time.monotonic() - started:.1f}s"
+        )
+
+        return materialised
 
     def _flush_batch(
         self,
@@ -2789,9 +2918,14 @@ class EdgeFeatureExtractor:
         """
         type_ids = [type_id for type_id, _, _ in batch]
 
+        started = time.monotonic()
         pdf = materialised.filter(
             F.col(self._TYPE_COL).isin(type_ids)
         ).toPandas()
+        logger.info(
+            f"      batch of {len(batch)} type(s): {len(pdf):,} entries "
+            f"in {time.monotonic() - started:.1f}s"
+        )
 
         groups = (
             {int(k): g for k, g in pdf.groupby(self._TYPE_COL)}
