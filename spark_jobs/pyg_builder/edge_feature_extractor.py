@@ -214,8 +214,24 @@ _FEATURIZABLE_CATEGORIES = frozenset({
 # make correlation the dominant relation family on real data (22 of 46 relations
 # and 542 of 704 edge types on a two-source build), so leaving it out meant the
 # default config produced a graph with no edge features at all.
+#
+# "causal" is IN as of #359, and the reason it was not before is that it had
+# nothing to featurize. leadsTo is the only relation that classifies causal, and
+# it emitted zero triples until #350 woke the BLS leg, then 393,860,192 -- an
+# edge per market snapshot -- until #359 moved it onto the sector. It is now 570
+# edges in exactly two edge types on the 2026-08-30 graph:
+#
+#     Grouping -leadsTo-> EquitySector   300
+#     Category -leadsTo-> EquitySector   270
+#
+# Note that enabling a category does not create edge types. Those edges are in
+# the graph either way; the category only decides whether they carry an
+# edge_attr, so the cost here is two small tensors against the 2,401.9 MB of
+# edge features that build already writes. Causal is also the directional
+# sibling of correlation, and having one in the default set and not the other
+# was only ever an accident of leadsTo being dead.
 _DEFAULT_ENABLED_CATEGORIES = (
-    "temporal", "option_stock", "escalation", "correlation",
+    "temporal", "option_stock", "escalation", "correlation", "causal",
 )
 
 # Hash seeds for deterministic encoding
@@ -1119,6 +1135,18 @@ class EdgeFeatureExtractor:
         # phase rather than once per edge type.
         property_rows = self._endpoint_property_rows(numeric_props_df)
 
+        # The encoders filter the numeric frame by endpoint type, and
+        # every one of those filters is a scan. Narrow it once so they
+        # scan something small -- see _narrow_numeric_props.
+        endpoint_types: Set[str] = set()
+        for (src_type, _, dst_type), _ in eligible_types:
+            endpoint_types.add(src_type)
+            endpoint_types.add(dst_type)
+
+        narrow_props_df, narrow_types = self._narrow_numeric_props(
+            numeric_props_df, property_rows, endpoint_types
+        )
+
         # ============================================
         # Build features for all eligible edge types
         #
@@ -1150,11 +1178,18 @@ class EdgeFeatureExtractor:
                 )
                 continue
 
+            props_df = self._props_for(
+                edge_type_key,
+                narrow_props_df,
+                narrow_types,
+                numeric_props_df,
+            )
+
             entries = self._build_edge_type_entries(
                 edge_type_key=edge_type_key,
                 category=category,
                 edges_with_idx=edges_with_idx,
-                numeric_props_df=numeric_props_df,
+                numeric_props_df=props_df,
                 label_df=label_df,
                 has_shared_numerics=(
                     edge_type_key in shared_numeric_types
@@ -1215,7 +1250,7 @@ class EdgeFeatureExtractor:
 
         # Cleanup cached intermediates
         edges_with_idx.unpersist()
-        for df in [numeric_props_df, label_df]:
+        for df in [numeric_props_df, narrow_props_df, label_df]:
             if df is not None:
                 try:
                     df.unpersist()
@@ -1378,6 +1413,98 @@ class EdgeFeatureExtractor:
             )
 
         return sizes
+
+    def _narrow_numeric_props(
+        self,
+        numeric_props_df: DataFrame,
+        property_rows: Dict[str, _PropertyRows],
+        endpoint_types: Set[str],
+    ) -> Tuple[Optional[DataFrame], Set[str]]:
+        """
+        Materialise one small frame holding every endpoint type whose
+        properties the encoders were already going to broadcast.
+
+        The encoders filter the numeric property frame by endpoint type,
+        and each filter is a full scan of it: segment 1 takes four per
+        temporal edge type, segment 2 two more. That was affordable while
+        the collect ran one edge type at a time, because each scan was
+        its own small job. It stopped being affordable when the small
+        types were unioned into a single job -- 61 types put several
+        hundred scans of a 305,127,393-row frame into one plan, which is
+        the ~380 stages the 2026-09-01 run spent 83 minutes on without
+        finishing.
+
+        Narrowing does not make the plan narrower; the per-type filters
+        still happen. It makes them cheap, by giving them a frame of a
+        few hundred thousand rows to scan instead of three hundred
+        million.
+
+        A type is included when its rows fit the broadcast bar -- the
+        same measured test _maybe_broadcast applies -- so the frame holds
+        exactly the types whose joins were meant to be broadcasts. The
+        few above the bar (on the 2026-08 graph only
+        market_quotes_OptionSnapshot, at 304,600,530 rows) keep the full
+        frame and the shuffle joins they were already planning.
+
+        Returns (frame, the types it holds). The frame is None when no
+        type qualifies, and the caller then uses the full frame
+        throughout.
+        """
+        if self._broadcast_limit <= 0:
+            return None, set()
+
+        # A type absent from property_rows contributes no rows, so it
+        # reads as zero here and is included -- the narrow frame holds
+        # nothing for it, which is what the full frame holds too.
+        small_types = {
+            node_type
+            for node_type in endpoint_types
+            if property_rows.get(node_type, _PropertyRows()).total
+            * _NUMERIC_ROW_BYTES <= self._broadcast_limit
+        }
+
+        if not small_types:
+            return None, set()
+
+        narrow = numeric_props_df.filter(
+            F.col("node_type").isin(sorted(small_types))
+        ).localCheckpoint(eager=True)
+
+        kept = narrow.count()
+        logger.info(
+            f"    Endpoint numeric properties narrowed to "
+            f"{len(small_types)} of {len(endpoint_types)} endpoint "
+            f"type(s): {kept:,} rows, which is what the per-type filters "
+            f"now scan"
+        )
+
+        return narrow, small_types
+
+    def _props_for(
+        self,
+        edge_type_key: Tuple[str, str, str],
+        narrow_props_df: Optional[DataFrame],
+        narrow_types: Set[str],
+        numeric_props_df: DataFrame,
+    ) -> DataFrame:
+        """
+        Pick the numeric property frame one edge type is allowed to read.
+
+        Both endpoints have to be in the narrow frame. A type that is
+        missing from it reads as having no properties at all, so this
+        edge type's segment-1 and segment-2 features would come back
+        zeros -- wrong, and with nothing in the log to say so. Falling
+        back to the full frame costs that one type its scans and keeps
+        the answer right.
+        """
+        if narrow_props_df is None:
+            return numeric_props_df
+
+        src_type, _, dst_type = edge_type_key
+        if src_type in narrow_types and dst_type in narrow_types:
+            return narrow_props_df
+
+        return numeric_props_df
 
     def _extract_node_labels(
         self,
@@ -2652,35 +2779,52 @@ class EdgeFeatureExtractor:
         batch's collect stays inside spark.driver.maxResultSize) and type
         count (so the batch's Catalyst plan stays bounded in width). Either
         cap alone is insufficient — see _MAX_EDGE_TYPES_PER_BATCH.
+
+        The entries are aggregated and materialised ONCE before any of that
+        batching happens. Each type's entries frame carries its own join
+        against the endpoint property frames, which run to hundreds of
+        millions of rows, so a batch that collects straight from those
+        frames re-runs the join. #362 measured the cost: every batch read
+        the same 23,184 MB and returned 0.53 MB, about 1.7 TB of repeated
+        scanning to collect 41 MB. One eager checkpoint pays for the scan
+        once; the batched collects then read only the aggregated entries,
+        which are small by construction.
         """
         if not small:
+            return
+
+        materialised = self._materialise_small_entries(small)
+        if materialised is None:
             return
 
         budget = self._max_edges_per_collect(edge_vector_dim)
         max_types = max(1, self._max_types_per_batch)
 
-        batch: List[Tuple[Tuple[str, str, str], int, DataFrame]] = []
+        batch: List[Tuple[int, Tuple[str, str, str], int]] = []
         batch_edges = 0
         num_batches = 0
 
-        for item in small:
-            num_edges = item[1]
+        for type_id, (edge_type_key, num_edges, _) in enumerate(small):
             if batch and (
                 batch_edges + num_edges > budget
                 or len(batch) >= max_types
             ):
                 self._flush_batch(
-                    batch, edge_features, edge_vector_dim
+                    materialised, batch, edge_features, edge_vector_dim
                 )
                 num_batches += 1
                 batch = []
                 batch_edges = 0
-            batch.append(item)
+            batch.append((type_id, edge_type_key, num_edges))
             batch_edges += num_edges
 
         if batch:
-            self._flush_batch(batch, edge_features, edge_vector_dim)
+            self._flush_batch(
+                materialised, batch, edge_features, edge_vector_dim
+            )
             num_batches += 1
+
+        materialised.unpersist(blocking=False)
 
         logger.info(
             f"    {len(small)} small edge types collected in "
@@ -2690,51 +2834,105 @@ class EdgeFeatureExtractor:
             f" MB collected per batch)"
         )
 
+    def _materialise_small_entries(
+        self,
+        small: List[Tuple[Tuple[str, str, str], int, DataFrame]],
+    ) -> Optional[DataFrame]:
+        """
+        Tag every small type's entries with its index, union them, and
+        aggregate and materialise the result in one Spark job.
+
+        This is the whole point of #362. The per-type entries frames are
+        lazy joins against the endpoint property frames; collecting from
+        them in N batches scans those frames N times. Aggregating first
+        collapses the sparse entries to at most one row per (type, edge,
+        dim), and the eager checkpoint pins that small result so the
+        batched collects never touch the big frames again.
+
+        The union is wide — one subtree per type — but it is planned and
+        run exactly once here, rather than once per batch, which is the
+        trade _MAX_EDGE_TYPES_PER_BATCH was guarding against on the
+        collect path.
+        """
+        tagged: Optional[DataFrame] = None
+        for type_id, (_, _, entries) in enumerate(small):
+            part = entries.select(
+                F.lit(type_id).cast("int").alias(self._TYPE_COL),
+                F.col("edge_idx"),
+                F.col("dim"),
+                F.col("value"),
+            )
+            tagged = part if tagged is None else tagged.unionAll(part)
+
+        if tagged is None:
+            return None
+
+        # This is the one expensive action on the small-type path, and it
+        # used to run without saying anything. The 2026-09-01 run spent 83
+        # minutes inside it, and the notebook's watchdog -- seeing no log
+        # line move -- killed it as a hang while its tasks were still
+        # finishing normally. Say when it starts and what it cost.
+        logger.info(
+            f"    Materialising entries for {len(small)} small edge "
+            f"type(s) in one pass..."
+        )
+        started = time.monotonic()
+
+        materialised = self._aggregate_entries(
+            tagged, (self._TYPE_COL,)
+        ).localCheckpoint(eager=True)
+
+        logger.info(
+            f"    Materialised {materialised.count():,} aggregated "
+            f"entries in {time.monotonic() - started:.1f}s"
+        )
+
+        return materialised
+
     def _flush_batch(
         self,
-        batch: List[Tuple[Tuple[str, str, str], int, DataFrame]],
+        materialised: DataFrame,
+        batch: List[Tuple[int, Tuple[str, str, str], int]],
         edge_features: Dict[Tuple[str, str, str], torch.Tensor],
         edge_vector_dim: int,
     ) -> None:
         """
-        Union one batch of edge types, aggregate and collect once, then
-        scatter into per-type dense tensors on the driver.
+        Collect one batch of edge types from the materialised entries and
+        scatter them into per-type dense tensors on the driver.
 
         edge_idx is per-type 0-based (assigned by a window partitioned
         on the type triple), so a type key has to travel with every row
         and the scatter has to be done per group — unlike the node side,
         where node_id alone identifies the row.
 
-        The key is the type's position in this batch, as one int, not the
-        three strings of the type triple. Those strings repeat on every
-        sparse entry, and a batch holds up to _chunk_threshold edges times
-        their non-zero dims — millions of string objects for the driver to
-        build, where an int costs 4 bytes. Same reasoning as the edge-index
-        collect in edge_mapper.py.
-        """
-        unioned: Optional[DataFrame] = None
-        for type_id, (_, _, entries) in enumerate(batch):
-            tagged = entries.select(
-                F.lit(type_id).cast("int").alias(self._TYPE_COL),
-                F.col("edge_idx"),
-                F.col("dim"),
-                F.col("value"),
-            )
-            unioned = (
-                tagged if unioned is None
-                else unioned.unionAll(tagged)
-            )
+        The key is the type's index in the whole small list, as one int,
+        not the three strings of the type triple. Those strings repeat on
+        every sparse entry, and a batch holds up to _chunk_threshold edges
+        times their non-zero dims — millions of string objects for the
+        driver to build, where an int costs 4 bytes. Same reasoning as the
+        edge-index collect in edge_mapper.py.
 
-        pdf = self._aggregate_entries(
-            unioned, (self._TYPE_COL,)
+        The filter is what keeps the batch bounded. It reads the checkpoint
+        written by _materialise_small_entries, so it costs a scan of the
+        aggregated entries and never touches the endpoint frames (#362).
+        """
+        type_ids = [type_id for type_id, _, _ in batch]
+
+        started = time.monotonic()
+        pdf = materialised.filter(
+            F.col(self._TYPE_COL).isin(type_ids)
         ).toPandas()
+        logger.info(
+            f"      batch of {len(batch)} type(s): {len(pdf):,} entries "
+            f"in {time.monotonic() - started:.1f}s"
+        )
 
         groups = (
             {int(k): g for k, g in pdf.groupby(self._TYPE_COL)}
             if not pdf.empty else {}
         )
 
-        for type_id, (edge_type_key, num_edges, _) in enumerate(batch):
+        for type_id, edge_type_key, num_edges in batch:
             tensor = np.zeros(
                 (num_edges, edge_vector_dim), dtype=np.float32
             )

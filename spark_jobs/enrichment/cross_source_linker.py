@@ -438,6 +438,39 @@ class CrossSourceLinker:
             sec_match = sec_match | F.col("subject").startswith(prefix)
         entities = entities.filter(~sec_match)
 
+        # The vocabulary this pipeline mints is excluded too, for the same
+        # reason and with a worse symptom.
+        #
+        # This classifier reads a URI's last path segment. The sector nodes are
+        # NAMED after the keywords, so they matched themselves: bls:EnergySector
+        # has the local name "energysector", which contains "energy", so the
+        # graph carried bls:EnergySector belongsToSector bls:EnergySector. On
+        # the 2026-08-30 run that was 11 self-loops, plus junk between unrelated
+        # economic sectors (bls:ApparelSector -> ManufacturingSector).
+        #
+        # It also reached the GICS sectors and undid the crosswalk. All three
+        # sectors enrichment/sector_crosswalk.py deliberately maps to NOTHING
+        # were mapped anyway, under the STRONGER predicate:
+        #
+        #     market:InformationTechnologySector -> bls:InformationSector
+        #     market:CommunicationServicesSector -> bls:InformationSector
+        #     market:UtilitiesSector             -> bls:EnergySector
+        #
+        # which is the chip-maker-to-telephone-price link that module names as
+        # the reason those rows are blank, asserted as membership rather than
+        # the similarity the curated table states. A GICS sector reaches an
+        # economic sector through that table or not at all.
+        #
+        # Scoped to the two ontology namespaces, not to a "Sector" suffix:
+        # id/eci/State_and_local_government_workers_WorkerSector is real source
+        # data and must still be classified.
+        vocabulary_match = F.lit(False)
+        for namespace in (str(BLS_ENRICHMENT), str(MARKET_ENRICHMENT)):
+            vocabulary_match = (
+                vocabulary_match | F.col("subject").startswith(namespace)
+            )
+        entities = entities.filter(~vocabulary_match)
+
         # Join: entity local name contains sector keyword
         # Use broadcast for the small sector lookup
         matched = entities.join(
@@ -1419,7 +1452,46 @@ class CrossSourceLinker:
 
     def _create_causal_links(self) -> Optional[DataFrame]:
         """
-        Link a BLS indicator to a market entity in the same economic sector.
+        Link a BLS indicator to the equity sector it leads.
+
+        THE OBJECT IS A SECTOR, NOT A SNAPSHOT, and that is the whole of #359.
+        This used to point at every market entity in the sector, one edge per
+        snapshot. On the first run where the BLS side was not empty that was
+        393,860,192 edges -- 46% of the entire graph, 97% of everything
+        cross-source produced -- from 499 BLS subjects, averaging 789,299 edges
+        each. One producer-price series carried 2,933,391 on its own.
+
+        Those edges said "this producer-price series leads this PSX put, as
+        quoted at 18:20:40.111Z". The strike and the timestamp have nothing to
+        do with the indicator, and the same claim was repeated for every other
+        snapshot of that contract and every other contract in the sector. It is
+        one sector-level statement inflated by six orders of magnitude.
+
+        It was also information the graph already held. The edge is exactly the
+        composition of three relations that are already there:
+
+            BLS series -belongsToSector-> EconomicSector
+                       <-relatedToEconomicSector- GICS sector
+                       <-market:belongsToSector- snapshot
+
+        and the join below is built from the SAME crosswalk table that mints
+        the middle one. So every one of those 393 million edges was derivable
+        from ~499 + 15 + 10,054,950 edges already in the frame. They added no
+        reachability, and for a GNN a complete bipartite block between two
+        groups carries nothing beyond the group membership that defines it:
+        every snapshot in the sector receives the identical set of messages.
+
+        Pointing at the GICS sector states the claim at the granularity the
+        crosswalk actually supports. On that same run it is 570 edges -- the
+        same 499 subjects across the 8 mapped GICS sectors. A snapshot is still
+        two hops from any indicator that leads it, which a two-layer model
+        reaches.
+
+        NOT the economic sector, though both are one hop away. bls:leadsTo to
+        an EconomicSector would repeat the (subject, object) pair that
+        bls:belongsToSector already covers, which is the duplicate-relation
+        problem removed twice elsewhere in this module. The GICS sector is a
+        different node, so the edge is a different claim.
 
         WHY THIS NEVER FIRED. Both sides were selected by filtering for
         bls:belongsToSector -- but only the BLS side emits that. The market
@@ -1460,7 +1532,8 @@ class CrossSourceLinker:
             )
         )
 
-        # The market side, resolved to an ECONOMIC sector via the crosswalk.
+        # The market side. Read per snapshot, because that is the only place
+        # the GICS classification is stated; collapsed to the sector below.
         market_gics = (
             self.triples_df
             .filter(F.col("predicate") == str(MARKET_ENRICHMENT.belongsToSector))
@@ -1489,10 +1562,6 @@ class CrossSourceLinker:
             schema=["equity_sector", "sector"],
         )
 
-        market_resolved = market_gics.join(
-            crosswalk, "equity_sector", "inner"
-        ).select("entity", "sector")
-
         bls_prefixes = _BLS_ENTITY_PREFIXES
         market_prefixes = _MARKET_ENTITY_PREFIXES
 
@@ -1510,23 +1579,42 @@ class CrossSourceLinker:
         for p in market_prefixes[1:]:
             market_filter = market_filter | F.col("entity").startswith(p)
 
-        market_sector = market_resolved.filter(market_filter).select(
-            F.col("entity").alias("market_entity"), F.col("sector").alias("market_sector")
+        # DISTINCT on the sector, and this is the line that ends the cartesian
+        # product. The snapshots are still what proves a sector is present in
+        # this build -- a GICS sector nothing classified into must not collect
+        # an edge -- but once that is established they are dropped, and the
+        # right side of the join is at most eleven rows instead of ten million.
+        market_sector = (
+            market_gics
+            .filter(market_filter)
+            .select("equity_sector")
+            .distinct()
+            .join(crosswalk, "equity_sector", "inner")
+            .select(
+                F.col("equity_sector"),
+                F.col("sector").alias("market_sector"),
+            )
         )
 
         if bls_sector.head(1) and market_sector.head(1):
-            # Join on sector — BLS indicator leadsTo Market ticker in same sector
+            # Join on the economic sector, emit the GICS one. The economic
+            # sector is how the two vocabularies meet; it is not what the edge
+            # points at, because belongsToSector already points there.
             causal = bls_sector.join(
                 market_sector,
                 bls_sector.bls_sector == market_sector.market_sector,
                 how="inner"
             )
 
+            # An indicator can sit in several economic sectors that a single
+            # GICS sector maps to -- Industrials covers manufacturing,
+            # transportation and construction trades -- so the join can reach
+            # the same pair by more than one route.
             result = causal.select(
                 F.col("bls_entity").alias("subject"),
                 F.lit(str(BLS_ENRICHMENT.leadsTo)).alias("predicate"),
-                F.col("market_entity").alias("object")
-            )
+                F.col("equity_sector").alias("object")
+            ).distinct()
 
             logger.info("  Causal link triples prepared (lazy)")
             return result
