@@ -33,6 +33,10 @@ from spark_jobs.enrichment.intra_source.market.patterns import (
 from spark_jobs.enrichment.intra_source.market.symbols import (
     occ_expiration_date, occ_underlying,
 )
+from spark_jobs.enrichment.intra_source.sequencing import (
+    sequence_to_triples,
+    sequence_within_partitions,
+)
 
 import logging
 
@@ -303,21 +307,27 @@ class MarketIntraSourceLinker:
             logger.info("  No snapshots with symbol + captureTime found")
             return None
 
-        # Window: partition by symbol, order by capture_time
-        w = Window.partitionBy("symbol").orderBy("capture_time")
-        sequenced = snapshots_df.withColumn(
-            "next_snapshot", F.lead("snapshot").over(w)
+        # Sequence each symbol's snapshots.
+        #
+        # The two joins above are inner joins on snapshot, so a snapshot
+        # carrying two symbols or two capture times arrives here as two rows in
+        # one partition. Left in, they sorted next to each other and lead() made
+        # the snapshot precede itself (#360).
+        #
+        # The tie-break on the snapshot URI matters for the same reason it does
+        # in NOAA Step 1: capture_time alone is not a total order, snapshots of
+        # one symbol share a capture time, and lead() over a non-deterministic
+        # order would make the output vary between runs.
+        result = sequence_to_triples(
+            snapshots_df,
+            entity_col="snapshot",
+            predicate=PRECEDES_PRED,
+            partition_cols=["symbol"],
+            order_cols=["capture_time", "snapshot"],
         )
-        pairs = sequenced.filter(F.col("next_snapshot").isNotNull())
 
-        if pairs.head(1) == []:
+        if result.head(1) == []:
             return None
-
-        result = pairs.select(
-            F.col("snapshot").alias("subject"),
-            F.lit(PRECEDES_PRED).alias("predicate"),
-            F.col("next_snapshot").alias("object"),
-        )
 
         logger.info("  Snapshot sequence linking complete")
         return result
@@ -559,13 +569,22 @@ class MarketIntraSourceLinker:
         self, options_df: DataFrame
     ) -> Optional[DataFrame]:
         """Same underlying, expiration, type, capture_time — adjacent strikes."""
-        w = Window.partitionBy(
-            "underlying", "expiration", "contract_type", "capture_time"
-        ).orderBy("strike")
-
-        with_next = options_df.withColumn(
-            "next_option", F.lead("option").over(w)
-        ).filter(F.col("next_option").isNotNull())
+        # Pair each option with the next strike up in its chain.
+        #
+        # This step takes the paired rows rather than triples, because calls
+        # and puts leave through different predicates. The helper drops
+        # duplicate options before the window, so an option cannot spread with
+        # its own copy (#360), and the tie-break on the option URI keeps the
+        # chain the same between runs when two options share a strike.
+        with_next = sequence_within_partitions(
+            options_df,
+            entity_col="option",
+            partition_cols=[
+                "underlying", "expiration", "contract_type", "capture_time",
+            ],
+            order_cols=["strike", "option"],
+            next_col="next_option",
+        )
 
         if with_next.head(1) == []:
             return None

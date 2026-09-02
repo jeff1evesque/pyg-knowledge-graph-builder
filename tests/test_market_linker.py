@@ -27,6 +27,7 @@ from spark_jobs.enrichment.intra_source.market_linker import (
     HAS_MONEYNESS_PRED,
     HAS_UNDERLYING_EQUITY_PRED,
     STRADDLE_WITH_PRED,
+    CALL_SPREAD_WITH_PRED,
     UNDERLYING_SYMBOL_PRED,
     ATM_URI,
     ITM_URI,
@@ -177,3 +178,63 @@ def test_a_stated_underlying_wins_over_the_derived_one(spark, make_triples):
     triples = _triple_set(MarketIntraSourceLinker(spark).enrich(make_triples(rows)))
 
     assert (opt, HAS_UNDERLYING_EQUITY_PRED, eq) in triples
+
+
+# ======================================================================
+# Deep: no step may make a node its own object (#360)
+#
+# Market reaches every property it sequences on through an inner join, so a
+# snapshot stating one of them twice arrives at the window twice. The copies
+# sorted next to each other and lead() handed the snapshot its own URI back.
+# ======================================================================
+
+def test_snapshot_does_not_precede_itself(spark, make_triples):
+    """A snapshot stating two capture times must not precede its own copy."""
+    dup = "http://example.org/snap/AAPL_1000"
+    late = "http://example.org/snap/AAPL_1100"
+    rows = [
+        (dup, RDF_TYPE, EQUITY_SNAPSHOT_TYPE),
+        (dup, SYMBOL_PRED, "AAPL"),
+        (dup, CAPTURE_TIME_PRED, "2024-11-15T10:00:00"),
+        (dup, CAPTURE_TIME_PRED, "2024-11-15T10:30:00"),
+        (late, RDF_TYPE, EQUITY_SNAPSHOT_TYPE),
+        (late, SYMBOL_PRED, "AAPL"),
+        (late, CAPTURE_TIME_PRED, "2024-11-15T11:00:00"),
+    ]
+
+    triples = _triple_set(MarketIntraSourceLinker(spark).enrich(make_triples(rows)))
+    precedes = {(s, o) for s, p, o in triples if p == PRECEDES_PRED}
+
+    assert (dup, dup) not in precedes
+    assert (dup, late) in precedes
+
+
+def test_vertical_spread_does_not_pair_an_option_with_itself(spark, make_triples):
+    """An option stating two strikes must not spread with its own copy.
+
+    The strike join is what fans the option out, and strike is also what orders
+    the chain, so the copies land next to each other in one (underlying,
+    expiration, type, capture_time) partition.
+    """
+    dup = "http://example.org/opt/A_260717C00065000"
+    higher = "http://example.org/opt/A_260717C00070000"
+    when = "2026-07-02T16:40:40.167Z"
+    rows = [
+        (dup, RDF_TYPE, OPTION_SNAPSHOT_TYPE),
+        (dup, SYMBOL_PRED, "A     260717C00065000"),
+        (dup, STRIKE_PRICE_PRED, "65.0"),
+        (dup, STRIKE_PRICE_PRED, "66.0"),
+        (dup, CONTRACT_TYPE_PRED, "C"),
+        (dup, CAPTURE_TIME_PRED, when),
+        (higher, RDF_TYPE, OPTION_SNAPSHOT_TYPE),
+        (higher, SYMBOL_PRED, "A     260717C00070000"),
+        (higher, STRIKE_PRICE_PRED, "70.0"),
+        (higher, CONTRACT_TYPE_PRED, "C"),
+        (higher, CAPTURE_TIME_PRED, when),
+    ]
+
+    triples = _triple_set(MarketIntraSourceLinker(spark).enrich(make_triples(rows)))
+    spreads = {(s, o) for s, p, o in triples if p == CALL_SPREAD_WITH_PRED}
+
+    assert (dup, dup) not in spreads
+    assert (dup, higher) in spreads

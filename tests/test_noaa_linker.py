@@ -427,6 +427,51 @@ def test_precedes_is_deterministic_when_sent_times_tie(spark, make_triples):
     assert runs[0] == runs[1] == {(a1, a2)}
 
 
+# ======================================================================
+# No step may make a node its own object (#360)
+#
+# Both windows key on a property the alert can state more than once, and
+# neither deduplicated the alert before sequencing. The copies sorted next to
+# each other and lead() handed the alert its own URI back.
+# ======================================================================
+
+def test_precedes_does_not_link_an_alert_to_itself(spark, make_triples):
+    """An alert stating two sent times must not precede its own copy.
+
+    The step deduplicates on (alert, sent_time), so both copies survive it and
+    land in the same geocode partition.
+    """
+    dup = "http://example.org/alert/d1"
+    later = "http://example.org/alert/d2"
+    rows = _alert_over_geocodes(dup, ["012001"], restate_block=False,
+                                sent_time="2024-11-15T10:00:00")
+    rows.append((f"{dup}#info", HAS_SENT_TIME, "2024-11-15T10:30:00"))
+    rows += _alert_over_geocodes(later, ["012001"], restate_block=False,
+                                 sent_time="2024-11-15T11:00:00")
+
+    precedes = _precedes(_enrich_rows(spark, make_triples, rows))
+
+    assert (dup, dup) not in precedes
+    assert (dup, later) in precedes
+
+
+def test_escalation_does_not_link_an_alert_to_itself(spark, make_triples):
+    """An alert stating two severities must not escalate to its own copy.
+
+    This is the one place the defect changed an answer rather than only adding
+    an edge: the copies were compared against each other, so a single alert
+    read as a rising severity.
+    """
+    dup = "http://example.org/alert/e1"
+    rows = _alert_over_geocodes(dup, ["012001"], restate_block=False, severity=2)
+    rows.append((f"{dup}#info", HAS_SEVERITY, _severity_uri(4)))
+
+    escalates = _escalates(_enrich_rows(spark, make_triples, rows))
+
+    assert (dup, dup) not in escalates
+    assert escalates == set()
+
+
 def test_alerts_sharing_only_a_cap_category_are_not_linked(spark, make_triples):
     """Two alerts alike in nothing but cap:hasCategory get no edge between them.
 

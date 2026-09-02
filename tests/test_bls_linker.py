@@ -155,6 +155,28 @@ def test_temporal_sequence_single_measurement_yields_nothing(spark, make_triples
     assert result is None or result.count() == 0
 
 
+def test_a_measurement_dated_twice_does_not_precede_itself(spark, make_triples):
+    """A measurement stating two years must not precede its own copy (#360).
+
+    Built from the real cause rather than a synthetic duplicate row: the year
+    is reached by an inner join on entity, so a measurement carrying two year
+    triples arrives at the window as two rows in one category. Their sort keys
+    are adjacent here, which is what let lead() return the measurement to
+    itself.
+    """
+    category = _cpi("Food_Entity")
+    rows = []
+    dup = _index_entity(rows, "Food_Nov_Index", category, "November", "2024")
+    rows.append((dup, HAS_YEAR, _cpi("2025")))
+    later = _index_entity(rows, "Food_Dec_Index", category, "December", "2026")
+
+    result = BLSDatasetEnricher(spark, "cpi").link_temporal_sequences(make_triples(rows))
+    pairs = [(r["subject"], r["object"]) for r in result.collect()]
+
+    assert (dup, dup) not in pairs
+    assert pairs == [(dup, later)]
+
+
 # ======================================================================
 # BLSIntraSourceLinker.enrich (end-to-end orchestration)
 # ======================================================================

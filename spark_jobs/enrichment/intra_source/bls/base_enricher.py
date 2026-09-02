@@ -17,12 +17,12 @@ needs custom logic, replace its registry entry with a subclass.
 """
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql import Window
 from functools import reduce
 from typing import Dict, List, Optional
 from rdflib.namespace import RDF
 from spark_jobs.utils.rdf_utils import BLS_ENRICHMENT
 from spark_jobs.enrichment.intra_source.bls.measurements import MEASUREMENT_TYPES
+from spark_jobs.enrichment.intra_source.sequencing import sequence_to_triples
 
 import logging
 
@@ -263,23 +263,20 @@ class BLSDatasetEnricher:
                 )
             )
 
-        # Step 4: Window partition by category, order by sort_key
-        w = Window.partitionBy("category").orderBy("sort_key")
-
-        with_next = (
-            entities_with_time
-            .withColumn("next_entity", F.lead("entity").over(w))
-            .filter(F.col("next_entity").isNotNull())
+        # Step 4: Sequence each category into precedes triples.
+        #
+        # The month and year joins above are inner joins on entity, so an
+        # entity carrying two months or two years arrives here as two rows in
+        # one category. The helper drops those copies before the window; left
+        # in, they sorted next to each other and lead() made the measurement
+        # precede itself (#360).
+        return sequence_to_triples(
+            entities_with_time,
+            entity_col="entity",
+            predicate=_PRECEDES,
+            partition_cols=["category"],
+            order_cols=["sort_key"],
         )
-
-        # Step 5: Produce precedes triples
-        precedes_triples = with_next.select(
-            F.col("entity").alias("subject"),
-            F.lit(_PRECEDES).alias("predicate"),
-            F.col("next_entity").alias("object"),
-        )
-
-        return precedes_triples
 
 
 # ============================================
