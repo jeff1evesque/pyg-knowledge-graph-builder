@@ -27,6 +27,7 @@ from typing import List, Optional
 
 from spark_jobs.utils.rdf_utils import MARKET_QUOTES, MARKET_ENRICHMENT
 from spark_jobs.enrichment.sector_crosswalk import EQUITY_SECTOR_TYPE
+from spark_jobs.enrichment.settle import settle
 from spark_jobs.enrichment.intra_source.market.patterns import (
     get_sector_patterns,
 )
@@ -251,6 +252,14 @@ class MarketIntraSourceLinker:
             return empty
 
         result = reduce(DataFrame.unionAll, new_dfs)
+
+        # Materialize before returning: this frame is counted again in
+        # intra_source_linker and read a third time by the pipeline's union, and
+        # uncached each of those re-ran all five steps above -- 20 minutes and
+        # 603 GB of re-read per run (#364). Settle rather than .cache() as the
+        # smaller sources do, because nothing unpersists these frames and 56M
+        # triples would sit in executor memory until the run ended (#346).
+        result = settle(result)
 
         count = result.count()
         logger.info("=" * 60)

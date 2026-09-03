@@ -238,3 +238,43 @@ def test_vertical_spread_does_not_pair_an_option_with_itself(spark, make_triples
 
     assert (dup, dup) not in spreads
     assert (dup, higher) in spreads
+
+
+# ======================================================================
+# The returned frame must not recompute (#364)
+# ======================================================================
+
+def _plan_nodes(df) -> int:
+    """Node count of a DataFrame's analyzed logical plan, one line per node."""
+    tree = df._jdf.queryExecution().logical().numberedTreeString()
+    return len([line for line in tree.split("\n") if line.strip()])
+
+
+def test_enrich_returns_a_materialized_frame(spark, make_triples):
+    """enrich() must settle its output before returning it.
+
+    intra_source_linker counts this frame again to fill in stats, and the
+    pipeline reads it a third time in its union. Returned unmaterialized, each
+    of those re-ran all five enrichment steps: 20 minutes of wall clock and
+    603 GB of re-read on the 2026-09-01 run alone (#364).
+    """
+    early = "http://example.org/snap/AAPL_1000"
+    late = "http://example.org/snap/AAPL_1100"
+    rows = [
+        (late, RDF_TYPE, EQUITY_SNAPSHOT_TYPE),
+        (late, SYMBOL_PRED, "AAPL"),
+        (late, CAPTURE_TIME_PRED, "2024-11-15T11:00:00"),
+        (early, RDF_TYPE, EQUITY_SNAPSHOT_TYPE),
+        (early, SYMBOL_PRED, "AAPL"),
+        (early, CAPTURE_TIME_PRED, "2024-11-15T10:00:00"),
+    ]
+
+    result = MarketIntraSourceLinker(spark).enrich(make_triples(rows))
+
+    assert _plan_nodes(result) == 1, (
+        f"enrich() returned a {_plan_nodes(result)}-node plan, so every later "
+        f"read re-runs the five steps. It must collapse to a single scan. "
+        f"A .cache() would satisfy a row-level assertion while leaving the "
+        f"plan intact, which is why this asserts the plan and not the rows."
+    )
+    assert result.count() > 0, "the fixture should produce precedes triples"
