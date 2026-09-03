@@ -448,24 +448,36 @@ def _assembly_inputs(spark, rows=None):
 def _record_checkpoint_kinds(monkeypatch, checkpoint_dir):
     """Record which checkpoint kind each settled frame chose.
 
-    Both methods return ``self``, so the frames stay lazy and the fixture
-    stays cheap -- these tests assert the choice, not the truncation. The
-    truncation is what the lineage tests above assert.
+    Both spies call the real ``localCheckpoint``, so the frame that comes back
+    is really truncated. Returning ``self`` instead is cheaper to write, and it
+    is what this helper did first, but it takes the truncation out of a phase
+    that cannot run without it: assembly unions one subtree per edge type in
+    ``_materialise_small_entries`` and counts the result, so with the plan left
+    whole that one count plans every subtree at once. On 2026-09-02 that ran
+    22,922 stages off this 29-row fixture and killed the driver after five
+    hours, taking the rest of the session-scoped suite with it.
+
+    The reliable kind is spied the same way rather than run for real, because
+    ``checkpoint`` needs a dir set on the session and this session is shared by
+    the whole suite. What it writes is covered by
+    ``test_settle_writes_a_reliable_checkpoint_when_a_dir_is_set``; the two
+    tests below assert only the choice.
     """
     calls = []
+    truncate = DataFrame.localCheckpoint
+
+    def spy(kind):
+        def record(self, eager=True):
+            calls.append(kind)
+            return truncate(self, eager)
+
+        return record
+
     monkeypatch.setattr(
         SparkContext, "getCheckpointDir", lambda self: checkpoint_dir
     )
-    monkeypatch.setattr(
-        DataFrame,
-        "checkpoint",
-        lambda self, eager=True: calls.append("reliable") or self,
-    )
-    monkeypatch.setattr(
-        DataFrame,
-        "localCheckpoint",
-        lambda self, eager=True: calls.append("local") or self,
-    )
+    monkeypatch.setattr(DataFrame, "checkpoint", spy("reliable"))
+    monkeypatch.setattr(DataFrame, "localCheckpoint", spy("local"))
     return calls
 
 
