@@ -29,6 +29,17 @@ def large_run() -> dict[str, str]:
     return _exports("large-run.env")
 
 
+@pytest.fixture(scope="module")
+def pyg_assembly() -> dict[str, str]:
+    return _exports("pyg-assembly.env")
+
+
+@pytest.fixture(scope="module", params=["large-run.env", "pyg-assembly.env"])
+def any_profile(request) -> dict[str, str]:
+    """Both profiles, for the invariants that hold of either."""
+    return _exports(request.param)
+
+
 def test_alloc_fraction_does_not_exceed_its_cap(large_run):
     """The launcher refuses to submit when it does, so this fails fast instead.
 
@@ -74,6 +85,48 @@ def test_uncapped_slots_require_a_lowered_batch_size(large_run):
             "RAPIDS' 1g default, which does not fit 144 concurrent tasks"
         )
         assert batch != "1g", "the default is the value that does not fit"
+
+
+def test_the_pool_floor_is_reachable(any_profile):
+    """A floor above the alloc fraction refuses every executor.
+
+    The two are not on the same base -- the floor is a fraction of TOTAL GPU
+    memory and the alloc fraction is of FREE -- so the ordering is what keeps the
+    floor meetable on a host that has anything else resident. The launcher
+    refuses this combination; failing here costs a second instead of a queue slot.
+    """
+    floor = float(any_profile["RAPIDS_GPU_MIN_ALLOC_FRACTION"])
+    alloc = float(any_profile["RAPIDS_GPU_ALLOC_FRACTION"])
+    assert 0 < floor <= alloc
+
+
+def test_the_pool_floor_leaves_room_under_a_healthy_pool(any_profile):
+    """The floor catches an unusable executor, not a busy one.
+
+    A replacement executor sizes its pool against memory free at startup, so a
+    floor set near a healthy pool refuses executors that would have worked and
+    burns spark.deploy.maxExecutorRetries doing it. Half the alloc fraction is
+    already generous: the pool that motivated this was 67.8 MB against a healthy
+    8.8 GiB, which is three orders of magnitude down, not a near miss.
+    """
+    floor = float(any_profile["RAPIDS_GPU_MIN_ALLOC_FRACTION"])
+    alloc = float(any_profile["RAPIDS_GPU_ALLOC_FRACTION"])
+    assert floor <= alloc / 2, (
+        "a floor this close to the alloc fraction refuses executors that a "
+        "partly-used GPU would otherwise have started"
+    )
+
+
+def test_assembly_leaves_the_host_to_the_driver(pyg_assembly):
+    """The assembly leg's whole reason for existing as a separate profile.
+
+    The HeteroData is built in the driver's own memory -- numpy, outside any
+    -Xmx -- so what sizes it is how much of the host nothing else has claimed.
+    An executor heap the size of large-run.env's would take that room back and
+    reproduce the 2026-08-25 host OOM.
+    """
+    assert int(pyg_assembly["EXECUTOR_MEMORY"].rstrip("gG")) <= 16
+    assert float(pyg_assembly["RAPIDS_GPU_ALLOC_FRACTION"]) <= 0.12
 
 
 def test_large_run_is_not_for_assembly(large_run):
