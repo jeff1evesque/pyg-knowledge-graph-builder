@@ -1811,10 +1811,11 @@ def get_spark_session() -> SparkSession:
     return (
         SparkSession.builder.appName("PyG-Knowledge-Graph-Builder")
         .config("spark.rapids.sql.enabled", rapids_enabled)
-        # Each enrichment phase's checkpoint is dead as soon as the next phase
-        # settles, but Spark keeps checkpoint files until the job ends unless
-        # told otherwise. A month's run settles six times over 13.8 GB, so
-        # without this the work dir carries tens of GB nothing reads.
+        # A settled frame's checkpoint is dead as soon as the frame that
+        # replaces it settles, but Spark keeps checkpoint files until the job
+        # ends unless told otherwise. A month's run settles six times over
+        # 13.8 GB in enrichment alone, and assembly settles five more frames,
+        # so without this the work dir carries tens of GB nothing reads.
         .config("spark.cleaner.referenceTracking.cleanCheckpoints", "true")
         .getOrCreate()
     )
@@ -2425,10 +2426,11 @@ def main():
     # Initialize Spark. Create an S3 client only when the job needs S3
     # (archiving final artifacts or reading external definitions from S3).
     spark = get_spark_session()
-    # Where EnrichmentPipeline._settle puts its per-phase copies. Under the work
-    # dir so it shares the run's storage and lifetime -- the shared mount on a
-    # cluster run, the same object store when the work dir is an s3a:// URI.
-    # Without a dir set, _settle falls back to localCheckpoint, which is what
+    # Where settle() puts its copies, in enrichment and in assembly alike. Under
+    # the work dir so it shares the run's storage and lifetime -- the shared
+    # mount on a cluster run, the same object store when the work dir is an
+    # s3a:// URI. Set here, before the mode dispatch, so every mode gets one:
+    # without a dir set settle() falls back to localCheckpoint, which is what
     # let one evicted executor abort the 2026-08-29 run at 47 minutes.
     spark.sparkContext.setCheckpointDir(f"{config.local_work_dir}/checkpoints")
     needs_s3 = bool(

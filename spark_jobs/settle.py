@@ -1,8 +1,11 @@
 """Materialize a frame and truncate its logical plan.
 
-Its own module rather than a method on EnrichmentPipeline because the temporal
-unifier needs it too, and pipeline.py already imports temporal_unifier.py --
-importing back the other way is a cycle.
+At the top of ``spark_jobs`` because both halves of the job settle frames: the
+enrichment pipeline and the temporal unifier, and the assembly path in
+``pyg_builder``. It is not a method on EnrichmentPipeline because pipeline.py
+already imports temporal_unifier.py, so importing back the other way is a
+cycle. It is not under ``enrichment`` because assembly runs in its own mode and
+should not have to load the enrichment package to settle a frame.
 """
 from pyspark.sql import DataFrame
 import logging
@@ -38,6 +41,11 @@ def settle(df: DataFrame) -> DataFrame:
     rdd_23348_23 not found`` after 157 minutes, taking both downstream legs
     with it. It never reached the other two, in temporal unification and in
     the cross-source union; all three now settle through here.
+
+    Assembly had five more of the same sites, in ``edge_feature_extractor``,
+    and they carry the same risk for longer: they hold the frames every
+    per-edge-type query reads, so losing one is losing the phase. They settle
+    through here now too.
 
     ``checkpoint(eager=True)`` writes the same truncating copy to the session's
     checkpoint dir, which build_graph points at the run's work dir. Callers

@@ -16,7 +16,7 @@ from spark_jobs.enrichment.intra_source.market.patterns import (
     get_sub_industries, get_ticker_cik_map,
 )
 from spark_jobs.enrichment.ontology_mapper import OntologyMapper
-from spark_jobs.enrichment.settle import settle
+from spark_jobs.settle import settle
 from typing import Dict, Optional
 import logging
 
@@ -67,11 +67,11 @@ class EnrichmentPipeline:
     def _settle(self, df: DataFrame) -> DataFrame:
         """Materialize and truncate the plan between phases.
 
-        The body lives in ``spark_jobs.enrichment.settle`` because the temporal
-        unifier settles its own frames the same way and used to do it with a
-        second, divergent copy -- that copy still called ``localCheckpoint``
-        after this one moved to reliable checkpoints, and it aborted the
-        2026-08-30 run. Read the reasoning there.
+        The body lives in ``spark_jobs.settle`` because the temporal unifier
+        settles its own frames the same way and used to do it with a second,
+        divergent copy -- that copy still called ``localCheckpoint`` after this
+        one moved to reliable checkpoints, and it aborted the 2026-08-30 run.
+        Read the reasoning there.
 
         Kept as a method so the plan-truncation tests can call it unbound.
         """

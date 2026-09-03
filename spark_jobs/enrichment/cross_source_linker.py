@@ -21,7 +21,7 @@ from spark_jobs.utils.rdf_utils import (
     ALERT,
     identifier_namespace,
 )
-from spark_jobs.enrichment.settle import settle
+from spark_jobs.settle import settle
 from spark_jobs.enrichment.intra_source.bls.patterns import (
     BLS_SECTOR_PATTERNS,
 )
@@ -350,7 +350,7 @@ class CrossSourceLinker:
         for df in new_dfs[1:]:
             all_new = all_new.unionByName(df)
 
-        # Truncate the plan before the dedup pass (see spark_jobs.enrichment.settle).
+        # Truncate the plan before the dedup pass (see spark_jobs.settle).
         # Each step above is a join over triples_df, so this union carries five of
         # those subtrees; feeding it straight into dropDuplicates + the anti-join
         # against triples_df makes Catalyst's constraint inference blow the driver
