@@ -117,6 +117,30 @@ def test_the_pool_floor_leaves_room_under_a_healthy_pool(any_profile):
     )
 
 
+def test_the_network_timeout_is_not_raised_past_ten_minutes(any_profile):
+    """600s is the ceiling, not a dial to turn when an executor stalls.
+
+    It was already raised once, from Spark's 120s, to tolerate a 173s stall
+    inside block eviction. The trade is stated in both profiles: a genuinely
+    dead executor also goes undetected for the whole window. On 2026-08-26 a
+    stall outlasted even this and the timeout fired anyway -- so raising it
+    further buys nothing and costs detection. The stall is the thing to
+    remove; #346 removes a cause of it rather than widening the window.
+    """
+    timeout = any_profile["NETWORK_TIMEOUT"]
+    assert timeout.endswith("s"), f"expected seconds, got {timeout!r}"
+    assert int(timeout[:-1]) <= 600, (
+        "raising the network timeout hides a dead executor for longer without "
+        "fixing what stalled it"
+    )
+
+    heartbeat = any_profile["EXECUTOR_HEARTBEAT_INTERVAL"]
+    assert int(heartbeat[:-1]) * 2 <= int(timeout[:-1]), (
+        "the heartbeat has to fit inside the timeout several times over, or a "
+        "live executor is evicted for missing one"
+    )
+
+
 def test_assembly_leaves_the_host_to_the_driver(pyg_assembly):
     """The assembly leg's whole reason for existing as a separate profile.
 
