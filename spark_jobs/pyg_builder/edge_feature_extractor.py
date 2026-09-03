@@ -87,6 +87,8 @@ from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
+from spark_jobs.settle import settle
+
 
 logger = logging.getLogger(__name__)
 
@@ -268,8 +270,8 @@ _SPARSE_ENTRY_BYTES = 20
 # alone is not a sufficient cap: every type contributes its own join
 # subtree to the batch's Catalyst plan, so a few hundred tiny types
 # would satisfy any edge budget while producing a plan large enough to
-# reproduce the plan-size blowup that forced localCheckpoint into the
-# enrichment phases. This caps plan width independently of row count.
+# reproduce the plan-size blowup that forced the enrichment phases to
+# settle. This caps plan width independently of row count.
 _MAX_EDGE_TYPES_PER_BATCH = 8
 
 # Predicate patterns that identify a month or a year property. Hoisted
@@ -1105,14 +1107,14 @@ class EdgeFeatureExtractor:
         )
 
         # Materialize *and truncate* the logical plan, for the same
-        # reason EnrichmentPipeline._settle does. .cache() materializes
+        # reason the enrichment phases settle. .cache() materializes
         # the rows but leaves the plan intact, so every per-edge-type
         # query below re-analyzes the full enrichment lineage on the
         # driver. That analysis is pure driver CPU: flat per edge type,
         # independent of how many edges the type has, and unaffected by
         # how the collects are batched or how the joins are planned.
         # It was the dominant cost of this phase.
-        edges_with_idx = edges_with_idx.localCheckpoint(eager=True)
+        edges_with_idx = settle(edges_with_idx)
 
         # ============================================
         # Pre-extract endpoint literal properties (on executors)
@@ -1342,7 +1344,7 @@ class EdgeFeatureExtractor:
         # Truncate the plan, not just materialize it — this frame is
         # referenced by every edge type's segment-1/2 encoding. See the
         # note on edges_with_idx in build_edge_features.
-        numeric_df = numeric_df.localCheckpoint(eager=True)
+        numeric_df = settle(numeric_df)
         count = numeric_df.count()
         logger.info(
             f"    Endpoint numeric properties: {count:,} "
@@ -1368,7 +1370,7 @@ class EdgeFeatureExtractor:
         Counted per (type, month, year) in a single pass, because
         segment 1 broadcasts the month and year subsets while segment 2
         broadcasts the whole per-type frame. numeric_props_df is already
-        localCheckpointed, so this is one job for the phase.
+        settled, so this is one job for the phase.
 
         Returns node_type -> _PropertyRows. A type absent from the frame
         is absent here too, and reads as zero rows.
@@ -1466,9 +1468,11 @@ class EdgeFeatureExtractor:
         if not small_types:
             return None, set()
 
-        narrow = numeric_props_df.filter(
-            F.col("node_type").isin(sorted(small_types))
-        ).localCheckpoint(eager=True)
+        narrow = settle(
+            numeric_props_df.filter(
+                F.col("node_type").isin(sorted(small_types))
+            )
+        )
 
         kept = narrow.count()
         logger.info(
@@ -1547,7 +1551,7 @@ class EdgeFeatureExtractor:
         )
 
         # Plan truncation, same rationale as numeric_df above.
-        label_df = label_df.localCheckpoint(eager=True)
+        label_df = settle(label_df)
         count = label_df.count()
         logger.info(f"    Endpoint labels: {count:,} (node, label) pairs")
 
@@ -2878,9 +2882,9 @@ class EdgeFeatureExtractor:
         )
         started = time.monotonic()
 
-        materialised = self._aggregate_entries(
-            tagged, (self._TYPE_COL,)
-        ).localCheckpoint(eager=True)
+        materialised = settle(
+            self._aggregate_entries(tagged, (self._TYPE_COL,))
+        )
 
         logger.info(
             f"    Materialised {materialised.count():,} aggregated "
