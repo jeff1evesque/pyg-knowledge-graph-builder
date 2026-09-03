@@ -58,6 +58,13 @@
 #                               (optional, default 0.4) hard cap on the pool as a
 #                               fraction of TOTAL GPU memory. Raising the alloc
 #                               fraction alone cannot grow the pool past this.
+#   RAPIDS_GPU_MIN_ALLOC_FRACTION
+#                               (optional, default 0) floor on the pool as a fraction of
+#                               TOTAL GPU memory. RAPIDS refuses to start an executor
+#                               whose pool lands under it, naming the free memory and
+#                               fraction it used. 0 means no floor, which is how a 67.8
+#                               MB pool started and died on std::bad_alloc; see the note
+#                               below. Must not exceed the alloc fraction.
 #   NETWORK_TIMEOUT             (optional, default 120s) how long the driver waits on an
 #                               unresponsive executor before evicting it. See note below.
 #   EXECUTOR_HEARTBEAT_INTERVAL (optional, default 10s) must stay well under the above.
@@ -384,14 +391,33 @@ fi
 # localCheckpoint blocks it held and aborted the job. Raise both fractions for that run
 # via bin/profiles/large-run.env -- opted into per run, where the host-RAM trade can be
 # weighed against what else is resident -- rather than changing the floor here.
+#
+# THE FLOOR IS THE OTHER HALF OF THIS. Because the pool is sized against memory FREE at
+# startup, an executor that starts while another still holds the card gets a fraction of
+# whatever is left. On 2026-08-26 a replacement started one second after its predecessor
+# was killed, sized 0.08 against almost nothing, came up with a 67.8 MB pool and died on
+# "java.lang.OutOfMemoryError: Could not allocate native memory: std::bad_alloc" -- which
+# names neither the pool nor the reason. minAllocFraction makes RAPIDS refuse that
+# executor at startup instead, and its message gives the free memory, the alloc fraction
+# and the reserve it used. The worker then starts another, by which time the card is
+# actually free. Default 0 keeps every existing caller unchanged; the profiles set it.
 RAPIDS_GPU_ALLOC_FRACTION="${RAPIDS_GPU_ALLOC_FRACTION:-0.25}"
 RAPIDS_GPU_MAX_ALLOC_FRACTION="${RAPIDS_GPU_MAX_ALLOC_FRACTION:-0.4}"
+RAPIDS_GPU_MIN_ALLOC_FRACTION="${RAPIDS_GPU_MIN_ALLOC_FRACTION:-0}"
 if awk "BEGIN{exit !($RAPIDS_GPU_ALLOC_FRACTION > $RAPIDS_GPU_MAX_ALLOC_FRACTION)}"; then
   echo "ERROR: RAPIDS_GPU_ALLOC_FRACTION=${RAPIDS_GPU_ALLOC_FRACTION} exceeds" >&2
   echo "       RAPIDS_GPU_MAX_ALLOC_FRACTION=${RAPIDS_GPU_MAX_ALLOC_FRACTION}." >&2
   echo "       RAPIDS caps the pool at gpu.total * maxAllocFraction, so this either" >&2
   echo "       fails at startup or succeeds only while the GPU is already partly in" >&2
   echo "       use. Lower the alloc fraction, or raise both to widen the cap." >&2
+  exit 2
+fi
+if awk "BEGIN{exit !($RAPIDS_GPU_MIN_ALLOC_FRACTION > $RAPIDS_GPU_ALLOC_FRACTION)}"; then
+  echo "ERROR: RAPIDS_GPU_MIN_ALLOC_FRACTION=${RAPIDS_GPU_MIN_ALLOC_FRACTION} exceeds" >&2
+  echo "       RAPIDS_GPU_ALLOC_FRACTION=${RAPIDS_GPU_ALLOC_FRACTION}." >&2
+  echo "       The floor is a fraction of TOTAL memory and the alloc fraction is of" >&2
+  echo "       FREE, so a floor above it can never be met on a busy GPU and refuses" >&2
+  echo "       every executor. Lower the floor." >&2
   exit 2
 fi
 
@@ -412,7 +438,7 @@ fi
   --conf spark.rapids.sql.batchSizeBytes="${RAPIDS_BATCH_SIZE_BYTES:-1g}" \
   --conf spark.rapids.memory.pinnedPool.size="${RAPIDS_PINNED_POOL:-2G}" \
   --conf spark.rapids.memory.gpu.allocFraction="${RAPIDS_GPU_ALLOC_FRACTION}" \
-  --conf spark.rapids.memory.gpu.minAllocFraction="${RAPIDS_GPU_MIN_ALLOC_FRACTION:-0}" \
+  --conf spark.rapids.memory.gpu.minAllocFraction="${RAPIDS_GPU_MIN_ALLOC_FRACTION}" \
   --conf spark.rapids.memory.gpu.maxAllocFraction="${RAPIDS_GPU_MAX_ALLOC_FRACTION}" \
   --conf spark.rapids.sql.format.parquet.reader.type=MULTITHREADED \
   --conf spark.rapids.sql.explain="${RAPIDS_EXPLAIN:-NONE}" \
