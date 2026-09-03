@@ -67,23 +67,29 @@ def spark(tmp_path_factory):
     """
     from pyspark.sql import SparkSession
 
+    from spark_env import ignore_cluster_conf
+
     warehouse = tmp_path_factory.mktemp("spark_warehouse")
 
-    session = (
-        SparkSession.builder
-        .master("local[2]")
-        .appName("pyg-kg-builder-tests")
-        .config("spark.ui.enabled", "false")
-        .config("spark.sql.shuffle.partitions", "2")
-        .config("spark.sql.warehouse.dir", str(warehouse))
-        .config("spark.driver.host", "127.0.0.1")
-        # Bound driver-side retention so a long session doesn't leak plan
-        # metadata for every executed query.
-        .config("spark.sql.ui.retainedExecutions", "5")
-        .config("spark.ui.retainedJobs", "20")
-        .config("spark.ui.retainedStages", "40")
-        .getOrCreate()
-    )
+    # Without this, a shell that has SPARK_HOME set hands local mode the
+    # cluster's per-task GPU request and the suite hangs here forever. See
+    # tests/spark_env.py.
+    with ignore_cluster_conf():
+        session = (
+            SparkSession.builder
+            .master("local[2]")
+            .appName("pyg-kg-builder-tests")
+            .config("spark.ui.enabled", "false")
+            .config("spark.sql.shuffle.partitions", "2")
+            .config("spark.sql.warehouse.dir", str(warehouse))
+            .config("spark.driver.host", "127.0.0.1")
+            # Bound driver-side retention so a long session doesn't leak plan
+            # metadata for every executed query.
+            .config("spark.sql.ui.retainedExecutions", "5")
+            .config("spark.ui.retainedJobs", "20")
+            .config("spark.ui.retainedStages", "40")
+            .getOrCreate()
+        )
     session.sparkContext.setLogLevel("ERROR")
 
     yield session
