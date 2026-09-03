@@ -11,7 +11,8 @@ the shared local SparkSession and assert the encoded rows at the value level:
   * numeric literals are z-score normalized to the expected value in the numeric
     slot (F.hash(predicate, 500));
   * categorical values set exactly the expected multi-hot slots;
-  * _scatter_all_types places each type's rows at the right node IDs;
+  * _scatter_all_types places each type's rows at the right node IDs, and
+    collects them without caching a second copy of what it was handed (#346);
   * encoding the same fixture repeatedly yields identical vectors — the direct
     regression guard for the jolts_* categorical non-determinism (Issue open).
 
@@ -23,7 +24,7 @@ import json
 
 import numpy as np
 import pytest
-from pyspark.sql import functions as F
+from pyspark.sql import DataFrame, functions as F
 
 from spark_jobs.pyg_builder.node_mapper import NodeMapper
 from spark_jobs.pyg_builder.feature_extractor import (
@@ -403,6 +404,134 @@ def test_scatter_places_each_type_at_its_own_node_ids(spark):
     # are placed at their own node IDs (not swapped across the type boundary).
     assert feats["cpi_Index"][0, slot] < feats["cpi_Index"][1, slot]
     assert np.isfinite(feats["cpi_Series"][0, slot])
+
+
+# ======================================================================
+# Executor memory — the sparse entries are cached once, not twice (#346)
+# ======================================================================
+
+_SPARSE_SCHEMA = "node_type STRING, node_id LONG, dim INT, value FLOAT"
+
+
+def _spy_on_caching(monkeypatch) -> list:
+    """Record every cache/persist made while the returned list is live.
+
+    Both spies delegate to the real call, so the frames really are cached and
+    the path under test behaves normally. cache() and persist() are recorded
+    separately because PySpark's cache() goes straight to the JVM rather than
+    through the Python persist(), so patching one does not catch the other.
+    """
+    calls = []
+    original_cache = DataFrame.cache
+    original_persist = DataFrame.persist
+
+    def spy_cache(self):
+        calls.append("cache")
+        return original_cache(self)
+
+    def spy_persist(self, *args, **kwargs):
+        calls.append("persist")
+        return original_persist(self, *args, **kwargs)
+
+    monkeypatch.setattr(DataFrame, "cache", spy_cache)
+    monkeypatch.setattr(DataFrame, "persist", spy_persist)
+    return calls
+
+
+def test_the_chunked_collect_does_not_cache_the_callers_frame(
+    spark, monkeypatch
+):
+    """_scatter_all_types is handed a cached frame; it must not re-cache it.
+
+    Caching a filter of the all-types frame stores the same rows twice, and on
+    the 2026-08 graph one node type is 10,153,351 of 10,348,460 nodes -- so the
+    second copy is nearly the whole frame, against a 16g executor heap. That is
+    #346: the eviction rounds and the ten-minute executor wedge came out of it.
+    """
+    combined = spark.createDataFrame(
+        [
+            ("big", 0, 1, 1.0),
+            ("big", 1, 2, 1.0),
+            ("big", 2, 3, 1.0),
+            ("small", 0, 4, 1.0),
+        ],
+        schema=_SPARSE_SCHEMA,
+    ).cache()
+
+    extractor = FeatureExtractor(
+        spark,
+        {"feature_config": {"vector_dim": VDIM, "chunk_node_threshold": 2}},
+    )
+
+    calls = _spy_on_caching(monkeypatch)
+    tensors, names = {}, {}
+    extractor._scatter_all_types(
+        combined, [("big", 3), ("small", 1)], VDIM, tensors, names, ["seg"]
+    )
+    monkeypatch.undo()
+
+    assert calls == [], (
+        f"the scatter cached {len(calls)} frame(s) out of one it was already "
+        f"handed cached; on the production graph that is a second copy of "
+        f"~98% of the sparse entries"
+    )
+
+    # Not vacuous: the chunked path really ran, and placed every value.
+    assert tensors["big"].shape == (3, VDIM)
+    assert tensors["small"].shape == (1, VDIM)
+    for node_id, dim in [(0, 1), (1, 2), (2, 3)]:
+        assert tensors["big"][node_id, dim] == pytest.approx(1.0)
+    assert tensors["small"][0, 4] == pytest.approx(1.0)
+
+
+def test_crossing_the_chunk_threshold_adds_no_cache(spark, monkeypatch):
+    """Same data, same result, two paths — the large one costs no extra copy.
+
+    A control rather than an absolute count: build_features legitimately caches
+    several intermediates, and pinning that number would break on any unrelated
+    change. What must not happen is that a type crossing chunk_node_threshold
+    and taking the chunked path adds a cache the batched path does not need.
+    """
+    rows = [
+        ("https://ex/i0", RDF_TYPE, CPI_INDEX),
+        ("https://ex/i1", RDF_TYPE, CPI_INDEX),
+        ("https://ex/i2", RDF_TYPE, CPI_INDEX),
+        ("https://ex/i0", METRIC, "10"),
+        ("https://ex/i1", METRIC, "20"),
+        ("https://ex/i2", METRIC, "30"),
+    ]
+
+    def run(chunk_node_threshold):
+        triples = spark.createDataFrame(
+            rows, schema="subject STRING, predicate STRING, object STRING"
+        )
+        config = {
+            "feature_config": {
+                "vector_dim": VDIM,
+                "chunk_node_threshold": chunk_node_threshold,
+            }
+        }
+        node_id_df, counts = NodeMapper(spark, config).build_node_id_table(
+            triples
+        )
+        calls = _spy_on_caching(monkeypatch)
+        tensors, _ = FeatureExtractor(spark, config).build_features(
+            triples, node_id_df, counts
+        )
+        monkeypatch.undo()
+        return len(calls), {t: v.numpy() for t, v in tensors.items()}
+
+    batched, batched_feats = run(1000)   # 3 nodes <= threshold: small path
+    chunked, chunked_feats = run(2)      # 3 nodes  > threshold: chunked path
+
+    assert chunked == batched, (
+        f"the chunked path made {chunked} cache calls against the batched "
+        f"path's {batched}; the extra copy is the one that wedged an executor"
+    )
+    np.testing.assert_array_equal(
+        chunked_feats["cpi_Index"], batched_feats["cpi_Index"],
+        err_msg="the two collect paths must produce identical features",
+    )
 
 
 # ======================================================================
