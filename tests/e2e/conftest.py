@@ -47,6 +47,8 @@ def _truthy(val) -> bool:
 def spark(tmp_path_factory):
     from pyspark.sql import SparkSession
 
+    from spark_env import ignore_cluster_conf
+
     warehouse = tmp_path_factory.mktemp("spark_warehouse_e2e")
 
     # Pin the executor/worker Python to the *same* interpreter running the
@@ -125,7 +127,10 @@ def spark(tmp_path_factory):
         if rapids_jar:
             builder = builder.config("spark.jars", rapids_jar)
 
-    session = builder.getOrCreate()
+    # A shell with SPARK_HOME set would otherwise hand local mode the cluster's
+    # per-task GPU request and hang here forever. See tests/spark_env.py.
+    with ignore_cluster_conf():
+        session = builder.getOrCreate()
     session.sparkContext.setLogLevel("ERROR")
 
     yield session
