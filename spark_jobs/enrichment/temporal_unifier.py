@@ -63,7 +63,7 @@ from pyspark.sql import functions as F
 from functools import reduce
 from typing import List, Optional
 
-from spark_jobs.enrichment.settle import settle
+from spark_jobs.settle import settle
 from spark_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, UNIFIED, SOURCE_TEMPORAL,
     CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER, WKYENG,
@@ -343,7 +343,7 @@ class TemporalUnifier:
 
         # Union all temporal entities: (temporal_uri, normalized_name, kind)
         #
-        # Truncate the plan here (see spark_jobs.enrichment.settle). all_temporals is a
+        # Truncate the plan here (see spark_jobs.settle). all_temporals is a
         # union of every collector above -- each one a scan of triples_df -- and the
         # three _create_unified_* branches below each build on it, so without this its
         # whole subtree is re-planned into all three and Catalyst's constraint
