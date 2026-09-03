@@ -232,6 +232,58 @@ def test_max_alloc_fraction_is_emitted(tmp_path):
     assert conf.get("spark.rapids.memory.gpu.allocFraction") == "0.25"
 
 
+def test_min_alloc_fraction_defaults_to_no_floor(tmp_path):
+    """Unset means no floor, which is RAPIDS' own default.
+
+    Pinned because the floor refuses executors: turning it on for callers who did
+    not ask would fail runs that currently start.
+    """
+    _, argv, _ = _run(tmp_path, CLUSTER_MASTER)
+
+    assert _conf(argv).get("spark.rapids.memory.gpu.minAllocFraction") == "0"
+
+
+def test_min_alloc_fraction_is_passed_through(tmp_path):
+    """The floor is what turns a 67.8 MB pool into a refusal instead of a
+    std::bad_alloc on the executor's first allocation."""
+    _, argv, _ = _run(
+        tmp_path, CLUSTER_MASTER, RAPIDS_GPU_MIN_ALLOC_FRACTION="0.02",
+    )
+
+    assert _conf(argv).get("spark.rapids.memory.gpu.minAllocFraction") == "0.02"
+
+
+def test_min_alloc_fraction_above_alloc_is_refused_before_submitting(tmp_path):
+    """A floor above the alloc fraction can never be met.
+
+    The floor is a fraction of TOTAL memory and the alloc fraction is of FREE, so
+    once the floor exceeds it every executor is refused as soon as anything else
+    is resident -- which on a unified-memory host is always. That reads as a
+    cluster that will not start rather than as a bad setting.
+    """
+    proc, _, submitted = _run(
+        tmp_path, CLUSTER_MASTER,
+        RAPIDS_GPU_ALLOC_FRACTION="0.08", RAPIDS_GPU_MIN_ALLOC_FRACTION="0.5",
+    )
+
+    assert proc.returncode != 0, "an unmeetable pool floor was submitted anyway"
+    assert not submitted
+    assert "RAPIDS_GPU_MIN_ALLOC_FRACTION" in proc.stderr
+    assert "0.5" in proc.stderr and "0.08" in proc.stderr
+
+
+def test_min_alloc_fraction_equal_to_alloc_is_allowed(tmp_path):
+    """The bound is <=, matching the alloc/max guard above."""
+    proc, argv, submitted = _run(
+        tmp_path, CLUSTER_MASTER,
+        RAPIDS_GPU_ALLOC_FRACTION="0.08", RAPIDS_GPU_MIN_ALLOC_FRACTION="0.08",
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert submitted
+    assert _conf(argv)["spark.rapids.memory.gpu.minAllocFraction"] == "0.08"
+
+
 # ======================================================================
 # RAPIDS batch size — what actually decides how many tasks fit in host RAM
 # ======================================================================
