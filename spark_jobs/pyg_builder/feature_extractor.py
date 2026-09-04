@@ -1186,6 +1186,12 @@ class FeatureExtractor:
             driver heap.
           - Small types are collected in node-count-bounded batches — one
             toPandas per batch instead of one per type.
+
+        Executor-memory discipline (#346): ``combined`` arrives cached, and
+        that is the only copy of these rows the executors should hold. Neither
+        path below may cache what it filters out of it -- one node type is
+        ~98% of the graph, so caching that type's slice is a second copy of
+        nearly the whole frame.
         """
         import torch
 
@@ -1766,19 +1772,27 @@ class FeatureExtractor:
         """
         Collect sparse entries in chunks by node_id range and scatter
         into the pre-allocated dense array incrementally.
+
+        Does not cache (#346). ``combined`` is a filter over the all-types
+        frame the caller already cached, so caching it here stores the same
+        rows twice. The type that takes this path holds 10,153,351 of the
+        graph's 10,348,460 nodes, so the second copy was ~98% of the first and
+        the block manager held roughly two full copies against a 16g heap.
+        That is what the eviction rounds and the wedged executor came out of.
+        Reading the caller's cache costs one predicate per chunk instead.
+
+        The entry total is summed from the chunks. Taking it with a ``count()``
+        first read every row for a log line -- a whole extra pass.
         """
         chunk_size = self._chunk_threshold
-
-        combined = combined.cache()
-        total_entries = combined.count()
+        num_chunks = (num_nodes + chunk_size - 1) // chunk_size
 
         logger.info(
             f"      Chunked collection: {num_nodes:,} nodes, "
-            f"{total_entries:,} sparse entries, "
-            f"chunk size {chunk_size:,}"
+            f"{num_chunks} chunk(s) of {chunk_size:,}"
         )
 
-        num_chunks = (num_nodes + chunk_size - 1) // chunk_size
+        total_entries = 0
 
         for chunk_idx in range(num_chunks):
             lo = chunk_idx * chunk_size
@@ -1791,6 +1805,7 @@ class FeatureExtractor:
             pdf = chunk_df.toPandas()
 
             if not pdf.empty:
+                total_entries += len(pdf)
                 node_ids = pdf["node_id"].values
                 dims = pdf["dim"].values
                 values = pdf["value"].values
@@ -1809,7 +1824,10 @@ class FeatureExtractor:
                     f"(nodes {lo:,}–{hi:,})"
                 )
 
-        combined.unpersist()
+        logger.info(
+            f"      Collected {total_entries:,} sparse entries "
+            f"for {num_nodes:,} nodes"
+        )
 
     # ================================================================
     # Metadata collection helpers
