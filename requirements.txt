@@ -1,7 +1,8 @@
 # Runtime dependencies for the knowledge-graph-builder Spark job.
 #
-# Install into the Spark Python environment on every worker. rdflib is used
-# on executors (Turtle parsing UDF) and the driver; torch / torch-geometric
+# Install into the Spark Python environment on every worker. pyoxigraph parses
+# the Turtle on executors and rdflib defines how the parsed terms are spelled
+# (and relabels blank nodes), so both are needed there; torch / torch-geometric
 # are used on the driver for HeteroData assembly and torch.save; pandas /
 # pyarrow back the driver's Arrow-optimized toPandas() collection in the PyG
 # feature build; boto3 is used on the driver to read optional definitions from
@@ -10,6 +11,7 @@
 # NOTE: install torch / torch-geometric from the wheel index matching your
 # cluster's GPUs and CUDA version (see the PyTorch and PyG install guides).
 # The ceilings below are intentionally open so a CUDA-matched build can be used.
+pyoxigraph>=0.4.0,<0.6.0
 rdflib>=6.0.0,<8.0.0
 torch>=2.5.0
 torch-geometric>=2.6.0
