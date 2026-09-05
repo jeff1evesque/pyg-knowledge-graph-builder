@@ -32,10 +32,12 @@
 #                               system RAM: ~1.0 GB of host RAM per concurrent task at
 #                               this default, on a ~26 GB base. At 144 concurrent tasks
 #                               that asks for ~170 GB on a 121 GiB host and the run dies.
-#                               At 256m all 144 held with 44 GB still free -- more
-#                               headroom than 64 tasks had at 1g. Lower this before
-#                               lowering concurrency; concurrency is not what costs the
-#                               memory.)
+#                               At 256m all 144 held with 44 GB still free -- but the
+#                               parse then took 4,833.8s against 1,408.3s at 64 tasks
+#                               and this default, so shrinking the batch buys survival,
+#                               not speed. The two trade against one host-RAM budget:
+#                               take the most tasks that still fit at 1g rather than
+#                               shrinking the batch to afford more of them.)
 #   RAPIDS_PINNED_POOL          (optional, default 2G)
 #   RAPIDS_EXPLAIN              (optional, default NONE; set ALL to log which
 #                               operators run on GPU vs fall back to CPU)
