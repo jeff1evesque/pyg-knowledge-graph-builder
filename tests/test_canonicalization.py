@@ -326,3 +326,28 @@ def test_entry_point_applies_the_sec_rule(spark, make_triples):
 def test_padding_width_is_the_canonical_cik_width():
     """Ten digits, zero-padded -- the form the SEC states everywhere."""
     assert CIK_DIGITS == 10
+
+
+def test_extra_columns_survive_the_rewrite(spark):
+    """This was a three-column select, and it dropped everything else.
+
+    Whatever the caller had added disappeared without an error, which is why
+    the loader could only stamp SOURCE_COLUMN after this ran and could not hand
+    it a frame carrying object_datatype at all. #375 needs both to pass
+    through. A silent drop here reappears far away -- as markers that never got
+    built, or a stamp that never reached the statistics -- so it is pinned at
+    the point of loss.
+    """
+    df = spark.createDataFrame(
+        [(_UNPADDED, _TYPE, _ISSUER_TYPE, _XSD_DECIMAL, "sec")],
+        schema="subject STRING, predicate STRING, object STRING, "
+               "object_datatype STRING, source_name STRING",
+    )
+
+    result = canonicalize_sec_identifiers(df)
+
+    assert result.columns == df.columns, "the rewrite dropped a caller's column"
+    row = result.collect()[0]
+    assert row["subject"] == _PADDED, "the rewrite itself stopped working"
+    assert row["object_datatype"] == _XSD_DECIMAL
+    assert row["source_name"] == "sec"
