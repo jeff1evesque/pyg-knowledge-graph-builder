@@ -153,6 +153,27 @@ def test_assembly_leaves_the_host_to_the_driver(pyg_assembly):
     assert float(pyg_assembly["RAPIDS_GPU_ALLOC_FRACTION"]) <= 0.12
 
 
+def test_assembly_slots_leave_each_one_a_usable_pool(pyg_assembly):
+    """GPU_PER_TASK and the alloc fraction only work as a pair.
+
+    The slots divide one pool, so halving GPU_PER_TASK halves what each task
+    gets without touching a line that mentions memory. Nothing fails at submit;
+    the leg runs and pays in retries. Going from four slots to eight on
+    2026-09-05 took "maximum pool size exceeded" from 34,571 to 100,024 on one
+    leg and 45,912 to 132,419 on the other, and returned 17% of the wall for
+    it. Eight is where that trade was still worth making.
+
+    A floor rather than an equality -- fewer slots is always safe for the pool.
+    What this refuses is another halving on its own, with the alloc fraction
+    left where it is.
+    """
+    assert float(pyg_assembly["GPU_PER_TASK"]) >= 0.125, (
+        "more than eight slots per executor divides the pool below the ~1.1 GiB "
+        "a slot that was measured; RAPIDS_GPU_ALLOC_FRACTION has to rise with "
+        "it, at the driver's expense, or the slot count stays put"
+    )
+
+
 def test_large_run_is_not_for_assembly(large_run):
     """The assembly leg needs the host for the driver, not the executors.
 
