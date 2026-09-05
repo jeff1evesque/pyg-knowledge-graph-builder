@@ -277,18 +277,25 @@ def canonicalize_sec_identifiers(triples_df: DataFrame) -> DataFrame:
     ``_unify_company_entities`` grouping on two different literals; padding
     only the literal unifies two nodes that stay two nodes.
 
+    Rewrites the two columns in place and CARRIES ANY OTHERS THROUGH. This used
+    to be a three-column ``select``, which silently dropped whatever else the
+    caller had added -- so the loader had to apply this before stamping
+    SOURCE_COLUMN, and could not hand it a frame carrying ``object_datatype``
+    at all. Both rules below read only the columns named in their arguments, so
+    rewriting in place is equivalent to the simultaneous select it replaces.
+
     Args:
-        triples_df: canonical (subject, predicate, object) frame.
+        triples_df: a frame carrying at least (subject, predicate, object).
 
     Returns:
-        The same frame with SEC identifiers in canonical form.
+        The same frame, same columns in the same order, with SEC identifiers in
+        canonical form.
     """
-    return triples_df.select(
-        _canonical_cik_uri(F.col("subject")).alias("subject"),
-        F.col("predicate"),
-        _canonical_identifier_literal(
-            F.col("predicate"), F.col("object")
-        ).alias("object"),
+    return triples_df.withColumn(
+        "subject", _canonical_cik_uri(F.col("subject"))
+    ).withColumn(
+        "object",
+        _canonical_identifier_literal(F.col("predicate"), F.col("object")),
     )
 
 
