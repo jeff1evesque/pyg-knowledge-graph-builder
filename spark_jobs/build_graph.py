@@ -943,8 +943,13 @@ def load_turtle_parquet_to_dataframe(
 
     Returns:
         DataFrame with columns (subject: string, predicate: string,
-        object: string), one row per triple. Compatible with all
-        downstream pipeline steps.
+        object: string, object_datatype: string), one row per triple.
+
+        ``object_datatype`` is the fourth column ON PURPOSE and is not part of
+        the pipeline's canonical schema -- ``load_source_triples`` turns it into
+        marker triples and drops it, the same way it does with SOURCE_COLUMN.
+        This function used to build the markers itself and union them in, which
+        read the parse a second time; see #375 and the note at the return.
 
     Raises:
         ValueError: If no usable Turtle column is found in the Parquet schema.
@@ -1097,11 +1102,16 @@ def load_turtle_parquet_to_dataframe(
         & (F.col("predicate") != "")
     )
 
-    triples_df = parsed_df.select(
-        "subject", "predicate", "object"
-    ).unionByName(literal_datatype_observations(parsed_df))
-
-    return triples_df
+    # Returned with object_datatype still on it, and WITHOUT the datatype
+    # markers unioned in. Building them here read parsed_df a second time, and
+    # nothing had cached it yet, so Spark ran the rdflib UDF over every source
+    # twice: one pass for the three-column projection, another for the marker
+    # branch's distinct(). Measured on the 2026-09-05 run, those two passes were
+    # 9.17 and 9.29 of the load phase's 20.57 task-hours.
+    #
+    # load_source_triples derives the markers once, off the cached frame, and
+    # drops this column -- the same shape it already uses for SOURCE_COLUMN. #375
+    return parsed_df
 
 
 # ============================================
@@ -1352,7 +1362,32 @@ def load_source_triples(
     # whole reason this costs an aggregation instead of a second parse: on real
     # input the parse is ~176s and the aggregation is seconds.
     triples_df = triples_df.cache()
+    # Materialized with its own action, BEFORE the marker frame forks off it.
+    # Assembling the union first and counting once would leave both branches
+    # racing a cache nothing had populated yet, which is exactly the shape #375
+    # was filed about.
     count = triples_df.count()
+
+    # Datatype markers, built once from the cached parse instead of by reading
+    # the source again. Only the turtle loader hands `object_datatype` up here;
+    # load_ntriples_to_dataframe returns the three canonical columns and reads
+    # no datatype at all, so the column's presence is what picks the path.
+    #
+    # SOURCE_COLUMN rides along so per-source accounting charges each marker to
+    # the source that declared it -- which came for free while the loader built
+    # markers per source, and has to be asked for now that the parse is shared.
+    #
+    # Cached and counted here rather than left lazy: the distinct() underneath
+    # is a shuffle over the whole frame, and every downstream action -- the
+    # statistics below, the enrichment phases, the Parquet write -- would
+    # otherwise run it again. One parse and one shuffle, against the two parses
+    # and one shuffle this replaces.
+    if "object_datatype" in triples_df.columns:
+        markers = literal_datatype_observations(
+            triples_df, carry=[SOURCE_COLUMN]
+        ).cache()
+        count += markers.count()
+        triples_df = triples_df.drop("object_datatype").unionByName(markers)
 
     # Checked before the statistics below, which would otherwise aggregate an
     # empty frame on the way to raising anyway.
