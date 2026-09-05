@@ -1162,6 +1162,26 @@ class EdgeFeatureExtractor:
 
         collect_start = time.monotonic()
 
+        # Which types are small is decided by edge count alone, so it is
+        # known before any entries frame is built -- which is what lets
+        # the small types be handed a narrowed edge frame below rather
+        # than the full one.
+        budget = self._max_edges_per_collect(edge_vector_dim)
+        small_keys = [
+            key for key, _ in eligible_types
+            if 0 < edge_indices[key].shape[1] <= budget
+        ]
+        small_edge_count = sum(
+            edge_indices[key].shape[1] for key in small_keys
+        )
+        total_edge_count = sum(
+            index.shape[1] for index in edge_indices.values()
+        )
+
+        small_edges_df = self._narrow_edges_for_small_types(
+            edges_with_idx, small_keys, small_edge_count, total_edge_count
+        )
+
         # (edge_type_key, num_edges, entries_df) awaiting collection
         large: List[Tuple[Tuple[str, str, str], int, DataFrame]] = []
         small: List[Tuple[Tuple[str, str, str], int, DataFrame]] = []
@@ -1187,10 +1207,16 @@ class EdgeFeatureExtractor:
                 numeric_props_df,
             )
 
+            is_small = num_edges <= budget
+
             entries = self._build_edge_type_entries(
                 edge_type_key=edge_type_key,
                 category=category,
-                edges_with_idx=edges_with_idx,
+                edges_with_idx=(
+                    small_edges_df
+                    if is_small and small_edges_df is not None
+                    else edges_with_idx
+                ),
                 numeric_props_df=props_df,
                 label_df=label_df,
                 has_shared_numerics=(
@@ -1212,10 +1238,10 @@ class EdgeFeatureExtractor:
             # question about bytes rather than rows -- the same edge count is
             # a different amount of driver memory at a different
             # edge_vector_dim (#340).
-            if num_edges > self._max_edges_per_collect(edge_vector_dim):
-                large.append((edge_type_key, num_edges, entries))
-            else:
+            if is_small:
                 small.append((edge_type_key, num_edges, entries))
+            else:
+                large.append((edge_type_key, num_edges, entries))
 
         # Large types stay on the streaming path, collected one at a
         # time by edge_idx range. This preserves the #186 driver-memory
@@ -1252,7 +1278,8 @@ class EdgeFeatureExtractor:
 
         # Cleanup cached intermediates
         edges_with_idx.unpersist()
-        for df in [numeric_props_df, narrow_props_df, label_df]:
+        for df in [numeric_props_df, narrow_props_df, label_df,
+                   small_edges_df]:
             if df is not None:
                 try:
                     df.unpersist()
@@ -1483,6 +1510,87 @@ class EdgeFeatureExtractor:
         )
 
         return narrow, small_types
+
+    def _narrow_edges_for_small_types(
+        self,
+        edges_with_idx: DataFrame,
+        small_keys: List[Tuple[str, str, str]],
+        small_edges: int,
+        total_edges: int,
+    ) -> Optional[DataFrame]:
+        """
+        Materialise one frame holding only the edges of the small types.
+
+        Same move as _narrow_numeric_props, on the other frame the
+        encoders scan. Each small type filters the resolved edge frame
+        down to its own triple, and each of those filters is a full scan
+        of it. The scans multiply twice over: by edge type, and again by
+        how many times a type's three segments reference their edge
+        frame.
+
+        Measured on the 2026-09-04 run, where the union carried 60 small
+        types: 78,065,931,890 rows scanned in one stage, which is about
+        1,090 passes over a 71,620,121-row frame -- 71 minutes, the
+        longest single stage in the pipeline. The 60 types hold 57,811
+        edges between them, so better than 99.9% of those rows were read
+        and discarded.
+
+        Narrowing does not make the plan narrower; the per-type filters
+        still happen. It gives them a frame of tens of thousands of rows
+        to scan instead of tens of millions.
+
+        The large types are deliberately NOT in the frame. They stay on
+        the chunked path, one Spark job each, where a scan is not
+        multiplied by anything -- and they are the types that hold nearly
+        every edge, so putting them in would be narrowing to the whole
+        frame.
+
+        Returns None when there is nothing to gain, and the caller then
+        uses the full frame throughout.
+        """
+        if not small_keys:
+            return None
+
+        # Narrowing costs one pass over the full frame plus a settle. When
+        # the small types hold most of the edges there is nothing on the
+        # other side of that trade -- the "narrow" frame would be the full
+        # one, written twice.
+        if total_edges <= 0 or small_edges * 2 >= total_edges:
+            logger.info(
+                f"    Small edge types hold {small_edges:,} of "
+                f"{total_edges:,} edges, too many to be worth narrowing; "
+                f"the per-type filters read the full frame"
+            )
+            return None
+
+        keys_df = self.spark.createDataFrame(
+            sorted(small_keys),
+            schema="src_type STRING, relation STRING, dst_type STRING",
+        )
+
+        # left_semi, so the result carries the edge frame's columns and
+        # nothing of the key frame. The select afterwards is not tidying:
+        # a join on named keys emits those keys FIRST, so without it the
+        # narrowed frame has the same columns in a different order from
+        # the frame it replaces, and any positional read of a row -- here
+        # or in anything that later reads one of these frames -- silently
+        # takes the wrong field.
+        narrow = settle(
+            edges_with_idx.join(
+                F.broadcast(keys_df),
+                on=["src_type", "relation", "dst_type"],
+                how="left_semi",
+            ).select(*edges_with_idx.columns)
+        )
+
+        kept = narrow.count()
+        logger.info(
+            f"    Edges narrowed to the {len(small_keys)} small type(s): "
+            f"{kept:,} of {total_edges:,} rows, which is what their "
+            f"per-type filters now scan"
+        )
+
+        return narrow
 
     def _props_for(
         self,
