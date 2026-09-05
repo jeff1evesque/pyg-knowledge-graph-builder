@@ -849,6 +849,213 @@ def deterministic_bnode_labels(graph, rounds: int = 3) -> dict:
 
 
 # ============================================
+# Turtle blob → the UDF's four columns
+# ============================================
+# rdflib parses Turtle in pure Python, and profiling the UDF on real blobs
+# (2026-09-05, 13,024 blobs across all four sources) put 88% of its time inside
+# g.parse(): 578 us of a 656 us blob for market, and the same share everywhere.
+# Graph() construction was 0.4%, the blank-node relabel 4.5%, the emit loop 5.8%
+# and pickling the result 1.1%. So the parser is the phase, and a faster one is
+# the only change with room in it.
+#
+# pyoxigraph is that parser -- Rust, and a wheel, so it travels to executors
+# through requirements-executor.txt like any other dependency. Measured on the
+# same blobs it is 10-13x on the whole UDF, not just the parse, because dropping
+# rdflib also drops a Graph and three term objects per triple.
+#
+# WHAT MUST NOT CHANGE is what the rows say: these strings are hashed into
+# feature slots, so a different spelling is a different graph. rdflib still
+# defines that spelling -- see _literal_columns, which borrows rdflib's own
+# lexical-to-Python table rather than restating it.
+_LEXICAL_TO_PYTHON: Optional[dict] = None
+
+RDF_LANG_STRING = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString"
+
+
+def _lexical_converters() -> dict:
+    """rdflib's lexical→Python table, re-keyed by plain string.
+
+    THE RE-KEYING IS THE POINT. rdflib keys it by ``URIRef``, and ``URIRef``
+    overrides ``__hash__``, so a lookup with an ordinary string never finds a
+    ``URIRef`` entry -- it misses silently and the caller keeps the lexical
+    form. Measured while building this: every boolean came out ``"false"``
+    instead of ``"False"`` and every ``xsd:dateTime`` kept its ``T`` where
+    ``str(datetime)`` puts a space. Both are hashed into feature slots.
+
+    Built once per worker process rather than per row.
+    """
+    global _LEXICAL_TO_PYTHON
+    if _LEXICAL_TO_PYTHON is None:
+        from rdflib.term import XSDToPython
+
+        _LEXICAL_TO_PYTHON = {
+            str(datatype): convert
+            for datatype, convert in XSDToPython.items()
+            if datatype is not None and convert is not None
+        }
+    return _LEXICAL_TO_PYTHON
+
+
+def _literal_columns(literal) -> Tuple[str, str]:
+    """``(object, object_datatype)`` for one literal, spelled as rdflib spells it.
+
+    Mirrors ``str(Literal.toPython())`` exactly, including the two cases that
+    are easy to get wrong: an unconvertible datatype and an ill-typed value both
+    keep the lexical form, because rdflib's ``toPython()`` hands back the
+    ``Literal`` itself when ``.value`` is ``None``.
+    """
+    datatype = literal.datatype.value if literal.datatype is not None else None
+
+    # rdflib reports a language-tagged literal's datatype as None rather than
+    # rdf:langString, and this column has always followed rdflib.
+    if datatype is None or datatype == RDF_LANG_STRING:
+        return literal.value, ""
+
+    # ONE PLACE THIS CANNOT FOLLOW RDFLIB, and it is RDF 1.1's doing: a plain
+    # literal and an ^^xsd:string literal are the same term, so pyoxigraph
+    # reports xsd:string for both while rdflib reports it only for the second.
+    # Reporting it is the reading that leaves this corpus untouched -- every
+    # string literal in it is written ^^xsd:string in the source text (measured
+    # 2026-09-05: 3,461 of 3,461 on SEC, 1,744 of 1,744 on NOAA), so erasing
+    # xsd:string here would strip a marker off every one of them. What changes
+    # is only a source that ships a bare "literal": it now contributes an
+    # xsd:string observation where it used to contribute none.
+
+    convert = _lexical_converters().get(datatype)
+    if convert is None:
+        return literal.value, datatype
+    try:
+        value = convert(literal.value)
+    except Exception:
+        return literal.value, datatype
+    return (literal.value if value is None else str(value)), datatype
+
+
+def _blank_node_labels(triples) -> dict:
+    """Content-derived blank-node labels, keyed by pyoxigraph's node id.
+
+    Delegates to ``deterministic_bnode_labels`` so there is one definition of
+    what a label means, which costs building an rdflib graph -- about what the
+    whole fast path costs. Paid only by blobs that actually carry a blank node:
+    a full day of all four sources shipped none (measured 2026-09-05), and the
+    e2e fixtures do, so the branch stays covered.
+    """
+    from pyoxigraph import BlankNode, NamedNode
+
+    if not any(
+        isinstance(term, BlankNode)
+        for triple in triples
+        for term in (triple.subject, triple.object)
+    ):
+        return {}
+
+    from rdflib import BNode, Graph, Literal, URIRef
+
+    def to_rdflib(term):
+        if isinstance(term, NamedNode):
+            return URIRef(term.value)
+        if isinstance(term, BlankNode):
+            return BNode(term.value)
+        if term.language:
+            return Literal(term.value, lang=term.language)
+        if term.datatype is not None:
+            return Literal(term.value, datatype=URIRef(term.datatype.value))
+        return Literal(term.value)
+
+    graph = Graph()
+    for triple in triples:
+        graph.add(
+            (
+                to_rdflib(triple.subject),
+                to_rdflib(triple.predicate),
+                to_rdflib(triple.object),
+            )
+        )
+
+    return {
+        str(bnode): label
+        for bnode, label in deterministic_bnode_labels(graph).items()
+    }
+
+
+def turtle_rows_or_skip(turtle_str: str) -> List[dict]:
+    """``turtle_to_rows`` with the UDF's error policy, which is not "everything".
+
+    A malformed blob contributes nothing and the run continues -- that is
+    deliberate, and the zero-triple contribution shows up in the count logged
+    after loading. A MISSING PARSER IS NOT A MALFORMED BLOB. Executors run a
+    venv packaged separately from this repo (``requirements-executor.txt`` via
+    ``bin/package_venv.sh``), so shipping code that imports something the
+    archive does not carry is a real way to be wrong -- and under a blanket
+    ``except`` it is invisible: every row answers "no triples", the job
+    succeeds, and the graph is empty.
+
+    Kept out of the UDF closure so the policy can be tested without a cluster.
+    """
+    if not turtle_str or not turtle_str.strip():
+        return []
+    try:
+        return turtle_to_rows(turtle_str)
+    except ImportError:
+        raise
+    except Exception:
+        return []
+
+
+def turtle_to_rows(turtle_str: str) -> List[dict]:
+    """One self-contained Turtle blob → the rows the UDF returns.
+
+    Raises rather than swallowing a parse error; the UDF is what decides that a
+    malformed blob contributes nothing.
+    """
+    from pyoxigraph import BlankNode, NamedNode, RdfFormat, parse
+
+    # An rdflib Graph is a SET, so a blob stating the same triple twice
+    # contributed it once. pyoxigraph streams the document and would emit both,
+    # which would move every triple count the pipeline reports.
+    seen = set()
+    triples = []
+    for triple in parse(turtle_str, format=RdfFormat.TURTLE):
+        if triple in seen:
+            continue
+        seen.add(triple)
+        triples.append(triple)
+
+    labels = _blank_node_labels(triples)
+
+    rows = []
+    for triple in triples:
+        subject = triple.subject
+        if isinstance(subject, NamedNode):
+            subj = subject.value
+        elif isinstance(subject, BlankNode):
+            subj = f"_:{labels[subject.value]}"
+        else:
+            # Not reachable from well-formed Turtle; the rdflib version skipped
+            # these rather than guessing, so this one does too.
+            continue
+
+        obj_term = triple.object
+        if isinstance(obj_term, NamedNode):
+            obj, datatype = obj_term.value, ""
+        elif isinstance(obj_term, BlankNode):
+            obj, datatype = f"_:{labels[obj_term.value]}", ""
+        else:
+            obj, datatype = _literal_columns(obj_term)
+
+        rows.append(
+            {
+                "subject": subj,
+                "predicate": triple.predicate.value,
+                "object": obj,
+                "object_datatype": datatype,
+            }
+        )
+
+    return rows
+
+
+# ============================================
 # Turtle Parquet parsing (source Parquet → triples DataFrame)
 # ============================================
 # Column names a Turtle Parquet source may use for its blob, in preference
@@ -975,20 +1182,23 @@ def load_turtle_parquet_to_dataframe(
     # ============================================
     # UDF: parse one Turtle blob → list of (s, p, o) structs
     # ============================================
-    # rdflib is used here because Turtle has prefix resolution,
+    # A real parser is used here because Turtle has prefix resolution,
     # predicate lists (;), object lists (,), and typed literals that
     # cannot be correctly parsed with regex. The UDF runs per-row on
     # executors — each blob is small (~60 triples), so the per-row
     # overhead is acceptable. All downstream operations remain
     # pure Spark expressions.
     #
+    # The parsing itself is turtle_to_rows(); read the note above it for why
+    # it is pyoxigraph rather than rdflib, and for what rdflib still decides.
+    #
     # Object normalization matches the pipeline convention established
     # in load_ntriples_to_dataframe():
-    #   - URIRef  → str(uri)
+    #   - URI     → the URI
     #   - Literal → str(literal.toPython()) for numerics,
-    #               str(literal) for strings (lexical form, no ^^datatype)
+    #               the lexical form for strings (no ^^datatype)
     #   - BNode   → f"_:{content_hash}" (see deterministic_bnode_labels;
-    #               rdflib's own labels are random per parse, which made the
+    #               a parser's own labels are per-parse, which made the
     #               whole pipeline non-reproducible)
     #
     # Malformed blobs return an empty list so that parse errors skip
@@ -1014,72 +1224,9 @@ def load_turtle_parquet_to_dataframe(
         Parse a self-contained Turtle string into a list of
         (subject, predicate, object) dicts with fully-expanded URIs.
         """
-        if not turtle_str or not turtle_str.strip():
-            return []
-
-        try:
-            from rdflib import Graph, URIRef, Literal, BNode
-
-            g = Graph()
-            g.parse(data=turtle_str, format="turtle")
-
-            # rdflib's blank-node labels are random per parse, so emitting them
-            # verbatim made the whole pipeline non-reproducible (they end up
-            # hashed into feature slots). Relabel by content instead.
-            bnode_labels = deterministic_bnode_labels(g)
-
-            triples = []
-            for s, p, o in g:
-                # Subject
-                if isinstance(s, URIRef):
-                    subj = str(s)
-                elif isinstance(s, BNode):
-                    subj = f"_:{bnode_labels[s]}"
-                else:
-                    # Skip unexpected subject types (should not occur
-                    # in well-formed Turtle)
-                    continue
-
-                # Predicate — always a URIRef in valid RDF
-                pred = str(p)
-
-                # Object — normalize to pipeline convention
-                datatype = ""
-                if isinstance(o, URIRef):
-                    obj = str(o)
-                elif isinstance(o, BNode):
-                    obj = f"_:{bnode_labels[o]}"
-                elif isinstance(o, Literal):
-                    # toPython() returns a Python native type for
-                    # numeric/date XSD types; str() of that matches
-                    # what the pipeline expects for numeric literals.
-                    # For plain strings, str(literal) returns the
-                    # lexical form without ^^datatype or @lang.
-                    py_val = o.toPython()
-                    obj = str(py_val)
-                    # ...which is exactly why the datatype has to be taken
-                    # off the Literal here: toPython() is where the source's
-                    # ^^<xsd:...> declaration stops existing, and it is the
-                    # only evidence of a literal property's rdfs:range.
-                    if o.datatype is not None:
-                        datatype = str(o.datatype)
-                else:
-                    obj = str(o)
-
-                triples.append({
-                    "subject": subj,
-                    "predicate": pred,
-                    "object": obj,
-                    "object_datatype": datatype,
-                })
-
-            return triples
-
-        except Exception:
-            # Malformed Turtle — skip this row silently.
-            # The zero-triple contribution will be visible in the
-            # final triple count logged after loading.
-            return []
+        # Malformed Turtle — skip that row silently; a missing parser — fail the
+        # job. See turtle_rows_or_skip for why those are not the same thing.
+        return turtle_rows_or_skip(turtle_str)
 
     # ============================================
     # Apply UDF and explode into one row per triple
