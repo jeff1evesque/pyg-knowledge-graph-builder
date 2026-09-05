@@ -48,7 +48,9 @@ def collect_sorted(df: DataFrame) -> List:
     return sorted(df.collect(), key=lambda row: tuple(str(v) for v in row))
 
 
-def literal_datatype_observations(parsed_df: DataFrame) -> DataFrame:
+def literal_datatype_observations(
+    parsed_df: DataFrame, carry: Optional[List[str]] = None
+) -> DataFrame:
     """Marker triples recording the XSD datatype each predicate's literals carry.
 
     ``(predicate, prov:observedLiteralDatatype, datatype_uri)``, deduplicated —
@@ -70,12 +72,14 @@ def literal_datatype_observations(parsed_df: DataFrame) -> DataFrame:
 
     THE COALESCE IS NOT A TIDY-UP. ``distinct()`` is a shuffle, and a shuffle
     lands on ``spark.sql.shuffle.partitions`` -- 200 by default -- however few
-    rows come out of it. The loader unions this frame into the triples for its
-    source, and a union's partition count is the sum of its children's, so each
-    source contributed 200 partitions of a few-hundred-row frame on top of its
-    file-scan partitions. Measured on five sources: 160 scan partitions and
-    1,000 of these, and every stage that read the cached frame inherited all
-    1,160.
+    rows come out of it. The loader used to union this frame into the triples
+    for each source, and a union's partition count is the sum of its children's,
+    so each source contributed 200 partitions of a few-hundred-row frame on top
+    of its file-scan partitions. Measured on five sources: 160 scan partitions
+    and 1,000 of these, and every stage that read the cached frame inherited all
+    1,160. Since #375 the union happens once, after the cache, so the 200 arrive
+    once instead of per source -- which shrinks the problem but does not remove
+    it, and the coalesce still costs nothing.
 
     Measured on a cluster run, not estimated: this took the seed leg from
     661,509 tasks to 151,808, and its wall clock from 174.5 to 168.2 minutes.
@@ -96,8 +100,16 @@ def literal_datatype_observations(parsed_df: DataFrame) -> DataFrame:
         parsed_df: a frame carrying at least ``predicate`` and
             ``object_datatype`` (empty string where the literal declared none,
             which is how ``regexp_extract`` reports no match).
+        carry: extra columns to copy onto each marker row and include in the
+            deduplication. ``load_source_triples`` passes the source stamp, so
+            two sources declaring the same (predicate, datatype) still produce
+            one marker each and per-source accounting charges each to its own
+            source -- which is what happened for free when this ran per source,
+            inside the loader, before the parse was shared (#375).
     """
     from spark_jobs.utils.rdf_utils import PROV_OBSERVED_LITERAL_DATATYPE
+
+    extra = [F.col(name) for name in (carry or [])]
 
     return (
         parsed_df
@@ -106,6 +118,7 @@ def literal_datatype_observations(parsed_df: DataFrame) -> DataFrame:
             F.col("predicate").alias("subject"),
             F.lit(PROV_OBSERVED_LITERAL_DATATYPE).alias("predicate"),
             F.col("object_datatype").alias("object"),
+            *extra,
         )
         .distinct()
         .coalesce(1)

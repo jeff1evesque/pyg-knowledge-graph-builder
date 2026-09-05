@@ -139,7 +139,14 @@ def test_the_committed_fixtures_declare_datatypes(spark):
 # ======================================================================
 
 def test_turtle_parquet_preserves_datatypes(spark, tmp_path):
-    """`Literal.toPython()` is where the declaration used to be lost."""
+    """`Literal.toPython()` is where the declaration used to be lost.
+
+    The loader reports the declaration in `object_datatype` and no longer
+    builds the marker triples itself -- doing that read the parse a second time
+    (#375), so they are assembled from the cached frame in
+    `load_source_triples` instead. What this test guards is the reading of the
+    declaration, which is the part that was hard to get right.
+    """
     pytest.importorskip("rdflib")
     from spark_jobs.build_graph import load_turtle_parquet_to_dataframe
 
@@ -154,11 +161,106 @@ def test_turtle_parquet_preserves_datatypes(spark, tmp_path):
 
     df = load_turtle_parquet_to_dataframe(spark, str(pq))
 
-    assert (PRED, f"{XSD}decimal") in _markers(df)
-    # rdflib types a bare Turtle string as xsd:string, so <name> gets an
-    # observation too — correct, and it is what makes string-valued
-    # properties rangeable at all.
-    assert (SUBJ, PRED, "1.5") in _data(df)
+    assert "object_datatype" in df.columns
+    rows = {
+        (r["subject"], r["predicate"], r["object"], r["object_datatype"])
+        for r in df.collect()
+    }
+    assert (SUBJ, PRED, "1.5", f"{XSD}decimal") in rows
+    # A bare Turtle string declares nothing: rdflib reports
+    # Literal("alpha").datatype as None, the UDF only fills the column when it
+    # is not None, and no marker comes from the row. The comment that used to
+    # sit here said rdflib types it as xsd:string and that <name> picked up an
+    # observation too -- it asserted neither, and it is not what rdflib does.
+    # test_a_plain_literal_produces_no_observation pins the same rule for the
+    # N-Triples loader.
+    assert (SUBJ, "https://ex/name", "alpha", "") in rows
+    # ...and the markers are not built here any more.
+    assert _markers(df) == set()
+
+
+def test_carried_columns_ride_along_and_narrow_the_dedup(spark):
+    """Two sources declaring the same pair must still produce one marker each.
+
+    While the loader built markers per source, that came for free -- each frame
+    only ever held one source's rows. Sharing the parse (#375) merged them, so
+    the source has to enter the distinct() explicitly or the two collapse into
+    one and per-source accounting loses a row.
+    """
+    from spark_jobs.utils.spark_rdf_utils import literal_datatype_observations
+
+    parsed = spark.createDataFrame(
+        [
+            (SUBJ, PRED, "1.5", f"{XSD}decimal", "sec"),
+            (SUBJ, PRED, "2.5", f"{XSD}decimal", "sec"),
+            (SUBJ, PRED, "3.5", f"{XSD}decimal", "bls"),
+        ],
+        schema="subject STRING, predicate STRING, object STRING, "
+               "object_datatype STRING, source_name STRING",
+    )
+
+    markers = literal_datatype_observations(parsed, carry=["source_name"])
+
+    assert {(r["subject"], r["object"], r["source_name"]) for r in markers.collect()} == {
+        (PRED, f"{XSD}decimal", "sec"),
+        (PRED, f"{XSD}decimal", "bls"),
+    }
+    # ...and without the carry it is one row, which is the collapse above.
+    assert literal_datatype_observations(parsed).count() == 1
+
+
+def test_markers_survive_the_shared_parse_and_stay_attributed(spark, tmp_path):
+    """Everything the per-source build used to give the turtle path for free.
+
+    #375 moved marker construction out of the loader and behind the cache, so
+    the properties that came from building them per source are the ones to
+    re-check: they still exist, each is still charged to the source that
+    declared it, the reported count still includes them, and `object_datatype`
+    does not escape into the three-column frame every downstream stage expects.
+    """
+    pytest.importorskip("rdflib")
+    from spark_jobs.build_graph import JobConfig, load_source_triples
+
+    # bls and noaa, not sec: a sec path has to name feed=filings and this test
+    # is not about that guard.
+    sources = {"bls": f"{XSD}decimal", "noaa": f"{XSD}integer"}
+    paths = []
+    for index, (name, datatype) in enumerate(sources.items()):
+        turtle = f'<{SUBJ}{index}> <{PRED}> "{index + 1}"^^<{datatype}> .\n'
+        path = tmp_path / f"source={name}" / "src"
+        spark.createDataFrame(
+            [(turtle,)], schema="triples STRING"
+        ).write.parquet(str(path))
+        paths.append(str(path))
+
+    config = JobConfig({
+        "mode": "enrichment_only",
+        "source_paths": ",".join(paths),
+        "source_format": "turtle_parquet",
+        "local_work_dir": str(tmp_path / "work"),
+        "time_period": "2026-09",
+    })
+
+    triples_df, count, stats = load_source_triples(spark, config)
+
+    assert triples_df.columns == ["subject", "predicate", "object"], (
+        f"loader returned {triples_df.columns}; object_datatype escaped and "
+        "every downstream stage now receives a frame it does not expect"
+    )
+    assert _markers(triples_df) == {
+        (PRED, f"{XSD}decimal"),
+        (PRED, f"{XSD}integer"),
+    }
+    # One data triple and one marker charged to each source, and the reported
+    # count covers the markers the same way it did when the loader unioned them
+    # in. Asserted on the shape rather than the two labels: which paths
+    # source_label recognises is a separate question, and test_per_source_stats
+    # already owns it.
+    assert len(stats["sources"]) == 2, stats["sources"]
+    assert all(s["rows_contributed"] == 2 for s in stats["sources"].values()), (
+        stats["sources"]
+    )
+    assert count == 4
 
 
 # ======================================================================
