@@ -87,6 +87,30 @@ def test_uncapped_slots_require_a_lowered_batch_size(large_run):
         assert batch != "1g", "the default is the value that does not fit"
 
 
+def test_parse_slots_fit_what_the_host_can_feed(large_run):
+    """Slots are bounded by host RAM here, not by the pool.
+
+    A concurrent task costs ~1.0 GB of host RAM at the 1g batch, on a ~26 GB
+    base, so what limits the parse is the host. Measured on one day, nothing
+    else changed: 64 slots parsed in 1,408.3s and completed; 144 -- which is
+    what GPU_PER_TASK=0 asks for -- parsed in 1,570.9s and then exhausted the
+    host and lost the run. Faster is not the same as survivable, and 144 was
+    not even faster.
+
+    A floor rather than an equality: fewer slots is always safe for the host.
+    The two implications above are what to satisfy if this profile ever goes
+    back to 0; this pins that it currently does not.
+    """
+    assert float(large_run["GPU_PER_TASK"]) >= 0.03125, (
+        "more than 32 slots per executor asks for more host RAM than the "
+        "budget at the top of the profile accounts for; move that budget first"
+    )
+    assert int(large_run["GPU_PER_EXECUTOR"]) >= 1, (
+        "the fraction above only caps slots while an executor declares a GPU; "
+        "with 0 the slot count falls back to the advertised cores"
+    )
+
+
 def test_the_pool_floor_is_reachable(any_profile):
     """A floor above the alloc fraction refuses every executor.
 
