@@ -21,7 +21,7 @@ import itertools
 from rdflib.namespace import RDF, RDFS
 
 from spark_jobs.utils.rdf_utils import (
-    CPI, MARKET_QUOTES, BLS_ENRICHMENT, identifier_namespace,
+    CPI, MARKET_QUOTES, WKYENG, BLS_ENRICHMENT, identifier_namespace,
 )
 from spark_jobs.enrichment.intra_source.bls_linker import (
     BLSIntraSourceLinker,
@@ -48,8 +48,15 @@ FOOD_SECTOR = str(BLS_ENRICHMENT.FoodSector)
 HAS_PARENT = str(BLS_ENRICHMENT.hasParent)
 
 
+WK_QUARTERLY_EARNINGS = str(WKYENG.QuarterlyEarningsData)
+WK_HAS_SEX = str(WKYENG.hasSex)
+WK_HAS_QUARTER = str(WKYENG.hasQuarter)
+WK_HAS_YEAR = str(WKYENG.hasYear)
+
+
 CPI_ID = identifier_namespace(str(CPI))
 MARKET_ID = identifier_namespace(str(MARKET_QUOTES))
+WKYENG_ID = identifier_namespace(str(WKYENG))
 
 
 def _cpi(local):
@@ -66,6 +73,27 @@ def _cpi(local):
     of with the data.
     """
     return f"{CPI_ID}{local}"
+
+
+def _wk(local):
+    """Build a wkyeng INDIVIDUAL uri string, the quarterly counterpart of _cpi."""
+    return f"{WKYENG_ID}{local}"
+
+
+def _earnings_entity(rows, entity_local, category_uri, quarter, year):
+    """Append the triples for one wkyeng QuarterlyEarningsData measurement.
+
+    `quarter` is spliced into the URI, so a caller can pass "Q2" or a nested
+    "2024/Q2" to exercise what the last-segment extraction actually sees.
+    """
+    entity = _wk(entity_local)
+    rows.extend([
+        (entity, RDF_TYPE, WK_QUARTERLY_EARNINGS),
+        (entity, WK_HAS_SEX, category_uri),
+        (entity, WK_HAS_QUARTER, _wk(quarter)),
+        (entity, WK_HAS_YEAR, _wk(year)),
+    ])
+    return entity
 
 
 def _index_entity(rows, entity_local, category_uri, month, year):
@@ -122,6 +150,69 @@ def test_temporal_sequence_orders_by_time(spark, make_triples):
     assert (_cpi("Food_Dec2024_Index"), _cpi("Food_Jan2025_Index")) in precedes
     assert len(precedes) == 2
     assert all(r["predicate"] == PRECEDES for r in result.collect())
+
+
+def test_temporal_sequence_orders_quarterly_data(spark, make_triples):
+    """
+    Four wkyeng measurements in one category link Q1 -> Q2 -> Q3 -> Q4.
+
+    Every other test in this section uses cpi, which is monthly, so the
+    quarterly branch of BLSDatasetEnricher was never reached. #380 rewrote both
+    branches from a "[/]([^/]+)$" regexp_extract to substring_index -- RAPIDS
+    will not put an end anchor after a variable-length match on the GPU -- and
+    the monthly half was covered by the tests above while this half was not.
+
+    The quarter name has to survive that extraction: it is joined against
+    QUARTER_ORDER to get the sort key, and the join is an inner one. Extract the
+    wrong substring and the join matches nothing, no chain is built, and the
+    result is None rather than a wrong answer.
+    """
+    category = _wk("Women")
+    rows = []
+    _earnings_entity(rows, "Women_2024Q3_Earnings", category, "Q3", "2024")
+    _earnings_entity(rows, "Women_2024Q1_Earnings", category, "Q1", "2024")
+    _earnings_entity(rows, "Women_2024Q4_Earnings", category, "Q4", "2024")
+    _earnings_entity(rows, "Women_2024Q2_Earnings", category, "Q2", "2024")
+
+    result = BLSDatasetEnricher(spark, "wkyeng").link_temporal_sequences(
+        make_triples(rows)
+    )
+    assert result is not None, "quarter extraction produced no join match"
+
+    precedes = [
+        (r["subject"], r["object"])
+        for r in result.filter("predicate = '%s'" % PRECEDES).collect()
+    ]
+    # Chronological regardless of input order.
+    assert (_wk("Women_2024Q1_Earnings"), _wk("Women_2024Q2_Earnings")) in precedes
+    assert (_wk("Women_2024Q2_Earnings"), _wk("Women_2024Q3_Earnings")) in precedes
+    assert (_wk("Women_2024Q3_Earnings"), _wk("Women_2024Q4_Earnings")) in precedes
+    assert len(precedes) == 3
+
+
+def test_quarter_name_comes_from_the_last_uri_segment(spark, make_triples):
+    """
+    A quarter URI with extra path segments still resolves to its last one.
+
+    This is the property the rewrite actually depends on, stated on its own so
+    a future change to the extraction fails here rather than silently returning
+    an unlinked graph. A URI of .../id/wkyeng/2024/Q2 must read as "Q2".
+    """
+    category = _wk("Men")
+    rows = []
+    _earnings_entity(rows, "Men_A_Earnings", category, "2024/Q1", "2024")
+    _earnings_entity(rows, "Men_B_Earnings", category, "2024/Q2", "2024")
+
+    result = BLSDatasetEnricher(spark, "wkyeng").link_temporal_sequences(
+        make_triples(rows)
+    )
+    assert result is not None, "a nested quarter URI broke the extraction"
+
+    precedes = [
+        (r["subject"], r["object"])
+        for r in result.filter("predicate = '%s'" % PRECEDES).collect()
+    ]
+    assert precedes == [(_wk("Men_A_Earnings"), _wk("Men_B_Earnings"))]
 
 
 def test_temporal_sequence_partitioned_by_category(spark, make_triples):
