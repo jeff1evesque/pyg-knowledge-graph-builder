@@ -211,6 +211,47 @@ def test_enrich_produces_temporal_sector_and_hierarchy(spark, make_triples):
     assert (child, HAS_PARENT, parent) in triples
 
 
+def test_hierarchy_skips_a_missing_generation(spark, make_triples):
+    """
+    A child whose immediate parent does not exist links to its grandparent,
+    and a child with no ancestor at all links to nothing.
+
+    This pins the depth-2 branch of _link_category_hierarchies, which nothing
+    reached before. #380 rewrote that branch from a "_[^_]+$" regexp_replace to
+    substring_index so it can run on the GPU, and the point of the test is that
+    the output does not move: it passes on both spellings.
+
+    It does NOT exercise the length guard on parent_path_d2. Removing that guard
+    and re-running this test still passes, because an empty candidate path is
+    already dropped by the inner join against existing paths -- no entity has an
+    empty path. The guard stays as cheap insurance, not as a behaviour change.
+    """
+    grandparent = _cpi("All_items_Entity")            # path All_items
+    child = _cpi("All_items_Food_Home_Entity")        # path All_items_Food_Home
+    orphan = _cpi("Housing_Rent_Entity")              # path Housing_Rent
+
+    rows = [
+        (grandparent, RDFS_LABEL, "All items"),
+        (child, RDFS_LABEL, "Food at home"),
+        (orphan, RDFS_LABEL, "Rent"),
+    ]
+    # All_items_Food_Entity is deliberately absent, so depth 1 finds nothing
+    # for `child`. Housing_Entity is absent too, and `orphan` has no second
+    # generation to fall back to.
+    _index_entity(rows, "Home_Nov2024_Index", child, "November", "2024")
+
+    result = BLSIntraSourceLinker(spark).enrich(make_triples(rows))
+    parents = {
+        (r["subject"], r["object"])
+        for r in result.collect()
+        if r["predicate"] == HAS_PARENT
+    }
+
+    assert (child, grandparent) in parents
+    assert not [p for p in parents if p[0] == orphan]
+    assert not [p for p in parents if p[1] == ""]
+
+
 def test_enrich_finds_bls_behind_a_wall_of_market_rows(spark, make_triples):
     """A few BLS rows after many market ones still run the whole BLS leg.
 
