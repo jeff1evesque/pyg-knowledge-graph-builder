@@ -7,8 +7,15 @@ The watchdog exists to capture a thread dump while a stall is live, because on
 2026-09-06 seven runs stalled and that dump was never taken -- the window closed
 before anyone decided it was worth taking. Its expensive failure is therefore a
 false NEGATIVE: if the detector does not fire, the run is killed, the JVM goes
-away and the evidence is gone for good. A false positive costs a few hundred KB
-of dumps nobody reads.
+away and the evidence is gone for good.
+
+A false positive was first written down here as costing "a few hundred KB of
+dumps nobody reads". That was wrong, and run 20260906T184507Z is what showed it:
+the harness around this tool treats any capture as proof of a stall, so two false
+captures on stages that had simply not finished their first task ended a run that
+was in fact healthy, 69 minutes before it went on to succeed. Being eager is
+still right; the price of being wrong is a whole run's recording, not a few
+hundred KB.
 
 That asymmetry is why the "slow task must not trip it" case is here too. A
 detector that fires on every draining stage gets turned off, and then it is not
@@ -140,13 +147,42 @@ def test_the_factor_is_what_moves_the_line(wd):
 def test_no_completed_task_means_capture_anyway(wd):
     """
     A stage where nothing has finished gives no baseline to compare against.
-    Capture rather than stay quiet: a spurious dump is cheap, a missed stall is
-    the failure this tool exists to prevent.
+    Capture rather than stay quiet: a stage whose first task hangs never
+    completes one, and a missed stall is the failure this tool exists to
+    prevent. The task's own age is the only thing left to judge on -- see the
+    floor tests below for what keeps that from firing on a fresh task.
     """
     tasks = _stage([], [600])
     _running, finished, stuck = wd.classify(tasks, 1.5)
     assert finished == []
     assert len(stuck) == 1
+
+
+def test_no_baseline_floor_rejects_a_task_that_just_started(wd):
+    """
+    The 2026-09-06 false positives. Two stages with nothing finished were
+    reported stalled, naming tasks 0.6s and 0.8s old, and the run was abandoned
+    on them. Under the floor those stay quiet.
+    """
+    tasks = _stage([], [0.6, 0.8])
+    _running, _finished, stuck = wd.classify(tasks, 1.5, 300 * 1000.0)
+    assert stuck == []
+
+
+def test_no_baseline_floor_still_catches_a_first_task_that_hangs(wd):
+    """
+    The case the eagerness is for: nothing has finished because the only task
+    never will. The floor must not cost this.
+    """
+    tasks = _stage([], [600])
+    _running, _finished, stuck = wd.classify(tasks, 1.5, 300 * 1000.0)
+    assert len(stuck) == 1
+
+
+def test_the_floor_only_applies_when_nothing_has_finished(wd):
+    """A stage with a baseline is judged on the baseline, floor or no floor."""
+    tasks = _stage([40, 47, 55, 76], [165])
+    assert len(wd.classify(tasks, 1.5, 300 * 1000.0)[2]) == 1
 
 
 def test_a_stage_with_nothing_running_is_never_stuck(wd):
