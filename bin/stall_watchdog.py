@@ -38,6 +38,16 @@ So the trigger is two-part:
 Part 2 is what makes it safe to run unattended. Part 1 on its own fires on any
 stage that is merely slow.
 
+A stage where nothing has finished has no such baseline. Staying quiet there
+would miss a stage whose very first task hangs, so those still qualify -- but
+only once a running task has itself been going for --stall-seconds. Without that
+floor, any stage that has not finished its first task inside the threshold is
+reported stalled, naming tasks that started moments earlier. That happened twice
+on 2026-09-06, on a stage with one task and on a 200-task ``toPandas``; both
+went on to finish, and both captures named tasks under a second old. It cost a
+run that had actually succeeded its outcome report, because the harness around
+this tool reads a capture as proof of a stall.
+
 WHAT IT CANNOT TELL YOU
 -----------------------
 It captures, it does not diagnose. A dump showing threads parked in
@@ -154,11 +164,19 @@ class Api:
         return get(url, as_json=False)
 
 
-def classify(tasks, straggler_factor):
+def classify(tasks, straggler_factor, no_baseline_floor_ms=0.0):
     """Split a stage's tasks and decide whether any running one is past the max.
 
     Returns (running, finished_ms, stuck) where stuck is the running tasks
     older than straggler_factor x the longest task that finished.
+
+    When nothing has finished there is no maximum to compare against. Those
+    stages still qualify, because a stage whose first task hangs never completes
+    one -- but only for tasks that have themselves been running longer than
+    no_baseline_floor_ms. The default of 0 names every running task, which is the
+    eager reading and what the pure decision means on its own; main passes
+    --stall-seconds so an unattended run cannot report a task that started
+    seconds ago.
     """
     now_ms = time.time() * 1000.0
     running, finished_ms = [], []
@@ -172,8 +190,11 @@ def classify(tasks, straggler_factor):
             finished_ms.append(float(t["duration"]))
 
     if not finished_ms:
-        # No completed task to compare against, so every running task counts.
-        return running, finished_ms, list(running)
+        # No completed task to compare against, so the task's own age is all
+        # there is to go on.
+        return running, finished_ms, [
+            (t, age) for t, age in running if age >= no_baseline_floor_ms
+        ]
 
     ceiling = max(finished_ms) * straggler_factor
     return running, finished_ms, [(t, age) for t, age in running if age > ceiling]
@@ -331,20 +352,30 @@ def main():
                 continue
 
             tasks = api.tasks(app, stage["stageId"], stage["attemptId"])
-            running, finished, stuck = classify(tasks, args.straggler_factor)
+            running, finished, stuck = classify(
+                tasks, args.straggler_factor, args.stall_seconds * 1000.0
+            )
+            # Which of the two rules applied has to be in the log. Reading these
+            # lines wrong is how the stall they exist for was misdiagnosed.
             if not stuck:
-                longest = max(finished) / 1000.0 if finished else 0
+                if finished:
+                    why = (f"no task is past {args.straggler_factor}x the "
+                           f"{max(finished) / 1000.0:.0f}s max")
+                else:
+                    why = ("nothing has finished, and no task has itself been "
+                           f"running {args.stall_seconds}s")
                 log(
                     f"stage {stage['stageId']}: {done} done, {active} running, no completion "
-                    f"for {frozen_for:.0f}s -- but no task is past "
-                    f"{args.straggler_factor}x the {longest:.0f}s max. Slow, not stuck."
+                    f"for {frozen_for:.0f}s -- but {why}. Slow, not stuck."
                 )
                 continue
 
+            basis = ("past the stage maximum" if finished else
+                     f"running past {args.stall_seconds}s with nothing finished")
             log(
                 f"STALL: stage {stage['stageId']} ({stage.get('name', '')[:60]}) "
                 f"{done}/{stage.get('numTasks')} done, no completion for {frozen_for:.0f}s, "
-                f"{len(stuck)} task(s) past the stage maximum"
+                f"{len(stuck)} task(s) {basis}"
             )
             capture(api, app, stage, tasks, stuck, args.out,
                     args.dump_rounds, args.dump_gap)
