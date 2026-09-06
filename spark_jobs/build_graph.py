@@ -1106,6 +1106,79 @@ def resolve_turtle_column(columns, turtle_column: str = "") -> str:
     )
 
 
+# The four columns a parsed triple contributes, in the order the batches carry
+# them. object_datatype is dropped downstream by load_source_triples once the
+# marker triples are built; see the note at load_turtle_parquet_to_dataframe.
+TRIPLE_FIELD_NAMES = ("subject", "predicate", "object", "object_datatype")
+
+# Triples buffered before a batch is handed back. Only the fallback --
+# load_turtle_parquet_to_dataframe reads spark.sql.execution.arrow.maxRecordsPerBatch
+# and passes that instead.
+PARSE_BATCH_ROWS = 10000
+
+
+def turtle_batches_to_arrow(batches, max_rows: int = PARSE_BATCH_ROWS):
+    """Arrow batches of Turtle blobs -> Arrow batches of triples, bounded.
+
+    WHY THIS IS NOT A UDF RETURNING AN ARRAY
+    ----------------------------------------
+    It was one, and it deadlocked the cluster. ``@F.udf(returnType=ArrayType(...))``
+    has to hand back every triple from a blob as ONE value, and nothing bounds
+    that value. Most blobs are tiny -- bls, market and noaa are all 1-4 KB and a
+    few dozen triples -- but one SEC filing in the 2026-09 data is 5.6 MB and
+    parses into 57,350 triples, which is 14.8 MB pickled across the socket in a
+    single piece.
+
+    When that lands, the executor's writer thread blocks pushing more input into
+    a socket that is already full while the task thread blocks waiting for output
+    that cannot fit. Both wait forever. Nothing raises, no executor is lost, the
+    stage sits one task short of done and both nodes go to ~99% idle until the
+    job's own cap kills it. That cost seven runs and a day on 2026-09-06 before a
+    thread dump showed the two blocked threads. See #380.
+
+    Yielding bounded batches removes the precondition rather than the trigger: no
+    single value crossing the boundary exceeds ``max_rows`` triples, whatever any
+    blob does. A bigger outlier tomorrow costs more batches, not a wedged run.
+
+    Args:
+        batches: iterator of ``pyarrow.RecordBatch``, each carrying the Turtle
+                 blob as its first (and only) column.
+        max_rows: triples to buffer before yielding a batch.
+
+    Yields:
+        ``pyarrow.RecordBatch`` with the four string columns of
+        TRIPLE_FIELD_NAMES. Nothing is yielded for an input that produces no
+        triples, which is what an empty partition and a partition of malformed
+        blobs both look like.
+    """
+    import pyarrow as pa
+
+    columns = ([], [], [], [])
+
+    def drain():
+        batch = pa.RecordBatch.from_arrays(
+            [pa.array(values, type=pa.string()) for values in columns],
+            names=list(TRIPLE_FIELD_NAMES),
+        )
+        for values in columns:
+            values.clear()
+        return batch
+
+    for batch in batches:
+        # turtle_df selects the blob column and nothing else, so it is column 0.
+        # Reading by index keeps the source's column name out of the closure --
+        # sources disagree on the name and it is resolved per source.
+        for blob in batch.column(0).to_pylist():
+            for row in turtle_rows_or_skip(blob):
+                for values, field in zip(columns, TRIPLE_FIELD_NAMES):
+                    values.append(row[field])
+                if len(columns[0]) >= max_rows:
+                    yield drain()
+
+    if columns[0]:
+        yield drain()
+
+
 def load_turtle_parquet_to_dataframe(
     spark: SparkSession,
     source_path: str,
@@ -1161,8 +1234,6 @@ def load_turtle_parquet_to_dataframe(
     Raises:
         ValueError: If no usable Turtle column is found in the Parquet schema.
     """
-    from pyspark.sql.types import ArrayType
-
     raw_df = spark.read.parquet(source_path)
     turtle_column = resolve_turtle_column(raw_df.columns, turtle_column)
 
@@ -1180,20 +1251,23 @@ def load_turtle_parquet_to_dataframe(
     )
 
     # ============================================
-    # UDF: parse one Turtle blob → list of (s, p, o) structs
+    # Parse: one Turtle blob -> many triple rows, streamed
     # ============================================
     # A real parser is used here because Turtle has prefix resolution,
-    # predicate lists (;), object lists (,), and typed literals that
-    # cannot be correctly parsed with regex. The UDF runs per-row on
-    # executors — each blob is small (~60 triples), so the per-row
-    # overhead is acceptable. All downstream operations remain
-    # pure Spark expressions.
+    # predicate lists (;), object lists (,), and typed literals that cannot be
+    # correctly parsed with regex.
     #
-    # The parsing itself is turtle_to_rows(); read the note above it for why
-    # it is pyoxigraph rather than rdflib, and for what rdflib still decides.
+    # mapInArrow, NOT a UDF returning an array. A UDF must hand every triple
+    # from a blob back as one value, and one SEC blob in the 2026-09 data is
+    # 5.6 MB -> 57,350 triples -> 14.8 MB in a single piece, which deadlocks the
+    # executor against its Python worker. turtle_batches_to_arrow carries the
+    # whole account; it is the function to read before changing any of this.
     #
-    # Object normalization matches the pipeline convention established
-    # in load_ntriples_to_dataframe():
+    # The parsing itself is turtle_to_rows(); read the note above it for why it
+    # is pyoxigraph rather than rdflib, and for what rdflib still decides.
+    #
+    # Object normalization matches the pipeline convention established in
+    # load_ntriples_to_dataframe():
     #   - URI     → the URI
     #   - Literal → str(literal.toPython()) for numerics,
     #               the lexical form for strings (no ^^datatype)
@@ -1201,50 +1275,33 @@ def load_turtle_parquet_to_dataframe(
     #               a parser's own labels are per-parse, which made the
     #               whole pipeline non-reproducible)
     #
-    # Malformed blobs return an empty list so that parse errors skip
-    # the row rather than failing the job. The zero-triple contribution
-    # is visible in the final triple count logged after loading.
+    # Malformed blobs contribute no rows so that parse errors skip the blob
+    # rather than failing the job. The zero-triple contribution is visible in
+    # the final triple count logged after loading.
 
-    triple_schema = ArrayType(
-        StructType([
-            StructField("subject", StringType(), nullable=False),
-            StructField("predicate", StringType(), nullable=False),
-            StructField("object", StringType(), nullable=False),
-            # The literal's declared ^^<datatype>, "" for URIs/bnodes/plain
-            # literals. Internal to this UDF and dropped below once the
-            # observation markers are built -- the frame this loader returns
-            # is the canonical 3-column one.
-            StructField("object_datatype", StringType(), nullable=False),
-        ])
+    triple_schema = StructType([
+        StructField("subject", StringType(), nullable=False),
+        StructField("predicate", StringType(), nullable=False),
+        StructField("object", StringType(), nullable=False),
+        # The literal's declared ^^<datatype>, "" for URIs/bnodes/plain
+        # literals. Dropped by load_source_triples once the observation markers
+        # are built -- the frame that reaches the pipeline is the canonical
+        # 3-column one.
+        StructField("object_datatype", StringType(), nullable=False),
+    ])
+
+    # Spark's own batch bound, so one knob governs how much crosses the boundary
+    # at a time rather than this path inventing a second one.
+    max_rows = int(
+        spark.conf.get(
+            "spark.sql.execution.arrow.maxRecordsPerBatch", str(PARSE_BATCH_ROWS)
+        )
     )
 
-    @F.udf(returnType=triple_schema)
-    def parse_turtle_blob(turtle_str):
-        """
-        Parse a self-contained Turtle string into a list of
-        (subject, predicate, object) dicts with fully-expanded URIs.
-        """
-        # Malformed Turtle — skip that row silently; a missing parser — fail the
-        # job. See turtle_rows_or_skip for why those are not the same thing.
-        return turtle_rows_or_skip(turtle_str)
+    def parse_turtle_batches(batches):
+        return turtle_batches_to_arrow(batches, max_rows)
 
-    # ============================================
-    # Apply UDF and explode into one row per triple
-    # ============================================
-    parsed_df = turtle_df.withColumn(
-        "_triples", parse_turtle_blob(F.col(turtle_column))
-    )
-
-    exploded_df = parsed_df.select(
-        F.explode(F.col("_triples")).alias("_triple")
-    )
-
-    parsed_df = exploded_df.select(
-        F.col("_triple.subject").alias("subject"),
-        F.col("_triple.predicate").alias("predicate"),
-        F.col("_triple.object").alias("object"),
-        F.col("_triple.object_datatype").alias("object_datatype"),
-    ).filter(
+    parsed_df = turtle_df.mapInArrow(parse_turtle_batches, triple_schema).filter(
         (F.col("subject") != "")
         & (F.col("predicate") != "")
     )
