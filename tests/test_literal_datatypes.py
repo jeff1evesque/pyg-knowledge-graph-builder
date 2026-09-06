@@ -167,14 +167,19 @@ def test_turtle_parquet_preserves_datatypes(spark, tmp_path):
         for r in df.collect()
     }
     assert (SUBJ, PRED, "1.5", f"{XSD}decimal") in rows
-    # A bare Turtle string declares nothing: rdflib reports
-    # Literal("alpha").datatype as None, the UDF only fills the column when it
-    # is not None, and no marker comes from the row. The comment that used to
-    # sit here said rdflib types it as xsd:string and that <name> picked up an
-    # observation too -- it asserted neither, and it is not what rdflib does.
-    # test_a_plain_literal_produces_no_observation pins the same rule for the
-    # N-Triples loader.
-    assert (SUBJ, "https://ex/name", "alpha", "") in rows
+    # A bare Turtle string now reports xsd:string, and that flipped with the
+    # parser (#376). RDF 1.1 says a plain literal IS an xsd:string, so
+    # pyoxigraph reports the datatype for both spellings; rdflib kept the older
+    # distinction and reported it only for the explicit one, which is what this
+    # line used to assert. Following rdflib would mean erasing xsd:string from
+    # every literal that declares it, and every string literal this pipeline
+    # reads declares it -- measured 2026-09-05 across all four sources and all
+    # seven committed fixtures, ZERO bare literals and thousands of
+    # ^^xsd:string. So no real blob changes; this synthetic one is the only
+    # place the difference is visible.
+    # The N-Triples loader still reads the text, so it still reports nothing
+    # here -- see test_a_plain_literal_produces_no_observation.
+    assert (SUBJ, "https://ex/name", "alpha", f"{XSD}string") in rows
     # ...and the markers are not built here any more.
     assert _markers(df) == set()
 

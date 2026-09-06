@@ -1483,15 +1483,30 @@ SPARK_MASTER_URL=spark://<host>:7077 \
 The Turtle parse is a Python UDF running rdflib, so RAPIDS cannot place it on a
 GPU — but Spark applies one resource profile to the whole SQL job, and that
 profile reserves a quarter GPU per task. With one GPU per executor and two
-executors, the parse was pinned at **8 concurrent tasks while holding 144 cores**.
-Removing the reservation is the right fix and it is what `GPU_PER_TASK=0` does.
+executors, the parse was pinned at **8 concurrent tasks on a cluster advertising
+144 slots**.
 
-It also takes the phase from 8 to 144 concurrent object-storage readers, and on a
-deployment whose workers reach the bucket over a site uplink rather than an
-in-region link, that is enough to take the network down. Measured twice on a
-two-node cluster: within 60 seconds the gateway's flow table went from ~330 to
-~1,900 tracked connections and both nodes lost their default route within a second
-of each other, mid-parse.
+Read that 144 as slots, not hardware. It is `SPARK_WORKER_CORES` summed over the
+workers, and that setting is a declaration rather than a count — the cluster these
+measurements come from declares 72 per node against 20 physical cores, so most of
+the headroom the cap appeared to waste was never there. Loosening the reservation
+is still the lever, but how far is a measurement. The same day, parsed at three slot
+counts: 8 slots took 4,299.7s; 64 slots (`GPU_PER_TASK=0.03125`, one GPU per
+executor) took 1,408.3s; and `GPU_PER_TASK=0`, which declares no GPU requirement at
+all so the slot count falls back to the advertised 144, parsed in 1,570.9s and then
+exhausted host RAM and lost the run — slower than 64 slots despite more than twice
+as many, because the extra ones are oversubscription against cores that are already
+outnumbered. Shrinking `RAPIDS_BATCH_SIZE_BYTES` to `256m` let those 144 slots
+survive, at 4,833.8s — slower than the 8 they replaced, because batch size and slot
+count trade against one fixed host-RAM budget. Take the most slots that still fit at
+the default batch.
+
+Dropping the reservation also takes the phase from 8 to 144 concurrent
+object-storage readers, and on a deployment whose workers reach the bucket over a
+site uplink rather than an in-region link, that is enough to take the network down.
+Measured twice on a two-node cluster: within 60 seconds the gateway's flow table
+went from ~330 to ~1,900 tracked connections and both nodes lost their default route
+within a second of each other, mid-parse.
 
 The count of *established* connections was not the problem — it stayed flat at
 around 155. **Churn** was. Reads slower than `fs.s3a.connection.timeout` are
@@ -1751,17 +1766,18 @@ Read executor-side logs at `$SPARK_HOME/work/<app-id>/<executor-id>/stderr` — 
 log cannot distinguish a hung executor from a dead one, and the difference decides
 whether more memory or a longer timeout is the fix.
 
-**Where the loaded frame's partition count comes from.** Every loader returns the source's
-triples unioned with the datatype markers `literal_datatype_observations()` derives from
-them, and a union's partition count is the *sum* of its children's. The marker frame ends
-in `distinct()`, which is a shuffle, and a shuffle lands on
-`spark.sql.shuffle.partitions` — 200 by default — however few rows survive it. So each
-source used to contribute its file-scan partitions **plus 200**, for a frame whose row
-count is bounded by distinct (predicate, datatype) pairs. Measured on five sources: 160
-scan partitions and 1,000 marker partitions, and because the union is cached and read by
-every enrichment phase, every stage that read it inherited all 1,160. The marker frame is
-now coalesced to one partition at the point it is built, so what remains is the scan
-partitioning of the actual data.
+**Where the loaded frame's partition count comes from.** The triples are unioned with the
+datatype markers `literal_datatype_observations()` derives, and a union's partition count
+is the *sum* of its children's. The marker frame ends in `distinct()`, which is a shuffle,
+and a shuffle lands on `spark.sql.shuffle.partitions` — 200 by default — however few rows
+survive it. That union used to happen inside each loader, so every source contributed its
+file-scan partitions **plus 200**, for a frame whose row count is bounded by distinct
+(predicate, datatype) pairs. Measured on five sources: 160 scan partitions and 1,000
+marker partitions, and because the union is cached and read by every enrichment phase,
+every stage that read it inherited all 1,160. Two changes closed that: the marker frame is
+coalesced to one partition where it is built, and `load_source_triples` now derives the
+markers from the cached parse and unions them once for the whole run rather than once per
+source. What remains is the scan partitioning of the actual data.
 
 **What that is worth — measure it, do not estimate it.** On a cluster run the coalesce took
 the seed leg from 661,509 tasks to 151,808, and its wall clock from 174.5 to 168.2 minutes.
@@ -1772,6 +1788,20 @@ earlier estimate of 60–80 minutes came from costing the empty tasks at the ave
 counts and task cost are separate measurements, and on this pipeline they differ by two
 orders of magnitude. The reason to fix the partition count is that nothing bounds it: it
 grows with every source added, and every enrichment stage reads the result.
+
+**The same fork also cost a second parse, which was the expensive half.** Building the
+markers from the *uncached* frame planned two independent legs per source, so the rdflib
+UDF ran over every source twice — once for the triples, once for the markers — and the
+`cache()` further down sat below the fork and never applied. Deriving them from the cached
+parse instead took the load phase from 1,346.3s to 727.7s on identical input, and folded
+two stages of 9.17 and 9.29 task-hours into one of 9.35.
+
+That change moves the triple count slightly, and the move is correct. Markers now
+deduplicate once per *source*, where they used to deduplicate once per *file path*, so a
+source that ships ten files and declares the same (predicate, datatype) in each
+contributes one marker row instead of ten. On a four-source day this is 9 rows out of
+322.7M, all of them from the ten-file source, and `duplicates_within_source` falls by the
+same 9. Distinct triples are unchanged, so no graph built either side of it differs.
 
 The lesson generalizes past this one frame: a small `distinct()`, `groupBy` or join
 *inside a branch you are about to union* costs the whole downstream pipeline that branch's
@@ -2283,7 +2313,8 @@ The pipeline is designed to handle:
 - **No double-join for edge features** — the expensive double-join (triples × node_id_df) runs exactly once in EdgeMapper; EdgeFeatureExtractor reuses the cached result
 - **No Python UDFs in the hot path** — URI-to-name conversions, hash-based encoding, and numeric parsing use pure Spark expressions (JVM-native), avoiding Python serialization overhead on 30-50M rows
 - **Controlled Parquet output** — configurable partition count prevents thousands of tiny files or few huge files
-- **Loaded partitions track the data, not the shuffle default** — the datatype markers each loader unions into its source are coalesced to one partition, so a vocabulary-sized frame no longer adds 200 partitions per source to the cached triples that every enrichment stage reads (see [Sizing a large run](#sizing-a-large-run))
+- **One parse per source** — the datatype markers are derived from the cached parse rather than from a second, uncached read of the same frame, so the rdflib UDF runs once per source instead of twice (measured: load phase 1,346.3s → 727.7s on identical input)
+- **Loaded partitions track the data, not the shuffle default** — the datatype markers are coalesced to one partition and unioned once after that cached parse, not once per source, so a vocabulary-sized frame no longer adds 200 partitions per source to the cached triples that every enrichment stage reads (see [Sizing a large run](#sizing-a-large-run))
 - **Efficient literal isolation** — anti-join against node_id_df filters out edge triples before numeric parsing, avoiding wasted computation on URI-valued objects
 - **Canonical namespace registry** — `NAMESPACE_PREFIXES` and `ONTOLOGY_NAMESPACE_INDICES` in `rdf_utils.py` are the single source of truth, imported by `node_mapper.py`, `edge_mapper.py`, `feature_extractor.py`, and `edge_feature_extractor.py` to eliminate duplication
 - **Negligible metadata overhead** — all metadata collect calls target small aggregated DataFrames (<5000 rows each); total metadata memory is under 1 MB; six JSON files are written after the `.pt` file with no impact on tensor collection or HeteroData assembly

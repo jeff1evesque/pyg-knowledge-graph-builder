@@ -306,7 +306,9 @@ def test_batch_size_is_configurable(tmp_path):
     comes out of system RAM -- it, not the slot count, decides how many tasks
     fit. Measured 2026-08-29: ~1.0 GB of host RAM per task at the 1g default, so
     144 concurrent tasks want ~170 GB on a 121 GiB host and the run dies. At
-    256m all 144 held with 44 GB free.
+    256m all 144 held with 44 GB free -- and the parse took 4,833.8s against
+    1,408.3s at 64 tasks and the 1g default, so this is a survival lever rather
+    than a speed one.
     """
     _, argv, _ = _run(tmp_path, CLUSTER_MASTER, RAPIDS_BATCH_SIZE_BYTES="256m")
     assert _conf(argv)["spark.rapids.sql.batchSizeBytes"] == "256m"

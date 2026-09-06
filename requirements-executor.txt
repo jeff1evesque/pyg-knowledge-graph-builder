@@ -12,6 +12,12 @@
 # relaunches, which unpacks 3.2 GB again. The job never progresses.
 #
 # Keep this list to what executors actually import.
+#
+# pyoxigraph parses the Turtle; rdflib is still here and still required, because
+# it decides how a literal is spelled (its lexical->Python table) and it owns the
+# blank-node relabelling. See turtle_to_rows in spark_jobs/build_graph.py. The
+# wheel is 7.7 MB, which is nothing against the 3.2 GB this file exists to avoid.
+pyoxigraph>=0.4.0,<0.6.0
 rdflib>=6.0.0,<8.0.0
 pandas>=1.0.5
 pyarrow>=4.0.0
