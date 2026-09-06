@@ -423,6 +423,48 @@ if awk "BEGIN{exit !($RAPIDS_GPU_MIN_ALLOC_FRACTION > $RAPIDS_GPU_ALLOC_FRACTION
   exit 2
 fi
 
+# ---------------------------------------------------------------------------
+# Stall watchdog. Started here, and not in a run harness, because the harness
+# is copied per run and tracked nowhere -- which is exactly how selfloops.py
+# and sampler.sh went missing from later run dirs, silently, twice. Every leg
+# of every notebook run goes through this script, so this is the one place that
+# cannot be forgotten.
+#
+# It only ever READS: the driver's REST API over HTTP, plus /proc/meminfo and
+# nvidia-smi. It never signals the job. On a stall it writes thread dumps and
+# the stuck task ids and stops there; deciding what to do about a stall stays
+# with whoever launched the run.
+#
+# Standalone cluster only. The stall is a cluster phenomenon, and this keeps
+# local-mode runs and the stub-spark-submit launcher tests untouched.
+#
+#   PYG_STALL_WATCHDOG=0    turn it off
+#   PYG_STALL_DUMP_DIR      where captures go; default under TMPDIR
+# ---------------------------------------------------------------------------
+STALL_WATCHDOG_PID=""
+if [[ "${PYG_STALL_WATCHDOG:-1}" != "0" && "${SPARK_MASTER_URL:-}" == spark://* ]]; then
+  _stall_wd="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/stall_watchdog.py"
+  _stall_out="${PYG_STALL_DUMP_DIR:-${TMPDIR:-/tmp}/pyg-stalls}"
+  if [[ -f "$_stall_wd" ]]; then
+    mkdir -p "$_stall_out"
+    python3 "$_stall_wd" \
+      --host "${SPARK_DRIVER_HOST:-127.0.0.1}" \
+      --out "$_stall_out" \
+      --stall-seconds "${PYG_STALL_SECONDS:-300}" \
+      --straggler-factor "${PYG_STALL_FACTOR:-2.0}" \
+      --max-captures "${PYG_STALL_MAX_CAPTURES:-1}" \
+      </dev/null >>"$_stall_out/watchdog.log" 2>&1 &
+    STALL_WATCHDOG_PID=$!
+    echo "stall watchdog pid ${STALL_WATCHDOG_PID} -> ${_stall_out}" >&2
+  else
+    echo "stall watchdog not found at ${_stall_wd}; continuing without it" >&2
+  fi
+fi
+
+# `|| rc=$?` because set -e would otherwise abort here on a non-zero submit and
+# never run the cleanup below. The caller's exit code must survive this exactly:
+# the notebook's submit() decides a leg passed or failed on it.
+rc=0
 "$SPARK_SUBMIT" \
   "${executor_args[@]}" \
   "${venv_args[@]}" \
@@ -454,4 +496,11 @@ fi
   --conf spark.hadoop.fs.s3a.attempts.maximum=3 \
   --conf spark.hadoop.fs.s3a.retry.limit=3 \
   ${SPARK_EXTRA_CONF:-} \
-  spark_jobs/build_graph.py "$@" "${job_input_args[@]}"
+  spark_jobs/build_graph.py "$@" "${job_input_args[@]}" || rc=$?
+
+if [[ -n "$STALL_WATCHDOG_PID" ]]; then
+  kill "$STALL_WATCHDOG_PID" 2>/dev/null || true
+  wait "$STALL_WATCHDOG_PID" 2>/dev/null || true
+fi
+
+exit "$rc"
