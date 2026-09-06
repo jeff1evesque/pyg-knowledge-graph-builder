@@ -264,10 +264,8 @@ class SECIntraSourceLinker:
         logger.info("\n[Step 4/4] Applying violation patterns...")
         self._append(new_dfs, self._apply_violation_patterns(), "[Step 4/4]")
 
-        # Unpersist cached subset
-        self._sec_triples.unpersist()
-
         if not new_dfs:
+            self._sec_triples.unpersist()
             logger.info("SEC enrichment produced no new triples")
             return empty
 
@@ -277,6 +275,12 @@ class SECIntraSourceLinker:
 
         all_new = all_new.cache()
         total = all_new.count()
+
+        # Unpersist after the count, not before it. The four steps only build
+        # lazy frames, so this count is the first thing that reads them;
+        # dropping the cache above it meant the count rebuilt the subset from
+        # the source frame instead of reading what we had just cached. #380
+        self._sec_triples.unpersist()
 
         logger.info("\n" + "=" * 60)
         logger.info(f"SEC Intra-Source Enrichment Complete: {total} new triples")

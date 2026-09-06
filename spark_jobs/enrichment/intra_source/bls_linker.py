@@ -168,10 +168,8 @@ class BLSIntraSourceLinker:
         logger.info("\n[Step 4/4] Linking category hierarchies...")
         self._append(new_dfs, self._link_category_hierarchies(), "[Step 4/4]")
 
-        # Unpersist cached subset
-        self._bls_triples.unpersist()
-
         if not new_dfs:
+            self._bls_triples.unpersist()
             logger.info("BLS enrichment produced no new triples")
             return empty
 
@@ -181,6 +179,12 @@ class BLSIntraSourceLinker:
 
         all_new = all_new.cache()
         total = all_new.count()
+
+        # Unpersist after the count, not before it. Steps 1-4 only build lazy
+        # frames, so this count is the first thing that reads them; dropping the
+        # cache above it meant the count rebuilt the subset from the source
+        # frame instead of reading what we had just cached. #380
+        self._bls_triples.unpersist()
 
         logger.info("\n" + "=" * 60)
         logger.info(f"BLS Intra-Source Enrichment Complete: {total} new triples")
@@ -368,7 +372,12 @@ class BLSIntraSourceLinker:
             .withColumn(
                 "label",
                 F.regexp_replace(
-                    F.regexp_extract(F.col("sector_uri"), r"[/#]([^/#]+)$", 1),
+                    # Last segment after "/" or "#", without the end anchor
+                    # RAPIDS refuses. The outer replace is fine on the GPU; it
+                    # was this inner extract that pulled the Project off. #380
+                    F.substring_index(
+                        F.substring_index(F.col("sector_uri"), "/", -1), "#", -1
+                    ),
                     "([A-Z])", r" $1"
                 )
             )
@@ -513,9 +522,13 @@ class BLSIntraSourceLinker:
         # Extract namespace and local path
         # URI format: {namespace}{path}_Entity
         # We need to split into namespace + path
+        # substring_index, not a regex. RAPIDS cannot put "([^/]+)$" on the GPU
+        # -- it rejects an end anchor after a variable-length match -- and one
+        # rejected expression puts the whole Project on the CPU. Same answer:
+        # everything after the last "/". #380
         all_categories = all_categories.withColumn(
             "local_name",
-            F.regexp_extract(F.col("subject"), r"[/]([^/]+)$", 1)
+            F.substring_index(F.col("subject"), "/", -1)
         ).withColumn(
             "namespace",
             F.regexp_extract(F.col("subject"), r"^(.+/)", 1)
@@ -559,9 +572,12 @@ class BLSIntraSourceLinker:
         # This handles the most common case. For deeper gaps, we'd need iteration,
         # but the rdflib version also only linked to the immediate parent
         # (break after first match).
+        # Keep all but the last "_" segment. segment_count is already on the
+        # frame, so substring_index can say how many to keep and we drop the
+        # "_[^_]+$" regex RAPIDS will not run on the GPU. #380
         children_with_parent_path = children.withColumn(
             "parent_path_candidate",
-            F.regexp_replace(F.col("path"), r"_[^_]+$", "")
+            F.expr("substring_index(path, '_', segment_count - 1)")
         ).filter(
             # Ensure we actually removed something
             F.col("parent_path_candidate") != F.col("path")
@@ -597,11 +613,16 @@ class BLSIntraSourceLinker:
         )
 
         # Try removing two segments for entities where immediate parent doesn't exist
+        # Same rewrite as above, one segment deeper. The length guard is new:
+        # the old regex left a single-segment candidate untouched, so the "!="
+        # filter dropped it, while substring_index with a count of 0 returns an
+        # empty string that would pass. #380
         depth2_candidates = unmatched_at_d1.withColumn(
             "parent_path_d2",
-            F.regexp_replace(F.col("parent_path_candidate"), r"_[^_]+$", "")
+            F.expr("substring_index(parent_path_candidate, '_', segment_count - 2)")
         ).filter(
-            F.col("parent_path_d2") != F.col("parent_path_candidate")
+            (F.col("parent_path_d2") != F.col("parent_path_candidate")) &
+            (F.length(F.col("parent_path_d2")) > 0)
         )
 
         depth2_matched = (

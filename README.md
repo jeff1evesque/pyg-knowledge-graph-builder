@@ -61,17 +61,19 @@ The pipeline supports three execution modes:
 ┌────────────────────────────────────────────────────────────┐
 │ Raw Data Sources (local filesystem or S3 via s3a://)       │
 │                                                            │
-│ N-Triples format (.nt files):                              │
+│ Turtle Parquet format (a column of Turtle blobs):          │
 │ ├── BLS Economic Data (10 categories, ~100 mappers)        │
 │ ├── Market Data (1 mapper, intraday snapshots)             │
-│ └── NOAA Weather Alerts (1 mapper)                         │
-│                                                            │
-│ Turtle Parquet format (column of Turtle blobs):            │
+│ ├── NOAA Weather Alerts (1 mapper)                         │
 │ └── SEC Data (4 categories, 4 mappers)                     │
-│     (and any other source whose scraper writes Parquet)    │
+│                                                            │
+│ N-Triples (.nt) is still supported by the loader; no       │
+│ source currently ships it.                                 │
 │                                                            │
 │ Total: 100+ mappers and ontologies                         │
-│ Volume: ~30-50M triples/month with intraday market data    │
+│ Volume: one day of intraday market snapshots loads         │
+│ 322.7M triples, 421.4M after enrichment. Market is         │
+│ 99.5% of that; BLS 1.3M, SEC 198K, NOAA 143K.              │
 └────────────────────────────────────────────────────────────┘
                             ↓
 ┌────────────────────────────────────────────────────────────┐
@@ -2204,7 +2206,22 @@ The pipeline ingests RDF data from multiple heterogeneous sources, all in **N-Tr
 pyg-knowledge-graph-builder/
 ├── bin/
 │   ├── profiles/
-│   │   └── large-run.env                   # opt-in sizing for a full-day run
+│   │   ├── large-run.env                   # opt-in sizing for a full-day run
+│   │   └── pyg-assembly.env                # sizing for the assembly leg (--mode pyg_only)
+│   ├── census_sec_terms.py                 # per-form census of the SEC filings vocabulary
+│   ├── check_vocabulary_drift.py           # terms we key on that upstream no longer emits
+│   ├── generate_bls_e2e_fixtures.py        # rebuild the BLS e2e fixtures from the archive
+│   ├── generate_market_e2e_fixtures.py     # rebuild the market e2e fixtures from snapshots
+│   ├── generate_report.sh                  # run every suite -> reports/tests/report.{html,json}
+│   ├── generate_sec_e2e_fixtures.py        # rebuild the SEC e2e fixtures from the archive
+│   ├── generate_test_report.py             # the report renderer (reads pytest JUnit XML)
+│   ├── package_venv.sh                     # package the venv so executors can run our Python
+│   ├── record_run_outcome.sh               # summarise a finished (or abandoned) run
+│   ├── run_e2e_tests.sh                    # the e2e smoke suite, local SparkSession (CPU/GPU)
+│   ├── run_tests.sh                        # the fast suite, parallel (sibling of run_e2e_tests.sh)
+│   ├── selfloops.py                        # count nodes that are their own object
+│   ├── stage_sources.sh                    # mirror source prefixes onto each worker's disk
+│   ├── stall_watchdog.py                   # catch a stalled stage, dump the executors
 │   └── submit_spark_job.sh                 # spark-submit launcher (RAPIDS/GPU)
 ├── conf/
 │   └── spark-rapids.conf.template          # reference RAPIDS spark-defaults
@@ -2338,12 +2355,22 @@ python -m venv .venv
 # Fast suite (what CI runs on every push/PR):
 SPARK_LOCAL_IP=127.0.0.1 .venv/bin/python -m pytest tests/ -m "not e2e"
 
-# ...optionally in parallel (local machines only — NOT what CI runs). Each xdist
-# worker is its own process and so builds its OWN SparkSession, trading memory
-# for wall-clock: on a 20-core box, 8 workers cut the fast suite from ~248s to
-# ~90s (2.8x). Returns flatten quickly because per-worker session startup is a
-# fixed cost. Pick a number; avoid `-n auto`, which silently scales with
-# whatever machine it lands on:
+# ...or in parallel (local machines only — NOT what CI runs). bin/run_tests.sh
+# is the wrapper for exactly this, and is the sibling of bin/run_e2e_tests.sh:
+bin/run_tests.sh                      # the whole fast suite
+bin/run_tests.sh tests/test_foo.py    # pytest args pass through
+
+# It runs `-m "not e2e" -n 8`, and unsets SPARK_HOME with an empty
+# SPARK_CONF_DIR so a shell that has sourced a cluster env cannot leak the
+# standalone conf into local mode (which then asks for a per-task GPU local mode
+# cannot satisfy, and hangs with 0 active tasks and no error).
+#
+# Each xdist worker is its own process and builds its OWN SparkSession, trading
+# memory for wall-clock. Measured on this 20-core box: 1,178 tests, ~5m30s at 8
+# workers — but only ~90s of that is user CPU, the rest being per-worker session
+# startup. So raising the worker count buys little, and `-n auto` is worth
+# avoiding outright since it silently scales with whatever machine it lands on.
+# Set PYTEST_WORKERS to override the 8. The equivalent by hand:
 SPARK_LOCAL_IP=127.0.0.1 .venv/bin/python -m pytest tests/ -m "not e2e" -n 8
 
 # End-to-end pipeline smoke test (heavy; run locally / on a capable machine).
@@ -2401,6 +2428,85 @@ export CLUSTER_SMOKE_OUTPUT_PATH=s3a://<bucket>/<prefix>   # must be reachable b
 | `CLUSTER_SMOKE_EXPECT_GPU` | `1` | Set `0` to skip the GPU-placement assertion (e.g. a CPU-only cluster). |
 
 Three failure modes this test exists to catch, all of which otherwise produce a **green** suite: RAPIDS silently falling back to CPU (the job still succeeds and still produces a correct graph), a job that writes a structurally broken graph to the right place under the right name (caught only by opening the `.pt`, which is what the validation step above added), and the driver OOMing while *planning* the multi-source query — see [`bin/submit_spark_job.sh`](bin/submit_spark_job.sh) on `spark.sql.maxPlanStringLength`, and `_settle()` in [`spark_jobs/enrichment/pipeline.py`](spark_jobs/enrichment/pipeline.py) on why the enrichment phases truncate their logical plans.
+
+### Watching a long run for a stall
+
+A cluster run can stop making progress without failing. The stage sits one task
+short of done, both nodes go to ~99% idle, and nothing is raised: no exception,
+no lost executor, no OOM, no failed task. Killing it produces a log that looks
+like a crash and is not one, which is how three runs on 2026-09-06 produced
+conclusions that were all wrong.
+
+[`bin/stall_watchdog.py`](bin/stall_watchdog.py) watches for that state and
+captures the evidence, so nobody has to be at the keyboard when it happens:
+
+```bash
+bin/stall_watchdog.py --host <driver-host> --out <run-dir>/stalls
+```
+
+It polls the driver's REST API and fires only when a stage has stopped
+completing tasks **and** has one running past that stage's own longest completed
+task — quiet alone is ambiguous, because a stage draining its last few tasks is
+quiet too. A stage where nothing has finished yet has no such yardstick; there it
+fires only once a running task has itself passed `--stall-seconds`. Without that
+floor, any stage slow to finish its first task gets reported as stalled, naming
+tasks that started seconds earlier — which happened twice on 2026-09-06 and cost
+a run that had actually succeeded its outcome report, because the harness around
+it treats a capture as proof. On a confirmed stall it pulls thread dumps from every executor twice,
+30 seconds apart, alongside the stuck task ids and host memory. A thread present
+in both dumps is stuck; one present in a single dump was merely slow.
+
+Everything it does is a read — HTTP GETs plus two local files — so it never
+touches the job. It re-resolves the application between legs, so one invocation
+covers a whole notebook run, and it costs well under 100 KB of log per run.
+
+This is how #380 was diagnosed: the dumps showed the executor's reader thread in
+`BasePythonUDFRunner.read` and its writer thread in `PythonRDD.write`, both
+blocked on the same Python worker, with the worker itself burning no CPU — a
+deadlock, not a slow parse. See `turtle_batches_to_arrow` in
+[`spark_jobs/build_graph.py`](spark_jobs/build_graph.py) for what caused it.
+
+### Recording what a run did
+
+A run's own log is not the record. The notebook runner puts each cell's output in
+the executed `.ipynb`, so grepping the run log shows a clean run no matter what
+happened — that is how a run whose seed died at 47 minutes, and whose three
+experiments then failed outright, was once written down as "rc=0, errors: none".
+
+[`bin/record_run_outcome.sh`](bin/record_run_outcome.sh) reads the run directory
+and writes `outcome.txt` beside it:
+
+```bash
+bin/record_run_outcome.sh <run-dir> [work-dir]
+```
+
+It flattens the executed notebook into text first, then reports each
+submission's status, the phases the job logged, how many tasks each stage really
+ran at once (from the event log — the only place that exists), a ranked error
+scan, executor memory-pool pressure per node, and the network traces. A trace
+whose samples fall outside the run window is called out as stale rather than
+summarised, because a leftover file from an earlier attempt otherwise produces a
+confident set of numbers about a different run.
+
+Everything it does is a read, and it does not care how the run ended — **the run
+whose harness gave up is the one whose report is worth having**. Whatever a
+particular run was meant to prove goes in `<run-dir>/extra-checks.sh`, which it
+sources at the end, so this file stays the same from one run to the next.
+
+[`bin/selfloops.py`](bin/selfloops.py) is the acceptance check for sequencing:
+it counts every predicate that makes a node its own object, and breaks
+`precedes` out by source.
+
+```bash
+env -u SPARK_HOME -u SPARK_CONF_DIR SPARK_LOCAL_IP=127.0.0.1 \
+    .venv/bin/python bin/selfloops.py <enriched-triples-parquet> selfloops.json
+```
+
+Unsetting `SPARK_HOME` matters: a cluster config asks for a GPU per task, which
+local mode can never satisfy, and the job then sits at zero tasks with no error
+rather than failing. Watch the edge counts as well as the loop total — a loop
+count that falls to zero because the edge count collapsed means a dedupe took
+rows it should have kept.
 
 ### Test tiers
 

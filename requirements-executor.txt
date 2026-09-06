@@ -22,5 +22,22 @@ rdflib>=6.0.0,<8.0.0
 pandas>=1.0.5
 pyarrow>=4.0.0
 
+# setuptools is here for `distutils`, which it restores through the
+# distutils-precedence.pth shim it installs.
+#
+# Python 3.12 removed distutils from the stdlib, and `python -m venv` on 3.12 no
+# longer installs setuptools, so a venv built from this file has neither. Spark
+# 3.5.3 still does `from distutils.version import LooseVersion` inside
+# pyspark.sql.pandas.types.to_arrow_type, which every Arrow-batch UDF path calls
+# on the executor -- so mapInArrow raises ModuleNotFoundError on the first task
+# and the stage dies four retries later.
+#
+# It cost a cluster run on 2026-09-06 and is invisible locally: the DRIVER venv
+# has setuptools, so the unit suite (including the Spark end-to-end parse test)
+# passes while every executor fails. When a change touches what executors
+# import, the packaged venv is a separate environment and has to be repackaged
+# with bin/package_venv.sh.
+setuptools>=68.0.0
+
 # pyspark itself is NOT needed here: Spark puts its own pyspark on the executor's
 # PYTHONPATH from SPARK_HOME.
