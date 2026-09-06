@@ -2206,10 +2206,21 @@ The pipeline ingests RDF data from multiple heterogeneous sources, all in **N-Tr
 pyg-knowledge-graph-builder/
 ├── bin/
 │   ├── profiles/
-│   │   └── large-run.env                   # opt-in sizing for a full-day run
+│   │   ├── large-run.env                   # opt-in sizing for a full-day run
+│   │   └── pyg-assembly.env                # sizing for the assembly leg (--mode pyg_only)
+│   ├── census_sec_terms.py                 # per-form census of the SEC filings vocabulary
+│   ├── check_vocabulary_drift.py           # terms we key on that upstream no longer emits
+│   ├── generate_bls_e2e_fixtures.py        # rebuild the BLS e2e fixtures from the archive
+│   ├── generate_market_e2e_fixtures.py     # rebuild the market e2e fixtures from snapshots
+│   ├── generate_report.sh                  # run every suite -> reports/tests/report.{html,json}
+│   ├── generate_sec_e2e_fixtures.py        # rebuild the SEC e2e fixtures from the archive
+│   ├── generate_test_report.py             # the report renderer (reads pytest JUnit XML)
+│   ├── package_venv.sh                     # package the venv so executors can run our Python
 │   ├── record_run_outcome.sh               # summarise a finished (or abandoned) run
+│   ├── run_e2e_tests.sh                    # the e2e smoke suite, local SparkSession (CPU/GPU)
 │   ├── run_tests.sh                        # the fast suite, parallel (sibling of run_e2e_tests.sh)
 │   ├── selfloops.py                        # count nodes that are their own object
+│   ├── stage_sources.sh                    # mirror source prefixes onto each worker's disk
 │   ├── stall_watchdog.py                   # catch a stalled stage, dump the executors
 │   └── submit_spark_job.sh                 # spark-submit launcher (RAPIDS/GPU)
 ├── conf/
