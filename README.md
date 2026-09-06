@@ -2207,7 +2207,9 @@ pyg-knowledge-graph-builder/
 ├── bin/
 │   ├── profiles/
 │   │   └── large-run.env                   # opt-in sizing for a full-day run
+│   ├── record_run_outcome.sh               # summarise a finished (or abandoned) run
 │   ├── run_tests.sh                        # the fast suite, parallel (sibling of run_e2e_tests.sh)
+│   ├── selfloops.py                        # count nodes that are their own object
 │   ├── stall_watchdog.py                   # catch a stalled stage, dump the executors
 │   └── submit_spark_job.sh                 # spark-submit launcher (RAPIDS/GPU)
 ├── conf/
@@ -2434,7 +2436,12 @@ bin/stall_watchdog.py --host <driver-host> --out <run-dir>/stalls
 It polls the driver's REST API and fires only when a stage has stopped
 completing tasks **and** has one running past that stage's own longest completed
 task — quiet alone is ambiguous, because a stage draining its last few tasks is
-quiet too. On a confirmed stall it pulls thread dumps from every executor twice,
+quiet too. A stage where nothing has finished yet has no such yardstick; there it
+fires only once a running task has itself passed `--stall-seconds`. Without that
+floor, any stage slow to finish its first task gets reported as stalled, naming
+tasks that started seconds earlier — which happened twice on 2026-09-06 and cost
+a run that had actually succeeded its outcome report, because the harness around
+it treats a capture as proof. On a confirmed stall it pulls thread dumps from every executor twice,
 30 seconds apart, alongside the stuck task ids and host memory. A thread present
 in both dumps is stuck; one present in a single dump was merely slow.
 
@@ -2447,6 +2454,48 @@ This is how #380 was diagnosed: the dumps showed the executor's reader thread in
 blocked on the same Python worker, with the worker itself burning no CPU — a
 deadlock, not a slow parse. See `turtle_batches_to_arrow` in
 [`spark_jobs/build_graph.py`](spark_jobs/build_graph.py) for what caused it.
+
+### Recording what a run did
+
+A run's own log is not the record. The notebook runner puts each cell's output in
+the executed `.ipynb`, so grepping the run log shows a clean run no matter what
+happened — that is how a run whose seed died at 47 minutes, and whose three
+experiments then failed outright, was once written down as "rc=0, errors: none".
+
+[`bin/record_run_outcome.sh`](bin/record_run_outcome.sh) reads the run directory
+and writes `outcome.txt` beside it:
+
+```bash
+bin/record_run_outcome.sh <run-dir> [work-dir]
+```
+
+It flattens the executed notebook into text first, then reports each
+submission's status, the phases the job logged, how many tasks each stage really
+ran at once (from the event log — the only place that exists), a ranked error
+scan, executor memory-pool pressure per node, and the network traces. A trace
+whose samples fall outside the run window is called out as stale rather than
+summarised, because a leftover file from an earlier attempt otherwise produces a
+confident set of numbers about a different run.
+
+Everything it does is a read, and it does not care how the run ended — **the run
+whose harness gave up is the one whose report is worth having**. Whatever a
+particular run was meant to prove goes in `<run-dir>/extra-checks.sh`, which it
+sources at the end, so this file stays the same from one run to the next.
+
+[`bin/selfloops.py`](bin/selfloops.py) is the acceptance check for sequencing:
+it counts every predicate that makes a node its own object, and breaks
+`precedes` out by source.
+
+```bash
+env -u SPARK_HOME -u SPARK_CONF_DIR SPARK_LOCAL_IP=127.0.0.1 \
+    .venv/bin/python bin/selfloops.py <enriched-triples-parquet> selfloops.json
+```
+
+Unsetting `SPARK_HOME` matters: a cluster config asks for a GPU per task, which
+local mode can never satisfy, and the job then sits at zero tasks with no error
+rather than failing. Watch the edge counts as well as the loop total — a loop
+count that falls to zero because the edge count collapsed means a dedupe took
+rows it should have kept.
 
 ### Test tiers
 
