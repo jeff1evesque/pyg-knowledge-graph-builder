@@ -168,10 +168,8 @@ class BLSIntraSourceLinker:
         logger.info("\n[Step 4/4] Linking category hierarchies...")
         self._append(new_dfs, self._link_category_hierarchies(), "[Step 4/4]")
 
-        # Unpersist cached subset
-        self._bls_triples.unpersist()
-
         if not new_dfs:
+            self._bls_triples.unpersist()
             logger.info("BLS enrichment produced no new triples")
             return empty
 
@@ -181,6 +179,12 @@ class BLSIntraSourceLinker:
 
         all_new = all_new.cache()
         total = all_new.count()
+
+        # Unpersist after the count, not before it. Steps 1-4 only build lazy
+        # frames, so this count is the first thing that reads them; dropping the
+        # cache above it meant the count rebuilt the subset from the source
+        # frame instead of reading what we had just cached. #380
+        self._bls_triples.unpersist()
 
         logger.info("\n" + "=" * 60)
         logger.info(f"BLS Intra-Source Enrichment Complete: {total} new triples")
