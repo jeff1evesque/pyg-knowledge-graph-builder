@@ -89,6 +89,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
 from spark_jobs.settle import settle
+from spark_jobs.pyg_builder.sparse_scatter import scatter_sparse_entries
 
 
 logger = logging.getLogger(__name__)
@@ -3049,17 +3050,9 @@ class EdgeFeatureExtractor:
             tensor = np.zeros(
                 (num_edges, edge_vector_dim), dtype=np.float32
             )
-            g = groups.get(type_id)
-            if g is not None and not g.empty:
-                edge_idxs = g["edge_idx"].values
-                dims = g["dim"].values
-                values = g["value"].values
-
-                valid_mask = (dims >= 0) & (dims < edge_vector_dim)
-                tensor[
-                    edge_idxs[valid_mask], dims[valid_mask]
-                ] = values[valid_mask]
-
+            scatter_sparse_entries(
+                groups.get(type_id), tensor, "edge_idx", edge_vector_dim
+            )
             edge_features[edge_type_key] = (
                 torch.from_numpy(tensor).contiguous()
             )
@@ -3108,17 +3101,7 @@ class EdgeFeatureExtractor:
             )
 
             pdf = chunk_df.toPandas()
-
-            if not pdf.empty:
-                edge_idxs = pdf["edge_idx"].values
-                dims = pdf["dim"].values
-                values = pdf["value"].values
-
-                valid_mask = (dims >= 0) & (dims < edge_vector_dim)
-                tensor[
-                    edge_idxs[valid_mask], dims[valid_mask]
-                ] = values[valid_mask]
-
+            scatter_sparse_entries(pdf, tensor, "edge_idx", edge_vector_dim)
             del pdf
             gc.collect()
 
