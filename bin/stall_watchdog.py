@@ -48,6 +48,14 @@ went on to finish, and both captures named tasks under a second old. It cost a
 run that had actually succeeded its outcome report, because the harness around
 this tool reads a capture as proof of a stall.
 
+A baseline can also be present and still be worthless. Later the same day a
+stage whose longest finished task took 0.1s put the ceiling at 0.2s, so 21 tasks
+that had been running 1.2s came back as stragglers. Part 2 held, in that the
+ratio was 12x; the stage was simply made of tasks too short to measure against.
+--min-stuck-seconds is the answer to that: however small the baseline, a task
+is not called stuck until it has been running that long. Every stall this has
+genuinely caught had its stuck task past 165s, so the bar sits well below them.
+
 WHAT IT CANNOT TELL YOU
 -----------------------
 It captures, it does not diagnose. A dump showing threads parked in
@@ -164,7 +172,7 @@ class Api:
         return get(url, as_json=False)
 
 
-def classify(tasks, straggler_factor, no_baseline_floor_ms=0.0):
+def classify(tasks, straggler_factor, no_baseline_floor_ms=0.0, min_stuck_ms=0.0):
     """Split a stage's tasks and decide whether any running one is past the max.
 
     Returns (running, finished_ms, stuck) where stuck is the running tasks
@@ -177,6 +185,10 @@ def classify(tasks, straggler_factor, no_baseline_floor_ms=0.0):
     eager reading and what the pure decision means on its own; main passes
     --stall-seconds so an unattended run cannot report a task that started
     seconds ago.
+
+    A baseline can be present and still be useless. min_stuck_ms is the age a
+    running task has to reach before the ratio is allowed to call it stuck, and
+    it defaults to 0 so the ratio alone is what the pure decision means.
     """
     now_ms = time.time() * 1000.0
     running, finished_ms = [], []
@@ -196,8 +208,16 @@ def classify(tasks, straggler_factor, no_baseline_floor_ms=0.0):
             (t, age) for t, age in running if age >= no_baseline_floor_ms
         ]
 
+    # A stage whose finished tasks were all quick puts the ceiling near zero,
+    # and then anything alive for a second reads as a straggler. On 2026-09-06 a
+    # 0.1s maximum set the ceiling at 0.2s and named 21 tasks that had been
+    # running 1.2s. That stage went on to finish, and the run was written off on
+    # the capture. The ratio was doing its job; the baseline was the problem, so
+    # the guard goes on the task's own age instead of on the factor.
     ceiling = max(finished_ms) * straggler_factor
-    return running, finished_ms, [(t, age) for t, age in running if age > ceiling]
+    return running, finished_ms, [
+        (t, age) for t, age in running if age > ceiling and age >= min_stuck_ms
+    ]
 
 
 def local_facts():
@@ -301,6 +321,9 @@ def main():
                     help="a stage must go this long with no completion to qualify")
     ap.add_argument("--straggler-factor", type=float, default=1.5,
                     help="a running task must exceed this x the stage's longest finished task")
+    ap.add_argument("--min-stuck-seconds", type=int, default=30,
+                    help="a running task younger than this is never called stuck, "
+                         "however small the stage's longest finished task was")
     ap.add_argument("--dump-rounds", type=int, default=2, help="dumps per capture")
     ap.add_argument("--dump-gap", type=int, default=30, help="seconds between rounds")
     ap.add_argument("--max-captures", type=int, default=3, help="stop after this many")
@@ -353,14 +376,16 @@ def main():
 
             tasks = api.tasks(app, stage["stageId"], stage["attemptId"])
             running, finished, stuck = classify(
-                tasks, args.straggler_factor, args.stall_seconds * 1000.0
+                tasks, args.straggler_factor, args.stall_seconds * 1000.0,
+                args.min_stuck_seconds * 1000.0,
             )
             # Which of the two rules applied has to be in the log. Reading these
             # lines wrong is how the stall they exist for was misdiagnosed.
             if not stuck:
                 if finished:
-                    why = (f"no task is past {args.straggler_factor}x the "
-                           f"{max(finished) / 1000.0:.0f}s max")
+                    why = (f"no task is both past {args.straggler_factor}x the "
+                           f"{max(finished) / 1000.0:.0f}s max and "
+                           f"{args.min_stuck_seconds}s old")
                 else:
                     why = ("nothing has finished, and no task has itself been "
                            f"running {args.stall_seconds}s")
