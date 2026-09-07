@@ -1136,9 +1136,24 @@ def turtle_batches_to_arrow(batches, max_rows: int = PARSE_BATCH_ROWS):
     job's own cap kills it. That cost seven runs and a day on 2026-09-06 before a
     thread dump showed the two blocked threads. See #380.
 
-    Yielding bounded batches removes the precondition rather than the trigger: no
-    single value crossing the boundary exceeds ``max_rows`` triples, whatever any
-    blob does. A bigger outlier tomorrow costs more batches, not a wedged run.
+    Yielding bounded batches bounds the value: nothing crossing the boundary
+    exceeds ``max_rows`` triples, whatever any blob does. A bigger outlier
+    tomorrow costs more batches.
+
+    THAT IS NECESSARY BUT NOT SUFFICIENT -- it does not on its own stop the
+    deadlock, and an earlier version of this docstring claimed it did. Run
+    20260906T233804Z stalled the same way with this function in place: bounding
+    each value does not bound the total bytes in flight, and mapInArrow still
+    streams a whole partition in while Python streams several times as many bytes
+    of triples back. When both directions fill, both threads block. That made the
+    stall rare rather than gone -- one run finished clean and the next stalled on
+    identical code.
+
+    What actually closes it is keeping this operator off the GPU:
+    ``spark.rapids.sql.exec.PythonMapInArrowExec=false``, set by
+    bin/submit_spark_job.sh. Both blocked frames are cudf native calls that exist
+    only in the RAPIDS runner, so on Spark's stock ArrowPythonRunner they cannot
+    occur. Keep both fixes; they are not alternatives.
 
     Args:
         batches: iterator of ``pyarrow.RecordBatch``, each carrying the Turtle
