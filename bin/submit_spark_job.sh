@@ -455,6 +455,7 @@ if [[ "${PYG_STALL_WATCHDOG:-1}" != "0" && "${SPARK_MASTER_URL:-}" == spark://* 
       --out "$_stall_out" \
       --stall-seconds "${PYG_STALL_SECONDS:-300}" \
       --straggler-factor "${PYG_STALL_FACTOR:-2.0}" \
+      --min-stuck-seconds "${PYG_STALL_MIN_STUCK:-30}" \
       --max-captures "${PYG_STALL_MAX_CAPTURES:-1}" \
       </dev/null >>"$_stall_out/watchdog.log" 2>&1 &
     STALL_WATCHDOG_PID=$!
