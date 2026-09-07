@@ -28,9 +28,16 @@ WHY A SIZE TEST AND NOT A DEADLOCK TEST
 ---------------------------------------
 The deadlock itself needs two hosts, a full socket buffer and an unlucky
 interleaving; it is not reproducible in a unit test and was not reproducible on
-demand on the cluster either -- it took a different partition every run. The
-precondition IS testable and is what the fix removes, so that is what is pinned
-here. A test that can only fail when the stars align is not a regression guard.
+demand on the cluster either -- it took a different partition every run. One
+precondition IS testable, so that is what is pinned here. A test that can only
+fail when the stars align is not a regression guard.
+
+Note what this file does NOT prove. Bounding the value is necessary, not
+sufficient: the stall came back on 2026-09-06 with this bound in place, because
+bounding each hand-back does not bound the total bytes in flight. The other half
+of the fix is keeping the operator off the GPU, and it is pinned in
+test_submit_spark_job_conf.py. These tests passing does not mean the parse is
+safe.
 
 No Spark session: turtle_batches_to_arrow takes and returns pyarrow directly.
 """
@@ -81,14 +88,15 @@ def test_a_huge_blob_is_split_into_bounded_batches():
     """THE test. One blob, many triples, and no single hand-back is unbounded.
 
     Before the fix this was one value of 57,350 triples. If this assertion ever
-    fails again, the cluster will deadlock and give no error while doing it.
+    fails again, the parse regains its worst deadlock precondition and the
+    cluster can wedge with no error while doing it.
     """
     batches = list(turtle_batches_to_arrow([_batch([_turtle(25_000)])], max_rows=1_000))
 
     assert len(batches) == 25, "25,000 triples at 1,000 per batch must be 25 batches"
     assert all(b.num_rows <= 1_000 for b in batches), (
-        "a batch exceeded max_rows -- the bound that prevents the #380 deadlock "
-        "is not being applied"
+        "a batch exceeded max_rows -- one of the two bounds that keep the #380 "
+        "deadlock closed is not being applied"
     )
 
 
