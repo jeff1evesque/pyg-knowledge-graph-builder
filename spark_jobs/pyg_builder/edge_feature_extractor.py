@@ -83,6 +83,7 @@ from typing import Dict, Any, List, Optional, Tuple, Set
 
 import numpy as np
 import torch
+from pyspark import StorageLevel
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
@@ -3086,7 +3087,8 @@ class EdgeFeatureExtractor:
         """
         chunk_size = self._max_edges_per_collect(edge_vector_dim)
 
-        combined = combined.cache()
+        # DISK_ONLY -- nothing in this leg stays resident; see execute_pyg_only.
+        combined = combined.persist(StorageLevel.DISK_ONLY)
         total_entries = combined.count()
 
         logger.info(
