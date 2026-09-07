@@ -149,6 +149,12 @@ mkdir -p "$PYG_STALL_DUMP_DIR/stall-20260101T000001Z-stage13"
 sleep 60
 """
 
+# A submit that returns before the clock ticks, so several trials share one second.
+INSTANT_SUBMIT = """
+printf "%s\\n" "$*" >> "{calls}/submit.txt"
+exit 0
+"""
+
 
 @pytest.fixture
 def loop(tmp_path):
@@ -238,6 +244,22 @@ def test_each_trial_gets_its_own_work_dir(loop):
         for line in h.recorded("submit").splitlines()
     }
     assert len(work_dirs) == 2, f"trials shared a work dir: {work_dirs}"
+
+
+def test_trials_inside_one_second_still_get_their_own_work_dir(loop):
+    """The trial id is second-resolution, and trials can be faster than that.
+
+    A submit that returns immediately is not contrived -- it is what a misconfigured
+    run does, and what every skipped trial does. With a timestamp-only id these land
+    in the same work directory and the second reads the first's manifest.
+    """
+    h = loop(submit=INSTANT_SUBMIT)
+    h.run(trials=3)
+    work_dirs = {
+        line.split("--local_work_dir ")[1].split()[0]
+        for line in h.recorded("submit").splitlines()
+    }
+    assert len(work_dirs) == 3, f"fast trials collided: {work_dirs}"
 
 
 def test_records_the_parse_seconds_from_the_manifest(loop):
