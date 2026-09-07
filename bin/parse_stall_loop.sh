@@ -102,6 +102,25 @@ TRIAL_LOG="$RD/trials.jsonl"
 WANT_FREE_GB="${PYG_WANT_FREE_GB:-90}"
 TRIAL_TIMEOUT="${PYG_TRIAL_TIMEOUT:-1800}"
 
+# PYG_TRIAL_VIA_NOTEBOOK submits the SAME parse through the notebook instead of
+# calling the launcher directly. It exists to test one difference and only one.
+#
+# A trial normally sends the driver's output straight to a file, which can never
+# block. A notebook run sends it to a 64 KB pipe that bin/execute_notebook.py's
+# kernel drains a line at a time -- appending each to a list, running it through a
+# redaction regex, and printing it, which in ipykernel means a ZMQ message to the
+# parent. STREAM_TAIL_LINES is 0, so every line takes that path; that is why a full
+# run's notebook.log is ~99 MB. So in a notebook run the driver CAN be blocked on
+# its own logging and in a plain trial it never can, and stage 13 is the burst --
+# 338 scheduler lines for 169 tasks. Every stall on record is from a notebook run.
+#
+# Everything else is deliberately shared: same reclaim, same ids, same work dirs,
+# same sizing, same stall detection, same manifest read. The notebook's submit()
+# builds the identical argv, so the two arms differ in who holds the pipe.
+NB_RUNNER="${PYG_RUNNER_PYTHON:-$RD/runner-venv/bin/python}"
+NB_NOTEBOOK="${PYG_NOTEBOOK:-$REPO/notebook/multi_experiment.ipynb}"
+NB_KERNEL="${PYG_NOTEBOOK_KERNEL:-pyg-notebook-runner}"
+
 log() { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$RD/loop.log"; }
 
 LOCAL_HOST="$(hostname -s)"
@@ -245,15 +264,27 @@ for (( trial = 1; trial <= TRIALS; trial++ )); do
   # still reach -- exists only while that job is up. A child in this session would
   # take the loop's SIGHUP with it.
   started=$(date +%s)
-  setsid bash -c 'exec "$@"' _ \
-    "$REPO/bin/submit_spark_job.sh" \
-    --mode parse_only \
-    --local_work_dir "$PYG_WORK_DIR" \
-    --time_period "$PYG_TIME_PERIOD" \
-    --source_paths "$PYG_SOURCE_PATHS" \
-    --source_format "${PYG_SOURCE_FORMAT:-turtle_parquet}" \
-    --parquet_partitions "${PYG_PARQUET_PARTITIONS:-200}" \
-    >"$RD/trial-$TRIAL_ID.log" 2>&1 &
+  if [[ -n "${PYG_TRIAL_VIA_NOTEBOOK:-}" ]]; then
+    # The notebook builds this same argv itself, from these two settings plus the
+    # PYG_* variables env.sh already exports. PYG_SEED_ONLY stops it after the seed,
+    # so the trial is the parse and nothing else -- the same work the direct arm does.
+    export PYG_SEED_ONLY=1
+    export PYG_SEED_MODE=parse_only
+    setsid bash -c 'exec "$1" "$2" "$3" "$4" "$5"' _ \
+      "$NB_RUNNER" "$REPO/bin/execute_notebook.py" \
+      "$NB_NOTEBOOK" "$RD/executed-$TRIAL_ID.ipynb" "$NB_KERNEL" \
+      >"$RD/trial-$TRIAL_ID.log" 2>&1 &
+  else
+    setsid bash -c 'exec "$@"' _ \
+      "$REPO/bin/submit_spark_job.sh" \
+      --mode parse_only \
+      --local_work_dir "$PYG_WORK_DIR" \
+      --time_period "$PYG_TIME_PERIOD" \
+      --source_paths "$PYG_SOURCE_PATHS" \
+      --source_format "${PYG_SOURCE_FORMAT:-turtle_parquet}" \
+      --parquet_partitions "${PYG_PARQUET_PARTITIONS:-200}" \
+      >"$RD/trial-$TRIAL_ID.log" 2>&1 &
+  fi
   submit_pid=$!
   # The whole group, because the timeout path below has to take the spark-submit JVM
   # with it. Signalling the wrapper alone leaves that JVM holding every core on the
@@ -301,7 +332,15 @@ for (( trial = 1; trial <= TRIALS; trial++ )); do
   else
     wait "$submit_pid"; rc=$?
     read -r parse_seconds triples <<<"$(read_manifest "$PYG_WORK_DIR")"
-    if (( rc == 0 )); then
+    # bin/execute_notebook.py exits non-zero if ANY cell raised, and a parse_only
+    # trial leaves the later read-back cells with no graph to read. What this trial
+    # measures is the parse, so judge that arm on the manifest the parse itself
+    # wrote. rc stays in the record, so a trial that really failed is still visible.
+    parsed_ok=""
+    if [[ -n "${PYG_TRIAL_VIA_NOTEBOOK:-}" && -n "$triples" && "$triples" != "null" ]]; then
+      parsed_ok=1
+    fi
+    if (( rc == 0 )) || [[ -n "$parsed_ok" ]]; then
       log "  clean: parse ${parse_seconds}s, ${triples} triples (${elapsed}s wall)"
       record trial "$trial" run_id "$TRIAL_ID" verdict clean seconds "$elapsed" \
              parse_seconds "$parse_seconds" triples "$triples" submit_rc "$rc"
