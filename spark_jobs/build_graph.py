@@ -1588,7 +1588,21 @@ def load_source_triples(
     # read from cache rather than re-triggering the parse. That ordering is the
     # whole reason this costs an aggregation instead of a second parse: on real
     # input the parse is ~176s and the aggregation is seconds.
-    triples_df = triples_df.cache()
+    # DISK_ONLY, not .cache(). MEMORY_AND_DISK unrolls this frame through
+    # MemoryStore.putIteratorAsValues, and that unroll is what deadlocks the
+    # parse. The count below is stage 13, which wedged twice on 2026-09-06
+    # (issue-380-dump, issue-380-validate) with one task left of 169: the task
+    # thread sat in SocketInputStream.read inside putIteratorAsValues, holding
+    # the GpuArrowReader open, while "stdout writer for python" sat in
+    # SocketOutputStream.write holding the stream monitors. The reader stops
+    # draining Python's output while it waits for unroll memory, so Python
+    # blocks writing output, so it stops reading input, so the writer blocks
+    # too -- both socket directions full and nothing left to break the tie.
+    # DISK_ONLY writes the iterator straight to the disk store, never runs that
+    # unroll, and the stream keeps draining. Same reasoning as the assembly
+    # leg's persist below, which was moved off .cache() for the sibling
+    # deadlock.
+    triples_df = triples_df.persist(StorageLevel.DISK_ONLY)
     # Materialized with its own action, BEFORE the marker frame forks off it.
     # Assembling the union first and counting once would leave both branches
     # racing a cache nothing had populated yet, which is exactly the shape #375
