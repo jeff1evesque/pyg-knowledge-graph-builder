@@ -91,6 +91,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List
 
+from pyspark import StorageLevel
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType, StructField, StringType
@@ -2369,7 +2370,18 @@ def execute_pyg_only(
     # run's published output and writing its graph somewhere else entirely.
     enriched_path = config.enriched_input_path
     triples_df = load_enriched_parquet(spark, enriched_path)
-    triples_df = triples_df.cache()
+    # DISK_ONLY, not .cache(). The assembly leg runs on a 16g executor, which
+    # leaves about 5 GB of storage pool for a frame of 421M rows, so
+    # MEMORY_AND_DISK never holds it and the blocks live on disk regardless.
+    # What that level does add is a read path: a block fetched from disk gets
+    # promoted back into memory, and to make room Spark takes the
+    # UnifiedMemoryManager monitor and evicts. On 2026-09-06 it picked a GPU
+    # broadcast to evict, and writing one of those out needs the RAPIDS GPU
+    # semaphore -- held by the tasks queued behind that same monitor. The
+    # executor sat for nine minutes with no GC, no reads and no GPU, until the
+    # driver dropped it on a heartbeat timeout. DISK_ONLY skips the promotion,
+    # so that eviction never runs here.
+    triples_df = triples_df.persist(StorageLevel.DISK_ONLY)
     triple_count = triples_df.count()
 
     load_elapsed = time.time() - start_time
