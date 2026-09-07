@@ -41,6 +41,9 @@
 #   RAPIDS_PINNED_POOL          (optional, default 2G)
 #   RAPIDS_EXPLAIN              (optional, default NONE; set ALL to log which
 #                               operators run on GPU vs fall back to CPU)
+#   RAPIDS_GPU_MAP_IN_ARROW     (optional, default false) let RAPIDS put mapInArrow
+#                               on the GPU. Off on purpose -- see the note above the
+#                               spark-submit. Set true only to reproduce the stall.
 #   DRIVER_MEMORY               (optional, default 4g) driver heap. The pipeline fans
 #                               out into ~1,300 stages and OOMs Spark's 1g default.
 #   EXECUTOR_MEMORY             (optional, default 4g; cluster masters only) heap per
@@ -461,6 +464,36 @@ if [[ "${PYG_STALL_WATCHDOG:-1}" != "0" && "${SPARK_MASTER_URL:-}" == spark://* 
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# WHY mapInArrow IS KEPT OFF THE GPU (spark.rapids.sql.exec.PythonMapInArrowExec)
+#
+# The Turtle parse deadlocks the executor against its Python worker when RAPIDS
+# runs mapInArrow on the GPU. It is a stage-13 stall at 168/169: one task never
+# finishes, nothing raises, no executor is lost, and both nodes sit near idle
+# until the job's own cap kills it. See #380.
+#
+# The thread dump from run 20260906T233804Z, byte-identical 30s apart:
+#
+#   task thread    GpuArrowPythonOutput.read -> GpuArrowReader.readNext
+#                  -> cudf readArrowIPCChunkToArrowTable -> read0
+#   stdout writer  GpuArrowWriter.write -> cudf writeArrowIPCArrowChunk -> write0
+#
+# Both blocked on the same worker, which itself burned 0 CPU ticks over 15s.
+# `ss` showed ~4.19 MB stuck in the send queue in BOTH directions at once, so
+# each side was blocked writing and neither could drain the other.
+#
+# Bounding the batch (turtle_batches_to_arrow, #380) removed the 14.8 MB
+# single-value trigger but not this: mapInArrow still streams a whole partition
+# in while Python streams several times as many bytes of triples back, and when
+# both directions fill, both threads block. That made the stall rare, not gone
+# -- one run finished clean and the next stalled on identical pipeline code.
+#
+# Both blocked frames are cudf native calls that exist only in the RAPIDS
+# runner. Off the GPU, Spark's stock ArrowPythonRunner handles it and those
+# frames cannot occur. The parse is CPU-bound anyway (#342), so this is not
+# giving up GPU work that was paying for itself.
+# ---------------------------------------------------------------------------
+
 # `|| rc=$?` because set -e would otherwise abort here on a non-zero submit and
 # never run the cleanup below. The caller's exit code must survive this exactly:
 # the notebook's submit() decides a leg passed or failed on it.
@@ -486,6 +519,7 @@ rc=0
   --conf spark.rapids.memory.gpu.maxAllocFraction="${RAPIDS_GPU_MAX_ALLOC_FRACTION}" \
   --conf spark.rapids.sql.format.parquet.reader.type=MULTITHREADED \
   --conf spark.rapids.sql.explain="${RAPIDS_EXPLAIN:-NONE}" \
+  --conf spark.rapids.sql.exec.PythonMapInArrowExec="${RAPIDS_GPU_MAP_IN_ARROW:-false}" \
   --conf spark.network.timeout="${NETWORK_TIMEOUT:-120s}" \
   --conf spark.executor.heartbeatInterval="${EXECUTOR_HEARTBEAT_INTERVAL:-10s}" \
   --conf spark.sql.maxPlanStringLength="${MAX_PLAN_STRING_LENGTH:-16k}" \
