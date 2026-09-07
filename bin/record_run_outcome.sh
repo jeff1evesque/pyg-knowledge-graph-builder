@@ -47,6 +47,10 @@ OUT="$RD/outcome.txt"
 CELLS="$RD/notebook-cells.txt"
 SPARK_WORK_DIR="${SPARK_WORK_DIR:-/opt/spark/work}"
 
+# The run this report is about. Everything a run writes is named after it, so this
+# is what tells a leftover file from one belonging here.
+RUN_ID="$(grep -m1 'RUN_ID=' "$RD/run.log" 2>/dev/null | sed 's/.*RUN_ID=//' | tr -d '[:space:]')"
+
 if [[ ! -d "$RD" ]]; then
   echo "no such run directory: $RD" >&2
   exit 2
@@ -134,7 +138,7 @@ PY
 echo "======== RUN OUTCOME ========"
 echo "written  : $(date -u '+%Y-%m-%d %H:%M:%SZ')"
 echo "run dir  : $(basename "$RD")"
-echo "run id   : $(grep -m1 'RUN_ID=' "$RD/run.log" 2>/dev/null | sed 's/.*RUN_ID=//')"
+echo "run id   : ${RUN_ID:-not recorded}"
 # The harness rc is the notebook runner's, never the job's, and is labelled that
 # way. A harness that aborted says nothing about whether the job succeeded.
 echo "harness  : $([ -f "$RD/run.done" ] && echo "runner rc=$(cat "$RD/run.done")" || echo 'no rc recorded')"
@@ -222,18 +226,27 @@ PY
 
 echo
 echo "--- network during the run (kernel byte counters, not Spark's) ---"
-python3 - "$RD" <<'PY'
+python3 - "$RD" "${RUN_ID:-}" <<'PY'
 import csv, glob, os, re, sys, datetime
 d = sys.argv[1]
+run_id = sys.argv[2] if len(sys.argv) > 2 else ""
 
-# The run window, taken from the event log file names (app-<yyyyMMddHHmmss>-<n>),
-# because those are written by Spark and need no cooperation from the harness.
+# A trace that belongs to another run must never be summarised as this one's. That
+# has happened repeatedly: a stop flag is cleared on one node but set on both, so
+# the second node's sampler exits at once and the end-of-run copy brings the
+# previous attempt's file back. The report then prints a confident set of numbers
+# about a different run.
 #
-# A trace whose samples fall outside this window is a leftover from an earlier
-# attempt, not this run. That has happened repeatedly: a stop flag is cleared on
-# one node but set on both, so the second node's sampler exits at once and the
-# end-of-run copy brings the previous attempt's file back. Summarising it prints
-# a confident set of numbers about a different run.
+# Two checks, because there are two kinds of name. A trace written by the current
+# launcher carries the run id (net-<host>-<run id>.tsv), and that is decisive.
+# Older names carry no run id, so they fall back to the window below.
+NAMED = re.compile(r"^net-.*-(\d{8}T\d{6}Z)\.tsv$")
+
+# The window comes from the event log file names (app-<yyyyMMddHHmmss>-<n>),
+# because those are written by Spark and need no cooperation from the harness. It
+# is a floor, not an identity: a run directory reused for a second run keeps the
+# first run's event logs, so the earliest app here may not belong to this run --
+# which is exactly why a name carrying the run id is checked first.
 starts = []
 for p in glob.glob(os.path.join(d, "eventlog", "app-*")):
     m = re.search(r"app-(\d{14})-", os.path.basename(p))
@@ -243,6 +256,11 @@ window_start = min(starts) if starts else None
 
 for name in sorted(glob.glob(os.path.join(d, "net-*.tsv"))):
     label = os.path.basename(name)
+    named = NAMED.match(label)
+    mine = bool(named and run_id and named.group(1) == run_id)
+    if named and run_id and not mine:
+        print(f"  {label}: from run {named.group(1)}, not this one. Not summarised.")
+        continue
     rows = list(csv.DictReader(open(name), delimiter="\t"))
     if len(rows) < 2:
         print(f"  {label}: too few samples")
@@ -252,7 +270,9 @@ for name in sorted(glob.glob(os.path.join(d, "net-*.tsv"))):
     def fmt(t):
         return datetime.datetime.fromtimestamp(t).strftime("%H:%M:%S")
 
-    if window_start is not None and last < window_start:
+    # The name already settled it; the window is only for traces without one, and
+    # a trace legitimately starts before Spark does.
+    if not mine and window_start is not None and last < window_start:
         print(f"  {label}: STALE -- {len(rows)} samples covering {fmt(first)}-{fmt(last)}, "
               f"all before this run's first application at {fmt(window_start)}. "
               f"Left over from an earlier attempt; not summarised.")
