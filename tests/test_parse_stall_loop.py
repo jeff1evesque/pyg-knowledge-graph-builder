@@ -134,6 +134,7 @@ CLEAN_SUBMIT = """
 printf "%s\\n" "$*" >> "{calls}/submit.txt"
 echo "PYG_STAGE_ENABLED=${{PYG_STAGE_ENABLED:-unset}}" >> "{calls}/submit_env.txt"
 echo "PYG_STALL_DUMP_DIR=${{PYG_STALL_DUMP_DIR:-unset}}" >> "{calls}/submit_env.txt"
+echo "GPU_PER_TASK=${{GPU_PER_TASK:-unset}}" >> "{calls}/submit_env.txt"
 mkdir -p "$PYG_WORK_DIR/manifests/year=2026/month=09"
 cat > "$PYG_WORK_DIR/manifests/year=2026/month=09/parse_only_1.json" <<'JSON'
 {{"result": {{"parse_seconds": 68.7, "initial_triples": 19600000}}}}
@@ -196,6 +197,24 @@ def test_does_not_restage_the_sources(loop):
     h = loop()
     h.run(trials=1)
     assert "PYG_STAGE_ENABLED=false" in h.recorded("submit_env")
+
+
+def test_submits_at_the_seed_legs_sizing(loop):
+    """Without the seed profile a trial runs at the defaults, which is a different experiment.
+
+    GPU_PER_TASK decides how many parse tasks share the GPU -- 64 slots at the seed
+    leg's 0.03125 against 8 at the 0.125 default. Concurrency across the JVM/Python
+    boundary is the most likely thing the race turns on, so a trial at the wrong
+    sizing measures something else and reports it as a parse trial.
+    """
+    h = loop()
+    (h.rd / "seed-profile.env").write_text("export GPU_PER_TASK=0.03125\n")
+    with open(h.rd / "env.sh", "a") as env:
+        env.write(f'export PYG_SEED_PROFILE="{h.rd}/seed-profile.env"\n')
+
+    h.run(trials=1)
+
+    assert "GPU_PER_TASK=0.03125" in h.recorded("submit_env")
 
 
 def test_reclaims_memory_on_every_node_before_each_trial(loop):
