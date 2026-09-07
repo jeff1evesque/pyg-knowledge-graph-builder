@@ -37,6 +37,7 @@ import logging
 from typing import Dict, Any, List, Tuple
 
 import torch
+from pyspark import StorageLevel
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 
@@ -242,7 +243,8 @@ class EdgeMapper:
             )
         )
 
-        edges_final = edges_final.cache()
+        # DISK_ONLY -- nothing in this leg stays resident; see execute_pyg_only.
+        edges_final = edges_final.persist(StorageLevel.DISK_ONLY)
 
         # ============================================
         # Step 5: Collect the edges in one globally-sorted pass, keyed by a
@@ -299,7 +301,9 @@ class EdgeMapper:
             .join(F.broadcast(id_df), ["src_type", "relation", "dst_type"])
             .select("edge_type_id", "src_id", "dst_id")
             .orderBy("edge_type_id", "src_id", "dst_id")
-            .cache()
+            # DISK_ONLY -- 22.7 GB on disk and nothing resident when measured
+            # on 2026-09-06; see execute_pyg_only.
+            .persist(StorageLevel.DISK_ONLY)
         )
 
         chunks = self._chunk_type_ids(keys_by_id, edge_counts)
