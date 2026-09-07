@@ -82,7 +82,8 @@ jobs:
         # itself -- see the note at tests/conftest.py:26, where a shared heap
         # produced ~150 failures that read as unrelated test breakage.
         #
-        # bin/run_tests.sh's -n 8 is calibrated for a 20-core developer box and
-        # does not belong here. If this run turns red with exit 137, or with
-        # failures that look like nothing to do with the diff, drop the -n first.
+        # bin/run_tests.sh's -n 8 is sized for a much larger local machine and
+        # does not belong here; see the note there for what it was measured on.
+        # If this run turns red with exit 137, or with failures that look like
+        # nothing to do with the diff, drop the -n before reading anything else.
         run: python -m pytest tests/ -q -m "not e2e" -n 2
