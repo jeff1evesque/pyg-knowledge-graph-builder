@@ -50,6 +50,7 @@ from typing import Dict, Any, List, Optional, Set, Tuple
 
 import numpy as np
 import torch
+from pyspark import StorageLevel
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 
@@ -1003,7 +1004,10 @@ class FeatureExtractor:
 
         # Classify each literal predicate once, then route its values to
         # exactly one segment — the two extractions partition the literals.
-        literal_triples = self._literal_triples(triples_df, node_id_df).cache()
+        # DISK_ONLY -- nothing in this leg stays resident; see execute_pyg_only.
+        literal_triples = self._literal_triples(
+            triples_df, node_id_df
+        ).persist(StorageLevel.DISK_ONLY)
         numeric_predicates = self._classify_literal_predicates(literal_triples)
 
         numeric_df = self._extract_numeric_literals(
@@ -1145,7 +1149,9 @@ class FeatureExtractor:
                     F.col("dim").cast("int"),
                     F.col("value").cast("float"),
                 )
-                .cache()
+                # DISK_ONLY -- nothing in this leg stays resident; see
+                # execute_pyg_only.
+                .persist(StorageLevel.DISK_ONLY)
             )
 
             self._scatter_all_types(
@@ -1597,7 +1603,8 @@ class FeatureExtractor:
             .agg(F.mean("numeric_value").alias("numeric_value"))
         )
 
-        numeric_df = numeric_df.cache()
+        # DISK_ONLY -- nothing in this leg stays resident; see execute_pyg_only.
+        numeric_df = numeric_df.persist(StorageLevel.DISK_ONLY)
         count = numeric_df.count()
         logger.info(
             f"    Numeric literals: {count:,} (node, property) pairs"
