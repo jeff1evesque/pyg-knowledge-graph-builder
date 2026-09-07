@@ -1338,7 +1338,7 @@ When config is empty, sensible defaults are inferred from the data.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `--mode` | Yes | `full` | `full`, `enrichment_only`, or `pyg_only` |
+| `--mode` | Yes | `full` | `full`, `enrichment_only`, or `pyg_only`. `parse_only` also exists but is a diagnostic, not a pipeline stage: it stops at the count that materialises the parse and writes nothing — see [The parse stall](#the-parse-stall) |
 | `--source_paths` | Modes 1,2 | — | Comma-separated source path(s)/URI(s): local directories or `s3a://...`. Each is loaded independently and the results are unioned into a single triples DataFrame before enrichment. A path naming the archive's `source=sec` partition must also name `feed=filings`: that is the only SEC feed carrying RDF, and the job rejects the other seven up front rather than failing later on a missing Turtle column |
 | `--input_mode` | No | `s3` | Where `--source_paths` are opened from. `s3` reads the `s3a://` URIs directly — correct in the cloud, where executors sit beside the bucket. `local` reads a mirror of those same objects from node-local disk instead; see [Reading sources from local disk](#reading-sources-from-local-disk) |
 | `--local_source_root` | When `--input_mode local` | — | Root of the staged mirror. Must exist at the same path on every worker |
@@ -2499,6 +2499,42 @@ reported as "168 of 169". That is not a failure near the end. The stuck task
 launches in the first wave, milliseconds after the stage is submitted, and the
 other 168 finish and stream past it — so the counter parks at N-1 whichever task
 was hit. The progress number describes what survived, not when it broke.
+
+### The parse stall
+
+For weeks the seed leg would hang at 168 of 169 tasks in the stage that
+materialises the parse, and never clear. It looked like a pure race: the same
+job read the same mirror twice within half an hour, with byte-identical Spark
+properties, and stalled on one attempt while clearing the same stage in 68.7s on
+the next. Three successive fixes were each declared verified on one clean run,
+and each came back.
+
+The cause was sitting in the thread dumps
+[`bin/stall_watchdog.py`](bin/stall_watchdog.py) had been collecting all along.
+Two threads on the executor wedge against each other:
+
+- the task thread, blocked in `SocketInputStream.read` reading Arrow results back
+  from the Python parse worker, *inside* `MemoryStore.putIteratorAsValues`;
+- `stdout writer for python`, blocked in `SocketOutputStream.write` holding the
+  stream monitors, writing the next input batch *to* Python.
+
+The reader stops draining Python's output while it unrolls rows into the memory
+store. Python's output buffer fills, so Python stops reading its input, so the
+writer blocks too. Both directions are full and nothing breaks the tie.
+
+The two captures show this with *different* Python runners — one
+`GpuArrowPythonRunner`, one `BasePythonUDFRunner` — which is why "keep mapInArrow
+off the GPU" swapped the runner and the stall followed it. The runner was never
+the cause. The shared consumer was, and that consumer existed only because the
+parse frame was `.cache()`d: #380 converted five other frames and this file's
+*enriched* frame to `DISK_ONLY`, and left the parse frame behind. It is
+`DISK_ONLY` now — `doPutIterator` branches on `level.useMemory`, so the unroll
+never runs.
+
+`--mode parse_only` remains, because it is still the cheapest way to exercise the
+parse: it stops at the count that materialises it and writes nothing, so it
+reaches a verdict in under two minutes against the three hours a full run needs
+to reach the same point once.
 
 ### Driving a real cluster run
 

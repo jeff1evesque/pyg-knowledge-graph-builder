@@ -178,7 +178,11 @@ def _utcnow() -> datetime:
 # ============================================
 # Constants
 # ============================================
-VALID_MODES = {"full", "enrichment_only", "pyg_only"}
+# parse_only is a diagnostic and not part of any pipeline: it stops at the count
+# that materialises the parse and writes nothing. It is listed here because that
+# is what makes it reachable from --mode, which is the point -- the stall it
+# reproduces only happens on a real submission. See execute_parse_only.
+VALID_MODES = {"full", "enrichment_only", "pyg_only", "parse_only"}
 VALID_SOURCE_FORMATS = {"ntriples", "turtle_parquet"}
 
 # Where the parse reads its input from.
@@ -573,7 +577,10 @@ class JobConfig:
                 f"Must be one of: {', '.join(sorted(VALID_INPUT_MODES))}"
             )
 
-        if self.mode in ("full", "enrichment_only"):
+        # parse_only reads the same sources through the same loader, so it wants
+        # every check the modes that parse for real get -- a trial that skipped
+        # them would not be reproducing the submission it claims to.
+        if self.mode in ("full", "enrichment_only", "parse_only"):
             if not self.source_paths:
                 raise ValueError(
                     f"source_paths is required for mode '{self.mode}'"
@@ -1581,7 +1588,21 @@ def load_source_triples(
     # read from cache rather than re-triggering the parse. That ordering is the
     # whole reason this costs an aggregation instead of a second parse: on real
     # input the parse is ~176s and the aggregation is seconds.
-    triples_df = triples_df.cache()
+    # DISK_ONLY, not .cache(). MEMORY_AND_DISK unrolls this frame through
+    # MemoryStore.putIteratorAsValues, and that unroll is what deadlocks the
+    # parse. The count below is stage 13, which wedged twice on 2026-09-06
+    # (issue-380-dump, issue-380-validate) with one task left of 169: the task
+    # thread sat in SocketInputStream.read inside putIteratorAsValues, holding
+    # the GpuArrowReader open, while "stdout writer for python" sat in
+    # SocketOutputStream.write holding the stream monitors. The reader stops
+    # draining Python's output while it waits for unroll memory, so Python
+    # blocks writing output, so it stops reading input, so the writer blocks
+    # too -- both socket directions full and nothing left to break the tie.
+    # DISK_ONLY writes the iterator straight to the disk store, never runs that
+    # unroll, and the stream keeps draining. Same reasoning as the assembly
+    # leg's persist below, which was moved off .cache() for the sibling
+    # deadlock.
+    triples_df = triples_df.persist(StorageLevel.DISK_ONLY)
     # Materialized with its own action, BEFORE the marker frame forks off it.
     # Assembling the union first and counting once would leave both branches
     # racing a cache nothing had populated yet, which is exactly the shape #375
@@ -2341,6 +2362,66 @@ def execute_enrichment_only(
     }
 
 
+def execute_parse_only(
+    config: JobConfig, spark: SparkSession, s3_client
+):
+    """
+    Mode: parse_only
+    Raw source → triples_df → count → stop.
+
+    A DIAGNOSTIC MODE. It builds no graph and writes no Parquet, and nothing in
+    the ordinary pipeline calls it.
+
+    It exists because the stage that materialises the parse deadlocks between
+    the executor JVM and its Python worker, at 168 of 169 tasks, and never
+    clears (issue #388). The stall is a race: on 2026-09-07 the same job, from
+    the same mirror, with byte-identical Spark properties, stalled on one
+    attempt and cleared the same stage in 68.7s on the next. There is no diff
+    to read, so the only instrument that says anything is repetition -- and a
+    full run costs about three hours to deliver exactly ONE parse attempt.
+
+    This mode is that attempt on its own. The count below is the first action
+    the seed leg takes; everything before it is Parquet metadata listing. So a
+    trial here reaches the verdict in under two minutes, against the three
+    hours a full run needs to reach the same point once.
+
+    THE PLAN MUST STAY IDENTICAL to what a real seed leg submits. That is the
+    whole basis for reading a result here as a statement about a real run, and
+    it is why this calls ``load_source_triples`` with the same config rather
+    than assembling a cheaper frame of its own: same sources, same union, same
+    canonicalization, same cache, same count. Anything added between the
+    session and the count changes what is being measured.
+    """
+    logger.info("Executing PARSE ONLY mode (diagnostic -- writes nothing)")
+    logger.info("")
+
+    logger.info("=" * 80)
+    logger.info("PHASE: LOADING SOURCE TRIPLES")
+    logger.info("=" * 80)
+    start_time = time.time()
+
+    triples_df, initial_count, source_stats = load_source_triples(spark, config)
+
+    load_elapsed = time.time() - start_time
+    logger.info(f"Loaded {initial_count:,} triples in {load_elapsed:.1f}s")
+    logger.info("")
+
+    # Released here rather than left to session teardown so a trial that is
+    # timed by the loop is not also paying for the cache it leaves behind.
+    triples_df.unpersist()
+
+    return {
+        "mode": "parse_only",
+        "source_format": config.source_format,
+        "initial_triples": initial_count,
+        # The number the loop compares across trials. Recorded in the result,
+        # and so in the manifest, rather than left for something to scrape back
+        # out of a log whose format is not a contract.
+        "parse_seconds": round(load_elapsed, 1),
+        "sources": source_stats,
+    }
+
+
 def execute_pyg_only(
     config: JobConfig, spark: SparkSession, s3_client
 ):
@@ -2465,16 +2546,16 @@ def save_job_manifest(
             "pyg_output_path": config.pyg_output_path,
             "s3_archive_bucket": config.s3_archive_bucket,
             "s3_pyg_key": config.s3_pyg_key,
-            # pyg_only never reaches the enrichment phase, so this job's flag
-            # describes something it never ran. Recorded verbatim it reads as
-            # a statement about the enriched Parquet being consumed -- which
-            # it is not, and which is how the 2026-07-29 build's empty class
-            # hierarchy got attributed to a flag that had nothing to do with
-            # it. null means "not applicable to this mode"; the answer that
+            # pyg_only and parse_only never reach the enrichment phase, so this
+            # job's flag describes something they never ran. Recorded verbatim it
+            # reads as a statement about the enriched Parquet being consumed --
+            # which it is not, and which is how the 2026-07-29 build's empty
+            # class hierarchy got attributed to a flag that had nothing to do
+            # with it. null means "not applicable to this mode"; the answer that
             # IS true of the data is in ontology_schema.json
             # (ontology_mapping_enabled), derived from the triples.
             "enable_ontology_mapping": (
-                None if config.mode == "pyg_only"
+                None if config.mode in ("pyg_only", "parse_only")
                 else config.enable_ontology_mapping
             ),
             "pyg_config": config.pyg_config,
@@ -2719,6 +2800,7 @@ def main():
         mode_handlers = {
             "full": execute_full_pipeline,
             "enrichment_only": execute_enrichment_only,
+            "parse_only": execute_parse_only,
             "pyg_only": execute_pyg_only,
         }
 

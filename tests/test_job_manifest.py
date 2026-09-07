@@ -18,6 +18,7 @@ import json
 import os
 from types import SimpleNamespace
 
+import pytest
 
 from spark_jobs.build_graph import save_job_manifest
 
@@ -100,24 +101,30 @@ def test_manifest_records_the_ontology_flag_where_it_applies(spark, tmp_path):
     assert payload["config"]["enable_ontology_mapping"] is True
 
 
-def test_manifest_does_not_claim_an_ontology_flag_pyg_only_never_used(
-    spark, tmp_path
+@pytest.mark.parametrize("mode", ["pyg_only", "parse_only"])
+def test_manifest_does_not_claim_an_ontology_flag_the_mode_never_used(
+    spark, tmp_path, mode
 ):
-    """pyg_only must not report a flag for a phase it never reaches.
+    """A mode that never enriches must not report a flag for that phase.
 
-    That job enriches nothing -- it reads a Parquet some earlier job wrote --
+    pyg_only enriches nothing -- it reads a Parquet some earlier job wrote --
     so its own --enable_ontology_mapping is inert. Written verbatim it reads
     as a claim about that Parquet, and the 2026-07-29 build's empty class
     hierarchy was diagnosed off exactly that misreading. null says "not
     applicable"; ontology_schema.json's ontology_mapping_enabled carries the
     verdict that is actually derived from the triples.
+
+    parse_only stops at the count that materialises the parse, so the same
+    holds and for the same reason. Its manifests are the per-trial record of a
+    stall hunt (#388), which is exactly the setting where a field that quietly
+    describes a phase the job never ran costs a day.
     """
-    work = tmp_path / "pyg_only"
-    config = _config(str(work), mode="pyg_only")
+    work = tmp_path / mode
+    config = _config(str(work), mode=mode)
     config.enable_ontology_mapping = False
-    save_job_manifest(spark, None, config, {"mode": "pyg_only"}, 0.5)
+    save_job_manifest(spark, None, config, {"mode": mode}, 0.5)
 
     payload = json.loads(open(_find_manifest(work), "rb").read())
     assert payload["config"]["enable_ontology_mapping"] is None, (
-        "pyg_only manifest states an enrichment flag it never honored"
+        f"{mode} manifest states an enrichment flag it never honored"
     )
