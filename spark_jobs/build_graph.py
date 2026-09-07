@@ -2382,9 +2382,8 @@ def execute_parse_only(
 
     This mode is that attempt on its own. The count below is the first action
     the seed leg takes; everything before it is Parquet metadata listing. So a
-    trial here reaches the verdict in under two minutes, and
-    ``bin/parse_stall_loop.sh`` can take thirty of them in the time one full
-    run takes to reach the same point once.
+    trial here reaches the verdict in under two minutes, against the three
+    hours a full run needs to reach the same point once.
 
     THE PLAN MUST STAY IDENTICAL to what a real seed leg submits. That is the
     whole basis for reading a result here as a statement about a real run, and

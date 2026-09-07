@@ -11,7 +11,7 @@ concluded from a single trial, and a full run costs about three hours to deliver
 exactly one.
 
 ``parse_only`` is that trial on its own -- under two minutes to a verdict --
-so ``bin/parse_stall_loop.sh`` can take enough of them to measure a rate.
+against the three hours a full run needs to reach the same point once.
 
 WHAT THESE TESTS PROTECT
 ------------------------
