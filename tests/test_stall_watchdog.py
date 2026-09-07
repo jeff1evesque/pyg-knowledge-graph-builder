@@ -47,6 +47,7 @@ API assumptions.
 No Spark session, no network: these are pure functions.
 """
 import importlib.util
+import os
 import time
 from pathlib import Path
 
@@ -255,3 +256,52 @@ def test_dump_text_unescapes_entities(wd):
 def test_dump_text_handles_an_empty_response(wd):
     assert wd.dump_to_text(None) == ""
     assert wd.dump_to_text("") == ""
+
+
+# --------------------------------------------------------------------------- #
+# The half of a stall the JVM dump cannot see
+#
+# The parse deadlock in #386 lives between the executor and its Python worker. Two
+# unprivileged readings identified it by hand -- socket queues backed up in both
+# directions, and workers asleep with no CPU -- and both are gone the moment anybody
+# kills the job. These pin that the watchdog takes them, and that trying to take them
+# can never be what breaks a capture.
+# --------------------------------------------------------------------------- #
+
+def test_the_probe_cannot_match_its_own_command_line(wd):
+    """Over ssh the remote shell's command line IS this snippet, so a plain pattern
+    matches that shell and the probe reports itself. This trap has already cost two
+    debugging detours today -- once in a pkill sweep, once in a wait loop."""
+    assert "[p]yspark.daemon" in wd.WORKER_PROBE
+    assert "pyspark.daemon" not in wd.WORKER_PROBE.replace("[p]yspark.daemon", "")
+
+
+def test_worker_facts_runs_the_probe_on_the_local_host(wd, tmp_path, monkeypatch):
+    import socket as _socket
+
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    (stub / "ss").write_text("#!/usr/bin/env bash\necho 'State Recv-Q Send-Q'\n"
+                             "echo 'ESTAB 725820 4146382 127.0.0.1:1 127.0.0.1:2'\n")
+    (stub / "pgrep").write_text("#!/usr/bin/env bash\nexit 1\n")
+    for f in stub.iterdir():
+        f.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stub}:{os.environ['PATH']}")
+
+    out = wd.worker_facts([_socket.gethostname()])
+    text = out[_socket.gethostname()]
+    assert "725820 4146382" in text
+    assert "python workers" in text
+
+
+def test_worker_facts_records_an_unreachable_host_rather_than_raising(wd, tmp_path,
+                                                                     monkeypatch):
+    """A capture that dies trying to add context is worse than one without it."""
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    (stub / "ssh").write_text("#!/usr/bin/env bash\nexit 255\n")
+    (stub / "ssh").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stub}:{os.environ['PATH']}")
+
+    out = wd.worker_facts(["some-other-node"])
+    assert "rc=255" in out["some-other-node"]

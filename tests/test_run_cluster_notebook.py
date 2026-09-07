@@ -135,8 +135,14 @@ class Harness:
 
 @pytest.fixture
 def harness(tmp_path):
-    def build(work_dir=None, runner_body="exit 0\n"):
+    def build(work_dir=None, runner_body="exit 0\n", stalls=False):
         wd = work_dir if work_dir is not None else str(tmp_path / "work" / RUN_ID)
+        if stalls:
+            # The watchdog fires DURING the run, so the stub notebook is what drops
+            # the capture. Pre-creating it in the test would not reach the wait loop:
+            # the launcher moves earlier captures aside before the notebook starts.
+            cap = tmp_path / "run" / "stalls" / "stall-20260101T000001Z-stage9"
+            runner_body = f'mkdir -p "{cap}"\nsleep 30\n'
         h = Harness(tmp_path, wd, runner_body)
         (Path(wd) / "checkpoints").mkdir(parents=True)
         return h
@@ -246,9 +252,7 @@ def test_outcome_is_recorded_on_the_success_path(harness):
 
 def test_outcome_is_recorded_when_a_stall_is_captured(harness):
     """The run whose harness gave up is the run whose report is worth having."""
-    h = harness(runner_body="sleep 30\n")
-    (h.rd / "stalls").mkdir(exist_ok=True)
-    (h.rd / "stalls" / "stall-20260101T000001Z-stage9").mkdir()
+    h = harness(stalls=True)
 
     r = h.run()
     assert r.returncode == 99
@@ -256,11 +260,23 @@ def test_outcome_is_recorded_when_a_stall_is_captured(harness):
     assert h.recorded("record").splitlines() == [str(h.rd), h.work_dir]
 
 
+def test_an_earlier_run_s_capture_does_not_end_this_one(harness):
+    """The wait loop treats any stall-* as this run's, so a leftover from the last
+    attempt would stop a healthy run before it began -- and the run directory is
+    reused across attempts, which is exactly when this bites."""
+    h = harness()
+    (h.rd / "stalls").mkdir(exist_ok=True)
+    (h.rd / "stalls" / "stall-20251231T235900Z-stage13").mkdir()
+
+    assert h.run().returncode == 0
+    assert (h.rd / "run.done").read_text().strip() == "0"
+    # Moved aside, not deleted: a capture is the only evidence a stall happened.
+    assert (h.rd / "stalls" / f"before-{RUN_ID}" / "stall-20251231T235900Z-stage13").is_dir()
+
+
 def test_a_captured_stall_leaves_the_checkpoints_alone(harness):
     """The job is still running on this path and may still read them."""
-    h = harness(runner_body="sleep 30\n")
-    (h.rd / "stalls").mkdir(exist_ok=True)
-    (h.rd / "stalls" / "stall-20260101T000001Z-stage9").mkdir()
+    h = harness(stalls=True)
     checkpoints = Path(h.work_dir) / "checkpoints"
 
     assert h.run().returncode == 99

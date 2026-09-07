@@ -97,6 +97,15 @@ EVENTLOG="$(sed -n 's/.*spark\.eventLog\.dir=\([^ ]*\).*/\1/p' <<<"${SPARK_EXTRA
 mkdir -p "$RD/eventlog" "$STALL_DIR"
 [[ -n "$EVENTLOG" ]] && mkdir -p "${EVENTLOG#file://}"
 
+# A capture left behind by an earlier attempt would end this run before it began:
+# the wait loop below treats any stall-* as this run's and stops with rc=99. Move
+# them aside rather than delete them -- a capture is the only evidence of a stall
+# that has already been cleaned up after.
+if compgen -G "$STALL_DIR/stall-*" > /dev/null 2>&1; then
+  mkdir -p "$STALL_DIR/before-$RUN_ID"
+  mv "$STALL_DIR"/stall-* "$STALL_DIR/before-$RUN_ID/" 2>/dev/null
+fi
+
 log "RUN_ID=$RUN_ID"
 log "work dir : $PYG_WORK_DIR"
 log "input    : ${PYG_INPUT_MODE:-remote}${PYG_LOCAL_SOURCE_ROOT:+ mirror at $PYG_LOCAL_SOURCE_ROOT}"

@@ -2457,8 +2457,18 @@ it treats a capture as proof. On a confirmed stall it pulls thread dumps from ev
 30 seconds apart, alongside the stuck task ids and host memory. A thread present
 in both dumps is stuck; one present in a single dump was merely slow.
 
-Everything it does is a read — HTTP GETs plus two local files — so it never
-touches the job. It re-resolves the application between legs, so one invocation
+It also captures what a JVM dump cannot see, for each host holding a stuck task:
+the socket queues from `ss -tn`, and every Python worker's state and accumulated
+CPU. Those two readings are what identified the deadlock in
+[#386](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/issues/386) —
+about 4 MB queued in *both* directions of one loopback connection at once, and
+workers asleep having burned no CPU — and both are gone the moment anybody kills
+the job. The worker's Python stack still needs `sudo py-spy dump --pid <worker>`
+by hand while the stall is live: the executors run as another user under
+restricted ptrace, which the watchdog has no way around.
+
+Everything it does is a read — HTTP GETs plus a few local files, and one `ssh`
+when the stuck task is on another node — so it never touches the job. It re-resolves the application between legs, so one invocation
 covers a whole notebook run, and it costs well under 100 KB of log per run.
 
 This is how #380 was diagnosed: the dumps showed the executor's reader thread in
@@ -2472,9 +2482,23 @@ keeping it. After that first fix a run stalled again at stage 13, 168 of 169
 tasks done, and the dumps showed the two blocked threads had simply moved to
 RAPIDS' GPU Arrow runner — `GpuArrowPythonOutput.read` against
 `GpuArrowWriter.write`. Bounding the batches had made the stall rare, not gone.
-The second half of the fix is
 `spark.rapids.sql.exec.PythonMapInArrowExec=false`, which
-[`bin/submit_spark_job.sh`](bin/submit_spark_job.sh) now sets by default.
+[`bin/submit_spark_job.sh`](bin/submit_spark_job.sh) now sets by default, moves
+the parse off that runner.
+
+**It is not fixed, and this section said otherwise for a day.** On 2026-09-07 the
+same stall happened with that setting confirmed in the submit line, and the
+blocked frames were Spark's own `ArrowPythonRunner` and `PythonArrowInput` — no
+`Gpu*` frame anywhere. The setting did what it promised; the deadlock followed
+the parse onto the CPU runner. Anything resting on "off the GPU it cannot occur"
+is unsound. See
+[#386](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/issues/386).
+
+A related trap worth knowing when reading any of these captures: they are always
+reported as "168 of 169". That is not a failure near the end. The stuck task
+launches in the first wave, milliseconds after the stage is submitted, and the
+other 168 finish and stream past it — so the counter parks at N-1 whichever task
+was hit. The progress number describes what survived, not when it broke.
 
 ### Driving a real cluster run
 
