@@ -185,6 +185,33 @@ def test_the_floor_only_applies_when_nothing_has_finished(wd):
     assert len(wd.classify(tasks, 1.5, 300 * 1000.0)[2]) == 1
 
 
+def test_a_baseline_too_small_to_measure_against_does_not_fire(wd):
+    """
+    Stage 3755 on 2026-09-06. Its longest finished task took 0.1s, so at 2.0x
+    the ceiling was 0.2s and 21 tasks that had been running 1.2s came back
+    stuck. The stage finished; the run was written off on the capture.
+    """
+    tasks = _stage([0.1, 0.0, 0.1], [1.2, 1.2, 1.2])
+    _running, _finished, stuck = wd.classify(tasks, 2.0, 300 * 1000.0, 30 * 1000.0)
+    assert stuck == []
+
+
+def test_the_min_stuck_floor_keeps_the_real_straggler(wd):
+    """
+    Stage 39, the same run, an hour later. Median finished 2.2s and eight tasks
+    at 353.8s -- a genuinely wedged executor. The floor must not cost this one.
+    """
+    tasks = _stage([2.2, 2.6, 2.2], [353.8])
+    _running, _finished, stuck = wd.classify(tasks, 2.0, 300 * 1000.0, 30 * 1000.0)
+    assert len(stuck) == 1
+
+
+def test_the_min_stuck_floor_leaves_the_earlier_stalls_alone(wd):
+    """The two stalls this tool was written for, now with the floor in place."""
+    assert len(wd.classify(_stage([47, 48, 70], [738]), 1.5, 0.0, 30 * 1000.0)[2]) == 1
+    assert len(wd.classify(_stage([40, 47, 55, 76], [165]), 1.5, 0.0, 30 * 1000.0)[2]) == 1
+
+
 def test_a_stage_with_nothing_running_is_never_stuck(wd):
     tasks = _stage([47, 48, 70], [])
     assert wd.classify(tasks, 1.5)[2] == []
