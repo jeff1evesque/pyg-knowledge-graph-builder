@@ -1338,7 +1338,7 @@ When config is empty, sensible defaults are inferred from the data.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `--mode` | Yes | `full` | `full`, `enrichment_only`, or `pyg_only` |
+| `--mode` | Yes | `full` | `full`, `enrichment_only`, or `pyg_only`. `parse_only` also exists but is a diagnostic, not a pipeline stage: it stops at the count that materialises the parse and writes nothing — see [Reproducing the parse stall](#reproducing-the-parse-stall) |
 | `--source_paths` | Modes 1,2 | — | Comma-separated source path(s)/URI(s): local directories or `s3a://...`. Each is loaded independently and the results are unioned into a single triples DataFrame before enrichment. A path naming the archive's `source=sec` partition must also name `feed=filings`: that is the only SEC feed carrying RDF, and the job rejects the other seven up front rather than failing later on a missing Turtle column |
 | `--input_mode` | No | `s3` | Where `--source_paths` are opened from. `s3` reads the `s3a://` URIs directly — correct in the cloud, where executors sit beside the bucket. `local` reads a mirror of those same objects from node-local disk instead; see [Reading sources from local disk](#reading-sources-from-local-disk) |
 | `--local_source_root` | When `--input_mode local` | — | Root of the staged mirror. Must exist at the same path on every worker |
@@ -2217,6 +2217,7 @@ pyg-knowledge-graph-builder/
 │   ├── generate_sec_e2e_fixtures.py        # rebuild the SEC e2e fixtures from the archive
 │   ├── generate_test_report.py             # the report renderer (reads pytest JUnit XML)
 │   ├── package_venv.sh                     # package the venv so executors can run our Python
+│   ├── parse_stall_loop.sh                 # run the parse until it deadlocks, and record the rate
 │   ├── record_run_outcome.sh               # summarise a finished (or abandoned) run
 │   ├── run_e2e_tests.sh                    # the e2e smoke suite, local SparkSession (CPU/GPU)
 │   ├── run_tests.sh                        # the fast suite, parallel (sibling of run_e2e_tests.sh)
@@ -2499,6 +2500,54 @@ reported as "168 of 169". That is not a failure near the end. The stuck task
 launches in the first wave, milliseconds after the stage is submitted, and the
 other 168 finish and stream past it — so the counter parks at N-1 whichever task
 was hit. The progress number describes what survived, not when it broke.
+
+### Reproducing the parse stall
+
+Watching for the stall is one problem; *provoking* it is the harder one, and it
+is what [#388](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/issues/388)
+exists for. The stall is a race, and the evidence for that is not an inference:
+on 2026-09-07 the same job read the same mirror twice within half an hour, with
+byte-identical Spark properties pulled from both event logs, and stalled on the
+first attempt while clearing the same stage in 68.7s on the second. There is no
+diff to read, so nothing can be concluded from a single trial — which is exactly
+how three successive fixes were each declared verified on one clean run, and
+each came back.
+
+A full notebook run costs about three hours and yields **one** parse attempt.
+But the parse is the *first* action a seed leg takes — everything before it is
+Parquet metadata listing — so that attempt is over inside two minutes, and the
+remaining hours say nothing about it. `--mode parse_only` is that attempt on its
+own, and [`bin/parse_stall_loop.sh`](bin/parse_stall_loop.sh) takes it repeatedly:
+
+```bash
+bin/parse_stall_loop.sh <run-dir> [trials]
+```
+
+It uses the same run directory and the same untracked `env.sh` as a real run.
+Per trial it reclaims the file cache on every node, submits one `parse_only`
+job, and waits for whichever comes first: the submit finishing, or
+`bin/stall_watchdog.py` — which
+[`bin/submit_spark_job.sh`](bin/submit_spark_job.sh) already starts per submit —
+dropping a capture. Every trial appends a line to `<run-dir>/trials.jsonl` with
+its verdict and its parse seconds, and the loop prints the rate at the end. That
+record is the point: a rate is what a candidate fix has to move, and a single
+clean parse is not evidence about a race.
+
+Three things it does deliberately:
+
+- **It reclaims memory before every trial, and skips a trial rather than
+  aborting when a node comes up short.** Each executor sizes its RMM pool from
+  MemFree *at executor start*, so MemFree is an input to the trial and not a
+  background condition — runs that opened 989 MB and 337 MB pools against a
+  healthy 18–19 GB died of exactly that. Skipped trials are recorded as skipped,
+  so they cannot be counted as clean.
+- **It gives every trial its own dump directory and its own work directory.**
+  Sharing either is a silent corruption of the result rather than a failure: one
+  capture would read as a stall on every later trial, and a shared work dir would
+  have trial 2 reporting trial 1's parse time as its own.
+- **It does not kill the job it catches.** It stops the loop and leaves the job
+  running, because the evidence only exists while it is up — the socket queues,
+  and a Python worker `sudo py-spy dump --pid <worker>` can still be pointed at.
 
 ### Driving a real cluster run
 
