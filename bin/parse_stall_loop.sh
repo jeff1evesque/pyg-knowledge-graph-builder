@@ -189,8 +189,12 @@ log "commit $(cd "$REPO" && git rev-parse --short HEAD) on $(cd "$REPO" && git r
 
 CAUGHT=""
 for (( trial = 1; trial <= TRIALS; trial++ )); do
-  TRIAL_ID="$(date -u +%Y%m%dT%H%M%SZ)"
-  STALL_DIR="$RD/stalls/trial-$(printf '%03d' "$trial")-$TRIAL_ID"
+  # The trial number is part of the id, not decoration. date is second-resolution and
+  # a skipped or fast-failing trial takes less than that, so two trials can be stamped
+  # the same second -- and since PYG_WORK_DIR is built from RUN_ID, that would silently
+  # put them in one work directory and have the second read the first's manifest.
+  TRIAL_ID="$(date -u +%Y%m%dT%H%M%SZ)-t$(printf '%03d' "$trial")"
+  STALL_DIR="$RD/stalls/trial-$TRIAL_ID"
 
   log ""
   log "trial $trial/$TRIALS  id=$TRIAL_ID"
@@ -235,6 +239,11 @@ for (( trial = 1; trial <= TRIALS; trial++ )); do
     --parquet_partitions "${PYG_PARQUET_PARTITIONS:-200}" \
     >"$RD/trial-$TRIAL_ID.log" 2>&1 &
   submit_pid=$!
+  # The whole group, because the timeout path below has to take the spark-submit JVM
+  # with it. Signalling the wrapper alone leaves that JVM holding every core on the
+  # cluster, and the next trial then measures a parse competing with an orphan --
+  # which is not a trial of anything.
+  submit_pgid="$(ps -o pgid= -p "$submit_pid" 2>/dev/null | tr -d ' ')"
 
   # Wait for whichever comes first: the submit finishing, or a capture appearing. A
   # stalled parse does not exit -- that is the entire defect -- so waiting on the
@@ -263,9 +272,15 @@ for (( trial = 1; trial <= TRIALS; trial++ )); do
 
   if kill -0 "$submit_pid" 2>/dev/null; then
     log "  TIMEOUT after ${elapsed}s with no capture -- killing the submit"
-    kill -TERM "$submit_pid" 2>/dev/null
-    sleep 5
-    kill -KILL "$submit_pid" 2>/dev/null
+    if [[ -n "$submit_pgid" ]]; then
+      kill -TERM -"$submit_pgid" 2>/dev/null
+      command sleep 5
+      kill -KILL -"$submit_pgid" 2>/dev/null
+    else
+      kill -TERM "$submit_pid" 2>/dev/null
+      command sleep 5
+      kill -KILL "$submit_pid" 2>/dev/null
+    fi
     record trial "$trial" run_id "$TRIAL_ID" verdict timeout seconds "$elapsed"
   else
     wait "$submit_pid"; rc=$?
