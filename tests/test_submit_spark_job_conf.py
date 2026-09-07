@@ -98,6 +98,35 @@ def test_rapids_gpu_pool_has_a_hard_cap(conf):
     assert 0 < float(default.group(1)) <= 1.0
 
 
+def test_map_in_arrow_stays_off_the_gpu(conf):
+    """RAPIDS running mapInArrow on the GPU deadlocks the parse. See #380.
+
+    The executor and its Python worker block against each other: the task thread
+    waits in GpuArrowPythonOutput.read for output while the stdout writer waits
+    in GpuArrowWriter.write to send input, both on the same worker, which itself
+    burns no CPU. Nothing raises and no executor is lost -- the stage sits one
+    task short of done until the job's own cap kills it, which is the exact
+    failure mode this file exists to prevent.
+
+    Bounding the batches in turtle_batches_to_arrow removed the 14.8 MB
+    single-value trigger but not this, so the two fixes are not alternatives.
+    One run finished clean and the next stalled on identical pipeline code.
+    """
+    key = "spark.rapids.sql.exec.PythonMapInArrowExec"
+    assert key in conf, (
+        f"launcher must set {key}; without it RAPIDS replaces the exec with "
+        "GpuPythonMapInArrowExec and the parse can deadlock with no error"
+    )
+
+    text = LAUNCHER.read_text()
+    default = re.search(r"RAPIDS_GPU_MAP_IN_ARROW:-(\w+)\}", text)
+    assert default, "the GPU mapInArrow switch must carry a default"
+    assert default.group(1) == "false", (
+        "mapInArrow must default to OFF the GPU; "
+        f"got {default.group(1)!r}. Turning it on reopens the #380 deadlock."
+    )
+
+
 def test_executor_requests_a_gpu(conf):
     """The executor asks for a GPU; the cluster's workers must advertise one.
 

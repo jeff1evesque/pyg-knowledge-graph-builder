@@ -175,10 +175,13 @@ class BLSDatasetEnricher:
                 )
             )
 
-            # Extract quarter name from URI (last segment)
+            # Quarter name is the last URI segment. substring_index, not a
+            # regex: RAPIDS will not put an end anchor after a variable-length
+            # match on the GPU, and this sits in the query that costs BLS most
+            # of its window. #380
             quarter_values = quarter_values.withColumn(
                 "quarter_name",
-                F.regexp_extract(F.col("quarter_uri"), r"[/]([^/]+)$", 1)
+                F.substring_index(F.col("quarter_uri"), "/", -1)
             )
 
             entities_with_time = entities_with_cat.join(quarter_values, "entity", "inner")
@@ -227,10 +230,12 @@ class BLSDatasetEnricher:
                 )
             )
 
-            # Extract month name from URI (last segment)
+            # Month name is the last URI segment -- same rewrite as the
+            # quarterly branch above, and the one that runs for nine of the ten
+            # BLS datasets. #380
             month_values = month_values.withColumn(
                 "month_name",
-                F.regexp_extract(F.col("month_uri"), r"[/]([^/]+)$", 1)
+                F.substring_index(F.col("month_uri"), "/", -1)
             )
 
             entities_with_time = entities_with_cat.join(month_values, "entity", "inner")

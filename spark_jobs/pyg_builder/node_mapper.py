@@ -30,6 +30,7 @@ Multi-type entities:
 import logging
 from typing import Dict, Any, List, Tuple
 
+from pyspark import StorageLevel
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
@@ -455,9 +456,10 @@ class NodeMapper:
             ).cast("long"),
         )
 
-        # Cache and materialize — downstream modules (EdgeMapper,
+        # Persist and materialize — downstream modules (EdgeMapper,
         # FeatureExtractor) both join against this DataFrame.
-        node_id_df = node_id_df.cache()
+        # DISK_ONLY -- nothing in this leg stays resident; see execute_pyg_only.
+        node_id_df = node_id_df.persist(StorageLevel.DISK_ONLY)
         node_id_df.count()  # force full materialization into cache
 
         # ============================================

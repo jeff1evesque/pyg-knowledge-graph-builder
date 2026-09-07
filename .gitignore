@@ -22,3 +22,5 @@ extract_*.py
 
 # Per-machine settings
 */settings.local.json
+
+/docs/
