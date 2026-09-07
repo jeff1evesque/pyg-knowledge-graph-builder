@@ -78,6 +78,21 @@ export RUN_ID
 # shellcheck source=/dev/null
 . "$RD/env.sh"
 
+# The seed leg's sizing, sourced AFTER env.sh because env.sh is what names it.
+#
+# This is load-bearing, not tidiness. Left out, a trial submits at the defaults --
+# GPU_PER_TASK=0.125 and a 4g executor, so eight parse slots against the seed leg's
+# sixty-four, on a fraction of the memory. Concurrency across that boundary is the
+# most likely thing the race turns on, so a trial run at the wrong sizing is not a
+# cheap version of the seed leg's parse; it is a different experiment that happens to
+# use the same code.
+seed_profile() {
+  [[ -n "${PYG_SEED_PROFILE:-}" && -f "${PYG_SEED_PROFILE}" ]] || return 0
+  # shellcheck source=/dev/null
+  . "$PYG_SEED_PROFILE"
+}
+seed_profile
+
 : "${PYG_REPO_ROOT:?env.sh must set PYG_REPO_ROOT}"
 : "${PYG_SOURCE_PATHS:?env.sh must set PYG_SOURCE_PATHS}"
 : "${PYG_TIME_PERIOD:?env.sh must set PYG_TIME_PERIOD}"
@@ -212,6 +227,7 @@ for (( trial = 1; trial <= TRIALS; trial++ )); do
   export RUN_ID
   # shellcheck source=/dev/null
   . "$RD/env.sh"
+  seed_profile
 
   # A per-trial dump directory, so a capture is unambiguously THIS trial's. Sharing
   # one directory is how run_cluster_notebook.sh used to end a run before it began,
