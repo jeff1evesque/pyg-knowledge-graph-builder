@@ -1716,6 +1716,7 @@ DRIVER_MEMORY=64g DRIVER_MAX_RESULT_SIZE=8g \
 | `RAPIDS_GPU_ALLOC_FRACTION` | `0.25` | pool as a fraction of **free** GPU memory |
 | `RAPIDS_GPU_MAX_ALLOC_FRACTION` | `0.4` | hard cap as a fraction of **total** GPU memory |
 | `RAPIDS_PINNED_POOL` | `2G` | host memory staged for host↔device transfer |
+| `RAPIDS_GPU_MAP_IN_ARROW` | `false` | lets RAPIDS run `mapInArrow` on the GPU. Off on purpose: the Turtle parse deadlocks against its Python worker there, with no error and no lost executor. Set `true` only to reproduce that stall. |
 | `NETWORK_TIMEOUT` | `120s` | how long the driver waits on a silent executor |
 | `EXECUTOR_HEARTBEAT_INTERVAL` | `10s` | must stay well under `NETWORK_TIMEOUT` |
 
@@ -2465,6 +2466,15 @@ This is how #380 was diagnosed: the dumps showed the executor's reader thread in
 blocked on the same Python worker, with the worker itself burning no CPU — a
 deadlock, not a slow parse. See `turtle_batches_to_arrow` in
 [`spark_jobs/build_graph.py`](spark_jobs/build_graph.py) for what caused it.
+
+It then caught the same defect a second time, which is the better argument for
+keeping it. After that first fix a run stalled again at stage 13, 168 of 169
+tasks done, and the dumps showed the two blocked threads had simply moved to
+RAPIDS' GPU Arrow runner — `GpuArrowPythonOutput.read` against
+`GpuArrowWriter.write`. Bounding the batches had made the stall rare, not gone.
+The second half of the fix is
+`spark.rapids.sql.exec.PythonMapInArrowExec=false`, which
+[`bin/submit_spark_job.sh`](bin/submit_spark_job.sh) now sets by default.
 
 ### Recording what a run did
 
