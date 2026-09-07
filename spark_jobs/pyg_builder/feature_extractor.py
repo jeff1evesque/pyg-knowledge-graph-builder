@@ -76,6 +76,7 @@ from spark_jobs.utils.spark_rdf_utils import collect_sorted
 # mapping graph_schema.json publishes. node_mapper does not import this module,
 # so there is no cycle.
 from spark_jobs.pyg_builder.node_mapper import build_type_uri_mapping
+from spark_jobs.pyg_builder.sparse_scatter import scatter_sparse_entries
 
 logger = logging.getLogger(__name__)
 
@@ -1244,15 +1245,9 @@ class FeatureExtractor:
                 tensor = np.zeros(
                     (num_nodes, vector_dim), dtype=np.float32
                 )
-                g = groups.get(node_type)
-                if g is not None and not g.empty:
-                    node_ids = g["node_id"].values
-                    dims = g["dim"].values
-                    values = g["value"].values
-                    valid_mask = (dims >= 0) & (dims < vector_dim)
-                    tensor[
-                        node_ids[valid_mask], dims[valid_mask]
-                    ] = values[valid_mask]
+                scatter_sparse_entries(
+                    groups.get(node_type), tensor, "node_id", vector_dim
+                )
                 feature_tensors[node_type] = (
                     torch.from_numpy(tensor).contiguous()
                 )
@@ -1755,17 +1750,7 @@ class FeatureExtractor:
         Used for small-to-medium node types.
         """
         pdf = combined.toPandas()
-
-        if not pdf.empty:
-            node_ids = pdf["node_id"].values
-            dims = pdf["dim"].values
-            values = pdf["value"].values
-
-            valid_mask = (dims >= 0) & (dims < vector_dim)
-            tensor[
-                node_ids[valid_mask], dims[valid_mask]
-            ] = values[valid_mask]
-
+        scatter_sparse_entries(pdf, tensor, "node_id", vector_dim)
         del pdf
         gc.collect()
 
@@ -1810,18 +1795,8 @@ class FeatureExtractor:
             )
 
             pdf = chunk_df.toPandas()
-
-            if not pdf.empty:
-                total_entries += len(pdf)
-                node_ids = pdf["node_id"].values
-                dims = pdf["dim"].values
-                values = pdf["value"].values
-
-                valid_mask = (dims >= 0) & (dims < vector_dim)
-                tensor[
-                    node_ids[valid_mask], dims[valid_mask]
-                ] = values[valid_mask]
-
+            total_entries += len(pdf)
+            scatter_sparse_entries(pdf, tensor, "node_id", vector_dim)
             del pdf
             gc.collect()
 
