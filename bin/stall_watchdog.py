@@ -84,6 +84,7 @@ import html
 import json
 import os
 import re
+import socket
 import statistics
 import subprocess
 import sys
@@ -240,6 +241,57 @@ def local_facts():
     return facts
 
 
+# What the JVM dump cannot see. The parse deadlock in #386 sits between the executor
+# and its Python worker, and the JVM half says the same thing every time; the worker
+# half has never been captured. These two readings are what identified it by hand:
+# ~4 MB queued in BOTH directions of the loopback socket at once, and workers asleep
+# with no CPU accumulated -- blocked, not computing.
+#
+# Both are unprivileged reads of world-readable files. The Python stack itself needs
+# `sudo py-spy dump --pid <worker>`, which this cannot do: the executors run as another
+# user and ptrace is restricted. That stays a manual step while a stall is live.
+#
+# The bracket in the pgrep pattern is not decoration. Over ssh the remote shell's own
+# command line contains this whole snippet, and a plain pattern matches that shell --
+# so the probe would report itself, or a pkill built the same way would kill its own
+# carrier. It has to be a pattern that cannot match its own text.
+WORKER_PROBE = r"""
+echo "## sockets with a non-empty queue (ss -tn)"
+ss -tn 2>/dev/null | awk 'NR==1 || ($2+0)>0 || ($3+0)>0' | head -40
+echo "## python workers: state and accumulated cpu"
+for p in $(pgrep -f '[p]yspark.daemon|[p]yspark.worker' 2>/dev/null); do
+  [ -r /proc/$p/stat ] || continue
+  awk -v p="$p" '{printf "pid %s state=%s utime+stime=%s threads=%s\n", p, $3, $14+$15, $20}' /proc/$p/stat
+done
+"""
+
+
+def worker_facts(hosts, timeout=30):
+    """Socket queues and Python worker state, for each host holding a stuck task.
+
+    Returns host -> text. Never raises: a capture that dies trying to add context is
+    worse than one without it.
+    """
+    out = {}
+    local = {"", "localhost", socket.gethostname(), socket.gethostname().split(".")[0]}
+    try:
+        local.update(socket.gethostbyname_ex(socket.gethostname())[2])
+    except OSError:
+        pass
+    for host in hosts:
+        if host in local:
+            cmd = ["sh", "-c", WORKER_PROBE]
+        else:
+            cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                   host, WORKER_PROBE]
+        try:
+            done = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            out[host] = done.stdout or f"(no output; rc={done.returncode})"
+        except (OSError, subprocess.SubprocessError) as exc:
+            out[host] = f"(unreachable: {exc})"
+    return out
+
+
 def capture(api, app, stage, tasks, stuck, out_dir, rounds, gap):
     """Write the whole bundle: dumps twice, the stuck task list, host state."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -293,6 +345,15 @@ def capture(api, app, stage, tasks, stuck, out_dir, rounds, gap):
             log(f"  round {round_no} executor {executor_id}: {len(page)} bytes")
         if round_no < rounds:
             time.sleep(gap)
+
+    # Taken last, and only for the hosts actually holding a stuck task: the window
+    # closes the moment anybody kills the job, and by then the sockets are gone.
+    hosts = sorted({t.get("host") for t, _ in stuck if t.get("host")})
+    for host, text in worker_facts(hosts).items():
+        with open(os.path.join(target, f"worker-{host}.txt"), "w") as fh:
+            fh.write(text)
+    if hosts:
+        log(f"  worker and socket state captured from {', '.join(hosts)}")
 
     with open(os.path.join(target, "tasks.json"), "w") as fh:
         json.dump(tasks, fh, indent=2)
