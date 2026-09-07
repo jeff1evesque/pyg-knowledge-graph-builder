@@ -70,6 +70,7 @@ import gc
 import logging
 from typing import Dict, Any, List, Optional, Tuple
 
+from pyspark import StorageLevel
 from pyspark.sql import SparkSession, DataFrame
 
 from spark_jobs.utils.rdf_utils import classify_edge_origin
@@ -178,14 +179,18 @@ def build_hetero_data(
         sources=sources,
     )
 
-    # Ensure triples_df is cached — if already cached, this is a no-op
+    # Ensure triples_df is persisted — if already persisted, this is a no-op.
+    # DISK_ONLY for the same reason build_graph's pyg_only path uses it: on a
+    # 16g executor this frame lives on disk either way, and the memory level's
+    # promote-on-read is what pulls the block manager into an eviction that can
+    # deadlock against the RAPIDS GPU semaphore.
     if not (
         triples_df.storageLevel.useMemory
         or triples_df.storageLevel.useDisk
     ):
-        triples_df = triples_df.cache()
+        triples_df = triples_df.persist(StorageLevel.DISK_ONLY)
         triples_df.count()
-        logger.info("Cached triples_df")
+        logger.info("Persisted triples_df (DISK_ONLY)")
 
     # ============================================
     # STEP 1: Build node ID tables (on executors)
