@@ -2476,6 +2476,46 @@ The second half of the fix is
 `spark.rapids.sql.exec.PythonMapInArrowExec=false`, which
 [`bin/submit_spark_job.sh`](bin/submit_spark_job.sh) now sets by default.
 
+### Driving a real cluster run
+
+[`bin/run_cluster_notebook.sh`](bin/run_cluster_notebook.sh) runs the experiment
+notebook against the cluster and leaves a report behind however it ends:
+
+```bash
+bin/run_cluster_notebook.sh <run-dir>
+```
+
+The run directory holds everything about *this run* and nothing about the code:
+an untracked `env.sh` with the addresses, paths and intent — copy
+[`bin/profiles/run-env.example.sh`](bin/profiles/run-env.example.sh), which
+documents every variable — and afterwards the executed notebook, run log,
+traces, event log and `outcome.txt`. Acceptance checks for whatever the run is
+meant to prove go in `<run-dir>/extra-checks.sh`, from
+[`bin/profiles/extra-checks.example.sh`](bin/profiles/extra-checks.example.sh).
+The same split as the sizing profiles: what is general is tracked, what
+identifies a deployment is sourced beside it.
+
+It starts a 1 Hz network trace on every node ([`bin/netsample.py`](bin/netsample.py))
+and a cluster sampler locally ([`bin/cluster_sampler.sh`](bin/cluster_sampler.sh)),
+runs the notebook through [`bin/execute_notebook.py`](bin/execute_notebook.py) —
+which rewrites the executed `.ipynb` after every cell, so a run that dies in the
+seed still leaves a report — kills the run if the round trip to the gateway
+starts climbing, stops early if the stall watchdog captures a stalled stage, and
+records the outcome on both paths before sweeping this run's checkpoints.
+[`bin/mem_reclaim.py`](bin/mem_reclaim.py) is the gate to run before it, on a
+unified-memory host: RAPIDS sizes its pool from `MemFree`, which a previous run's
+file cache holds near zero for hours while `MemAvailable` still reads over 100 GB.
+
+This used to live only as a copy inside each run directory, copied forward from
+whichever run came before, and three silent failures on one run are why it does
+not any more: a stop flag cleared on one node but set on two, so a second node's
+trace described a different run for two days; a checkpoint sweep keyed on a
+literal path carrying the previous run's name, which therefore matched nothing
+and once left 462 GB behind; and no recording at all when the harness gave up,
+69 minutes before the job went on to succeed. Everything this run owns now
+carries its run id, one supervisor may hold a run directory at a time, and
+`tests/test_run_cluster_notebook.py` pins all three against stub binaries.
+
 ### Recording what a run did
 
 A run's own log is not the record. The notebook runner puts each cell's output in
