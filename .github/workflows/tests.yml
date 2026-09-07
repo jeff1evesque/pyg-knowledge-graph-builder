@@ -71,4 +71,18 @@ jobs:
           # Pin Spark's bind address so the local[*] driver comes up on runners
           # that don't resolve their own hostname.
           SPARK_LOCAL_IP: 127.0.0.1
-        run: python -m pytest tests/ -q -m "not e2e"
+        # TWO workers, and the number is a ceiling rather than a preference.
+        #
+        # A worker here is expensive twice over. Each one builds its own
+        # session-scoped SparkSession, and tests/conftest.py asks for a 4g driver
+        # heap, so two workers already reserve 8 GB of ceiling on a 16 GB runner.
+        # Each session is local[2], so two workers also put four Spark threads on
+        # the runner's four vCPU. Four workers would be 16 GB of heap ceiling and
+        # eight threads: memory is what gives first, and it does not announce
+        # itself -- see the note at tests/conftest.py:26, where a shared heap
+        # produced ~150 failures that read as unrelated test breakage.
+        #
+        # bin/run_tests.sh's -n 8 is calibrated for a 20-core developer box and
+        # does not belong here. If this run turns red with exit 137, or with
+        # failures that look like nothing to do with the diff, drop the -n first.
+        run: python -m pytest tests/ -q -m "not e2e" -n 2
