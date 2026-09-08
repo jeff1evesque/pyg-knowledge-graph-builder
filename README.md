@@ -2228,6 +2228,15 @@ pyg-knowledge-graph-builder/
 │   └── spark-rapids.conf.template          # reference RAPIDS spark-defaults
 ├── spark_jobs/
 │   ├── build_graph.py                      # Main Spark job entry point
+│   ├── graph/                              # Pieces of the job that are not the
+│   │   │                                   # entry point
+│   │   ├── __init__.py
+│   │   └── turtle.py                       # One Turtle blob → the four triple
+│   │                                       # columns, plus the bounded batching
+│   │                                       # that carries them. The one module
+│   │                                       # executors import for themselves,
+│   │                                       # so its imports are pinned to the
+│   │                                       # executor venv by a test
 │   ├── enrichment/                         # RDF enrichment modules (PySpark)
 │   │   ├── __init__.py
 │   │   ├── pipeline.py                     # Main enrichment orchestrator
@@ -2315,6 +2324,7 @@ pyg-knowledge-graph-builder/
 | `cross_source_linker.py` | Produces cross-source enrichment triples | Yes |
 | `ontology_mapper.py` | Produces equivalence mapping triples | Yes |
 | `build_graph.py` | Parses source RDF into triples DataFrame (`load_ntriples_to_dataframe()` for `.nt` files, `load_turtle_parquet_to_dataframe()` for Turtle Parquet blobs); dispatches via `load_source_triples()`; orchestrates pipeline modes; writes enriched Parquet locally and the `.pt` + metadata JSON files locally (mirroring the final artifacts to S3 when an archive is configured). `--source_format` and `--turtle_column` parameters control which loader is used | Yes (orchestration) |
+| `graph/turtle.py` | One Turtle blob → the four triple columns (`turtle_to_rows()`, its skip policy, the blank-node labels that make a parse reproducible), and `turtle_batches_to_arrow()` — the bounded batching that replaced the array-returning UDF of #380. **The only module executors import for themselves**: `build_graph.py` is submitted by path, so its own functions ship by value and are never imported, while these are pickled by reference and really are imported inside the executor venv. Its imports are therefore pinned to what `requirements-executor.txt` carries, by `tests/test_executor_imports.py` | Yes (the parse itself runs on executors) |
 | `constructor.py` | Orchestrates PyG HeteroData construction from triples DataFrame (5 steps: node IDs, edge indices, node features, edge features, assembly); initializes `MetadataCollector`; calls `register_*` methods after each step; returns `(HeteroData, MetadataCollector)` | Yes (orchestration) |
 | `node_mapper.py` | Discovers node types, assigns per-type integer IDs via Window functions. `get_type_uri_mapping()` provides a small collect for metadata. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
 | `edge_mapper.py` | Double-joins triples with node IDs, collects edge index tensors. Returns cached resolved edges DataFrame for reuse by `edge_feature_extractor.py`. `get_predicate_uri_mapping()` provides a small collect for metadata. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
@@ -2485,7 +2495,7 @@ This is how #380 was diagnosed: the dumps showed the executor's reader thread in
 `BasePythonUDFRunner.read` and its writer thread in `PythonRDD.write`, both
 blocked on the same Python worker, with the worker itself burning no CPU — a
 deadlock, not a slow parse. See `turtle_batches_to_arrow` in
-[`spark_jobs/build_graph.py`](spark_jobs/build_graph.py) for what caused it.
+[`spark_jobs/graph/turtle.py`](spark_jobs/graph/turtle.py) for what caused it.
 
 It then caught the same defect a second time, which is the better argument for
 keeping it. After that first fix a run stalled again at stage 13, 168 of 169
@@ -2644,7 +2654,7 @@ Each tier below repeats its run group, so no row has to be cross-referenced agai
 
 | Tier | Scope | Examples |
 |------|-------|----------|
-| **1 — pure / no-Spark**<br>*fast suite* | Import-time integrity, vector geometry, hand-maintained pattern tables, and RDF parse determinism. Sub-second. | `test_imports.py` (imports every `spark_jobs` module), `test_vector_layout.py` / `test_edge_vector_layout.py` (`VectorLayout` / `EdgeVectorLayout` boundaries), `test_source_patterns.py` (NOAA/market/SEC pattern-dict integrity), `test_bnode_determinism.py` (blank-node labels are content-derived, so the same Turtle parses identically every time — rdflib's own labels are random per parse), `test_sparse_scatter.py` (`scatter_sparse_entries()` — which dims it drops, which bad keys it lets raise) |
+| **1 — pure / no-Spark**<br>*fast suite* | Import-time integrity, vector geometry, hand-maintained pattern tables, and RDF parse determinism. Sub-second. | `test_imports.py` (imports every `spark_jobs` module), `test_vector_layout.py` / `test_edge_vector_layout.py` (`VectorLayout` / `EdgeVectorLayout` boundaries), `test_source_patterns.py` (NOAA/market/SEC pattern-dict integrity), `test_bnode_determinism.py` (blank-node labels are content-derived, so the same Turtle parses identically every time — rdflib's own labels are random per parse), `test_sparse_scatter.py` (`scatter_sparse_entries()` — which dims it drops, which bad keys it lets raise), `test_executor_imports.py` (`graph/turtle.py` is imported by executors for real, so its transitive imports must stay inside what `requirements-executor.txt` ships — a driver-only import passes every other test and then fails every parse task) |
 | **2 — linker smokes**<br>*fast suite* | Each enrichment module's `enrich()` driven end-to-end over tiny in-memory triples: one happy path + one short-circuit (foreign input for the intra-source linkers; a single detected source, and two sources with nothing linkable, for the cross-source linker; non-temporal input for the temporal unifier). | `test_{bls,noaa,market,sec}_linker.py`, `test_cross_source_linker.py`, `test_temporal_unifier.py` |
 | **3 — targeted deep**<br>*fast suite* | One focused test on each module's trickiest computation (including the negative case), where a silent regression would be costly. | severity escalation (NOAA), option moneyness (market), CIK unification (SEC), temporal sequencing (BLS), state-FIPS geographic chain (cross-source), expiration-date period derivation (temporal unifier) |
 | **4 — construction internals**<br>*fast suite* | Value-level unit tests of the PyG construction modules — exact node IDs, edge-index contents + `(src_id, dst_id)` ordering, config filters, determinism, the node/edge feature **encoding** (a known triple lands in the layout-reserved vector slot with the expected value: class-identity/categorical multi-hots, depth-weighted `subClassOf` class hierarchy, property-schema presence/domain-range/property-hierarchy slots, z-score numeric normalization, edge temporal/numeric-contrast/moneyness signals, label-similarity Jaccard on correlation edges, the escalation severity-delta fallback, plus `_classify_relation` per category and a categorical-determinism guard), the final `build_hetero_data` assembly (feature↔node-ID alignment via encoding-independent sentinels, edge endpoints within per-type ID ranges, per-type counts), and the six metadata JSON files' content (keys, counts, type names, feature-segment structure) — asserting what the `e2e` smoke only checks structurally or for presence. Runs in the fast suite; `test_metadata_writer.py` is pure-Python (no `SparkSession`). | `test_node_mapper.py`, `test_edge_mapper.py`, `test_feature_extractor.py`, `test_edge_feature_extractor.py`, `test_constructor.py`, `test_metadata_writer.py` |
