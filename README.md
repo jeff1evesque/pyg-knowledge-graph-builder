@@ -2228,9 +2228,16 @@ pyg-knowledge-graph-builder/
 │   └── spark-rapids.conf.template          # reference RAPIDS spark-defaults
 ├── spark_jobs/
 │   ├── build_graph.py                      # Main Spark job entry point
-│   ├── graph/                              # Pieces of the job that are not the
-│   │   │                                   # entry point
+│   ├── graph/                              # The job, minus its orchestration
 │   │   ├── __init__.py
+│   │   ├── config.py                       # JobConfig + the CLI; rejects a
+│   │   │                                   # configuration that cannot work
+│   │   │                                   # before Spark starts
+│   │   ├── loading.py                      # The three loaders, the dispatcher,
+│   │   │                                   # and the per-source stamp/counts
+│   │   ├── persistence.py                  # Interim Parquet + descriptor, the
+│   │   │                                   # final .pt/metadata/node index, and
+│   │   │                                   # the job manifest
 │   │   └── turtle.py                       # One Turtle blob → the four triple
 │   │                                       # columns, plus the bounded batching
 │   │                                       # that carries them. The one module
@@ -2323,7 +2330,10 @@ pyg-knowledge-graph-builder/
 | `bls_linker.py`, `sec_linker.py`, `market_linker.py`, `noaa_linker.py` | Produce intra-source enrichment triples | Yes |
 | `cross_source_linker.py` | Produces cross-source enrichment triples | Yes |
 | `ontology_mapper.py` | Produces equivalence mapping triples | Yes |
-| `build_graph.py` | Parses source RDF into triples DataFrame (`load_ntriples_to_dataframe()` for `.nt` files, `load_turtle_parquet_to_dataframe()` for Turtle Parquet blobs); dispatches via `load_source_triples()`; orchestrates pipeline modes; writes enriched Parquet locally and the `.pt` + metadata JSON files locally (mirroring the final artifacts to S3 when an archive is configured). `--source_format` and `--turtle_column` parameters control which loader is used | Yes (orchestration) |
+| `build_graph.py` | The entry point and the orchestration only: `main()`, the four execution modes, the enrichment and PyG-construction phases, the SparkSession, the work-dir preflight and the final banner. Everything it reads, writes or is configured by now lives in `graph/` | Yes (orchestration) |
+| `graph/config.py` | `JobConfig` — the job's whole contract with its caller: resolves every path the run reads and writes, and REJECTS a configuration that cannot work (a mode without its inputs, a staged mirror that is not there, an SEC prefix naming an unhandled feed) before Spark starts. Also `parse_args()`, `staged_local_path()`, `period_partition()`, and the probe that answers whether the PyG builder is importable | No (pure Python) |
+| `graph/loading.py` | The three ways triples get in — `load_ntriples_to_dataframe()` for `.nt`, `load_turtle_parquet_to_dataframe()` for Turtle blobs, and `load_source_triples()` which dispatches per source path, stamps each row with `source_label()` and unions the result. The stamp is what makes the `s3` and `local` input modes report identical per-source counts | Yes (heavy, pure Spark expressions) |
+| `graph/persistence.py` | Everything written down and read back: the interim enriched Parquet and its `dataset.json` descriptor (how a `pyg_only` run learns what the `enrichment_only` run read), the final `.pt` / metadata / node index written locally and mirrored to S3, and the job manifest | Yes (writes are distributed; the `.pt` is driver-side) |
 | `graph/turtle.py` | One Turtle blob → the four triple columns (`turtle_to_rows()`, its skip policy, the blank-node labels that make a parse reproducible), and `turtle_batches_to_arrow()` — the bounded batching that replaced the array-returning UDF of #380. **The only module executors import for themselves**: `build_graph.py` is submitted by path, so its own functions ship by value and are never imported, while these are pickled by reference and really are imported inside the executor venv. Its imports are therefore pinned to what `requirements-executor.txt` carries, by `tests/test_executor_imports.py` | Yes (the parse itself runs on executors) |
 | `constructor.py` | Orchestrates PyG HeteroData construction from triples DataFrame (5 steps: node IDs, edge indices, node features, edge features, assembly); initializes `MetadataCollector`; calls `register_*` methods after each step; returns `(HeteroData, MetadataCollector)` | Yes (orchestration) |
 | `node_mapper.py` | Discovers node types, assigns per-type integer IDs via Window functions. `get_type_uri_mapping()` provides a small collect for metadata. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
