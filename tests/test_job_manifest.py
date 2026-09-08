@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from spark_jobs.build_graph import save_job_manifest
+from spark_jobs.graph.persistence import save_job_manifest
 
 
 def _config(work_dir: str, mode: str = "enrichment_only") -> SimpleNamespace:

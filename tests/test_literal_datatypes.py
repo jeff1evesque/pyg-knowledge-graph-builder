@@ -148,7 +148,7 @@ def test_turtle_parquet_preserves_datatypes(spark, tmp_path):
     declaration, which is the part that was hard to get right.
     """
     pytest.importorskip("rdflib")
-    from spark_jobs.build_graph import load_turtle_parquet_to_dataframe
+    from spark_jobs.graph.loading import load_turtle_parquet_to_dataframe
 
     turtle = (
         f'<{SUBJ}> <{PRED}> "1.5"^^<{XSD}decimal> ;\n'
@@ -224,7 +224,7 @@ def test_markers_survive_the_shared_parse_and_stay_attributed(spark, tmp_path):
     does not escape into the three-column frame every downstream stage expects.
     """
     pytest.importorskip("rdflib")
-    from spark_jobs.build_graph import load_source_triples
+    from spark_jobs.graph.loading import load_source_triples
     from spark_jobs.graph.config import JobConfig
 
     # bls and noaa, not sec: a sec path has to name feed=filings and this test

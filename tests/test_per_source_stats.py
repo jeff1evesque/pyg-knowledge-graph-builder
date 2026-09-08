@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 
-from spark_jobs.build_graph import (
+from spark_jobs.graph.loading import (
     SOURCE_COLUMN,
     load_source_triples,
     per_source_triple_stats,

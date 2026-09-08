@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from spark_jobs.build_graph import source_label
+from spark_jobs.graph.loading import source_label
 from spark_jobs.graph.config import JobConfig, staged_local_path
 
 
