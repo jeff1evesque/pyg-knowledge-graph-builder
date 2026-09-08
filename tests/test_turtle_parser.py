@@ -15,7 +15,7 @@ Pure Python, no SparkSession -- this is the fast tier.
 """
 import pytest
 
-from spark_jobs.build_graph import (
+from spark_jobs.graph.turtle import (
     _lexical_converters,
     deterministic_bnode_labels,
     turtle_to_rows,
@@ -234,17 +234,21 @@ def test_a_malformed_blob_is_skipped_but_a_missing_parser_is_not(monkeypatch):
     swallowing its ImportError would answer "no triples" for every row, finish
     green, and write an empty graph.
     """
-    from spark_jobs import build_graph
+    from spark_jobs.graph import turtle
 
-    assert build_graph.turtle_rows_or_skip("") == []
-    assert build_graph.turtle_rows_or_skip("this is not turtle {") == []
+    assert turtle.turtle_rows_or_skip("") == []
+    assert turtle.turtle_rows_or_skip("this is not turtle {") == []
 
     def missing(_):
         raise ImportError("No module named 'pyoxigraph'")
 
-    monkeypatch.setattr(build_graph, "turtle_to_rows", missing)
+    # Patched on the module that DEFINES turtle_rows_or_skip, because that is
+    # where it resolves turtle_to_rows from. Patching a name re-exported
+    # somewhere else would leave the real function in place and pass by
+    # accident.
+    monkeypatch.setattr(turtle, "turtle_to_rows", missing)
     with pytest.raises(ImportError):
-        build_graph.turtle_rows_or_skip(f"{PREFIX}ex:s ex:p ex:o .")
+        turtle.turtle_rows_or_skip(f"{PREFIX}ex:s ex:p ex:o .")
 
 
 def test_malformed_turtle_raises_so_the_udf_can_skip_the_row():
