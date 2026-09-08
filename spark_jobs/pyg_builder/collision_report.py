@@ -1,14 +1,16 @@
 """
-Hash collision statistics over the slot assignments, and the one check that
-must pass before a build ships.
+What collided in the node vector's slot assignments, and the check that reads
+the answer.
 
-FeatureExtractor gives every numeric property, class, namespace and superclass
-a slot in the feature vector. compute_collision_report counts what landed
-where. check_class_identity_capacity reads that report and stops the build when
-the class_identity segment can no longer tell this build's classes apart.
+FeatureExtractor gives every numeric property, class and namespace a slot in
+the feature vector. compute_collision_report counts what landed where, and its
+result is published as the collision_report block of slot_mapping.json.
+check_class_identity_capacity then reads that report and stops the build when
+the class_identity segment can no longer tell this build's classes apart --
+unless the run has opted into shipping anyway.
 
 Nothing here touches Spark or the extractor's state. It runs once per build on
-the driver, over a few hundred rows of Python dicts.
+the driver, over a few hundred Python dicts.
 """
 import logging
 from typing import Any, Dict, List, Optional, Tuple

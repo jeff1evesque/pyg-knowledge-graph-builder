@@ -1,20 +1,20 @@
 """
 The three segments of an edge feature vector, one function each.
 
-Each takes the edges of one type and returns lazy (edge_idx, dim, value) sparse
-entries -- nothing is computed here, and nothing reaches the driver. Every dim
-index comes from the EdgeVectorLayout passed in, so the segment boundaries are
-never written down twice.
+Each takes the edges of one type and returns (edge_idx, dim, value) sparse
+entries, unevaluated -- the extractor unions all three and collects once. The
+one exception is the cross-property fallback, which asks head(1) whether its
+join found anything before building on it. Every dim index comes from the
+EdgeVectorLayout passed in, so no segment boundary is written down twice.
 
-EdgeFeatureExtractor calls all three and unions what comes back. It also owns
-the broadcast decision, which segments 1 and 2 need for their endpoint property
-joins; those two take it as ``maybe_broadcast`` rather than reading it off an
-object, so a caller can hand them any policy and a test can hand them none.
+The two things these functions used to reach for through ``self`` are arguments
+now: the layout, and the broadcast decision that segments 1 and 2 need for
+their endpoint property joins.
 
-The frame shapes the encoders consume are described here as well -- PropertyRows
-and the row widths and predicate patterns beside it. The extractor builds those
-frames and imports the descriptions from here, so the dependency runs one way:
-extractor -> encoders, never back.
+The shapes of the frames they read are here too -- PropertyRows, and the row
+widths and predicate patterns beside it. The extractor builds those frames and
+imports the descriptions from here, so the dependency runs one way: extractor
+-> encoders, never back.
 """
 from typing import Callable, List, Optional
 
