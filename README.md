@@ -2280,6 +2280,10 @@ pyg-knowledge-graph-builder/
 │   │   │                                   # EdgeVectorLayout; reuses cached resolved
 │   │   │                                   # edges from EdgeMapper; provides encoding
 │   │   │                                   # config and edge classification for metadata
+│   │   ├── vector_layout.py                # VectorLayout — every node-vector segment
+│   │   │                                   # boundary, computed from vector_dim
+│   │   ├── edge_vector_layout.py           # EdgeVectorLayout — the same for the edge
+│   │   │                                   # vector, from edge_vector_dim
 │   │   ├── sparse_scatter.py               # Writes sparse (key, dim, value) rows into
 │   │   │                                   # a pre-allocated dense tensor; shared by
 │   │   │                                   # both feature extractors
@@ -2316,6 +2320,8 @@ pyg-knowledge-graph-builder/
 | `edge_mapper.py` | Double-joins triples with node IDs, collects edge index tensors. Returns cached resolved edges DataFrame for reuse by `edge_feature_extractor.py`. `get_predicate_uri_mapping()` provides a small collect for metadata. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
 | `feature_extractor.py` | Builds ontology-aware node feature vectors via `VectorLayout` (proportionally scaled segments): extracts class hierarchy, property schema, and literal values on executors; collects sparse entries (chunked for large types); scatters into dense tensors on driver. During `build_features()`, collects normalization stats, ontology schema snapshot, and slot mapping into small Python objects via `_collect_*` methods. `get_metadata_artifacts()` returns these for `MetadataCollector`. Imports `ONTOLOGY_NAMESPACE_INDICES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
 | `edge_feature_extractor.py` | Builds derived edge feature vectors via `EdgeVectorLayout` (proportionally scaled segments): classifies edge types by category, extracts endpoint properties, encodes temporal signals / numeric contrast / relational context on executors; collects sparse entries per edge type; scatters into dense tensors on driver. Reuses cached resolved edges from `edge_mapper.py` — no double-join replay. `get_encoding_config()` and `get_edge_classification()` provide metadata for `MetadataCollector`. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
+| `vector_layout.py` | `VectorLayout` — turns `vector_dim` into the start index and width of every node-vector segment and sub-segment, and holds the proportions those widths come from. The encoders ask it for a slot and `metadata_writer.py` publishes the same layout, so a vector and the metadata describing it cannot disagree | No (pure Python) |
+| `edge_vector_layout.py` | `EdgeVectorLayout` — the same for the edge vector, from `edge_vector_dim`, over the temporal / numeric-contrast / relational-context segments | No (pure Python) |
 | `sparse_scatter.py` | `scatter_sparse_entries()` — writes one frame of sparse `(key, dim, value)` rows into a pre-allocated dense tensor. The five collect paths in `feature_extractor.py` and `edge_feature_extractor.py` all end in this write; how they collect (persist level, chunking) stays with them | No (pure Python) |
 | `metadata_writer.py` | `MetadataCollector` accumulates metadata artifacts deposited by `constructor.py` during each step; `to_metadata_files()` produces six JSON-serializable dicts; `write_metadata_to_local()` writes them to the local metadata directory and `write_metadata_to_s3()` mirrors them to S3; `derive_metadata_prefix()` computes the metadata directory from the `.pt` filename/key | No (pure Python) |
 
