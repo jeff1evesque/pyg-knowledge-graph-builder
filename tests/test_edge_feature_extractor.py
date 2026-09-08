@@ -1,19 +1,20 @@
 """Value-level unit tests for EdgeFeatureExtractor encoding
-(spark_jobs/pyg_builder/edge_feature_extractor.py).
+(spark_jobs/pyg_builder/edge_feature_extractor.py and the three segment
+encoders it calls, in spark_jobs/pyg_builder/edge_encoders.py).
 
 Previously only EdgeVectorLayout's geometry was tested — never the encoding of a
 known edge into its reserved segments. These tests cover:
 
   * _classify_relation — pure function, one case per category (incl. skip
     precedence and the generic fallback);
-  * _encode_temporal_signals — period flags, direction sign, and time-delta on a
+  * encode_temporal_signals — period flags, direction sign, and time-delta on a
     known temporal edge;
-  * _encode_numeric_contrast — difference / ratio / magnitude of shared numeric
+  * encode_numeric_contrast — difference / ratio / magnitude of shared numeric
     endpoint properties (asserted via disjoint sub-segment sums, so hash
     collisions within a sub-segment don't matter);
   * _encode_cross_property_contrast — option_stock moneyness / log-moneyness /
     price-difference on endpoints with no shared predicate;
-  * _encode_relational_context — same-namespace / cross-source flags;
+  * encode_relational_context — same-namespace / cross-source flags;
   * determinism — encoding the same edge twice yields identical vectors.
 
 Edges are driven through the real NodeMapper → EdgeMapper → EdgeFeatureExtractor
@@ -29,12 +30,16 @@ from spark_jobs.pyg_builder.edge_mapper import EdgeMapper
 from spark_jobs.pyg_builder.edge_feature_extractor import (
     EdgeFeatureExtractor,
     _CHUNK_EDGE_THRESHOLD,
-    _NUMERIC_ROW_BYTES,
-    _PropertyRows,
     _RESULT_SIZE_TARGET_FRACTION,
     _SPARSE_ENTRY_BYTES,
     _classify_relation,
     _parse_byte_string,
+)
+from spark_jobs.pyg_builder.edge_encoders import (
+    NUMERIC_ROW_BYTES,
+    PropertyRows,
+    encode_numeric_contrast,
+    encode_temporal_signals,
 )
 
 CPI_INDEX = "https://jefflevesque.com/ontology/cpi/Index"        # -> cpi_Index
@@ -301,7 +306,7 @@ def test_featurized_run_does_not_warn(spark, caplog):
 
 
 # ======================================================================
-# _encode_temporal_signals + _encode_numeric_contrast on a known temporal edge
+# encode_temporal_signals + encode_numeric_contrast on a known temporal edge
 # ======================================================================
 
 def _temporal_rows(src_month, dst_month, year=2020):
@@ -405,7 +410,7 @@ def test_option_stock_cross_property_moneyness(spark):
 
 
 # ======================================================================
-# _encode_relational_context — label similarity (correlation edges)
+# encode_relational_context — label similarity (correlation edges)
 # ======================================================================
 
 def _correlation_rows(src_label, dst_label):
@@ -669,9 +674,9 @@ def test_maybe_broadcast_hints_only_below_the_bar(spark, broadcast_bar):
     efe = broadcast_bar(1024)          # 8 rows at 128 bytes each
     frame = spark.createDataFrame([(1, 2.0)], ["node_id", "numeric_value"])
 
-    assert _is_hinted(efe._maybe_broadcast(frame, 4, _NUMERIC_ROW_BYTES))
+    assert _is_hinted(efe._maybe_broadcast(frame, 4, NUMERIC_ROW_BYTES))
     assert not _is_hinted(
-        efe._maybe_broadcast(frame, 40, _NUMERIC_ROW_BYTES)
+        efe._maybe_broadcast(frame, 40, NUMERIC_ROW_BYTES)
     )
 
 
@@ -680,7 +685,7 @@ def test_maybe_broadcast_honours_a_disabled_threshold(spark, broadcast_bar):
     efe = broadcast_bar(-1)
     frame = spark.createDataFrame([(1, 2.0)], ["node_id", "numeric_value"])
 
-    assert not _is_hinted(efe._maybe_broadcast(frame, 1, _NUMERIC_ROW_BYTES))
+    assert not _is_hinted(efe._maybe_broadcast(frame, 1, NUMERIC_ROW_BYTES))
 
 
 def test_endpoint_property_rows_counts_per_type_and_subset(spark):
@@ -748,9 +753,11 @@ def test_temporal_joins_drop_the_hint_for_a_large_endpoint_type(
     ordinary shuffle join instead.
     """
     efe = broadcast_bar(256)      # ~10 temporal rows at 24 bytes each
-    big = _PropertyRows(total=10_000, month=5_000, year=5_000)
+    big = PropertyRows(total=10_000, month=5_000, year=5_000)
 
-    entries = efe._encode_temporal_signals(
+    entries = encode_temporal_signals(
+        efe.get_layout(),
+        efe._maybe_broadcast,
         edge_df=_one_edge_df(spark, "big_Type", "big_Type"),
         src_type="big_Type",
         dst_type="big_Type",
@@ -775,9 +782,11 @@ def test_temporal_joins_keep_the_hint_for_a_small_endpoint_type(
     shuffle stage per join per edge type.
     """
     efe = broadcast_bar(1024 * 1024)
-    small = _PropertyRows(total=6, month=2, year=2)
+    small = PropertyRows(total=6, month=2, year=2)
 
-    entries = efe._encode_temporal_signals(
+    entries = encode_temporal_signals(
+        efe.get_layout(),
+        efe._maybe_broadcast,
         edge_df=_one_edge_df(spark, "small_Type", "small_Type"),
         src_type="small_Type",
         dst_type="small_Type",
@@ -800,9 +809,11 @@ def test_numeric_contrast_drops_the_hint_for_a_large_endpoint_type(
     property of every one of its nodes: 305M rows on the failing run.
     """
     efe = broadcast_bar(256)      # 2 rows at 128 bytes each
-    big = _PropertyRows(total=10_000, month=5_000, year=5_000)
+    big = PropertyRows(total=10_000, month=5_000, year=5_000)
 
-    entries = efe._encode_numeric_contrast(
+    entries = encode_numeric_contrast(
+        efe.get_layout(),
+        efe._maybe_broadcast,
         edge_df=_one_edge_df(spark, "big_Type", "big_Type"),
         src_type="big_Type",
         dst_type="big_Type",

@@ -1,5 +1,6 @@
 """Value-level unit tests for FeatureExtractor node-feature encoding
-(spark_jobs/pyg_builder/feature_extractor.py).
+(spark_jobs/pyg_builder/feature_extractor.py, plus the slot collision report
+and class-identity guard it calls, in spark_jobs/pyg_builder/collision_report.py).
 
 Only VectorLayout's descriptor geometry was previously tested — never the
 *encoding*, i.e. that a given triple lands in the correct vector slot with the
@@ -31,9 +32,11 @@ from spark_jobs.pyg_builder.feature_extractor import (
     FeatureExtractor,
     VectorLayout,
     _HASH_SEEDS,
-    _compute_collision_report,
+)
+from spark_jobs.pyg_builder.collision_report import (
     ClassIdentityCapacityError,
-    _check_class_identity_capacity,
+    check_class_identity_capacity,
+    compute_collision_report,
     _min_vector_dim_for_segment_one,
 )
 
@@ -787,7 +790,7 @@ def _class_slots(codes, start=0):
 
 
 def _class_report(codes, dim, start=0):
-    report = _compute_collision_report(
+    report = compute_collision_report(
         [], [], _class_slots(codes, start), [], [], class_identity_dim=dim,
     )
     return report["class_identity"]
@@ -863,7 +866,7 @@ def test_saturation_warning_fires_only_when_identity_is_at_risk(
     }}
     logger_name = "spark_jobs.pyg_builder.feature_extractor"
     with caplog.at_level(logging.WARNING, logger=logger_name):
-        _check_class_identity_capacity(report)
+        check_class_identity_capacity(report)
 
     if expect is None:
         assert "class_identity" not in caplog.text, (
@@ -886,7 +889,7 @@ def test_over_subscription_fails_the_build():
         "classes_sharing_a_code": [],
     }}
     with pytest.raises(ClassIdentityCapacityError) as exc:
-        _check_class_identity_capacity(report)
+        check_class_identity_capacity(report)
 
     assert "over-subscribed" in str(exc.value)
     # The message must name the levers, or it reports a wall with no door.
@@ -913,7 +916,7 @@ def test_over_subscription_names_the_width_that_would_fit():
         "classes_sharing_a_code": [],
     }}
     with pytest.raises(ClassIdentityCapacityError) as exc:
-        _check_class_identity_capacity(report, vector_dim=256)
+        check_class_identity_capacity(report, vector_dim=256)
 
     message = str(exc.value)
     assert str(_min_vector_dim_for_segment_one(300)) in message, (
@@ -925,7 +928,7 @@ def test_over_subscription_names_the_width_that_would_fit():
 def test_the_width_is_omitted_when_the_caller_does_not_supply_one():
     """vector_dim is optional, so the message degrades rather than lying.
 
-    _check_class_identity_capacity is called directly by tests and could be by
+    check_class_identity_capacity is called directly by tests and could be by
     other callers. Without the width there is no arithmetic to do, and inventing
     one from the segment dim would assume a share this function does not own.
     """
@@ -935,7 +938,7 @@ def test_the_width_is_omitted_when_the_caller_does_not_supply_one():
         "classes_sharing_a_code": [],
     }}
     with pytest.raises(ClassIdentityCapacityError) as exc:
-        _check_class_identity_capacity(report)
+        check_class_identity_capacity(report)
 
     assert "smallest width" not in str(exc.value)
 
@@ -952,7 +955,7 @@ def test_over_subscription_can_be_opted_into(caplog):
     with caplog.at_level(
         logging.WARNING, logger="spark_jobs.pyg_builder.feature_extractor"
     ):
-        _check_class_identity_capacity(report, allow_oversubscription=True)
+        check_class_identity_capacity(report, allow_oversubscription=True)
 
     assert "over-subscribed" in caplog.text
 
@@ -965,7 +968,7 @@ def test_shared_codes_fail_the_build_and_name_the_groups():
         "classes_sharing_a_code": [["cpi_Area", "cpi_Region"]],
     }}
     with pytest.raises(ClassIdentityCapacityError) as exc:
-        _check_class_identity_capacity(report)
+        check_class_identity_capacity(report)
 
     assert "indistinguishable" in str(exc.value)
     assert "cpi_Area" in str(exc.value)
@@ -1111,7 +1114,7 @@ def test_dependent_codes_fail_the_build_with_their_own_diagnosis():
     report = {"class_identity": _class_report(codes, dim=8)}
 
     with pytest.raises(ClassIdentityCapacityError) as exc:
-        _check_class_identity_capacity(report)
+        check_class_identity_capacity(report)
 
     message = str(exc.value)
     assert "linearly dependent" in message
