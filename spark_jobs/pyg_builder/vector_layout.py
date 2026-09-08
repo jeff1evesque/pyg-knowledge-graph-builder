@@ -76,7 +76,7 @@ SEG3_FRAC = 0.375  # = 1.0 - 0.25 - 0.375
 # the 96 classes a full fixture build produces and moves the real lever into
 # config -- feature_config.class_identity_dim, or a larger vector_dim -- with
 # an over-subscribed build now failing outright rather than shipping features a
-# model cannot read. See feature_extractor's _check_class_identity_capacity.
+# model cannot read. See collision_report's check_class_identity_capacity.
 #
 # Changing this width changes every class's slots (`hash % dim`), so it
 # invalidates models trained against a previous layout. That is why it is a
@@ -90,7 +90,7 @@ SEG3_FRAC = 0.375  # = 1.0 - 0.25 - 0.375
 # fixed 26-entry namespace table and is EXPECTED to collide, so "what it needs"
 # is not a measurable quantity there. Any split that moves dims off them is a
 # guess. The build fails instead, naming the vector_dim that would fit; see
-# feature_extractor's _check_class_identity_capacity.
+# collision_report's check_class_identity_capacity.
 _SEG1_CLASS_IDENTITY_FRAC = 0.625
 _SEG1_CLASS_HIERARCHY_FRAC = 0.1875
 _SEG1_ONTOLOGY_SOURCE_FRAC = 0.1875
