@@ -17,7 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from spark_jobs.build_graph import JobConfig, check_work_dir_occupancy
+from spark_jobs.build_graph import check_work_dir_occupancy
+from spark_jobs.graph.config import JobConfig
 
 
 def _config(work_dir, **overrides):

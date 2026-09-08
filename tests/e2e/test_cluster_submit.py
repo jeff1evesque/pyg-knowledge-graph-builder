@@ -496,7 +496,7 @@ def test_full_mode_produces_a_structurally_valid_graph(full_submission, tmp_path
     if not work_dir.startswith("s3a://"):
         pytest.skip("only meaningful when the work dir is an object-store URI")
 
-    from spark_jobs.build_graph import JobConfig
+    from spark_jobs.graph.config import JobConfig
     from test_pipeline_smoke import _assert_valid_graph_and_metadata
 
     _download_run_artifacts(work_dir, tmp_path)

@@ -10,7 +10,7 @@ Pure Python: runs under ``pytest -m "not e2e"`` with no Spark fixture.
 """
 import pytest
 
-from spark_jobs.build_graph import JobConfig, period_partition
+from spark_jobs.graph.config import JobConfig, period_partition
 
 
 # ======================================================================

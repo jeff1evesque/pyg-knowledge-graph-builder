@@ -61,7 +61,7 @@ def _turtle_parquet_source_paths():
 
 
 def _make_config(**overrides):
-    from spark_jobs.build_graph import JobConfig
+    from spark_jobs.graph.config import JobConfig
 
     args = {
         "mode": "full",

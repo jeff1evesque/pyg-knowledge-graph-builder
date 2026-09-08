@@ -37,11 +37,10 @@ import pytest
 
 from spark_jobs import build_graph
 from spark_jobs.build_graph import (
-    VALID_MODES,
-    JobConfig,
     check_work_dir_occupancy,
     execute_parse_only,
 )
+from spark_jobs.graph.config import JobConfig, VALID_MODES
 
 
 BASE_ARGS = {
