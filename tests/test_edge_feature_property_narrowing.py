@@ -22,10 +22,10 @@ import pytest
 
 from pyspark.sql import functions as F
 
-from spark_jobs.pyg_builder.edge_feature_extractor import (
-    EdgeFeatureExtractor,
-    _NUMERIC_ROW_BYTES,
-    _PropertyRows,
+from spark_jobs.pyg_builder.edge_feature_extractor import EdgeFeatureExtractor
+from spark_jobs.pyg_builder.edge_encoders import (
+    NUMERIC_ROW_BYTES,
+    PropertyRows,
 )
 
 
@@ -84,9 +84,9 @@ def props(spark):
 @pytest.fixture
 def sizes():
     return {
-        "small_a": _PropertyRows(total=SMALL_ROWS),
-        "small_b": _PropertyRows(total=SMALL_ROWS),
-        "huge": _PropertyRows(total=HUGE_ROWS),
+        "small_a": PropertyRows(total=SMALL_ROWS),
+        "small_b": PropertyRows(total=SMALL_ROWS),
+        "huge": PropertyRows(total=HUGE_ROWS),
     }
 
 
@@ -111,7 +111,7 @@ def test_narrow_frame_holds_only_the_types_under_the_bar(spark, props, sizes):
 
     assert narrow is not None
     assert kept_types == {"small_a", "small_b"}, (
-        f"'huge' is {HUGE_ROWS * _NUMERIC_ROW_BYTES:,} bytes against a bar of "
+        f"'huge' is {HUGE_ROWS * NUMERIC_ROW_BYTES:,} bytes against a bar of "
         f"{BROADCAST_BAR:,} and must not be narrowed into the frame"
     )
 

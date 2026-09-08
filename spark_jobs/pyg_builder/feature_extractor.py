@@ -76,93 +76,24 @@ from spark_jobs.utils.spark_rdf_utils import collect_sorted
 # mapping graph_schema.json publishes. node_mapper does not import this module,
 # so there is no cycle.
 from spark_jobs.pyg_builder.node_mapper import build_type_uri_mapping
+from spark_jobs.pyg_builder.sparse_scatter import scatter_sparse_entries
+# What the slot assignments below collided on, and the check that stops a build
+# whose class_identity segment can no longer separate its classes.
+from spark_jobs.pyg_builder.collision_report import (
+    check_class_identity_capacity,
+    compute_collision_report,
+)
+# The vector's geometry: VectorLayout owns every segment boundary this
+# module writes into, plus the segment proportions published below.
+from spark_jobs.pyg_builder.vector_layout import (
+    SEG1_FRAC,
+    SEG2_FRAC,
+    SEG3_FRAC,
+    VECTOR_DIM,
+    VectorLayout,
+)
 
 logger = logging.getLogger(__name__)
-
-# ============================================
-# Default vector dimension
-# ============================================
-VECTOR_DIM = 1024
-
-# ============================================
-# Segment proportions (fraction of total vector_dim)
-# ============================================
-# These ratios are applied to any vector_dim to compute boundaries.
-#
-# Segment 1: Ontology Structure — 25%
-#   Sub-segments: class_identity=25%, class_hierarchy=50%, ontology_source=25%
-#
-# Segment 2: Property Schema — 37.5%
-#   Sub-segments: property_presence=50%, domain_range=~29%, property_hierarchy=~21%
-#
-# Segment 3: Literal Values — 37.5%
-#   Sub-segments: numeric=~67%, categorical=~33%
-#
-_SEG1_FRAC = 0.25
-_SEG2_FRAC = 0.375
-_SEG3_FRAC = 0.375  # = 1.0 - 0.25 - 0.375
-
-# Sub-segment fractions within each segment
-#
-# class_identity holds a multi-hot code per class, and a d-dim segment holds at
-# most d linearly independent codes -- so this fraction, not the property count,
-# is what bounds how many ontology CLASSES the encoding can represent. At the
-# original 0.25 it was 64 dims of a 1024-d vector: enough for the 44 classes of
-# a two-source run, but not for the 118 of a full sec+noaa+market+BLS build,
-# where identity stopped being recoverable while every code stayed distinct (so
-# nothing looked wrong).
-#
-# The dims come from within segment 1 rather than from vector_dim, which would
-# have raised driver memory for every node in the graph. Both donors have slack:
-#
-#   * class_hierarchy encodes rdfs:subClassOf chains, and no raw source declares
-#     any -- it is populated only when --enable_ontology_mapping derives them
-#     from class naming and the curated class_mappings table (33 axioms, 21 of
-#     86 node types, on the e2e fixtures) and is permanently zero when mapping
-#     is off. Which of the two produced a given build is recorded in
-#     ontology_schema.json (ontology_mapping_enabled) rather than left to be
-#     guessed from an empty list -- see _collect_ontology_schema_metadata.
-#   * ontology_source is `onto_idx % dim` over NAMESPACE_PREFIXES, so it needs
-#     only as many dims as there are namespaces (31). At 0.1875 and the default
-#     vector_dim it keeps 48 -- collision-free with room for 17 more sources.
-#     Below the default it aliases namespaces, as it already did at 256 (16
-#     dims); vector_dim is documented as a resolution dial and 1024 is the
-#     production recommendation, so that is the existing trade rather than a
-#     new one -- but 512 crosses the namespace count where it previously did
-#     not (32 dims before, 24 now).
-#
-# 0.625 gives 160 dims at the default vector_dim. That is NOT a permanent
-# answer: segment 1 is a quarter of the vector, so no split of it can carry more
-# than ~192 classes, while the class count grows with every source added (SEC
-# alone runs to the high hundreds on real filing volume). It buys headroom over
-# the 96 classes a full fixture build produces and moves the real lever into
-# config -- feature_config.class_identity_dim, or a larger vector_dim -- with
-# an over-subscribed build now failing outright rather than shipping features a
-# model cannot read. See _check_class_identity_capacity.
-#
-# Changing this width changes every class's slots (`hash % dim`), so it
-# invalidates models trained against a previous layout. That is why it is a
-# tuning constant with a published value in encoding_config.json rather than a
-# width recomputed per build -- one that moved whenever a class appeared would
-# re-map every existing class for no benefit.
-#
-# Deriving it per build was tried and removed. Sizing class_identity to the
-# class count means taking dims from class_hierarchy and ontology_source, and
-# neither has a stated requirement to size against -- ontology_source indexes a
-# fixed 26-entry namespace table and is EXPECTED to collide, so "what it needs"
-# is not a measurable quantity there. Any split that moves dims off them is a
-# guess. The build fails instead, naming the vector_dim that would fit; see
-# _check_class_identity_capacity.
-_SEG1_CLASS_IDENTITY_FRAC = 0.625
-_SEG1_CLASS_HIERARCHY_FRAC = 0.1875
-_SEG1_ONTOLOGY_SOURCE_FRAC = 0.1875
-
-_SEG2_PROPERTY_PRESENCE_FRAC = 0.50
-_SEG2_DOMAIN_RANGE_FRAC = 0.29
-_SEG2_PROPERTY_HIERARCHY_FRAC = 0.21
-
-_SEG3_NUMERIC_FRAC = 0.67
-_SEG3_CATEGORICAL_FRAC = 0.33
 
 # Default for feature_config.numeric_predicate_min_share. A literal property
 # is numeric only if MORE THAN this share of its values parse as a number;
@@ -454,289 +385,6 @@ def _local_name(uri: str) -> str:
     return uri.rsplit("/", 1)[-1].rsplit("#", 1)[-1]
 
 
-class VectorLayout:
-    """
-    Computes all segment and sub-segment boundaries from a given
-    vector_dim. All boundaries are integer dim indices.
-
-    Guarantees:
-    - All sub-segments are contiguous and non-overlapping
-    - All sub-segments have at least 1 dimension (raises if vector_dim
-      is too small)
-    - Sub-segment dims sum exactly to vector_dim (no gaps, no overlap)
-
-    Usage:
-        layout = VectorLayout(1024)
-        layout.seg1_class_identity_start  # 0
-        layout.seg1_class_identity_dim    # 160
-        layout.seg3_categorical_start     # 896
-        layout.seg3_categorical_dim       # 128
-        layout.vector_dim                 # 1024
-
-    class_identity_dim overrides the fraction-derived width of the
-    class_identity sub-segment. It is the lever for a build whose class count
-    exceeds what the default split carries -- see _SEG1_CLASS_IDENTITY_FRAC.
-    The dims are taken from the rest of segment 1, so vector_dim and every
-    other segment boundary are unchanged and driver memory does not move.
-    """
-
-    def __init__(
-        self,
-        vector_dim: int,
-        class_identity_dim: Optional[int] = None,
-    ):
-        if vector_dim < 32:
-            raise ValueError(
-                f"vector_dim must be >= 32, got {vector_dim}. "
-                f"Minimum needed for all sub-segments to have >= 1 dim."
-            )
-
-        self.vector_dim = vector_dim
-
-        # --- Segment boundaries ---
-        seg1_total = max(1, int(round(vector_dim * _SEG1_FRAC)))
-        seg2_total = max(1, int(round(vector_dim * _SEG2_FRAC)))
-        seg3_total = vector_dim - seg1_total - seg2_total  # remainder
-
-        if seg3_total < 1:
-            raise ValueError(
-                f"vector_dim={vector_dim} too small: seg3 would have "
-                f"{seg3_total} dims"
-            )
-
-        self.seg1_start = 0
-        self.seg1_total = seg1_total
-        self.seg2_start = seg1_total
-        self.seg2_total = seg2_total
-        self.seg3_start = seg1_total + seg2_total
-        self.seg3_total = seg3_total
-
-        # --- Segment 1 sub-segments ---
-        ci_dim = max(1, int(round(seg1_total * _SEG1_CLASS_IDENTITY_FRAC)))
-
-        if class_identity_dim is not None:
-            # Two dims have to remain for class_hierarchy and ontology_source,
-            # which are also indexed into and cannot be zero-width. Rejected
-            # rather than clamped: a build that asked for a capacity the vector
-            # cannot hold must not quietly get a smaller one, since the whole
-            # point of the override is to guarantee a class budget.
-            if not 1 <= class_identity_dim <= seg1_total - 2:
-                raise ValueError(
-                    f"feature_config.class_identity_dim={class_identity_dim} "
-                    f"does not fit: segment 1 is {seg1_total} dims at "
-                    f"vector_dim={vector_dim}, and class_hierarchy plus "
-                    f"ontology_source need at least 1 each, so the maximum is "
-                    f"{seg1_total - 2}. Raise feature_config.vector_dim to "
-                    f"carry more classes -- segment 1 scales with it."
-                )
-            ci_dim = class_identity_dim
-
-        ch_dim = max(1, int(round(seg1_total * _SEG1_CLASS_HIERARCHY_FRAC)))
-        os_dim = seg1_total - ci_dim - ch_dim  # remainder
-
-        if os_dim < 1:
-            os_dim = 1
-            ch_dim = seg1_total - ci_dim - os_dim
-
-        self.seg1_class_identity_start = self.seg1_start
-        self.seg1_class_identity_dim = ci_dim
-        self.seg1_class_hierarchy_start = self.seg1_start + ci_dim
-        self.seg1_class_hierarchy_dim = ch_dim
-        self.seg1_ontology_source_start = self.seg1_start + ci_dim + ch_dim
-        self.seg1_ontology_source_dim = os_dim
-
-        # --- Segment 2 sub-segments ---
-        pp_dim = max(1, int(round(seg2_total * _SEG2_PROPERTY_PRESENCE_FRAC)))
-        dr_dim = max(1, int(round(seg2_total * _SEG2_DOMAIN_RANGE_FRAC)))
-        ph_dim = seg2_total - pp_dim - dr_dim  # remainder
-
-        if ph_dim < 1:
-            ph_dim = 1
-            dr_dim = seg2_total - pp_dim - ph_dim
-
-        self.seg2_property_presence_start = self.seg2_start
-        self.seg2_property_presence_dim = pp_dim
-        self.seg2_domain_range_start = self.seg2_start + pp_dim
-        self.seg2_domain_range_dim = dr_dim
-        self.seg2_property_hierarchy_start = self.seg2_start + pp_dim + dr_dim
-        self.seg2_property_hierarchy_dim = ph_dim
-
-        # --- Segment 3 sub-segments ---
-        num_dim = max(1, int(round(seg3_total * _SEG3_NUMERIC_FRAC)))
-        cat_dim = seg3_total - num_dim  # remainder
-
-        if cat_dim < 1:
-            cat_dim = 1
-            num_dim = seg3_total - cat_dim
-
-        self.seg3_numeric_start = self.seg3_start
-        self.seg3_numeric_dim = num_dim
-        self.seg3_categorical_start = self.seg3_start + num_dim
-        self.seg3_categorical_dim = cat_dim
-
-        self._validate()
-
-        # Metadata artifacts — populated during build_features()
-        # by _collect_* methods. Small Python objects only.
-        self._collected_norm_stats: Optional[List[Dict[str, Any]]] = None
-        self._collected_zero_variance: List[str] = []
-        self._collected_ontology_schema: Optional[Dict[str, Any]] = None
-        self._collected_slot_mapping: Optional[Dict[str, Any]] = None
-
-    def _validate(self):
-        """Verify all sub-segments tile the full vector with no gaps."""
-        total = (
-            self.seg1_class_identity_dim
-            + self.seg1_class_hierarchy_dim
-            + self.seg1_ontology_source_dim
-            + self.seg2_property_presence_dim
-            + self.seg2_domain_range_dim
-            + self.seg2_property_hierarchy_dim
-            + self.seg3_numeric_dim
-            + self.seg3_categorical_dim
-        )
-        assert total == self.vector_dim, (
-            f"Sub-segment dims sum to {total}, expected {self.vector_dim}"
-        )
-
-        # Verify contiguity
-        assert self.seg1_class_identity_start == 0
-        assert (
-            self.seg1_class_hierarchy_start
-            == self.seg1_class_identity_start + self.seg1_class_identity_dim
-        )
-        assert (
-            self.seg1_ontology_source_start
-            == self.seg1_class_hierarchy_start + self.seg1_class_hierarchy_dim
-        )
-        assert (
-            self.seg2_property_presence_start
-            == self.seg1_ontology_source_start + self.seg1_ontology_source_dim
-        )
-        assert (
-            self.seg2_domain_range_start
-            == self.seg2_property_presence_start
-            + self.seg2_property_presence_dim
-        )
-        assert (
-            self.seg2_property_hierarchy_start
-            == self.seg2_domain_range_start + self.seg2_domain_range_dim
-        )
-        assert (
-            self.seg3_numeric_start
-            == self.seg2_property_hierarchy_start
-            + self.seg2_property_hierarchy_dim
-        )
-        assert (
-            self.seg3_categorical_start
-            == self.seg3_numeric_start + self.seg3_numeric_dim
-        )
-        assert (
-            self.seg3_categorical_start + self.seg3_categorical_dim
-            == self.vector_dim
-        )
-
-        # Verify all dims >= 1
-        for attr_name in dir(self):
-            if attr_name.endswith("_dim") and not attr_name.startswith("_"):
-                val = getattr(self, attr_name)
-                assert val >= 1, f"{attr_name} = {val}, must be >= 1"
-
-    def to_dict(self) -> Dict[str, Any]:
-        """
-        Serialize layout to a JSON-compatible dict.
-
-        Used by MetadataCollector for feature_spec.json and
-        encoding_config.json. Contains all segment and sub-segment
-        boundaries needed to reconstruct the layout.
-        """
-        return {
-            "vector_dim": self.vector_dim,
-            "seg1_start": self.seg1_start,
-            "seg1_total": self.seg1_total,
-            "seg1_class_identity_start": self.seg1_class_identity_start,
-            "seg1_class_identity_dim": self.seg1_class_identity_dim,
-            "seg1_class_hierarchy_start": (
-                self.seg1_class_hierarchy_start
-            ),
-            "seg1_class_hierarchy_dim": self.seg1_class_hierarchy_dim,
-            "seg1_ontology_source_start": (
-                self.seg1_ontology_source_start
-            ),
-            "seg1_ontology_source_dim": self.seg1_ontology_source_dim,
-            "seg2_start": self.seg2_start,
-            "seg2_total": self.seg2_total,
-            "seg2_property_presence_start": (
-                self.seg2_property_presence_start
-            ),
-            "seg2_property_presence_dim": (
-                self.seg2_property_presence_dim
-            ),
-            "seg2_domain_range_start": self.seg2_domain_range_start,
-            "seg2_domain_range_dim": self.seg2_domain_range_dim,
-            "seg2_property_hierarchy_start": (
-                self.seg2_property_hierarchy_start
-            ),
-            "seg2_property_hierarchy_dim": (
-                self.seg2_property_hierarchy_dim
-            ),
-            "seg3_start": self.seg3_start,
-            "seg3_total": self.seg3_total,
-            "seg3_numeric_start": self.seg3_numeric_start,
-            "seg3_numeric_dim": self.seg3_numeric_dim,
-            "seg3_categorical_start": self.seg3_categorical_start,
-            "seg3_categorical_dim": self.seg3_categorical_dim,
-        }
-
-    def summary(self) -> str:
-        """Human-readable layout summary."""
-        lines = [
-            f"VectorLayout(vector_dim={self.vector_dim})",
-            f"  Segment 1: Ontology Structure "
-            f"[{self.seg1_start}–{self.seg2_start - 1}] "
-            f"({self.seg1_total} dims)",
-            f"    Class Identity:    "
-            f"[{self.seg1_class_identity_start}–"
-            f"{self.seg1_class_identity_start + self.seg1_class_identity_dim - 1}] "
-            f"({self.seg1_class_identity_dim} dims)",
-            f"    Class Hierarchy:   "
-            f"[{self.seg1_class_hierarchy_start}–"
-            f"{self.seg1_class_hierarchy_start + self.seg1_class_hierarchy_dim - 1}] "
-            f"({self.seg1_class_hierarchy_dim} dims)",
-            f"    Ontology Source:   "
-            f"[{self.seg1_ontology_source_start}–"
-            f"{self.seg1_ontology_source_start + self.seg1_ontology_source_dim - 1}] "
-            f"({self.seg1_ontology_source_dim} dims)",
-            f"  Segment 2: Property Schema "
-            f"[{self.seg2_start}–{self.seg3_start - 1}] "
-            f"({self.seg2_total} dims)",
-            f"    Property Presence: "
-            f"[{self.seg2_property_presence_start}–"
-            f"{self.seg2_property_presence_start + self.seg2_property_presence_dim - 1}] "
-            f"({self.seg2_property_presence_dim} dims)",
-            f"    Domain/Range:      "
-            f"[{self.seg2_domain_range_start}–"
-            f"{self.seg2_domain_range_start + self.seg2_domain_range_dim - 1}] "
-            f"({self.seg2_domain_range_dim} dims)",
-            f"    Property Hierarchy:"
-            f"[{self.seg2_property_hierarchy_start}–"
-            f"{self.seg2_property_hierarchy_start + self.seg2_property_hierarchy_dim - 1}] "
-            f"({self.seg2_property_hierarchy_dim} dims)",
-            f"  Segment 3: Literal Values "
-            f"[{self.seg3_start}–{self.vector_dim - 1}] "
-            f"({self.seg3_total} dims)",
-            f"    Numeric Values:    "
-            f"[{self.seg3_numeric_start}–"
-            f"{self.seg3_numeric_start + self.seg3_numeric_dim - 1}] "
-            f"({self.seg3_numeric_dim} dims)",
-            f"    Categorical Values:"
-            f"[{self.seg3_categorical_start}–"
-            f"{self.seg3_categorical_start + self.seg3_categorical_dim - 1}] "
-            f"({self.seg3_categorical_dim} dims)",
-        ]
-        return "\n".join(lines)
-
-
 class FeatureExtractor:
     """
     Builds universal fixed-width ontology-aware feature vectors for all
@@ -834,9 +482,9 @@ class FeatureExtractor:
             "node_features": {
                 "total_dim": layout.vector_dim,
                 "segment_proportions": {
-                    "ontology_structure": _SEG1_FRAC,
-                    "property_schema": _SEG2_FRAC,
-                    "literal_values": _SEG3_FRAC,
+                    "ontology_structure": SEG1_FRAC,
+                    "property_schema": SEG2_FRAC,
+                    "literal_values": SEG3_FRAC,
                 },
                 "class_identity": {
                     "dim": layout.seg1_class_identity_dim,
@@ -1244,15 +892,9 @@ class FeatureExtractor:
                 tensor = np.zeros(
                     (num_nodes, vector_dim), dtype=np.float32
                 )
-                g = groups.get(node_type)
-                if g is not None and not g.empty:
-                    node_ids = g["node_id"].values
-                    dims = g["dim"].values
-                    values = g["value"].values
-                    valid_mask = (dims >= 0) & (dims < vector_dim)
-                    tensor[
-                        node_ids[valid_mask], dims[valid_mask]
-                    ] = values[valid_mask]
+                scatter_sparse_entries(
+                    groups.get(node_type), tensor, "node_id", vector_dim
+                )
                 feature_tensors[node_type] = (
                     torch.from_numpy(tensor).contiguous()
                 )
@@ -1755,17 +1397,7 @@ class FeatureExtractor:
         Used for small-to-medium node types.
         """
         pdf = combined.toPandas()
-
-        if not pdf.empty:
-            node_ids = pdf["node_id"].values
-            dims = pdf["dim"].values
-            values = pdf["value"].values
-
-            valid_mask = (dims >= 0) & (dims < vector_dim)
-            tensor[
-                node_ids[valid_mask], dims[valid_mask]
-            ] = values[valid_mask]
-
+        scatter_sparse_entries(pdf, tensor, "node_id", vector_dim)
         del pdf
         gc.collect()
 
@@ -1810,18 +1442,8 @@ class FeatureExtractor:
             )
 
             pdf = chunk_df.toPandas()
-
-            if not pdf.empty:
-                total_entries += len(pdf)
-                node_ids = pdf["node_id"].values
-                dims = pdf["dim"].values
-                values = pdf["value"].values
-
-                valid_mask = (dims >= 0) & (dims < vector_dim)
-                tensor[
-                    node_ids[valid_mask], dims[valid_mask]
-                ] = values[valid_mask]
-
+            total_entries += len(pdf)
+            scatter_sparse_entries(pdf, tensor, "node_id", vector_dim)
             del pdf
             gc.collect()
 
@@ -2455,12 +2077,12 @@ class FeatureExtractor:
                 })
 
         # --- Collision report ---
-        collision_report = _compute_collision_report(
+        collision_report = compute_collision_report(
             numeric_slots, categorical_slots, class_slots,
             namespace_slots, hierarchy_slots,
             class_identity_dim=layout.seg1_class_identity_dim,
         )
-        _check_class_identity_capacity(
+        check_class_identity_capacity(
             collision_report,
             allow_oversubscription=self._allow_class_oversubscription,
             vector_dim=layout.vector_dim,
@@ -2935,322 +2557,3 @@ class FeatureExtractor:
             F.col("dim").cast("int"),
             F.col("value").cast("float"),
         )
-
-# ================================================================
-# Module-level helpers for metadata collection
-# ================================================================
-
-class ClassIdentityCapacityError(RuntimeError):
-    """The class_identity segment cannot separate this build's classes."""
-
-
-def _min_vector_dim_for_segment_one(dims_needed: int) -> int:
-    """Smallest vector_dim whose segment 1 carries ``dims_needed`` dims."""
-    import math
-
-    return int(math.ceil(dims_needed / _SEG1_FRAC))
-
-
-def _driver_gb_per_million_nodes(vector_dim: int) -> float:
-    """Dense feature memory on the driver, per million nodes, at this width.
-
-    Quoted in the capacity error because "raise vector_dim" reads as free and
-    is not: the tensors are collected to the driver, so the cost is linear in
-    the width and lands in one process.
-    """
-    return vector_dim * 1_000_000 * 4 / 1024 ** 3
-
-
-def _check_class_identity_capacity(
-    report: Dict[str, Any],
-    allow_oversubscription: bool = False,
-    vector_dim: Optional[int] = None,
-) -> None:
-    """
-    Fail when the class_identity segment can no longer carry class identity.
-
-    Three distinct failures, all otherwise silent: the graph builds, the
-    vectors are the declared width, and every metadata file is internally
-    consistent.
-
-      * two classes share an identical code -- indistinguishable to any
-        downstream model, whatever the segment width;
-      * more classes than the segment has dimensions -- a d-dim segment holds
-        at most d linearly independent codes, so beyond that a readout layer
-        cannot recover class identity even though the codes stay distinct.
-        Empirically the codes remain unique well past that point (4-hot into
-        64 slots gives C(64,4) patterns), so distinctness alone will not warn
-        anyone;
-      * the codes are linearly DEPENDENT while distinct and under the ceiling
-        -- the case the other two miss entirely. This is the general failure;
-        the first two are the special cases of it that are cheap to name.
-        Caught by measuring the rank of the code matrix rather than inferring
-        separability from counts (_class_code_rank).
-
-    This RAISES rather than logging, which it used to do. A warning was the
-    wrong severity for the failure mode: the artifact ships, every consistency
-    check passes, and the only symptom is a model that never learns to tell two
-    classes apart -- weeks downstream, with nothing pointing back here. The
-    build is the last place the problem is still attributable, so it stops
-    here. feature_config.allow_class_identity_oversubscription re-enables the
-    old warn-and-continue for a run that knowingly accepts partial identity.
-
-    Near-capacity still warns: the class count grows with every source added
-    and the segment does not, so headroom is worth a nudge before it is a wall.
-    """
-    ci = report.get("class_identity")
-    if not ci:
-        return
-
-    total, dim = ci.get("total_classes", 0), ci.get("segment_dim", 0)
-    shared = ci.get("classes_sharing_a_code") or []
-
-    problems = []
-    if shared:
-        problems.append(
-            f"{len(shared)} group(s) of classes share an identical "
-            f"class_identity code and are indistinguishable downstream: "
-            f"{shared[:3]}"
-        )
-    if dim and total > dim:
-        problems.append(
-            f"class_identity is over-subscribed: {total} classes into {dim} "
-            f"dims. At most {dim} codes can be linearly independent, so class "
-            f"identity is not recoverable."
-        )
-    elif ci.get("code_matrix_rank") is not None and not ci.get(
-        "linearly_separable"
-    ):
-        # Distinct codes, inside the ceiling, and still not separable. Reported
-        # separately from over-subscription because the remedy differs: this is
-        # not "too many classes for the width", it is an unlucky hash draw, and
-        # nudging the width re-draws every code.
-        rank, deficiency = ci["code_matrix_rank"], ci.get("rank_deficiency")
-        problems.append(
-            f"class_identity codes are linearly dependent: {total} classes "
-            f"span only {rank} dimensions ({deficiency} class(es) are a "
-            f"combination of others) despite fitting in {dim} dims and having "
-            f"no identical codes. No linear readout can separate them."
-        )
-
-    if problems:
-        detail = " ".join(problems)
-        # Quote the width that would actually fit rather than naming the
-        # setting. "Raise vector_dim" leaves the operator to work out the
-        # arithmetic behind a fixed share of a fixed fraction, and to discover
-        # by a second failed build that the number they picked was still short.
-        # The memory figure goes with it because raising the width is not free:
-        # the feature tensors are collected to the driver, so the cost is linear
-        # in the width and lands in one process.
-        sized = ""
-        if vector_dim and total:
-            needed = _min_vector_dim_for_segment_one(total)
-            if needed > vector_dim:
-                sized = (
-                    f" At vector_dim={vector_dim} no split of segment 1 carries "
-                    f"{total} classes; the smallest width that does is "
-                    f"{needed} (~"
-                    f"{_driver_gb_per_million_nodes(needed):.0f} GB of driver "
-                    f"memory per 1M nodes)."
-                )
-        remedy = (
-            "Raise feature_config.class_identity_dim (taken from within "
-            "segment 1, so the vector width does not change) or "
-            "feature_config.vector_dim (scales every segment)." + sized
-            + " To build anyway, set feature_config."
-            "allow_class_identity_oversubscription=true."
-        )
-        if allow_oversubscription:
-            logger.warning(f"  {detail} {remedy}")
-        else:
-            raise ClassIdentityCapacityError(f"{detail} {remedy}")
-        return
-
-    if dim and total > 0.85 * dim:
-        logger.warning(
-            f"  class_identity segment is near capacity: {total} classes in "
-            f"{dim} dims ({dim - total} left). Adding a source will "
-            f"over-subscribe it."
-        )
-
-
-def _class_code_rank(
-    codes: List[Tuple[int, ...]],
-    dim: int,
-) -> Optional[int]:
-    """Rank of the multi-hot class-code matrix -- how many classes are recoverable.
-
-    Each class occupies a set of slots, so the codes form a num_classes x dim
-    0/1 matrix. A downstream layer reads class identity as a linear function of
-    those dims, so it can tell all the classes apart exactly when the rows are
-    linearly independent -- i.e. rank == num_classes. Anything less means some
-    class's code is a weighted combination of others' and no linear readout can
-    separate it, however distinct the codes look.
-
-    Why measured rather than inferred: the two cheap proxies are each only
-    NECESSARY. `num_classes <= dim` is the pigeonhole ceiling, and no two codes
-    being identical rules out the degenerate case, but distinct codes under the
-    ceiling can still be dependent (see the worked example at the call site).
-    Those proxies are what this reported before, so a rank-deficient build
-    passed every check.
-
-    Uses numpy's SVD-based matrix_rank with its default tolerance, which scales
-    with the largest singular value and the matrix dimensions -- appropriate
-    here because the entries are exact 0/1 and any dependency is exact, so
-    tolerance selection is not delicate.
-
-    The slots are taken modulo dim by the caller, so an out-of-range index is a
-    programming error rather than data; guarding would hide it.
-
-    Returns:
-        The rank, or None when dim is unknown (nothing to compute against).
-    """
-    if not dim or not codes:
-        return None
-
-    matrix = np.zeros((len(codes), dim), dtype=np.float64)
-    for row, code in enumerate(codes):
-        for slot in code:
-            matrix[row, slot % dim] = 1.0
-
-    return int(np.linalg.matrix_rank(matrix))
-
-
-def _compute_collision_report(
-    numeric_slots: List[Dict],
-    categorical_slots: List[Dict],
-    class_slots: List[Dict],
-    namespace_slots: List[Dict],
-    hierarchy_slots: List[Dict],
-    class_identity_dim: int = 0,
-) -> Dict[str, Any]:
-    """
-    Compute hash collision statistics across all slot assignments.
-
-    Returns a report with collision counts and rates per sub-segment.
-
-    Args:
-        class_identity_dim: Width of the class_identity sub-segment. Needed
-            because class identity is a multi-hot code whose health depends
-            on the segment width, not on slot occupancy alone -- see the
-            class_identity branch below.
-    """
-    dim = class_identity_dim
-    report: Dict[str, Any] = {}
-
-    if numeric_slots:
-        dims_used = [s["global_dim"] for s in numeric_slots]
-        unique_dims = len(set(dims_used))
-        total = len(dims_used)
-        collisions = total - unique_dims
-        report["numeric_properties"] = {
-            "total_properties": total,
-            "unique_slots": unique_dims,
-            "collisions": collisions,
-            "collision_rate": (
-                round(collisions / total, 4) if total > 0 else 0.0
-            ),
-        }
-
-    if class_slots:
-        all_dims: List[int] = []
-        for s in class_slots:
-            all_dims.extend(s["global_dims"])
-        unique_dims = len(set(all_dims))
-        total = len(all_dims)
-
-        # Class identity is a MULTI-HOT code: each class occupies
-        # num_hashes slots, and what identifies it is the set of slots, not
-        # any single one. So slot reuse is not identity loss -- 44 classes x
-        # 4 hashes into 64 slots reuses ~67% of slot entries while still
-        # giving all 44 classes distinct codes, full rank, and a condition
-        # number near 12. Reported as `collisions` / `collision_rate` (slot
-        # mapping 1.0) that number read as "two thirds of class identity is
-        # aliased", which is false and alarming: with total > dim, pigeonhole
-        # forces a high value no matter how healthy the code is.
-        #
-        # What actually costs identity is measured instead:
-        #   - two classes sharing an identical code (genuinely
-        #     indistinguishable),
-        #   - the class count outgrowing the segment, past which no set of
-        #     codes can be linearly separable, and
-        #   - the codes being linearly DEPENDENT while still distinct and
-        #     still under the ceiling, which is the case neither of the other
-        #     two catches -- see the rank computation below.
-        codes = [tuple(sorted(set(s["global_dims"]))) for s in class_slots]
-        by_code: Dict[Tuple[int, ...], List[str]] = {}
-        for slot, code in zip(class_slots, codes):
-            by_code.setdefault(code, []).append(
-                slot.get("pyg_name") or slot.get("class_uri", "?")
-            )
-        shared = sorted(
-            (sorted(names) for names in by_code.values() if len(names) > 1),
-            key=lambda names: names[0],
-        )
-        max_overlap = 0
-        for i in range(len(codes)):
-            for j in range(i + 1, len(codes)):
-                overlap = len(set(codes[i]) & set(codes[j]))
-                if overlap > max_overlap:
-                    max_overlap = overlap
-
-        num_classes = len(class_slots)
-        code_rank = _class_code_rank(codes, dim)
-        report["class_identity"] = {
-            "total_classes": num_classes,
-            "segment_dim": dim,
-            # Raw occupancy, kept because it is a fact about the slots --
-            # but named so it is not mistaken for lost identity.
-            "total_hash_entries": total,
-            "unique_slots": unique_dims,
-            "slot_reuse": total - unique_dims,
-            "slot_reuse_rate": (
-                round((total - unique_dims) / total, 4) if total > 0 else 0.0
-            ),
-            # Identity, which is what a reader actually needs.
-            "distinct_codes": len(by_code),
-            "classes_sharing_a_code": shared,
-            "max_pairwise_slot_overlap": max_overlap,
-            # Capacity. A d-dim segment holds at most d linearly independent
-            # codes, so this is a hard ceiling, not a heuristic.
-            "capacity_classes": dim,
-            "headroom_classes": (dim - num_classes) if dim else None,
-            # The MEASURED rank of the num_classes x dim code matrix, and
-            # separability derived from it.
-            #
-            # This was previously `num_classes <= dim and not shared`, which
-            # states two NECESSARY conditions as if they were sufficient. They
-            # are not: distinct codes under the ceiling can still be linearly
-            # dependent. Four 4-hot codes {0,1,2,3}, {0,1,4,5}, {2,3,6,7},
-            # {4,5,6,7} are pairwise distinct and fit in 8 dims, yet
-            # A + D - B - C = 0, so the matrix is rank 3 and one class is a
-            # blend of the others. A readout layer cannot recover it, and every
-            # cheaper check reports the code healthy.
-            #
-            # Rank is the direct measure, so it is what gets reported. The
-            # matrix is num_classes x dim (hundreds by hundreds at most) and
-            # this runs once per build on the driver -- microseconds.
-            "code_matrix_rank": code_rank,
-            "rank_deficiency": (
-                (num_classes - code_rank) if code_rank is not None else None
-            ),
-            "linearly_separable": (
-                bool(dim) and code_rank is not None and code_rank == num_classes
-            ),
-        }
-
-    if namespace_slots:
-        dims_used = [s["global_dim"] for s in namespace_slots]
-        unique_dims = len(set(dims_used))
-        total = len(dims_used)
-        collisions = total - unique_dims
-        report["namespaces"] = {
-            "total_namespaces": total,
-            "unique_slots": unique_dims,
-            "collisions": collisions,
-            "collision_rate": (
-                round(collisions / total, 4) if total > 0 else 0.0
-            ),
-        }
-
-    return report

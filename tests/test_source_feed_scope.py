@@ -14,7 +14,7 @@ Pure Python: runs under ``pytest -m "not e2e"`` with no Spark fixture.
 """
 import pytest
 
-from spark_jobs.build_graph import (
+from spark_jobs.graph.config import (
     SEC_HANDLED_FEED,
     SEC_UNHANDLED_FEEDS,
     JobConfig,

@@ -13,7 +13,7 @@ same class of bug.
 """
 import pytest
 
-from spark_jobs.build_graph import deterministic_bnode_labels
+from spark_jobs.graph.turtle import deterministic_bnode_labels
 
 rdflib = pytest.importorskip("rdflib")
 

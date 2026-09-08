@@ -2228,6 +2228,22 @@ pyg-knowledge-graph-builder/
 │   └── spark-rapids.conf.template          # reference RAPIDS spark-defaults
 ├── spark_jobs/
 │   ├── build_graph.py                      # Main Spark job entry point
+│   ├── graph/                              # The job, minus its orchestration
+│   │   ├── __init__.py
+│   │   ├── config.py                       # JobConfig + the CLI; rejects a
+│   │   │                                   # configuration that cannot work
+│   │   │                                   # before Spark starts
+│   │   ├── loading.py                      # The three loaders, the dispatcher,
+│   │   │                                   # and the per-source stamp/counts
+│   │   ├── persistence.py                  # Interim Parquet + descriptor, the
+│   │   │                                   # final .pt/metadata/node index, and
+│   │   │                                   # the job manifest
+│   │   └── turtle.py                       # One Turtle blob → the four triple
+│   │                                       # columns, plus the bounded batching
+│   │                                       # that carries them. The one module
+│   │                                       # executors import for themselves,
+│   │                                       # so its imports are pinned to the
+│   │                                       # executor venv by a test
 │   ├── enrichment/                         # RDF enrichment modules (PySpark)
 │   │   ├── __init__.py
 │   │   ├── pipeline.py                     # Main enrichment orchestrator
@@ -2280,6 +2296,19 @@ pyg-knowledge-graph-builder/
 │   │   │                                   # EdgeVectorLayout; reuses cached resolved
 │   │   │                                   # edges from EdgeMapper; provides encoding
 │   │   │                                   # config and edge classification for metadata
+│   │   ├── edge_encoders.py                # The three edge-vector segments, one
+│   │   │                                   # function each; called by
+│   │   │                                   # edge_feature_extractor.py
+│   │   ├── vector_layout.py                # VectorLayout — every node-vector segment
+│   │   │                                   # boundary, computed from vector_dim
+│   │   ├── edge_vector_layout.py           # EdgeVectorLayout — the same for the edge
+│   │   │                                   # vector, from edge_vector_dim
+│   │   ├── collision_report.py             # Hash collision stats over the node slot
+│   │   │                                   # assignments, and the class_identity
+│   │   │                                   # capacity check that reads them
+│   │   ├── sparse_scatter.py               # Writes sparse (key, dim, value) rows into
+│   │   │                                   # a pre-allocated dense tensor; shared by
+│   │   │                                   # both feature extractors
 │   │   └── metadata_writer.py              # MetadataCollector (accumulates artifacts
 │   │                                       # during construction steps);
 │   │                                       # write_metadata_to_local() / _to_s3()
@@ -2307,12 +2336,21 @@ pyg-knowledge-graph-builder/
 | `bls_linker.py`, `sec_linker.py`, `market_linker.py`, `noaa_linker.py` | Produce intra-source enrichment triples | Yes |
 | `cross_source_linker.py` | Produces cross-source enrichment triples | Yes |
 | `ontology_mapper.py` | Produces equivalence mapping triples | Yes |
-| `build_graph.py` | Parses source RDF into triples DataFrame (`load_ntriples_to_dataframe()` for `.nt` files, `load_turtle_parquet_to_dataframe()` for Turtle Parquet blobs); dispatches via `load_source_triples()`; orchestrates pipeline modes; writes enriched Parquet locally and the `.pt` + metadata JSON files locally (mirroring the final artifacts to S3 when an archive is configured). `--source_format` and `--turtle_column` parameters control which loader is used | Yes (orchestration) |
+| `build_graph.py` | The entry point and the orchestration only: `main()`, the four execution modes, the enrichment and PyG-construction phases, the SparkSession, the work-dir preflight and the final banner. Everything it reads, writes or is configured by now lives in `graph/` | Yes (orchestration) |
+| `graph/config.py` | `JobConfig` — the job's whole contract with its caller: resolves every path the run reads and writes, and REJECTS a configuration that cannot work (a mode without its inputs, a staged mirror that is not there, an SEC prefix naming an unhandled feed) before Spark starts. Also `parse_args()`, `staged_local_path()`, `period_partition()`, and the probe that answers whether the PyG builder is importable | No (pure Python) |
+| `graph/loading.py` | The three ways triples get in — `load_ntriples_to_dataframe()` for `.nt`, `load_turtle_parquet_to_dataframe()` for Turtle blobs, and `load_source_triples()` which dispatches per source path, stamps each row with `source_label()` and unions the result. The stamp is what makes the `s3` and `local` input modes report identical per-source counts | Yes (heavy, pure Spark expressions) |
+| `graph/persistence.py` | Everything written down and read back: the interim enriched Parquet and its `dataset.json` descriptor (how a `pyg_only` run learns what the `enrichment_only` run read), the final `.pt` / metadata / node index written locally and mirrored to S3, and the job manifest | Yes (writes are distributed; the `.pt` is driver-side) |
+| `graph/turtle.py` | One Turtle blob → the four triple columns (`turtle_to_rows()`, its skip policy, the blank-node labels that make a parse reproducible), and `turtle_batches_to_arrow()` — the bounded batching that replaced the array-returning UDF of #380. **The only module executors import for themselves**: `build_graph.py` is submitted by path, so its own functions ship by value and are never imported, while these are pickled by reference and really are imported inside the executor venv. Its imports are therefore pinned to what `requirements-executor.txt` carries, by `tests/test_executor_imports.py` | Yes (the parse itself runs on executors) |
 | `constructor.py` | Orchestrates PyG HeteroData construction from triples DataFrame (5 steps: node IDs, edge indices, node features, edge features, assembly); initializes `MetadataCollector`; calls `register_*` methods after each step; returns `(HeteroData, MetadataCollector)` | Yes (orchestration) |
 | `node_mapper.py` | Discovers node types, assigns per-type integer IDs via Window functions. `get_type_uri_mapping()` provides a small collect for metadata. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
 | `edge_mapper.py` | Double-joins triples with node IDs, collects edge index tensors. Returns cached resolved edges DataFrame for reuse by `edge_feature_extractor.py`. `get_predicate_uri_mapping()` provides a small collect for metadata. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
-| `feature_extractor.py` | Builds ontology-aware node feature vectors via `VectorLayout` (proportionally scaled segments): extracts class hierarchy, property schema, and literal values on executors; collects sparse entries (chunked for large types); scatters into dense tensors on driver. During `build_features()`, collects normalization stats, ontology schema snapshot, and slot mapping into small Python objects via `_collect_*` methods. `get_metadata_artifacts()` returns these for `MetadataCollector`. Imports `ONTOLOGY_NAMESPACE_INDICES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
-| `edge_feature_extractor.py` | Builds derived edge feature vectors via `EdgeVectorLayout` (proportionally scaled segments): classifies edge types by category, extracts endpoint properties, encodes temporal signals / numeric contrast / relational context on executors; collects sparse entries per edge type; scatters into dense tensors on driver. Reuses cached resolved edges from `edge_mapper.py` — no double-join replay. `get_encoding_config()` and `get_edge_classification()` provide metadata for `MetadataCollector`. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
+| `feature_extractor.py` | Builds ontology-aware node feature vectors via `VectorLayout` (proportionally scaled segments): extracts class hierarchy, property schema, and literal values on executors; collects sparse entries (chunked for large types); scatters into dense tensors on driver. During `build_features()`, collects normalization stats, ontology schema snapshot, and slot mapping into small Python objects via `_collect_*` methods. `get_metadata_artifacts()` returns these for `MetadataCollector`. Imports `ONTOLOGY_NAMESPACE_INDICES` from `rdf_utils.py`, and the collision report and class-identity guard from `collision_report.py` | Yes (heavy, pure Spark expressions) |
+| `edge_feature_extractor.py` | Builds derived edge feature vectors via `EdgeVectorLayout` (proportionally scaled segments): classifies edge types by category, extracts endpoint properties, calls the three segment encoders in `edge_encoders.py` on executors; collects sparse entries per edge type; scatters into dense tensors on driver. Reuses cached resolved edges from `edge_mapper.py` — no double-join replay. `get_encoding_config()` and `get_edge_classification()` provide metadata for `MetadataCollector`. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
+| `edge_encoders.py` | The three edge-vector segments, one function each: `encode_temporal_signals()`, `encode_numeric_contrast()` (with the cross-property fallback behind it) and `encode_relational_context()`. Each takes the edges of one type and returns lazy `(edge_idx, dim, value)` entries; every dim index comes from the `EdgeVectorLayout` handed in. `PropertyRows` and the row widths beside it describe the endpoint property frames `edge_feature_extractor.py` builds for them, which is why the dependency runs extractor → encoders and never back | Yes (pure Spark expressions, nothing collected) |
+| `vector_layout.py` | `VectorLayout` — turns `vector_dim` into the start index and width of every node-vector segment and sub-segment, and holds the proportions those widths come from. The encoders ask it for a slot and `metadata_writer.py` publishes the same layout, so a vector and the metadata describing it cannot disagree | No (pure Python) |
+| `edge_vector_layout.py` | `EdgeVectorLayout` — the same for the edge vector, from `edge_vector_dim`, over the temporal / numeric-contrast / relational-context segments | No (pure Python) |
+| `collision_report.py` | `compute_collision_report()` — what collided in the node vector's slot assignments, published as the `collision_report` block of `slot_mapping.json` — and `check_class_identity_capacity()`, which reads that report and raises `ClassIdentityCapacityError` when the class_identity segment can no longer separate the build's classes. Runs once per build on the driver, over a few hundred Python dicts | No (pure Python) |
+| `sparse_scatter.py` | `scatter_sparse_entries()` — writes one frame of sparse `(key, dim, value)` rows into a pre-allocated dense tensor. The five collect paths in `feature_extractor.py` and `edge_feature_extractor.py` all end in this write; how they collect (persist level, chunking) stays with them | No (pure Python) |
 | `metadata_writer.py` | `MetadataCollector` accumulates metadata artifacts deposited by `constructor.py` during each step; `to_metadata_files()` produces six JSON-serializable dicts; `write_metadata_to_local()` writes them to the local metadata directory and `write_metadata_to_s3()` mirrors them to S3; `derive_metadata_prefix()` computes the metadata directory from the `.pt` filename/key | No (pure Python) |
 
 ### Scalability
@@ -2475,7 +2513,7 @@ This is how #380 was diagnosed: the dumps showed the executor's reader thread in
 `BasePythonUDFRunner.read` and its writer thread in `PythonRDD.write`, both
 blocked on the same Python worker, with the worker itself burning no CPU — a
 deadlock, not a slow parse. See `turtle_batches_to_arrow` in
-[`spark_jobs/build_graph.py`](spark_jobs/build_graph.py) for what caused it.
+[`spark_jobs/graph/turtle.py`](spark_jobs/graph/turtle.py) for what caused it.
 
 It then caught the same defect a second time, which is the better argument for
 keeping it. After that first fix a run stalled again at stage 13, 168 of 169
@@ -2634,7 +2672,7 @@ Each tier below repeats its run group, so no row has to be cross-referenced agai
 
 | Tier | Scope | Examples |
 |------|-------|----------|
-| **1 — pure / no-Spark**<br>*fast suite* | Import-time integrity, vector geometry, hand-maintained pattern tables, and RDF parse determinism. Sub-second. | `test_imports.py` (imports every `spark_jobs` module), `test_vector_layout.py` / `test_edge_vector_layout.py` (`VectorLayout` / `EdgeVectorLayout` boundaries), `test_source_patterns.py` (NOAA/market/SEC pattern-dict integrity), `test_bnode_determinism.py` (blank-node labels are content-derived, so the same Turtle parses identically every time — rdflib's own labels are random per parse) |
+| **1 — pure / no-Spark**<br>*fast suite* | Import-time integrity, vector geometry, hand-maintained pattern tables, and RDF parse determinism. Sub-second. | `test_imports.py` (imports every `spark_jobs` module), `test_vector_layout.py` / `test_edge_vector_layout.py` (`VectorLayout` / `EdgeVectorLayout` boundaries), `test_source_patterns.py` (NOAA/market/SEC pattern-dict integrity), `test_bnode_determinism.py` (blank-node labels are content-derived, so the same Turtle parses identically every time — rdflib's own labels are random per parse), `test_sparse_scatter.py` (`scatter_sparse_entries()` — which dims it drops, which bad keys it lets raise), `test_executor_imports.py` (`graph/turtle.py` is imported by executors for real, so its transitive imports must stay inside what `requirements-executor.txt` ships — a driver-only import passes every other test and then fails every parse task) |
 | **2 — linker smokes**<br>*fast suite* | Each enrichment module's `enrich()` driven end-to-end over tiny in-memory triples: one happy path + one short-circuit (foreign input for the intra-source linkers; a single detected source, and two sources with nothing linkable, for the cross-source linker; non-temporal input for the temporal unifier). | `test_{bls,noaa,market,sec}_linker.py`, `test_cross_source_linker.py`, `test_temporal_unifier.py` |
 | **3 — targeted deep**<br>*fast suite* | One focused test on each module's trickiest computation (including the negative case), where a silent regression would be costly. | severity escalation (NOAA), option moneyness (market), CIK unification (SEC), temporal sequencing (BLS), state-FIPS geographic chain (cross-source), expiration-date period derivation (temporal unifier) |
 | **4 — construction internals**<br>*fast suite* | Value-level unit tests of the PyG construction modules — exact node IDs, edge-index contents + `(src_id, dst_id)` ordering, config filters, determinism, the node/edge feature **encoding** (a known triple lands in the layout-reserved vector slot with the expected value: class-identity/categorical multi-hots, depth-weighted `subClassOf` class hierarchy, property-schema presence/domain-range/property-hierarchy slots, z-score numeric normalization, edge temporal/numeric-contrast/moneyness signals, label-similarity Jaccard on correlation edges, the escalation severity-delta fallback, plus `_classify_relation` per category and a categorical-determinism guard), the final `build_hetero_data` assembly (feature↔node-ID alignment via encoding-independent sentinels, edge endpoints within per-type ID ranges, per-type counts), and the six metadata JSON files' content (keys, counts, type names, feature-segment structure) — asserting what the `e2e` smoke only checks structurally or for presence. Runs in the fast suite; `test_metadata_writer.py` is pure-Python (no `SparkSession`). | `test_node_mapper.py`, `test_edge_mapper.py`, `test_feature_extractor.py`, `test_edge_feature_extractor.py`, `test_constructor.py`, `test_metadata_writer.py` |

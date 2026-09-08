@@ -291,6 +291,46 @@ def test_a_failing_notebook_still_records_its_outcome(harness):
 
 
 # --------------------------------------------------------------------------- #
+# A run that never started is not a run that failed
+#
+# The launcher reports a job that RAN and failed rather than raising, which is the
+# test above. A runner that could not be EXECUTED has to be told apart from that:
+# no leg was submitted and there is no outcome, so reporting it the same way makes
+# a run that never began indistinguishable from one that finished.
+#
+# Run 20260908T201757Z is the case. Its run directory was built by copying an older
+# one's config files, which does not bring the runner venv, so the exec failed with
+# 127 two seconds in -- and the chain above it printed "exited rc=0".
+# --------------------------------------------------------------------------- #
+
+def test_a_missing_runner_is_refused_before_the_run_claims_anything(harness):
+    h = harness()
+    (h.repo / "runner").unlink()
+
+    r = h.run()
+    assert r.returncode == 2
+    assert "runner python is missing" in r.stderr
+    # Refused early, so nothing was claimed on this box or the other node: no stop
+    # flag, no trace, no outcome, and nothing for a later run to mistake for its own.
+    assert not (h.rd / "run.done").exists()
+    assert not (h.rd / f"STOP-{RUN_ID}").exists()
+    assert h.recorded("record") == ""
+    assert h.recorded("netsample") == ""
+
+
+def test_a_runner_that_cannot_exec_is_a_harness_fault_not_an_outcome(harness):
+    """The -x guard cannot see this one: the file is there and executable, and the
+    exec still fails -- a venv whose interpreter symlink dangles behaves this way."""
+    h = harness()
+    (h.repo / "runner").write_text("#!/nonexistent/python\n")
+    (h.repo / "runner").chmod(0o755)
+
+    r = h.run()
+    assert r.returncode == 2
+    assert (h.rd / "run.log").read_text().count("THE NOTEBOOK NEVER STARTED") == 1
+
+
+# --------------------------------------------------------------------------- #
 # One supervisor per run directory
 # --------------------------------------------------------------------------- #
 

@@ -69,6 +69,25 @@ STALL_DIR="${PYG_STALL_DUMP_DIR:-$RD/stalls}"
 RTT_LIMIT_MS="${PYG_GATEWAY_RTT_LIMIT_MS:-60}"
 RTT_STRIKES="${PYG_GATEWAY_STRIKES:-6}"
 
+# The runner defaults to a venv INSIDE the run directory, so a run directory built
+# by copying an older one's config files has everything except this. That is not a
+# hypothetical: it is how run 20260908T201757Z died. The exec failed with 127 two
+# seconds in, and because a job that runs and fails is reported rather than raised
+# (see the wait below), the chain above printed "exited rc=0" for a run that never
+# started. Every gate had passed, so it read exactly like a success.
+#
+# Checked here, with the other things that make the run impossible, rather than
+# after launch: a run that cannot start should never claim a run id, move a stall
+# capture aside, or start a network trace on two nodes.
+if [[ ! -x "$RUNNER" ]]; then
+  echo "runner python is missing or not executable: $RUNNER" >&2
+  echo "  it needs nbformat + nbclient. Either create it:" >&2
+  echo "    /usr/bin/python3 -m venv '$RD/runner-venv'" >&2
+  echo "    '$RD/runner-venv/bin/python' -m pip install nbformat nbclient" >&2
+  echo "  or point PYG_RUNNER_PYTHON at one that already exists." >&2
+  exit 2
+fi
+
 # Everything this run owns carries its run id, so nothing it writes can be mistaken
 # for another run's and nothing another run does can stop it.
 STOP="$RD/STOP-$RUN_ID"
@@ -264,6 +283,21 @@ log "notebook exited rc=$rc$( [[ -f "$RD/killed-by" ]] && echo ' (KILLED BY WATC
 log "artifacts: $RD/executed-$RUN_ID.ipynb, $RD/notebook.log, $RD/samples.jsonl, $RD/net-*-$RUN_ID.tsv"
 record
 log "outcome recorded -> $RD/outcome.txt"
+
+# A job that RAN and failed is reported, not raised -- run.done carries its code and
+# outcome.txt is the artifact worth having. A runner that could not be EXECUTED is a
+# different thing: no leg was submitted, nothing was measured, and there is no
+# outcome to report. 126 and 127 are the shell's own codes for that, and they cannot
+# come from execute_notebook.py, which exits 0 or 1.
+#
+# The guard above makes the missing-file case unreachable; this covers what it
+# cannot see, such as a venv whose interpreter symlink dangles.
+if [[ "$rc" -eq 126 || "$rc" -eq 127 ]]; then
+  log "THE NOTEBOOK NEVER STARTED -- could not execute $RUNNER (rc=$rc)."
+  log "  This is a harness fault, not a run outcome: no leg was submitted."
+  log "  See $RD/notebook.log for the exec error."
+  exit 2
+fi
 
 # Spark checkpoints are dead weight the moment the driver exits: they are keyed to the
 # SparkContext's own UUID and RDD ids, so nothing later can reattach to them -- they

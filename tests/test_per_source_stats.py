@@ -33,13 +33,13 @@ from pathlib import Path
 
 import pytest
 
-from spark_jobs.build_graph import (
+from spark_jobs.graph.loading import (
     SOURCE_COLUMN,
-    JobConfig,
     load_source_triples,
     per_source_triple_stats,
     source_label,
 )
+from spark_jobs.graph.config import JobConfig
 
 pytestmark = pytest.mark.usefixtures("spark")
 

@@ -484,7 +484,7 @@ def test_save_pyg_refuses_a_uri_without_spark(tmp_path, monkeypatch):
     import torch
     from torch_geometric.data import HeteroData
 
-    from spark_jobs.build_graph import save_pyg_local
+    from spark_jobs.graph.persistence import save_pyg_local
 
     monkeypatch.chdir(tmp_path)
 
@@ -502,7 +502,7 @@ def test_save_pyg_still_writes_plain_local_paths(tmp_path):
     import torch
     from torch_geometric.data import HeteroData
 
-    from spark_jobs.build_graph import save_pyg_local
+    from spark_jobs.graph.persistence import save_pyg_local
 
     data = HeteroData()
     data["thing"].x = torch.zeros(2, 3)

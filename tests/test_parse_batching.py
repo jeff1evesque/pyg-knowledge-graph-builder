@@ -48,14 +48,21 @@ import pytest
 
 pa = pytest.importorskip("pyarrow")
 
-from spark_jobs.build_graph import (  # noqa: E402
+from spark_jobs.graph.turtle import (  # noqa: E402
     PARSE_BATCH_ROWS,
     TRIPLE_FIELD_NAMES,
     turtle_batches_to_arrow,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BUILD_GRAPH = REPO_ROOT / "spark_jobs" / "build_graph.py"
+
+# Every file the parse path can be written in. The UDF used to live in
+# build_graph.py and now lives in graph/turtle.py, so a guard naming only one
+# of them would report clean because it was reading the wrong file.
+PARSE_PATH_SOURCES = (
+    REPO_ROOT / "spark_jobs" / "build_graph.py",
+    REPO_ROOT / "spark_jobs" / "graph" / "turtle.py",
+)
 
 
 def _turtle(n_triples, prefix="ex"):
@@ -188,14 +195,16 @@ def test_a_missing_parser_still_fails_the_job(monkeypatch):
     """ImportError is NOT a malformed blob. Under a blanket except, an executor
     venv without pyoxigraph answers "no triples" for every row and the job
     succeeds with an empty graph."""
-    import spark_jobs.build_graph as bg
+    from spark_jobs.graph import turtle
 
     def no_parser(_):
         raise ImportError("No module named 'pyoxigraph'")
 
-    monkeypatch.setattr(bg, "turtle_rows_or_skip", no_parser)
+    # Patched where turtle_batches_to_arrow looks the name up, which is its own
+    # module's globals -- not wherever build_graph happens to import it.
+    monkeypatch.setattr(turtle, "turtle_rows_or_skip", no_parser)
     with pytest.raises(ImportError):
-        list(bg.turtle_batches_to_arrow([_batch([_turtle(3)])]))
+        list(turtle.turtle_batches_to_arrow([_batch([_turtle(3)])]))
 
 
 # --- the structural guard ----------------------------------------------------
@@ -288,7 +297,11 @@ def test_the_parse_path_does_not_return_an_unbounded_array():
     which no number could be wrong. A Python UDF declared with an ArrayType
     return has no bound available to it at all.
     """
-    offenders = _array_returning_udfs(BUILD_GRAPH.read_text())
+    offenders = {
+        source.name: _array_returning_udfs(source.read_text())
+        for source in PARSE_PATH_SOURCES
+    }
+    offenders = {name: found for name, found in offenders.items() if found}
 
     assert not offenders, (
         f"{offenders} declare a Python UDF returning ArrayType. That hands every "

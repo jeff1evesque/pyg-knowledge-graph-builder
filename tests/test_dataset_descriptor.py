@@ -8,7 +8,7 @@ graph except a shared parent directory.
 """
 import json
 
-from spark_jobs.build_graph import (
+from spark_jobs.graph.persistence import (
     DATASET_DESCRIPTOR_NAME,
     dataset_descriptor_path,
     load_dataset_descriptor,
