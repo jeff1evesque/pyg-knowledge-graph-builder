@@ -261,10 +261,10 @@ _MAX_EDGE_TYPES_PER_BATCH = 8
 # ============================================
 # Broadcast sizing
 # ============================================
-# The row widths the encoders read the property frames at, and the predicate
-# patterns segment 1 filters on, are imported from edge_encoders — a count
-# taken here with a different pattern or width would size the wrong frame.
-#
+# The bar is here; the row widths measured against it are in edge_encoders,
+# beside the frames they describe. Sizing a frame here at a width the encoder
+# does not read it at would put the wrong number on both sides of the test.
+
 # Spark's own default, used when the session does not report a value.
 _DEFAULT_BROADCAST_THRESHOLD = 10 * 1024 * 1024
 
