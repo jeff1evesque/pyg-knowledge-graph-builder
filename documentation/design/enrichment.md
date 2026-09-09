@@ -305,27 +305,32 @@ jolts:Industry_LeisureAndHospitality_FoodServices_Industry
     bls:correlatesWith empsit:LeisureAndHospitality_Employment_Entity .
 ```
 
-## Enrichment Statistics (typical for 1-month dataset)
+## Enrichment Statistics (measured, one four-source day)
 
-| Enrichment Type | Triples Added | Example |
-|----------------|---------------|---------|
-| Temporal Unification | ~50,000 | All sources → unified months/years |
-| Sector-Based Links | ~10,000 | Energy entities across CPI/PPI/JOLTS/Market |
-| Company/Ticker Links | ~5,000 | SEC filings ↔ Stock prices |
-| Geographic Links | ~3,000 | Regional employment ↔ Weather ↔ Market |
-| Causal Relationships | ~8,000 | PPI → CPI, JOLTS → CPI, Weather → Market |
-| Hierarchical Enrichment | ~15,000 | Parent-child relationships across sources |
-| **Total Enrichment** | **~91,000** | Added to ~500,000 raw triples |
+| Measure | Triples | Notes |
+|---------|---------|-------|
+| Loaded | 322.7M | Market 99.5%; BLS 1.3M, SEC 198K, NOAA 143K |
+| Enriched (final) | 421.4M | after every phase and its `dropDuplicates` |
+| **Net change** | **+98.7M** | `total_enrichment` in the job manifest |
 
-These are triples **added**, which is the `enrichment_added` figure in the job
-manifest and the enrichment summary. The final triple count is not raw + added:
-each enrichment phase runs `dropDuplicates` over the whole frame, so duplicates
-the source already contained are collapsed at the same time. Real sources carry
-them — one day of SEC filings measured ~8.7% duplicate triples — so a run can
-legitimately finish with *fewer* triples than it started with while enrichment
-added tens of thousands. The manifest reports `enrichment_added` and
-`duplicates_removed` separately for that reason; `total_enrichment` is their sum
-(the net change), not a measure of enrichment on its own.
+Market is 99.5% of what loads, so nearly all of the net change comes from the
+market intra-source enricher — snapshot `precedes` chains per symbol,
+`hasUnderlyingEquity`, strategy detection, moneyness, and sector. The other three
+sources together are the remaining 0.5%.
+
+There is no per-phase breakdown here because none has been measured at this
+scale. `EnrichmentPipeline` computes one on every run — `enrichment_added` sums
+what each phase reported — so the numbers reach the manifest for any given job;
+they have simply never been recorded for a run this size.
+
+The final count is not loaded + added: each enrichment phase runs
+`dropDuplicates` over the whole frame, so duplicates the source already contained
+are collapsed at the same time. Real sources carry them — one day of SEC filings
+measured ~8.7% duplicate triples — so a run can legitimately finish with *fewer*
+triples than it started with while enrichment added millions. The manifest
+reports `enrichment_added` and `duplicates_removed` separately for that reason;
+`total_enrichment` is their sum (the net change), not a measure of enrichment on
+its own.
 
 ## Benefits for GNN Training
 
