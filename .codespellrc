@@ -1,22 +1,18 @@
 ##
-## Typo checking for the documentation pages. CI runs it over `documentation/`
-## and README.md only (.github/workflows/docs.yml) -- it is a guard on new prose,
-## not an audit of the existing code comments.
-##
-## The whole repository can be checked by hand with a bare `codespell`, which
-## picks up this file: the skip list below is what makes that run useful. As of
-## 2026-09-08 that finds 25 things, 23 of them the deliberate spellings and
-## identifiers listed here.
+## Typo checking, over the whole repository. CI runs a bare `codespell` in
+## .github/workflows/lint.yml, which picks up this file -- so the skip list below
+## is what defines the scope, and a local `codespell` reproduces CI exactly.
 ##
 
 [codespell]
 
 ##
-## Every entry below was checked against a real finding before being listed --
-## none of them are guesses:
+## Every entry below was checked in context against a real finding. None are
+## guesses, and none of them were typos:
 ##
 ##   unparseable   the spelling the feature extractors use throughout
 ##   pre-empt      hyphenated on purpose, here and in rdf_utils.py
+##   retuned       "so the profile can be retuned" -- tuned again, not "returned"
 ##   nd            a column name in bin/netsample.py, not "and"
 ##   ser           a pandas Series local in test_feature_extractor.py
 ##   categor       a truncated identifier, not "category"
@@ -24,6 +20,11 @@
 ##   confectionary the BLS category's own spelling; correcting it would stop the
 ##                 keyword matching the source data
 ##
-ignore-words-list = unparseable,pre-empt,pre-emptively,re-declared,re-declares,nd,ser,categor,ore,confectionary
+## Prefer an inline `codespell:ignore` comment over adding a word here when the
+## misspelling is deliberate and local. tests/test_edge_feature_extractor.py
+## feeds a misspelt category name in on purpose, to prove an unknown one raises;
+## whitelisting that word globally would hide a real misspelling somewhere else.
+##
+ignore-words-list = unparseable,pre-empt,pre-emptively,re-declared,re-declares,retuned,nd,ser,categor,ore,confectionary
 
 skip = ./.git,./.venv,./docs,./site,./reports,./dist,./notebook,./__pycache__,./.ruff_cache,./.pytest_cache,*.ipynb
