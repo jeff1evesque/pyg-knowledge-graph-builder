@@ -8,8 +8,8 @@ shape after it is parsed as HTML, outside the drawing. The published page keeps
 a correctly sized but empty box. Wrapping the SVG in a `<div>` is what keeps it
 one raw block.
 
-Needs the documentation extras, so it skips under `requirements-test.txt` alone
-and runs in the docs workflow, which installs them.
+Needs MkDocs, which `requirements-test.txt` layers in from
+`requirements-docs.txt`. The skip covers a virtualenv that predates that.
 """
 import re
 import subprocess
