@@ -6,7 +6,7 @@ published table, and the chart below is all one hundred of them — hover a bar
 for the category behind it.
 
 <div>
-<svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" role="img"
+<svg viewBox="0 0 780 300" xmlns="http://www.w3.org/2000/svg" role="img"
      aria-labelledby="srcTitle srcDesc"
      style="width:100%;height:auto;display:block;margin:1.2rem auto">
   <title id="srcTitle">Mappers per source</title>
@@ -28,8 +28,7 @@ for the category behind it.
     .tick { font: 600 10px var(--md-text-font-family, system-ui, sans-serif);
             fill: var(--md-default-fg-color--light, #5a5a5a);
             text-anchor: middle; }
-    .band { fill: none; stroke: var(--md-default-fg-color--lightest, #d8d8dc);
-            stroke-dasharray: 4 4; }
+    .band { fill: var(--md-code-bg-color, #f5f5f5); }
     .axis { stroke: var(--md-default-fg-color--lightest, #d8d8dc); }
     .bar  { fill: var(--md-primary-fg-color--light, #5d6cc0);
             transition: fill 120ms; }
@@ -47,15 +46,14 @@ for the category behind it.
   <text class="cap" x="12" y="22">MAPPERS PER SOURCE &#183; 100 TOTAL</text>
 
   <rect class="band" x="12" y="82" width="560" height="210" rx="8"/>
-  <rect class="band" x="576" y="82" width="172" height="210" rx="8"/>
   <text class="cap" x="24" y="284">BLS &#183; 10 CATEGORIES &#183; 97 TABLES</text>
-  <text class="cap" x="588" y="284">ONE MAPPER EACH</text>
-  <line class="axis" x1="12" y1="248" x2="748" y2="248"/>
+  <text class="cap" x="608" y="284">ONE MAPPER EACH</text>
+  <line class="axis" x1="12" y1="248" x2="768" y2="248"/>
 
   <g class="col">
     <rect class="hit" x="16" y="80" width="56" height="190"/>
     <line class="lead" x1="44" y1="74" x2="44" y2="204"/>
-    <rect class="bar" x="27" y="204" width="34" height="44" rx="2"/>
+    <rect class="bar" x="32" y="204" width="24" height="44" rx="2"/>
     <text class="val" x="44" y="198">8</text>
     <text class="tick" x="44" y="264">CPI</text>
     <g class="tip">
@@ -68,7 +66,7 @@ for the category behind it.
   <g class="col">
     <rect class="hit" x="72" y="80" width="56" height="190"/>
     <line class="lead" x1="100" y1="74" x2="100" y2="209.5"/>
-    <rect class="bar" x="83" y="209.5" width="34" height="38.5" rx="2"/>
+    <rect class="bar" x="88" y="209.5" width="24" height="38.5" rx="2"/>
     <text class="val" x="100" y="203.5">7</text>
     <text class="tick" x="100" y="264">PPI</text>
     <g class="tip">
@@ -81,7 +79,7 @@ for the category behind it.
   <g class="col">
     <rect class="hit" x="128" y="80" width="56" height="190"/>
     <line class="lead" x1="156" y1="74" x2="156" y2="171"/>
-    <rect class="bar" x="139" y="171" width="34" height="77" rx="2"/>
+    <rect class="bar" x="144" y="171" width="24" height="77" rx="2"/>
     <text class="val" x="156" y="165">14</text>
     <text class="tick" x="156" y="264">ECI</text>
     <g class="tip">
@@ -94,7 +92,7 @@ for the category behind it.
   <g class="col">
     <rect class="hit" x="184" y="80" width="56" height="190"/>
     <line class="lead" x1="212" y1="74" x2="212" y2="99.5"/>
-    <rect class="bar" x="195" y="99.5" width="34" height="148.5" rx="2"/>
+    <rect class="bar" x="200" y="99.5" width="24" height="148.5" rx="2"/>
     <text class="val" x="212" y="93.5">27</text>
     <text class="tick" x="212" y="264">EMPSIT</text>
     <g class="tip">
@@ -107,7 +105,7 @@ for the category behind it.
   <g class="col">
     <rect class="hit" x="240" y="80" width="56" height="190"/>
     <line class="lead" x1="268" y1="74" x2="268" y2="165.5"/>
-    <rect class="bar" x="251" y="165.5" width="34" height="82.5" rx="2"/>
+    <rect class="bar" x="256" y="165.5" width="24" height="82.5" rx="2"/>
     <text class="val" x="268" y="159.5">15</text>
     <text class="tick" x="268" y="264">JOLTS</text>
     <g class="tip">
@@ -120,7 +118,7 @@ for the category behind it.
   <g class="col">
     <rect class="hit" x="296" y="80" width="56" height="190"/>
     <line class="lead" x1="324" y1="74" x2="324" y2="231.5"/>
-    <rect class="bar" x="307" y="231.5" width="34" height="16.5" rx="2"/>
+    <rect class="bar" x="312" y="231.5" width="24" height="16.5" rx="2"/>
     <text class="val" x="324" y="225.5">3</text>
     <text class="tick" x="324" y="264">LAUS</text>
     <g class="tip">
@@ -133,7 +131,7 @@ for the category behind it.
   <g class="col">
     <rect class="hit" x="352" y="80" width="56" height="190"/>
     <line class="lead" x1="380" y1="74" x2="380" y2="226"/>
-    <rect class="bar" x="363" y="226" width="34" height="22" rx="2"/>
+    <rect class="bar" x="368" y="226" width="24" height="22" rx="2"/>
     <text class="val" x="380" y="220">4</text>
     <text class="tick" x="380" y="264">METRO</text>
     <g class="tip">
@@ -146,7 +144,7 @@ for the category behind it.
   <g class="col">
     <rect class="hit" x="408" y="80" width="56" height="190"/>
     <line class="lead" x1="436" y1="74" x2="436" y2="237"/>
-    <rect class="bar" x="419" y="237" width="34" height="11" rx="2"/>
+    <rect class="bar" x="424" y="237" width="24" height="11" rx="2"/>
     <text class="val" x="436" y="231">2</text>
     <text class="tick" x="436" y="264">REALER</text>
     <g class="tip">
@@ -159,7 +157,7 @@ for the category behind it.
   <g class="col">
     <rect class="hit" x="464" y="80" width="56" height="190"/>
     <line class="lead" x1="492" y1="74" x2="492" y2="215"/>
-    <rect class="bar" x="475" y="215" width="34" height="33" rx="2"/>
+    <rect class="bar" x="480" y="215" width="24" height="33" rx="2"/>
     <text class="val" x="492" y="209">6</text>
     <text class="tick" x="492" y="264">WKYENG</text>
     <g class="tip">
@@ -172,7 +170,7 @@ for the category behind it.
   <g class="col">
     <rect class="hit" x="520" y="80" width="56" height="190"/>
     <line class="lead" x1="548" y1="74" x2="548" y2="187.5"/>
-    <rect class="bar" x="531" y="187.5" width="34" height="60.5" rx="2"/>
+    <rect class="bar" x="536" y="187.5" width="24" height="60.5" rx="2"/>
     <text class="val" x="548" y="181.5">11</text>
     <text class="tick" x="548" y="264">XIMPIM</text>
     <g class="tip">
@@ -183,41 +181,41 @@ for the category behind it.
   </g>
 
   <g class="col">
-    <rect class="hit" x="576" y="80" width="56" height="190"/>
-    <line class="lead" x1="604" y1="74" x2="604" y2="242.5"/>
-    <rect class="bar" x="587" y="242.5" width="34" height="5.5" rx="2"/>
-    <text class="val" x="604" y="236.5">1</text>
-    <text class="tick" x="604" y="264">SEC</text>
+    <rect class="hit" x="596" y="80" width="56" height="190"/>
+    <line class="lead" x1="624" y1="74" x2="624" y2="242.5"/>
+    <rect class="bar" x="612" y="242.5" width="24" height="5.5" rx="2"/>
+    <text class="val" x="624" y="236.5">1</text>
+    <text class="tick" x="624" y="264">SEC</text>
     <g class="tip">
-      <rect class="tipbox" x="472" y="34" width="264" height="38" rx="4"/>
-      <text class="lbl" x="484" y="51">Filings &#183; 10-K, 10-Q, 8-K, Forms 3/4/5</text>
-      <text class="sub" x="484" y="66">1 of 8 SEC feeds &#183; 1 mapper</text>
+      <rect class="tipbox" x="492" y="34" width="264" height="38" rx="4"/>
+      <text class="lbl" x="504" y="51">Filings &#183; 10-K, 10-Q, 8-K, Forms 3/4/5</text>
+      <text class="sub" x="504" y="66">1 of 8 SEC feeds &#183; 1 mapper</text>
     </g>
   </g>
 
   <g class="col">
-    <rect class="hit" x="632" y="80" width="56" height="190"/>
-    <line class="lead" x1="660" y1="74" x2="660" y2="242.5"/>
-    <rect class="bar" x="643" y="242.5" width="34" height="5.5" rx="2"/>
-    <text class="val" x="660" y="236.5">1</text>
-    <text class="tick" x="660" y="264">Market</text>
+    <rect class="hit" x="652" y="80" width="56" height="190"/>
+    <line class="lead" x1="680" y1="74" x2="680" y2="242.5"/>
+    <rect class="bar" x="668" y="242.5" width="24" height="5.5" rx="2"/>
+    <text class="val" x="680" y="236.5">1</text>
+    <text class="tick" x="680" y="264">Market</text>
     <g class="tip">
-      <rect class="tipbox" x="488" y="34" width="264" height="38" rx="4"/>
-      <text class="lbl" x="500" y="51">Intraday equity and option snapshots</text>
-      <text class="sub" x="500" y="66">1 mapper</text>
+      <rect class="tipbox" x="508" y="34" width="264" height="38" rx="4"/>
+      <text class="lbl" x="520" y="51">Intraday equity and option snapshots</text>
+      <text class="sub" x="520" y="66">1 mapper</text>
     </g>
   </g>
 
   <g class="col">
-    <rect class="hit" x="688" y="80" width="56" height="190"/>
-    <line class="lead" x1="716" y1="74" x2="716" y2="242.5"/>
-    <rect class="bar" x="699" y="242.5" width="34" height="5.5" rx="2"/>
-    <text class="val" x="716" y="236.5">1</text>
-    <text class="tick" x="716" y="264">NOAA</text>
+    <rect class="hit" x="708" y="80" width="56" height="190"/>
+    <line class="lead" x1="736" y1="74" x2="736" y2="242.5"/>
+    <rect class="bar" x="724" y="242.5" width="24" height="5.5" rx="2"/>
+    <text class="val" x="736" y="236.5">1</text>
+    <text class="tick" x="736" y="264">NOAA</text>
     <g class="tip">
-      <rect class="tipbox" x="488" y="34" width="264" height="38" rx="4"/>
-      <text class="lbl" x="500" y="51">US weather alerts, CAP format</text>
-      <text class="sub" x="500" y="66">1 mapper</text>
+      <rect class="tipbox" x="508" y="34" width="264" height="38" rx="4"/>
+      <text class="lbl" x="520" y="51">US weather alerts, CAP format</text>
+      <text class="sub" x="520" y="66">1 mapper</text>
     </g>
   </g>
 </svg>
