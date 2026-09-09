@@ -304,11 +304,11 @@ def save_node_index(node_index_df: DataFrame, output_path: str) -> None:
     graph is anonymous: nothing says which real-world entity each row is, which
     blocks joining training labels and attributing predictions.
 
-    Parquet rather than a seventh JSON: production is ~30-50M triples/month, so
-    this can reach millions of rows. A single JSON would be hundreds of MB and
-    must be parsed whole to resolve one entity, where Parquet supports
-    predicate pushdown and matches how the rest of the pipeline stores bulk
-    data.
+    Parquet rather than a seventh JSON: production is 322.7M triples for a
+    single four-source day, so this can reach millions of rows. A single JSON
+    would be hundreds of MB and must be parsed whole to resolve one entity,
+    where Parquet supports predicate pushdown and matches how the rest of the
+    pipeline stores bulk data.
 
     coalesce(1) keeps the output a single deterministic file. The row content
     is already ordered by _node_index(); leaving it partitioned would spread it
