@@ -60,6 +60,13 @@ jobs:
       - name: Build
         run: mkdocs build
 
+      # tests.yml installs requirements-test.txt, which has no MkDocs, so this
+      # guard skips there and runs here instead.
+      - name: Check the inline SVG diagrams
+        run: |
+          pip install pytest
+          pytest tests/test_documentation_diagrams.py
+
       - name: Upload the site
         if: github.event_name == 'push'
         uses: actions/upload-pages-artifact@v3
