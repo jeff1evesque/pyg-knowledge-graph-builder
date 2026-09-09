@@ -255,7 +255,7 @@ The six JSON files above are all schema-level: together they answer *"what does 
 
 **Contents:** one row per node — `node_type`, `node_id`, `uri`. Sorted by `(node_type, node_id)` and coalesced to a single file so the artifact is content-stable run to run.
 
-**Why Parquet, not a seventh JSON:** production volume is ~30-50M triples/month, so this can reach millions of rows. A single JSON would be hundreds of MB and would need parsing in full to resolve one entity; Parquet supports predicate pushdown and matches how the rest of the pipeline stores bulk data.
+**Why Parquet, not a seventh JSON:** production volume is 322.7M triples for a single four-source day, so this can reach millions of rows. A single JSON would be hundreds of MB and would need parsing in full to resolve one entity; Parquet supports predicate pushdown and matches how the rest of the pipeline stores bulk data.
 
 **Needed for:**
 - **Training** — labels arrive keyed by entity; without this there is nothing to join them on, so a target tensor aligned to the graph cannot be built
