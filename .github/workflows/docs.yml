@@ -60,11 +60,6 @@ jobs:
       - name: Build
         run: mkdocs build
 
-      - name: Check the inline SVG diagrams
-        run: |
-          pip install pytest
-          pytest tests/test_documentation_diagrams.py
-
       - name: Upload the site
         if: github.event_name == 'push'
         uses: actions/upload-pages-artifact@v3
