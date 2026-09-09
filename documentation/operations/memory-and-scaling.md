@@ -186,12 +186,18 @@ bounds the graph size. Approximate budgets:
 | JVM + Spark overhead | ~8-10 GB | ~10-12 GB |
 | Python interpreter | ~1-2 GB | ~1-2 GB |
 | Available for tensors | ~20-22 GB | ~50-52 GB |
-| Node features | under 1M nodes at 1024-d | 2-5M nodes at 1024-d |
+| Node features | ~4.5-5M nodes at 1024-d | ~11.5-12.5M nodes at 1024-d |
 | Edge features | adds ~0.5-1 GB, typical temporal and option edges at 32-d | adds ~1-3 GB, every featurized edge type at 32-d |
 | Metadata | under 1 MB, negligible | under 1 MB, negligible |
 
-At ~32 GB, dropping to 512-d buys under 2M nodes with edge features still on.
-~64 GB is the size to run intraday market data on.
+At ~32 GB, dropping to 512-d buys ~9-10M nodes with edge features still on —
+just short of the **10.3M nodes** a four-source day produces. That is nodes, not
+triples: the same day loads 322.7M triples and enriches to 421.4M, so the graph
+is built from about 41 triples per node. Most triples are literal-valued
+properties (strike, expiry, greeks, captureTime) that become values inside a
+node's feature vector rather than nodes of their own, and enrichment mostly adds
+edges between nodes that already exist. ~64 GB is the size to run intraday
+market data on.
 
 Reducing `vector_dim` from 1024 to 512 **halves driver memory** for node feature tensors while preserving the same three-segment structure. Edge feature tensors at 32-d are already compact — reducing `edge_vector_dim` to 16 halves their memory but is rarely necessary since they are ~32× smaller per element than node features. This enables rapid experimentation at reduced resolution before committing to full-resolution production runs.
 
