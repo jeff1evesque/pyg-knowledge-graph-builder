@@ -1,0 +1,8 @@
+/* Material lets inline code break mid-token, which squeezes a table's key
+   column until a long key loses its last character to a new line. Keeping the
+   key whole widens the table instead, and the theme already scrolls one that
+   outgrows the page. */
+.md-typeset table:not([class]) th:first-child code,
+.md-typeset table:not([class]) td:first-child code {
+  white-space: nowrap;
+}
