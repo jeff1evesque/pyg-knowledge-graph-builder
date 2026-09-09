@@ -158,7 +158,7 @@ pyg-knowledge-graph-builder/
 
 The pipeline is designed to handle:
 - **100+ ontologies** with different schemas and vocabularies
-- **30-50M triples per month** with intraday market snapshots
+- **322.7M triples in a single day** with intraday market snapshots
 - **Heterogeneous data types** (prices, rates, levels, changes, categorical)
 - **Multiple temporal granularities** (intraday, daily, weekly, monthly, quarterly)
 - **Dynamic schema evolution** as new data sources are added
@@ -168,7 +168,7 @@ The pipeline is designed to handle:
 - **Configurable edge vector dimension** — reducing `edge_vector_dim` from 32 to 16 halves driver memory for edge feature tensors while preserving the same three-segment structure via proportional `EdgeVectorLayout` scaling
 - **Selective edge featurization** — only high-value edge types receive feature vectors, avoiding wasted memory on constant vectors for structural edges
 - **No double-join for edge features** — the expensive double-join (triples × node_id_df) runs exactly once in EdgeMapper; EdgeFeatureExtractor reuses the cached result
-- **No Python UDFs in the hot path** — URI-to-name conversions, hash-based encoding, and numeric parsing use pure Spark expressions (JVM-native), avoiding Python serialization overhead on 30-50M rows
+- **No Python UDFs in the hot path** — URI-to-name conversions, hash-based encoding, and numeric parsing use pure Spark expressions (JVM-native), avoiding Python serialization overhead on 322.7M rows
 - **Controlled Parquet output** — configurable partition count prevents thousands of tiny files or few huge files
 - **One parse per source** — the datatype markers are derived from the cached parse rather than from a second, uncached read of the same frame, so the rdflib UDF runs once per source instead of twice (measured: load phase 1,346.3s → 727.7s on identical input)
 - **Loaded partitions track the data, not the shuffle default** — the datatype markers are coalesced to one partition and unioned once after that cached parse, not once per source, so a vocabulary-sized frame no longer adds 200 partitions per source to the cached triples that every enrichment stage reads (see [Sizing a large run](../operations/running-a-job.md#sizing-a-large-run))
