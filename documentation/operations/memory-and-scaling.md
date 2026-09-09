@@ -4,37 +4,37 @@ What the driver holds while a job runs, and how that grows with the graph.
 
 ## Build / Train / Inference Lifecycle
 
-```
-BUILD TIME (this codebase — pyg_builder)
-│
-├── graph_schema.json     ← constructor.py after HeteroData assembly
-├── feature_spec.json     ← VectorLayout.to_dict() + EdgeVectorLayout.to_dict()
-├── normalization.json    ← feature_extractor normalization stats pass
-├── encoding_config.json  ← feature_extractor + edge_feature_extractor configs
-├── ontology_schema.json  ← feature_extractor ontology structure collection
-└── slot_mapping.json     ← feature_extractor hash slot computation
-│
-▼
-TRAIN TIME (downstream GNN training code)
-│
-├── Reads graph_schema.json  → decides which node/edge types to include,
-│                              sets up data splits, validates .pt after loading
-├── Reads feature_spec.json  → builds model architecture (layer dims,
-│                              conv routing, segment projections)
-├── Loads hetero_data.pt     → validates against graph_schema.json
-└── Trains model             → saves checkpoint + references metadata path
-│
-▼
-INFERENCE TIME (deployed model serving)
-│
-├── Reads feature_spec.json    → reconstructs identical model architecture
-├── Reads encoding_config.json → configures feature encoder with same hash params
-├── Reads normalization.json   → applies same z-score stats to new data
-├── Reads ontology_schema.json → encodes new nodes with correct class hierarchy
-├── Reads graph_schema.json    → validates that new data produces compatible types
-├── Loads model checkpoint     → loads trained weights into reconstructed architecture
-└── Encodes new data → runs inference
-```
+**Build time** — this codebase, `pyg_builder`. Each metadata file and what writes it:
+
+| file | written by |
+|---|---|
+| `graph_schema.json` | `constructor.py`, after HeteroData assembly |
+| `feature_spec.json` | `VectorLayout.to_dict()` + `EdgeVectorLayout.to_dict()` |
+| `normalization.json` | the `feature_extractor` normalization stats pass |
+| `encoding_config.json` | `feature_extractor` + `edge_feature_extractor` configs |
+| `ontology_schema.json` | `feature_extractor` ontology structure collection |
+| `slot_mapping.json` | `feature_extractor` hash slot computation |
+
+**Train time** — downstream GNN training code:
+
+| reads | to |
+|---|---|
+| `graph_schema.json` | decide which node and edge types to include, set up data splits, and validate the `.pt` after loading |
+| `feature_spec.json` | build the model architecture: layer dims, conv routing, segment projections |
+| `hetero_data.pt` | load the graph, validated against `graph_schema.json` |
+| — | train, then save a checkpoint referencing the metadata path |
+
+**Inference time** — deployed model serving:
+
+| reads | to |
+|---|---|
+| `feature_spec.json` | reconstruct an identical model architecture |
+| `encoding_config.json` | configure the feature encoder with the same hash parameters |
+| `normalization.json` | apply the same z-score stats to new data |
+| `ontology_schema.json` | encode new nodes with the correct class hierarchy |
+| `graph_schema.json` | validate that the new data produces compatible types |
+| model checkpoint | load trained weights into the reconstructed architecture |
+| — | encode new data, then run inference |
 
 ## Driver Memory Impact
 
@@ -59,71 +59,55 @@ No per-node or per-edge data is ever collected for metadata. The `MetadataCollec
 
 The pipeline is designed to prevent driver OOM even with millions of nodes per type:
 
-```
-Driver memory lifecycle during PyG construction:
-═══════════════════════════════════════════════════
+**Step 1: node ID table**
 
-Step 1: Node ID table
-  Driver holds: node_counts dict (~1 KB)
-  Executors hold: node_id_df (cached)
+- Driver holds `node_counts`, a dict of about 1 KB.
+- Executors hold `node_id_df`, cached.
 
-Step 2: Edge indices (collected one type at a time)
-  Driver holds: edge_indices dict (accumulating)
-    Per type: [2, N] int64 → ~16 bytes/edge
-    Total: ~200-500 MB for 15-30M edges
-  Peak per-type: Pandas DataFrame + tensor → Pandas freed immediately
-  Executors hold: edges_final_df (cached for Step 4)
+**Step 2: edge indices**, collected one type at a time
 
-Step 3: Feature tensors (collected one type at a time, largest first)
-  Driver holds: feature_tensors dict (accumulating) + edge_indices
-  Per type:
-    a) Pre-allocate dense numpy: num_nodes × vector_dim × 4 bytes
-    b) Collect sparse entries via toPandas():
-       - Small types (<500K nodes): single collect, ~120 MB peak
-       - Large types (>500K nodes): chunked by node_id range,
-         ~120 MB per chunk
-    c) Scatter into dense array (in-place, no copy)
-    d) Delete Pandas DataFrame, gc.collect()
-    e) Convert numpy → torch (zero-copy via from_numpy)
+- Driver holds the `edge_indices` dict, accumulating: `[2, N]` int64 per type, about 16 bytes an edge, so roughly 200-500 MB for 15-30M edges.
+- Peak per type is a Pandas DataFrame plus the tensor, and the Pandas is freed immediately.
+- Executors hold `edges_final_df`, cached for step 4.
 
-Step 4: Edge feature tensors (collected one type at a time)
-  Driver holds: edge_feature_tensors dict (accumulating)
-    + feature_tensors + edge_indices
-  Per type:
-    a) Pre-allocate dense numpy: num_edges × edge_vector_dim × 4 bytes
-       (much smaller than node features: 32-d vs 1024-d)
-    b) Collect sparse entries via toPandas():
-       - Small types (<1M edges): single collect
-       - Large types (>1M edges): chunked by edge_idx range
-    c) Scatter into dense array, delete Pandas, gc.collect()
-    d) Convert numpy → torch (zero-copy via from_numpy)
-  Typical total: 32 dims × 4 bytes × 2M edges = ~256 MB per type
-  Reuses cached edges_final_df — no additional executor memory
+**Step 3: feature tensors**, collected one type at a time, largest first
 
-  gc.collect() is safe here because it runs on the driver process
-  only — all Spark executor work is complete before collection.
-  It reclaims Pandas/numpy circular references that CPython's
-  reference counting alone may not free.
+- Driver holds the `feature_tensors` dict, accumulating, plus `edge_indices`.
+- Per type:
+    1. Pre-allocate a dense numpy array of `num_nodes × vector_dim × 4` bytes.
+    2. Collect sparse entries via `toPandas()` — types under 500K nodes in a single collect at about 120 MB peak, larger ones chunked by `node_id` range at about 120 MB a chunk.
+    3. Scatter into the dense array in place, no copy.
+    4. Delete the Pandas DataFrame and `gc.collect()`.
+    5. Convert numpy to torch, zero-copy via `from_numpy`.
 
-Step 5: Assemble HeteroData
-  HeteroData stores references to existing tensors (no copy)
-  Attach edge_attr for featurized edge types (reference only)
-  Delete intermediate dicts → only HeteroData holds references
-  Unpersist edges_final_df (executor cache freed)
-  Unpersist node_id_df (executor cache freed)
-  gc.collect() to reclaim dict overhead
+**Step 4: edge feature tensors**, collected one type at a time
 
-Post-construction: Save outputs
-  torch.save() → local .pt (and, when archiving, a BytesIO buffer
-    streamed to S3 via upload_fileobj)
-  Peak: HeteroData + serialized buffer (same size)
-  Buffer freed after upload
+- Driver holds the `edge_feature_tensors` dict, accumulating, plus `feature_tensors` and `edge_indices`.
+- Per type:
+    1. Pre-allocate a dense numpy array of `num_edges × edge_vector_dim × 4` bytes — much smaller than node features, 32-d against 1024-d.
+    2. Collect sparse entries via `toPandas()` — types under 1M edges in a single collect, larger ones chunked by `edge_idx` range.
+    3. Scatter into the dense array, delete the Pandas, `gc.collect()`.
+    4. Convert numpy to torch, zero-copy via `from_numpy`.
+- Typical total is 32 dims × 4 bytes × 2M edges, about 256 MB a type.
+- Reuses the cached `edges_final_df`, so no additional executor memory.
 
-  MetadataCollector.to_metadata_files() → six JSON dicts (<1 MB total)
-  write_metadata_to_local() → six files locally
-    (and write_metadata_to_s3() → six put_object calls when archiving)
-  MetadataCollector holds only small Python dicts throughout
-```
+`gc.collect()` is safe here because it runs on the driver process only — all
+Spark executor work is complete before collection. It reclaims the Pandas and
+numpy circular references that CPython's reference counting alone may not free.
+
+**Step 5: assemble HeteroData**
+
+- `HeteroData` stores references to the existing tensors, with no copy.
+- Attach `edge_attr` for featurized edge types, again by reference.
+- Delete the intermediate dicts, so only `HeteroData` holds references.
+- Unpersist `edges_final_df`, freeing that executor cache.
+- Unpersist `node_id_df`, freeing that one too.
+- `gc.collect()` to reclaim the dict overhead.
+
+**Post-construction: save the outputs**
+
+- `torch.save()` writes the local `.pt` and, when archiving, a `BytesIO` buffer streamed to S3 via `upload_fileobj`. Peak is the `HeteroData` plus that buffer, the same size again; the buffer is freed after the upload.
+- `MetadataCollector.to_metadata_files()` produces six JSON dicts, under 1 MB in total. `write_metadata_to_local()` writes the six files locally, and `write_metadata_to_s3()` adds six `put_object` calls when archiving. `MetadataCollector` holds only small Python dicts throughout.
 
 **Chunked collection for large node types**: When a node type has more than 500K nodes (configurable via `chunk_node_threshold`), the sparse `(node_id, dim, value)` entries are collected in chunks by node_id range. Each chunk's Pandas DataFrame is scattered into the pre-allocated dense array and immediately freed. This bounds peak Pandas memory to ~120 MB per chunk regardless of total type size.
 
@@ -197,25 +181,17 @@ Post-construction: Save outputs
 The final `HeteroData` assembly happens on the driver, so driver memory
 bounds the graph size. Approximate budgets:
 
-```
-~32 GB driver:
-  JVM + Spark overhead:     ~8-10 GB
-  Python interpreter:       ~1-2 GB
-  Available for tensors:    ~20-22 GB
-  → Node features: suitable for <1M total nodes at 1024-d
-  → Edge features: adds ~0.5-1 GB for typical temporal + option edges at 32-d
-  → Or <2M total nodes at 512-d with edge features
-  → Metadata: <1 MB, negligible
+| | ~32 GB driver | ~64 GB driver |
+|---|---|---|
+| JVM + Spark overhead | ~8-10 GB | ~10-12 GB |
+| Python interpreter | ~1-2 GB | ~1-2 GB |
+| Available for tensors | ~20-22 GB | ~50-52 GB |
+| Node features | under 1M nodes at 1024-d | 2-5M nodes at 1024-d |
+| Edge features | adds ~0.5-1 GB, typical temporal and option edges at 32-d | adds ~1-3 GB, every featurized edge type at 32-d |
+| Metadata | under 1 MB, negligible | under 1 MB, negligible |
 
-~64 GB driver:
-  JVM + Spark overhead:     ~10-12 GB
-  Python interpreter:       ~1-2 GB
-  Available for tensors:    ~50-52 GB
-  → Node features: suitable for 2-5M total nodes at 1024-d
-  → Edge features: adds ~1-3 GB for all featurized edge types at 32-d
-  → Recommended for production with intraday market data
-  → Metadata: <1 MB, negligible
-```
+At ~32 GB, dropping to 512-d buys under 2M nodes with edge features still on.
+~64 GB is the size to run intraday market data on.
 
 Reducing `vector_dim` from 1024 to 512 **halves driver memory** for node feature tensors while preserving the same three-segment structure. Edge feature tensors at 32-d are already compact — reducing `edge_vector_dim` to 16 halves their memory but is rarely necessary since they are ~32× smaller per element than node features. This enables rapid experimentation at reduced resolution before committing to full-resolution production runs.
 
