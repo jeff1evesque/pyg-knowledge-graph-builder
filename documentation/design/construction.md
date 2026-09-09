@@ -1,0 +1,114 @@
+# PyG Construction Pipeline
+
+The PyG builder converts the enriched triples DataFrame into a PyTorch Geometric `HeteroData` object through five steps, with all heavy computation on Spark executors. After the `.pt` file is saved, six metadata JSON files are written alongside it (locally, and mirrored to S3 when an archive is configured):
+
+```
+triples_df (enriched, on executors)
+    │
+    ├── Step 1: NodeMapper (on executors)
+    │   ├── Discover node types from rdf:type triples
+    │   ├── Filter out meta-ontology types (OWL, RDFS, RDF)
+    │   ├── Convert type URIs to PyG names via pure Spark WHEN expressions
+    │   ├── Assign canonical type per entity (pinned temporal types first, then
+    │   │   most specific wins via type count)
+    │   ├── Assign per-type 0-indexed integer IDs via Window functions
+    │   ├── Cache and materialize node_id_df on executors
+    │   ├── Collect type URI mapping for metadata (small collect, <500 rows)
+    │   └── Output: node_id_df (uri, node_id, node_type) — cached on executors
+    │              node_counts Dict[str, int] — small collect to driver
+    │              node_type_uris Dict[str, str] — deposited into MetadataCollector
+    │
+    ├── Step 2: EdgeMapper (on executors → driver tensors + cached DataFrame)
+    │   ├── Exclude structural predicates (rdf:type, rdfs:label, etc.)
+    │   ├── Double-join triples with node_id_df (subject → src_id, object → dst_id)
+    │   ├── Inner join on object naturally filters out literal properties
+    │   ├── Derive relation names via pure Spark WHEN expressions (no UDF)
+    │   ├── Cache resolved edges DataFrame (reused by EdgeFeatureExtractor)
+    │   ├── Discover distinct edge types (small collect)
+    │   ├── Collect per-edge-type [2, num_edges] int64 arrays via toPandas()
+    │   │   in deterministic order (src_id ASC, dst_id ASC)
+    │   ├── Release Pandas memory after each edge type conversion
+    │   ├── Collect predicate URI mapping for metadata (small collect, <100 rows)
+    │   └── Output: Dict[(src_type, relation, dst_type) → LongTensor]
+    │              edges_final_df — cached on executors for Step 4
+    │              edge_predicate_uris Dict[str, str] — deposited into MetadataCollector
+    │
+    ├── Step 3: FeatureExtractor (on executors → driver tensors)
+    │   ├── Compute VectorLayout from configured vector_dim (all boundaries
+    │   │   scale proportionally — no hardcoded dim indices)
+    │   ├── Extract ontology structure from triples (rdfs:subClassOf chains,
+    │   │   rdfs:domain/range, rdfs:subPropertyOf) — all on executors
+    │   ├── Compute per-node property presence via join — on executors
+    │   ├── Isolate literal triples via anti-join — on executors
+    │   ├── Classify each predicate numeric or categorical by the share of its
+    │   │   values that cast("double") (small collect, one row per predicate)
+    │   ├── Route each predicate's literals to its one sub-segment — on executors
+    │   ├── Compute per-predicate z-score stats (single-pass agg) — on executors
+    │   ├── Collect normalization stats for metadata (small collect, <200 rows)
+    │   ├── Collect ontology schema snapshot for metadata (small collects:
+    │   │   type URIs ~500 rows, class hierarchy ~5000 rows, property
+    │   │   schema ~500 rows)
+    │   ├── Compute slot mapping on driver (hash approximation, <1000 entries)
+    │   ├── For each node type (largest first):
+    │   │   ├── Encode Segment 1: class identity + hierarchy + source (hash-based)
+    │   │   ├── Encode Segment 2: property presence + domain/range + prop hierarchy
+    │   │   ├── Encode Segment 3: numeric hashed slots + categorical multi-hot
+    │   │   ├── Union segments, aggregate (sum at same node_id+dim) — on executors
+    │   │   ├── Pre-allocate dense numpy array on driver
+    │   │   ├── Collect sparse entries via toPandas() (chunked for large types)
+    │   │   ├── Scatter into dense array, delete Pandas, gc.collect()
+    │   │   └── Convert numpy → torch (zero-copy via from_numpy)
+    │   └── Output: Dict[node_type → FloatTensor[num_nodes, vector_dim]]
+    │              VectorLayout.to_dict() — deposited into MetadataCollector
+    │              normalization_stats, ontology_schema, slot_mapping
+    │              — all deposited into MetadataCollector
+    │
+    ├── Step 4: EdgeFeatureExtractor (on executors → driver tensors)
+    │   ├── Compute EdgeVectorLayout from configured edge_vector_dim
+    │   │   (all boundaries scale proportionally)
+    │   ├── Classify each edge type by relation name into categories
+    │   │   (temporal, option_stock, escalation, correlation, causal,
+    │   │    strategy, skip, generic)
+    │   ├── Filter to eligible edge types (enabled categories only)
+    │   ├── Assign deterministic edge_idx via Window functions on executors
+    │   │   (same sort order as EdgeMapper: src_id ASC, dst_id ASC)
+    │   ├── Extract endpoint numeric properties via anti-join — on executors
+    │   ├── Extract endpoint labels (rdfs:label) — on executors
+    │   ├── For each eligible edge type:
+    │   │   ├── Filter resolved edges to this type (on executors)
+    │   │   ├── Encode Segment 1: temporal signals (time delta, period flags,
+    │   │   │   direction) or category indicator for non-temporal edges
+    │   │   ├── Encode Segment 2: numeric contrast (difference, ratio,
+    │   │   │   magnitude) or cross-property derivation (moneyness, severity)
+    │   │   ├── Encode Segment 3: namespace signals + label similarity +
+    │   │   │   relation identity hash
+    │   │   ├── Union segments, aggregate (sum at same edge_idx+dim) — on executors
+    │   │   ├── Pre-allocate dense numpy array on driver
+    │   │   ├── Collect sparse entries via toPandas() (chunked for large types)
+    │   │   ├── Scatter into dense array, delete Pandas, gc.collect()
+    │   │   └── Convert numpy → torch (zero-copy via from_numpy)
+    │   ├── Reuses cached edges_final_df from EdgeMapper — no double-join replay
+    │   ├── Deposit EdgeVectorLayout.to_dict(), encoding config, and edge
+    │   │   classification into MetadataCollector
+    │   └── Output: Dict[(src_type, rel, dst_type) → FloatTensor[num_edges, edge_vector_dim]]
+    │              Only contains entries for edge types that received features
+    │
+    ├── Step 5: Assemble HeteroData (on driver)
+    │   ├── Only compact tensors on driver — no URI strings
+    │   ├── Attach node feature tensors per type (same width for all)
+    │   ├── Attach edge_index tensors per (src, rel, dst) type
+    │   ├── Attach edge_attr tensors for featurized edge types
+    │   ├── Release intermediate dicts, gc.collect()
+    │   ├── Release edges_final_df from executor cache
+    │   ├── Release node_id_df from executor cache
+    │   └── Output: HeteroData ready for torch.save() and GNN training
+    │
+    └── Post-construction: Save outputs (build_graph.py)
+        ├── torch.save() → BytesIO → fs_utils.write_bytes() → work dir (.pt file)
+        │   (local path → open(); s3a:// URI → Hadoop FileSystem)
+        ├── MetadataCollector.to_metadata_files() → six JSON dicts
+        └── write_metadata_to_local() → fs_utils.write_bytes() → six JSON files
+            (same scheme routing; write_metadata_to_s3() adds the boto3
+             mirror when an S3 archive is configured)
+```
+
