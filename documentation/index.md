@@ -2,6 +2,7 @@
 
 > GPU-accelerated Apache Spark pipeline for constructing PyTorch Geometric heterogeneous graphs from enriched RDF knowledge graphs
 
+<div>
 <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" role="img"
      aria-labelledby="archTitle archDesc"
      style="width:100%;height:auto;display:block;margin:1.2rem auto">
@@ -90,6 +91,7 @@
   <text class="lbl" x="624" y="200">Metadata JSON</text>
   <text class="sub" x="624" y="214">six files per build</text>
 </svg>
+</div>
 
 One day of intraday market snapshots loads **322.7M triples** and enriches to
 **421.4M**. Market is 99.5% of that; BLS 1.3M, SEC 198K, NOAA 143K. The job runs

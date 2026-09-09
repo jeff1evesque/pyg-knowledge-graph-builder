@@ -15,6 +15,7 @@ Edge features are **selective** — only edge types with meaningful per-instance
 
 Every featurized edge gets a fixed-width vector (default 32-d) with three segments derived entirely from endpoint node properties. All segment boundaries are computed proportionally by `EdgeVectorLayout`, so the structure scales to any `edge_vector_dim`:
 
+<div>
 <svg viewBox="0 0 760 84" xmlns="http://www.w3.org/2000/svg"
      role="img" aria-label="Edge feature vector, 32 dims"
      style="width:100%;height:auto;display:block;margin:1rem auto">
@@ -39,6 +40,7 @@ Every featurized edge gets a fixed-width vector (default 32-d) with three segmen
   <text class="bn" x="585.0" y="49">Relational context</text>
   <text class="bd" x="585.0" y="66">8 dims &#183; 25%</text>
 </svg>
+</div>
 
 - **Temporal signals** — time delta, period flags, direction
 - **Numeric contrast** — differences, ratios and magnitudes between endpoints
@@ -76,6 +78,7 @@ are enabled logs a `WARNING` naming the categories the graph actually contains.
 
 Encodes **when** the edge endpoints exist relative to each other. For temporal edges, this captures the time gap, periodicity, and direction. For non-temporal edges, a category indicator hash is placed in this segment so the GNN can still distinguish edge categories in this segment.
 
+<div>
 <svg viewBox="0 0 760 84" xmlns="http://www.w3.org/2000/svg"
      role="img" aria-label="Segment 1 &#183; temporal signals, 12 dims"
      style="width:100%;height:auto;display:block;margin:1rem auto">
@@ -100,6 +103,7 @@ Encodes **when** the edge endpoints exist relative to each other. For temporal e
   <text class="bn" x="585.0" y="49">Direction</text>
   <text class="bd" x="585.0" y="66">3 dims &#183; 25%</text>
 </svg>
+</div>
 
 - **Time delta** — signed normalised month delta, and absolute delta
 - **Period flags** — same-year, consecutive-month, same-quarter
@@ -113,6 +117,7 @@ Encodes **when** the edge endpoints exist relative to each other. For temporal e
 
 Encodes **how** the numeric properties of the two endpoints differ. For edges where both endpoints share the same predicate URI (e.g., two `cpi:Index` nodes both having `indexValue`), computes differences, ratios, and magnitudes. For edges with semantically related but differently-named properties (e.g., option `strikePrice` vs. stock `observedPrice`), uses cross-property derivation.
 
+<div>
 <svg viewBox="0 0 760 84" xmlns="http://www.w3.org/2000/svg"
      role="img" aria-label="Segment 2 &#183; numeric contrast, 12 dims"
      style="width:100%;height:auto;display:block;margin:1rem auto">
@@ -137,6 +142,7 @@ Encodes **how** the numeric properties of the two endpoints differ. For edges wh
   <text class="bn" x="585.0" y="49">Magnitude</text>
   <text class="bd" x="585.0" y="66">3 dims &#183; 25%</text>
 </svg>
+</div>
 
 - **Difference** — `dst_val - src_val`, per shared property
 - **Ratio** — `dst_val / src_val`, clamped to [-10, 10]
@@ -157,6 +163,7 @@ Encodes **how** the numeric properties of the two endpoints differ. For edges wh
 
 Encodes **what kind** of relationship this edge represents and whether it crosses ontology boundaries.
 
+<div>
 <svg viewBox="0 0 760 84" xmlns="http://www.w3.org/2000/svg"
      role="img" aria-label="Segment 3 &#183; relational context, 8 dims"
      style="width:100%;height:auto;display:block;margin:1rem auto">
@@ -181,6 +188,7 @@ Encodes **what kind** of relationship this edge represents and whether it crosse
   <text class="bn" x="585.0" y="49">Relation identity</text>
   <text class="bd" x="585.0" y="66">2 dims &#183; 25%</text>
 </svg>
+</div>
 
 - **Namespace signals** — same-namespace flag, cross-source flag, namespace hashes
 - **Label similarity** — Jaccard word overlap of the endpoint labels

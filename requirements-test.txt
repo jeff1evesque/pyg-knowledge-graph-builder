@@ -44,3 +44,8 @@ ruff==0.16.1
 # via PYTEST_WORKERS (see bin/generate_report.sh); a plain `pytest tests/` and
 # the GitHub Actions run stay strictly sequential.
 pytest-xdist>=3.5.0
+
+# MkDocs, for tests/test_documentation_diagrams.py: it builds the real site to
+# prove the inline SVG diagrams survive the build. Layered rather than pinned a
+# second time here, so requirements-docs.txt stays the one place to bump it.
+-r requirements-docs.txt

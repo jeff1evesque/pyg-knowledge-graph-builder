@@ -13,6 +13,7 @@ A naive approach encodes each node as a flat bag of its literal property values 
 
 Every node gets a fixed-width vector (default 1024-d) with three segments encoding progressively more specific information. All segment boundaries are computed proportionally by `VectorLayout`, so the structure scales to any `vector_dim`:
 
+<div>
 <svg viewBox="0 0 760 84" xmlns="http://www.w3.org/2000/svg"
      role="img" aria-label="Node feature vector, 1024 dims"
      style="width:100%;height:auto;display:block;margin:1rem auto">
@@ -37,6 +38,7 @@ Every node gets a fixed-width vector (default 1024-d) with three segments encodi
   <text class="bn" x="490.0" y="49">Literal values</text>
   <text class="bd" x="490.0" y="66">384 dims &#183; 37.5%</text>
 </svg>
+</div>
 
 - **Ontology structure** — class hierarchy and type identity
 - **Property schema** — which properties are defined and present
@@ -46,6 +48,7 @@ Every node gets a fixed-width vector (default 1024-d) with three segments encodi
 
 Encodes **what the node is** in the ontology hierarchy — its class, its superclasses, and its ontology membership. Gives the GNN a structural fingerprint consistent across all nodes of the same type.
 
+<div>
 <svg viewBox="0 0 760 84" xmlns="http://www.w3.org/2000/svg"
      role="img" aria-label="Segment 1 &#183; ontology structure, 256 dims"
      style="width:100%;height:auto;display:block;margin:1rem auto">
@@ -70,6 +73,7 @@ Encodes **what the node is** in the ontology hierarchy — its class, its superc
   <text class="bn" x="632.5" y="49">Ontology / source</text>
   <text class="bd" x="632.5" y="66">48 dims &#183; 18.8%</text>
 </svg>
+</div>
 
 - **Class identity** — multi-hot hash of the node's `rdf:type` URIs
 - **Class hierarchy** — the `rdfs:subClassOf` chain, depth-weighted
@@ -83,6 +87,7 @@ Encodes **what the node is** in the ontology hierarchy — its class, its superc
 
 Encodes **which ontology-defined properties are present** for this node, regardless of their values. This tells the GNN about schema conformance and distinguishes "missing because not observed" from "missing because inapplicable."
 
+<div>
 <svg viewBox="0 0 760 84" xmlns="http://www.w3.org/2000/svg"
      role="img" aria-label="Segment 2 &#183; property schema, 384 dims"
      style="width:100%;height:auto;display:block;margin:1rem auto">
@@ -107,6 +112,7 @@ Encodes **which ontology-defined properties are present** for this node, regardl
   <text class="bn" x="614.7" y="49">Property hierarchy</text>
   <text class="bd" x="614.7" y="66">81 dims &#183; 21.1%</text>
 </svg>
+</div>
 
 - **Property presence** — which properties this node has, multi-hot hashed
 - **Domain / range** — the `rdfs:domain` and `rdfs:range` of those properties
@@ -120,6 +126,7 @@ Encodes **which ontology-defined properties are present** for this node, regardl
 
 Carries the actual numeric and categorical values in a fixed-width format with proper encoding.
 
+<div>
 <svg viewBox="0 0 760 84" xmlns="http://www.w3.org/2000/svg"
      role="img" aria-label="Segment 3 &#183; literal values, 384 dims"
      style="width:100%;height:auto;display:block;margin:1rem auto">
@@ -141,6 +148,7 @@ Carries the actual numeric and categorical values in a fixed-width format with p
   <text class="bn" x="523.6" y="49">Categorical values</text>
   <text class="bd" x="523.6" y="66">127 dims &#183; 33.1%</text>
 </svg>
+</div>
 
 - **Numeric values** — z-score normalised into hashed slots
 - **Categorical values** — multi-hot hash encoding
