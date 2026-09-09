@@ -63,8 +63,9 @@ Driver memory safety:
 Scaling:
 - Spark-side: scales horizontally with DPUs
 - Driver-side: receives only integer/float tensors, not URI strings
-  - Typical total: 2-8 GB for 30-50M triples
-  - Fits on Glue G.2X (32 GB) or G.4X (64 GB)
+  - Node feature tensors alone: 42.4 GB for a 322.7M-triple day
+    (10.3M nodes at vector_dim 1024)
+  - Bigger than Glue G.2X (32 GB); G.4X (64 GB) fits
 """
 import gc
 import logging

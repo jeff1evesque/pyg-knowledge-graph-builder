@@ -69,6 +69,12 @@ theme:
     - content.code.copy
     - toc.follow
 
+##
+## One rule: a long key in a table's first column must not break mid-token.
+##
+extra_css:
+  - stylesheets/extra.css
+
 markdown_extensions:
   - admonition
   - attr_list

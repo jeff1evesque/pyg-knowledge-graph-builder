@@ -100,7 +100,7 @@ VALID_SOURCE_FORMATS = {"ntriples", "turtle_parquet"}
 VALID_INPUT_MODES = {"s3", "local"}
 
 # Default number of Parquet output partitions.
-# Targets ~128 MB per partition for 30-50M triples (~2-4 GB total Parquet).
+# Targets ~128 MB per partition for a 322.7M-triple four-source day (~25 GB).
 DEFAULT_PARQUET_PARTITIONS = 200
 
 # ============================================

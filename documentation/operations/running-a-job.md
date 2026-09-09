@@ -383,8 +383,8 @@ or in a stock `spark-defaults.conf` sets `spark.executor.memory`, so without
 workers advertise. This is the quietest failure of the five: the job does not
 crash, it spills, and it succeeds while running many times slower than it should.
 It stayed hidden because the cluster smoke test runs on committed fixtures
-measured in kilobytes, where 1 GB is ample — real input is not, at roughly 20
-million triples for a single day across four sources.
+measured in kilobytes, where 1 GB is ample — real input is not, at 322.7M
+triples for a single day across four sources.
 
 ```bash
 EXECUTOR_MEMORY=64g bin/submit_spark_job.sh --mode full ...
