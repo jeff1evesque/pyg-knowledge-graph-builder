@@ -7,7 +7,7 @@
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch Geometric](https://img.shields.io/badge/PyG-2.0+-red.svg)](https://pytorch-geometric.readthedocs.io/)
 [![Apache Spark](https://img.shields.io/badge/Apache-Spark-orange.svg)](https://spark.apache.org/)
-[![RAPIDS](https://img.shields.io/badge/RAPIDS-Accelerator-green.svg)](https://nvidia.github.io/spark-rapids/)
+[![RAPIDS](https://img.shields.io/badge/RAPIDS-Accelerator-green.svg)](https://docs.nvidia.com/spark-rapids/)
 
 **[Documentation](https://jeff1evesque.github.io/pyg-knowledge-graph-builder/)** — the design manual, the output reference, and the
 operator runbook, split into pages. This file is the short version.
