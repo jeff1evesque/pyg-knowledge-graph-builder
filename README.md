@@ -113,3 +113,7 @@ mkdocs serve          # http://127.0.0.1:8000
 Run `mkdocs build` from the repository root — Overview and Key Features above are
 pulled into the site's home page by path, and the build is strict, so a broken
 internal link fails it.
+
+## License
+
+BSD 3-Clause. See [`LICENSE`](LICENSE).
