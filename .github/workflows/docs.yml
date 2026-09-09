@@ -54,6 +54,17 @@ jobs:
       - name: Install MkDocs
         run: pip install -r requirements-docs.txt
 
+      - name: Install codespell
+        run: pip install codespell==2.4.3
+
+      # Scoped to the pages and the README on purpose. It is a guard on prose as
+      # it is written, not an audit of the 18,000 lines of existing comments and
+      # docstrings, which are full of domain terms it would only argue with.
+      # Deliberate spellings live in .codespellrc; add to that list rather than
+      # rewording something the project spells that way on purpose.
+      - name: Spell check
+        run: codespell documentation README.md
+
       # From the repository root, deliberately. mkdocs.yml pulls Overview and
       # Key Features out of README.md by relative path, so a build started from
       # anywhere else cannot find them.
