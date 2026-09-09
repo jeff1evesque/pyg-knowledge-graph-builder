@@ -260,31 +260,31 @@ config = {
 
 ## Why This Is Better for GNNs
 
-```
-OLD approach (flat literal vectors):
-┌────────────────────────────────────────────────────────────┐
-│ cpi_Index:  [295.8, 0.3, 2.1, 0.05, 3.0, 1.0]              │  6 dims, only literals
-│ ppi_Index:  [187.2, 0.1, 1.5, 0.03, 2.0, 1.0]              │  6 dims, only literals
-│                                                            │
-│ SEPARATE tensors per type (different widths)               │
-│ GNN needs type-specific linear layers                      │
-│ No cross-type weight sharing possible                      │
-│ Zero = missing? or inapplicable? GNN can't tell            │
-└────────────────────────────────────────────────────────────┘
+!!! failure "Flat literal vectors, the old approach"
 
-NEW approach (ontology-aware vectors):
-┌────────────────────────────────────────────────────────────┐
-│ cpi_Index:  [ontology:25% | schema:37.5% | lit:37.5%]      │  1024-d, universal
-│ ppi_Index:  [ontology:25% | schema:37.5% | lit:37.5%]      │  1024-d, universal
-│                                                            │
-│ SAME tensor width for ALL node types                       │
-│ Shared ontology bits where types share ancestry            │
-│ GNN can use SHARED layers across all types                 │
-│ Cross-type message passing works naturally                 │
-│ Property presence distinguishes missing vs N/A             │
-│ Override vector_dim for memory/fidelity tradeoff           │
-└────────────────────────────────────────────────────────────┘
-```
+    | node type | vector | width |
+    |---|---|---|
+    | `cpi_Index` | `[295.8, 0.3, 2.1, 0.05, 3.0, 1.0]` | 6 dims, literals only |
+    | `ppi_Index` | `[187.2, 0.1, 1.5, 0.03, 2.0, 1.0]` | 6 dims, literals only |
+
+    - Separate tensors per type, each a different width.
+    - The GNN needs type-specific linear layers.
+    - No cross-type weight sharing is possible.
+    - A zero is ambiguous — missing, or inapplicable? The GNN cannot tell.
+
+!!! success "Ontology-aware vectors, the current approach"
+
+    | node type | vector | width |
+    |---|---|---|
+    | `cpi_Index` | `[ontology 25%, schema 37.5%, literals 37.5%]` | 1024-d, universal |
+    | `ppi_Index` | `[ontology 25%, schema 37.5%, literals 37.5%]` | 1024-d, universal |
+
+    - The same tensor width for every node type.
+    - Ontology bits are shared wherever two types share ancestry.
+    - The GNN can use shared layers across all types.
+    - Cross-type message passing works naturally.
+    - Property presence distinguishes missing from not applicable.
+    - `vector_dim` is an override, trading memory against fidelity.
 
 ## All Node Encoding Runs on Spark Executors
 
