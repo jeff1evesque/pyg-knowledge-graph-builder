@@ -60,8 +60,6 @@ jobs:
       - name: Build
         run: mkdocs build
 
-      # tests.yml installs requirements-test.txt, which has no MkDocs, so this
-      # guard skips there and runs here instead.
       - name: Check the inline SVG diagrams
         run: |
           pip install pytest
