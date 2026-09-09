@@ -13,33 +13,67 @@ A naive approach encodes each node as a flat bag of its literal property values 
 
 Every node gets a fixed-width vector (default 1024-d) with three segments encoding progressively more specific information. All segment boundaries are computed proportionally by `VectorLayout`, so the structure scales to any `vector_dim`:
 
-```
-Default 1024-dimensional node feature vector
-┌─────────────────────┬──────────────────────┬─────────────────────┐
-│ Ontology Structure  │ Property Presence &  │ Literal Values      │
-│ (class hierarchy,   │ Schema Signals       │ (numeric + encoded  │
-│  type identity)     │ (which properties    │  categorical)       │
-│                     │  are defined/present)│                     │
-│ 25% of vector_dim   │ 37.5% of vector_dim  │ 37.5% of vector_dim │
-│ (256 dims @ 1024)   │ (384 dims @ 1024)    │ (384 dims @ 1024)   │
-└─────────────────────┴──────────────────────┴─────────────────────┘
-```
+<svg viewBox="0 0 760 84" xmlns="http://www.w3.org/2000/svg"
+     role="img" aria-label="Node feature vector, 1024 dims"
+     style="width:100%;height:auto;display:block;margin:1rem auto">
+  <style>
+    .bt  { font: 600 11px var(--md-text-font-family, system-ui, sans-serif);
+           fill: var(--md-default-fg-color--light, #5a5a5a); letter-spacing: .06em; }
+    .bn  { font: 600 13px var(--md-text-font-family, system-ui, sans-serif);
+           fill: var(--md-default-fg-color, #1a1a1a); }
+    .bd  { font: 400 10.5px var(--md-text-font-family, system-ui, sans-serif);
+           fill: var(--md-default-fg-color--light, #5a5a5a); }
+    .bc  { fill: var(--md-code-bg-color, #f4f4f5);
+           stroke: var(--md-primary-fg-color, #3f51b5); stroke-width: 1.4; }
+  </style>
+  <text class="bt" x="0" y="14">NODE FEATURE VECTOR, 1024 DIMS</text>
+  <rect class="bc" x="3.0" y="26" width="184.0" height="54" rx="4"/>
+  <text class="bn" x="15.0" y="49">Ontology structure</text>
+  <text class="bd" x="15.0" y="66">256 dims &#183; 25%</text>
+  <rect class="bc" x="193.0" y="26" width="279.0" height="54" rx="4"/>
+  <text class="bn" x="205.0" y="49">Property schema</text>
+  <text class="bd" x="205.0" y="66">384 dims &#183; 37.5%</text>
+  <rect class="bc" x="478.0" y="26" width="279.0" height="54" rx="4"/>
+  <text class="bn" x="490.0" y="49">Literal values</text>
+  <text class="bd" x="490.0" y="66">384 dims &#183; 37.5%</text>
+</svg>
+
+- **Ontology structure** — class hierarchy and type identity
+- **Property schema** — which properties are defined and present
+- **Literal values** — numeric, and categorical after encoding
 
 ### Segment 1: Ontology Structure (25% of vector_dim)
 
 Encodes **what the node is** in the ontology hierarchy — its class, its superclasses, and its ontology membership. Gives the GNN a structural fingerprint consistent across all nodes of the same type.
 
-```
-Segment 1: Ontology Structure [25% of vector_dim]
-┌────────────────────┬────────────────────┬────────────────────┐
-│ Class Identity     │ Class Hierarchy    │ Ontology/Source    │
-│ (multi-hot hash    │ (rdfs:subClassOf   │ (which ontology    │
-│  of rdf:type URIs) │  chain, depth-     │  namespace, multi- │
-│                    │  weighted hashing) │  hot encoding)     │
-│ 25% of segment     │ 50% of segment     │ 25% of segment     │
-│ (160 dims @ 1024)  │ (48 dims @ 1024)   │ (48 dims @ 1024)   │
-└────────────────────┴────────────────────┴────────────────────┘
-```
+<svg viewBox="0 0 760 84" xmlns="http://www.w3.org/2000/svg"
+     role="img" aria-label="Segment 1 &#183; ontology structure, 256 dims"
+     style="width:100%;height:auto;display:block;margin:1rem auto">
+  <style>
+    .bt  { font: 600 11px var(--md-text-font-family, system-ui, sans-serif);
+           fill: var(--md-default-fg-color--light, #5a5a5a); letter-spacing: .06em; }
+    .bn  { font: 600 13px var(--md-text-font-family, system-ui, sans-serif);
+           fill: var(--md-default-fg-color, #1a1a1a); }
+    .bd  { font: 400 10.5px var(--md-text-font-family, system-ui, sans-serif);
+           fill: var(--md-default-fg-color--light, #5a5a5a); }
+    .bc  { fill: var(--md-code-bg-color, #f4f4f5);
+           stroke: var(--md-primary-fg-color, #3f51b5); stroke-width: 1.4; }
+  </style>
+  <text class="bt" x="0" y="14">SEGMENT 1 &#183; ONTOLOGY STRUCTURE, 256 DIMS</text>
+  <rect class="bc" x="3.0" y="26" width="469.0" height="54" rx="4"/>
+  <text class="bn" x="15.0" y="49">Class identity</text>
+  <text class="bd" x="15.0" y="66">160 dims &#183; 62.5%</text>
+  <rect class="bc" x="478.0" y="26" width="136.5" height="54" rx="4"/>
+  <text class="bn" x="490.0" y="49">Class hierarchy</text>
+  <text class="bd" x="490.0" y="66">48 dims &#183; 18.8%</text>
+  <rect class="bc" x="620.5" y="26" width="136.5" height="54" rx="4"/>
+  <text class="bn" x="632.5" y="49">Ontology / source</text>
+  <text class="bd" x="632.5" y="66">48 dims &#183; 18.8%</text>
+</svg>
+
+- **Class identity** — multi-hot hash of the node's `rdf:type` URIs
+- **Class hierarchy** — the `rdfs:subClassOf` chain, depth-weighted
+- **Ontology / source** — which namespace the node comes from, multi-hot
 
 - **Class Identity**: Each `rdf:type` URI is hashed into 4 deterministic slots. Nodes of the same type share identical bits.
 - **Class Hierarchy**: `rdfs:subClassOf` chains are traversed (transitive closure up to depth 10). Superclass URIs are hashed with depth-weighted values (direct superclass = 1.0, grandparent = 0.5, etc.). Nodes sharing a superclass share bits in this segment.
@@ -49,17 +83,34 @@ Segment 1: Ontology Structure [25% of vector_dim]
 
 Encodes **which ontology-defined properties are present** for this node, regardless of their values. This tells the GNN about schema conformance and distinguishes "missing because not observed" from "missing because inapplicable."
 
-```
-Segment 2: Property Schema [37.5% of vector_dim]
-┌─────────────────────┬─────────────────────┬─────────────────────┐
-│ Property Presence   │ Domain/Range Signals│ Property Hierarchy  │
-│ (which properties   │ (rdfs:domain and    │ (rdfs:subPropertyOf │
-│  this node has,     │  rdfs:range of      │  chains)            │
-│  multi-hot hashed)  │  properties)        │                     │
-│ 50% of segment      │ 29% of segment      │ 21% of segment      │
-│ (192 dims @ 1024)   │ (112 dims @ 1024)   │ (80 dims @ 1024)    │
-└─────────────────────┴─────────────────────┴─────────────────────┘
-```
+<svg viewBox="0 0 760 84" xmlns="http://www.w3.org/2000/svg"
+     role="img" aria-label="Segment 2 &#183; property schema, 384 dims"
+     style="width:100%;height:auto;display:block;margin:1rem auto">
+  <style>
+    .bt  { font: 600 11px var(--md-text-font-family, system-ui, sans-serif);
+           fill: var(--md-default-fg-color--light, #5a5a5a); letter-spacing: .06em; }
+    .bn  { font: 600 13px var(--md-text-font-family, system-ui, sans-serif);
+           fill: var(--md-default-fg-color, #1a1a1a); }
+    .bd  { font: 400 10.5px var(--md-text-font-family, system-ui, sans-serif);
+           fill: var(--md-default-fg-color--light, #5a5a5a); }
+    .bc  { fill: var(--md-code-bg-color, #f4f4f5);
+           stroke: var(--md-primary-fg-color, #3f51b5); stroke-width: 1.4; }
+  </style>
+  <text class="bt" x="0" y="14">SEGMENT 2 &#183; PROPERTY SCHEMA, 384 DIMS</text>
+  <rect class="bc" x="3.0" y="26" width="374.0" height="54" rx="4"/>
+  <text class="bn" x="15.0" y="49">Property presence</text>
+  <text class="bd" x="15.0" y="66">192 dims &#183; 50%</text>
+  <rect class="bc" x="383.0" y="26" width="213.7" height="54" rx="4"/>
+  <text class="bn" x="395.0" y="49">Domain / range</text>
+  <text class="bd" x="395.0" y="66">111 dims &#183; 28.9%</text>
+  <rect class="bc" x="602.7" y="26" width="154.3" height="54" rx="4"/>
+  <text class="bn" x="614.7" y="49">Property hierarchy</text>
+  <text class="bd" x="614.7" y="66">81 dims &#183; 21.1%</text>
+</svg>
+
+- **Property presence** — which properties this node has, multi-hot hashed
+- **Domain / range** — the `rdfs:domain` and `rdfs:range` of those properties
+- **Property hierarchy** — `rdfs:subPropertyOf` chains
 
 - **Property Presence**: Each predicate URI the node has is hashed into 3 slots. A CPI Index node with `indexValue`, `percentChange`, `hasMonth` gets different bits than a JOLTS node with `jobOpeningsLevel`, `hasIndustry`.
 - **Domain/Range Signals**: For each property this node has, its `rdfs:domain` and `rdfs:range` are hashed. This tells the GNN what types of relationships this node can participate in. No source declares either, so both are **derived** — the domain from the observed `rdf:type` of the property's subjects, the range from its objects' types and from the XSD datatype the source declared on its literals. A property used on more than one class gets neither, because `rdfs:domain` is an intersection; see [`ontology_schema.json`](../reference/outputs.md#ontology_schemajson) for the provenance and coverage this publishes.
@@ -69,16 +120,30 @@ Segment 2: Property Schema [37.5% of vector_dim]
 
 Carries the actual numeric and categorical values in a fixed-width format with proper encoding.
 
-```
-Segment 3: Literal Values [37.5% of vector_dim]
-┌─────────────────────┬─────────────────────┐
-│ Numeric Values      │ Categorical Values  │
-│ (z-score normalized │ (multi-hot hash     │
-│  into hashed slots) │  encoding)          │
-│ 67% of segment      │ 33% of segment      │
-│ (256 dims @ 1024)   │ (128 dims @ 1024)   │
-└─────────────────────┴─────────────────────┘
-```
+<svg viewBox="0 0 760 84" xmlns="http://www.w3.org/2000/svg"
+     role="img" aria-label="Segment 3 &#183; literal values, 384 dims"
+     style="width:100%;height:auto;display:block;margin:1rem auto">
+  <style>
+    .bt  { font: 600 11px var(--md-text-font-family, system-ui, sans-serif);
+           fill: var(--md-default-fg-color--light, #5a5a5a); letter-spacing: .06em; }
+    .bn  { font: 600 13px var(--md-text-font-family, system-ui, sans-serif);
+           fill: var(--md-default-fg-color, #1a1a1a); }
+    .bd  { font: 400 10.5px var(--md-text-font-family, system-ui, sans-serif);
+           fill: var(--md-default-fg-color--light, #5a5a5a); }
+    .bc  { fill: var(--md-code-bg-color, #f4f4f5);
+           stroke: var(--md-primary-fg-color, #3f51b5); stroke-width: 1.4; }
+  </style>
+  <text class="bt" x="0" y="14">SEGMENT 3 &#183; LITERAL VALUES, 384 DIMS</text>
+  <rect class="bc" x="3.0" y="26" width="502.6" height="54" rx="4"/>
+  <text class="bn" x="15.0" y="49">Numeric values</text>
+  <text class="bd" x="15.0" y="66">257 dims &#183; 66.9%</text>
+  <rect class="bc" x="511.6" y="26" width="245.4" height="54" rx="4"/>
+  <text class="bn" x="523.6" y="49">Categorical values</text>
+  <text class="bd" x="523.6" y="66">127 dims &#183; 33.1%</text>
+</svg>
+
+- **Numeric values** — z-score normalised into hashed slots
+- **Categorical values** — multi-hot hash encoding
 
 - **Numeric Values**: Each numeric property's predicate URI hashes to a fixed slot. The value is z-score normalized (per-predicate stats computed in a single pass on executors) and placed at that slot. Hash collisions sum — rare with 256 dims and ~10 properties per type.
 - **Categorical Values**: Multi-hot hash encoding instead of `dense_rank`. Each `(predicate, value)` pair hashes to 4 slots. No ordinal assumption.
