@@ -284,39 +284,27 @@ All `dim` and `offset` values are read from `EdgeVectorLayout` at runtime — th
 
 ## Why This Is Better for GNNs
 
-```
-WITHOUT edge features:
-┌────────────────────────────────────────────────────────────┐
-│ precedes edge (1 month gap):   no features                 │
-│ precedes edge (12 month gap):  no features                 │
-│ → GNN treats both identically during message passing       │
-│                                                            │
-│ option→stock (deep ITM):       no features                 │
-│ option→stock (far OTM):        no features                 │
-│ → GNN cannot modulate messages by moneyness                │
-│                                                            │
-│ correlatesWith (CPI↔CPI):      no features                 │
-│ correlatesWith (CPI↔PPI):      no features                 │
-│ → GNN cannot distinguish intra-source from cross-source    │
-└────────────────────────────────────────────────────────────┘
+!!! failure "Without edge features"
 
-WITH selective edge features:
-┌────────────────────────────────────────────────────────────┐
-│ precedes edge (1 month):  [delta=0.08 | same_yr=1 | ...]   │  32-d
-│ precedes edge (12 month): [delta=1.00 | same_yr=0 | ...]   │  32-d
-│ → GNN can learn time-decay attention weights               │
-│                                                            │
-│ option→stock (deep ITM):  [moneyness=0.7 | log_m=-0.36]    │  32-d
-│ option→stock (far OTM):   [moneyness=1.5 | log_m=0.41]     │  32-d
-│ → GNN can modulate option-stock messages by moneyness      │
-│                                                            │
-│ correlatesWith (CPI↔CPI): [same_ns=1 | sim=0.8 | ...]      │  32-d
-│ correlatesWith (CPI↔PPI): [same_ns=0 | sim=0.3 | ...]      │  32-d
-│ → GNN can weight intra-source correlations differently     │
-│                                                            │
-│ belongsToSector:           no features (not needed)        │
-│ owl:sameAs:                no features (not needed)        │
-│ → Structural edges use simpler message-passing layers      │
-└────────────────────────────────────────────────────────────┘
-```
+    | edge | features | consequence |
+    |---|---|---|
+    | `precedes`, 1 month gap | none | the GNN treats a 1-month and a 12-month gap identically |
+    | `precedes`, 12 month gap | none | |
+    | option to stock, deep ITM | none | messages cannot be modulated by moneyness |
+    | option to stock, far OTM | none | |
+    | `correlatesWith`, CPI to CPI | none | intra-source and cross-source correlations are indistinguishable |
+    | `correlatesWith`, CPI to PPI | none | |
+
+!!! success "With selective edge features"
+
+    | edge | 32-d vector | what it buys |
+    |---|---|---|
+    | `precedes`, 1 month | `delta=0.08, same_yr=1, ...` | the GNN can learn time-decay attention weights |
+    | `precedes`, 12 month | `delta=1.00, same_yr=0, ...` | |
+    | option to stock, deep ITM | `moneyness=0.7, log_m=-0.36` | option-to-stock messages can be modulated by moneyness |
+    | option to stock, far OTM | `moneyness=1.5, log_m=0.41` | |
+    | `correlatesWith`, CPI to CPI | `same_ns=1, sim=0.8, ...` | intra-source correlations can be weighted differently |
+    | `correlatesWith`, CPI to PPI | `same_ns=0, sim=0.3, ...` | |
+    | `belongsToSector` | none, by design | structural edges use simpler message-passing layers |
+    | `owl:sameAs` | none, by design | |
 
