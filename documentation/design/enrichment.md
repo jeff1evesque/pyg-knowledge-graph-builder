@@ -4,60 +4,52 @@ The enrichment pipeline creates a unified knowledge graph by establishing relati
 
 ## Enrichment Pipeline Flow
 
-```
-triples_df (raw)
-    │
-    ├── BLS Intra-Source Enricher
-    │   ├── Temporal sequences (precedes links)
-    │   ├── Sector classification (belongsToSector)
-    │   ├── Cross-dataset correlations (correlatesWith)
-    │   └── Hierarchical enrichment (hasParent chains)
-    │
-    ├── SEC Intra-Source Enricher
-    │   ├── Company unification (owl:sameAs by CIK)
-    │   ├── Person unification (owl:sameAs by CIK)
-    │   ├── Filing sequences (precedes by date)
-    │   ├── Transaction sequences (precedes by transaction date, within
-    │   │   a reporting owner and instrument class)
-    │   ├── Sector classification (belongsToSector)
-    │   └── Violation type linking (hasViolationType)
-    │
-    ├── Market Intra-Source Enricher
-    │   ├── Snapshot temporal sequences (precedes by captureTime)
-    │   ├── Option-to-underlying equity linking (hasUnderlyingEquity)
-    │   ├── Option strategy detection (straddleWith, spreadWith, strangleWith)
-    │   ├── Sector classification (belongsToSector via symbol; loads
-    │   │   GICS sectors from S3 tickers CSV with hardcoded fallback)
-    │   └── Moneyness computation (hasMoneyness: ATM/ITM/OTM)
-    │
-    ├── NOAA Intra-Source Enricher
-    │   ├── Alert temporal sequences (precedes by sent time)
-    │   ├── Geographic linking (affectsSameRegion via SAME codes)
-    │   ├── Event type linking (sameEventType)
-    │   └── Severity escalation detection (escalatesTo)
-    │
-    ├── Temporal Unifier (cross-source)
-    │   └── Unified months/years/quarters (owl:sameAs)
-    │
-    ├── Cross-Source Linker
-    │   ├── Sector-based linking across sources
-    │   ├── Company/ticker linking (SEC ↔ Market)
-    │   ├── Geographic linking (BLS ↔ NOAA)
-    │   ├── Causal relationships (BLS → Market, NOAA → Market)
-    │   └── Measurement type alignment
-    │
-    └── Ontology Mapper (optional; --enable_ontology_mapping, default true)
-        ├── owl:equivalentProperty / owl:equivalentClass  (one-to-one pairs only)
-        ├── predicate folding to the unified vocabulary
-        ├── skos:prefLabel normalization
-        ├── rdfs:subClassOf      ← curated CLASS_MAPPINGS + class naming
-        ├── rdfs:subPropertyOf   ← curated PROPERTY_MAPPINGS shared targets
-        ├── rdfs:domain/range    ← observed usage + declared XSD datatypes
-        └── prov:derivedBy       ← how each of the above was arrived at
-    │
-    ▼
-triples_df (enriched) → Parquet (local) + PyG HeteroData (.pt) + Metadata JSON (local + optional S3)
-```
+Each enricher below reads `triples_df` and only adds to it — nothing is
+rewritten and nothing is removed:
+
+- **BLS Intra-Source Enricher**
+    - Temporal sequences (precedes links)
+    - Sector classification (belongsToSector)
+    - Cross-dataset correlations (correlatesWith)
+    - Hierarchical enrichment (hasParent chains)
+- **SEC Intra-Source Enricher**
+    - Company unification (owl:sameAs by CIK)
+    - Person unification (owl:sameAs by CIK)
+    - Filing sequences (precedes by date)
+    - Transaction sequences (precedes by transaction date, within a reporting owner and instrument class)
+    - Sector classification (belongsToSector)
+    - Violation type linking (hasViolationType)
+- **Market Intra-Source Enricher**
+    - Snapshot temporal sequences (precedes by captureTime)
+    - Option-to-underlying equity linking (hasUnderlyingEquity)
+    - Option strategy detection (straddleWith, spreadWith, strangleWith)
+    - Sector classification (belongsToSector via symbol; loads GICS sectors from S3 tickers CSV with hardcoded fallback)
+    - Moneyness computation (hasMoneyness: ATM/ITM/OTM)
+- **NOAA Intra-Source Enricher**
+    - Alert temporal sequences (precedes by sent time)
+    - Geographic linking (affectsSameRegion via SAME codes)
+    - Event type linking (sameEventType)
+    - Severity escalation detection (escalatesTo)
+- **Temporal Unifier** (cross-source)
+    - Unified months/years/quarters (owl:sameAs)
+- **Cross-Source Linker**
+    - Sector-based linking across sources
+    - Company/ticker linking (SEC ↔ Market)
+    - Geographic linking (BLS ↔ NOAA)
+    - Causal relationships (BLS → Market, NOAA → Market)
+    - Measurement type alignment
+- **Ontology Mapper (optional; --enable_ontology_mapping, default true)**
+    - owl:equivalentProperty / owl:equivalentClass (one-to-one pairs only)
+    - predicate folding to the unified vocabulary
+    - skos:prefLabel normalization
+    - rdfs:subClassOf ← curated CLASS_MAPPINGS + class naming
+    - rdfs:subPropertyOf ← curated PROPERTY_MAPPINGS shared targets
+    - rdfs:domain/range ← observed usage + declared XSD datatypes
+    - prov:derivedBy ← how each of the above was arrived at
+
+The result is `triples_df` (enriched), written as Parquet locally, alongside
+the PyG `HeteroData` `.pt` and the six metadata JSON files (local, and
+mirrored to S3 when an archive is configured).
 
 ## Intra-Source Linking
 
