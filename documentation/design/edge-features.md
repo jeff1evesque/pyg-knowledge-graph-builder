@@ -15,18 +15,34 @@ Edge features are **selective** — only edge types with meaningful per-instance
 
 Every featurized edge gets a fixed-width vector (default 32-d) with three segments derived entirely from endpoint node properties. All segment boundaries are computed proportionally by `EdgeVectorLayout`, so the structure scales to any `edge_vector_dim`:
 
-```
-Default 32-dimensional edge feature vector
-┌─────────────────────┬──────────────────────┬─────────────────────┐
-│ Temporal Signals    │ Numeric Contrast     │ Relational Context  │
-│ (time delta,        │ (differences, ratios,│ (namespace, label   │
-│  period flags,      │  magnitudes between  │  similarity,        │
-│  direction)         │  endpoints)          │  relation identity) │
-│                     │                      │                     │
-│ 37.5% of edge_dim   │ 37.5% of edge_dim    │ 25% of edge_dim     │
-│ (12 dims @ 32)      │ (12 dims @ 32)       │ (8 dims @ 32)       │
-└─────────────────────┴──────────────────────┴─────────────────────┘
-```
+<svg viewBox="0 0 760 84" xmlns="http://www.w3.org/2000/svg"
+     role="img" aria-label="Edge feature vector, 32 dims"
+     style="width:100%;height:auto;display:block;margin:1rem auto">
+  <style>
+    .bt  { font: 600 11px var(--md-text-font-family, system-ui, sans-serif);
+           fill: var(--md-default-fg-color--light, #5a5a5a); letter-spacing: .06em; }
+    .bn  { font: 600 13px var(--md-text-font-family, system-ui, sans-serif);
+           fill: var(--md-default-fg-color, #1a1a1a); }
+    .bd  { font: 400 10.5px var(--md-text-font-family, system-ui, sans-serif);
+           fill: var(--md-default-fg-color--light, #5a5a5a); }
+    .bc  { fill: var(--md-code-bg-color, #f4f4f5);
+           stroke: var(--md-primary-fg-color, #3f51b5); stroke-width: 1.4; }
+  </style>
+  <text class="bt" x="0" y="14">EDGE FEATURE VECTOR, 32 DIMS</text>
+  <rect class="bc" x="3.0" y="26" width="279.0" height="54" rx="4"/>
+  <text class="bn" x="15.0" y="49">Temporal signals</text>
+  <text class="bd" x="15.0" y="66">12 dims &#183; 37.5%</text>
+  <rect class="bc" x="288.0" y="26" width="279.0" height="54" rx="4"/>
+  <text class="bn" x="300.0" y="49">Numeric contrast</text>
+  <text class="bd" x="300.0" y="66">12 dims &#183; 37.5%</text>
+  <rect class="bc" x="573.0" y="26" width="184.0" height="54" rx="4"/>
+  <text class="bn" x="585.0" y="49">Relational context</text>
+  <text class="bd" x="585.0" y="66">8 dims &#183; 25%</text>
+</svg>
+
+- **Temporal signals** — time delta, period flags, direction
+- **Numeric contrast** — differences, ratios and magnitudes between endpoints
+- **Relational context** — namespace, label similarity, relation identity
 
 ### Which Edge Types Get Features
 
@@ -60,17 +76,34 @@ are enabled logs a `WARNING` naming the categories the graph actually contains.
 
 Encodes **when** the edge endpoints exist relative to each other. For temporal edges, this captures the time gap, periodicity, and direction. For non-temporal edges, a category indicator hash is placed in this segment so the GNN can still distinguish edge categories in this segment.
 
-```
-Segment 1: Temporal Signals [37.5% of edge_vector_dim]
-┌────────────────────┬────────────────────┬────────────────────┐
-│ Time Delta         │ Period Flags       │ Direction          │
-│ (signed normalized │ (same-year,        │ (forward/backward  │
-│  month delta,      │  consecutive-month,│  temporal direction│
-│  absolute delta)   │  same-quarter)     │  indicator)        │
-│ 40% of segment     │ 35% of segment     │ 25% of segment     │
-│ (5 dims @ 32)      │ (4 dims @ 32)      │ (3 dims @ 32)      │
-└────────────────────┴────────────────────┴────────────────────┘
-```
+<svg viewBox="0 0 760 84" xmlns="http://www.w3.org/2000/svg"
+     role="img" aria-label="Segment 1 &#183; temporal signals, 12 dims"
+     style="width:100%;height:auto;display:block;margin:1rem auto">
+  <style>
+    .bt  { font: 600 11px var(--md-text-font-family, system-ui, sans-serif);
+           fill: var(--md-default-fg-color--light, #5a5a5a); letter-spacing: .06em; }
+    .bn  { font: 600 13px var(--md-text-font-family, system-ui, sans-serif);
+           fill: var(--md-default-fg-color, #1a1a1a); }
+    .bd  { font: 400 10.5px var(--md-text-font-family, system-ui, sans-serif);
+           fill: var(--md-default-fg-color--light, #5a5a5a); }
+    .bc  { fill: var(--md-code-bg-color, #f4f4f5);
+           stroke: var(--md-primary-fg-color, #3f51b5); stroke-width: 1.4; }
+  </style>
+  <text class="bt" x="0" y="14">SEGMENT 1 &#183; TEMPORAL SIGNALS, 12 DIMS</text>
+  <rect class="bc" x="3.0" y="26" width="310.7" height="54" rx="4"/>
+  <text class="bn" x="15.0" y="49">Time delta</text>
+  <text class="bd" x="15.0" y="66">5 dims &#183; 41.7%</text>
+  <rect class="bc" x="319.7" y="26" width="247.3" height="54" rx="4"/>
+  <text class="bn" x="331.7" y="49">Period flags</text>
+  <text class="bd" x="331.7" y="66">4 dims &#183; 33.3%</text>
+  <rect class="bc" x="573.0" y="26" width="184.0" height="54" rx="4"/>
+  <text class="bn" x="585.0" y="49">Direction</text>
+  <text class="bd" x="585.0" y="66">3 dims &#183; 25%</text>
+</svg>
+
+- **Time delta** — signed normalised month delta, and absolute delta
+- **Period flags** — same-year, consecutive-month, same-quarter
+- **Direction** — forward or backward in time
 
 - **Time Delta**: Month delta between endpoints computed as `(dst_year - src_year) * 12 + (dst_month - src_month)`, normalized by dividing by 12. Both signed and absolute values are encoded in hashed slots. A 1-month gap = 0.083, a 1-year gap = 1.0.
 - **Period Flags**: Binary indicators — same-year (1.0 if both endpoints share the same year), consecutive-month (1.0 if exactly 1 month apart), same-quarter (1.0 if same calendar quarter and year).
@@ -80,17 +113,34 @@ Segment 1: Temporal Signals [37.5% of edge_vector_dim]
 
 Encodes **how** the numeric properties of the two endpoints differ. For edges where both endpoints share the same predicate URI (e.g., two `cpi:Index` nodes both having `indexValue`), computes differences, ratios, and magnitudes. For edges with semantically related but differently-named properties (e.g., option `strikePrice` vs. stock `observedPrice`), uses cross-property derivation.
 
-```
-Segment 2: Numeric Contrast [37.5% of edge_vector_dim]
-┌─────────────────────┬─────────────────────┬─────────────────────┐
-│ Difference          │ Ratio               │ Magnitude           │
-│ (dst_val - src_val  │ (dst_val / src_val, │ (average absolute   │
-│  per shared         │  clamped to         │  value of both      │
-│  property)          │  [-10, 10])         │  endpoints)         │
-│ 40% of segment      │ 35% of segment      │ 25% of segment      │
-│ (5 dims @ 32)       │ (4 dims @ 32)       │ (3 dims @ 32)       │
-└─────────────────────┴─────────────────────┴─────────────────────┘
-```
+<svg viewBox="0 0 760 84" xmlns="http://www.w3.org/2000/svg"
+     role="img" aria-label="Segment 2 &#183; numeric contrast, 12 dims"
+     style="width:100%;height:auto;display:block;margin:1rem auto">
+  <style>
+    .bt  { font: 600 11px var(--md-text-font-family, system-ui, sans-serif);
+           fill: var(--md-default-fg-color--light, #5a5a5a); letter-spacing: .06em; }
+    .bn  { font: 600 13px var(--md-text-font-family, system-ui, sans-serif);
+           fill: var(--md-default-fg-color, #1a1a1a); }
+    .bd  { font: 400 10.5px var(--md-text-font-family, system-ui, sans-serif);
+           fill: var(--md-default-fg-color--light, #5a5a5a); }
+    .bc  { fill: var(--md-code-bg-color, #f4f4f5);
+           stroke: var(--md-primary-fg-color, #3f51b5); stroke-width: 1.4; }
+  </style>
+  <text class="bt" x="0" y="14">SEGMENT 2 &#183; NUMERIC CONTRAST, 12 DIMS</text>
+  <rect class="bc" x="3.0" y="26" width="310.7" height="54" rx="4"/>
+  <text class="bn" x="15.0" y="49">Difference</text>
+  <text class="bd" x="15.0" y="66">5 dims &#183; 41.7%</text>
+  <rect class="bc" x="319.7" y="26" width="247.3" height="54" rx="4"/>
+  <text class="bn" x="331.7" y="49">Ratio</text>
+  <text class="bd" x="331.7" y="66">4 dims &#183; 33.3%</text>
+  <rect class="bc" x="573.0" y="26" width="184.0" height="54" rx="4"/>
+  <text class="bn" x="585.0" y="49">Magnitude</text>
+  <text class="bd" x="585.0" y="66">3 dims &#183; 25%</text>
+</svg>
+
+- **Difference** — `dst_val - src_val`, per shared property
+- **Ratio** — `dst_val / src_val`, clamped to [-10, 10]
+- **Magnitude** — average absolute value of both endpoints
 
 - **Difference**: `dst_value - src_value` for each shared numeric property, hashed into a fixed slot by predicate URI. For temporal edges, this captures how much an indicator changed. For option-stock edges (cross-property), this encodes the strike-stock price difference.
 - **Ratio**: `dst_value / src_value`, clamped to [-10, 10] to avoid extreme values from near-zero denominators. For option-stock edges, this encodes moneyness (strike/stock_price) and log-moneyness.
@@ -107,17 +157,34 @@ Segment 2: Numeric Contrast [37.5% of edge_vector_dim]
 
 Encodes **what kind** of relationship this edge represents and whether it crosses ontology boundaries.
 
-```
-Segment 3: Relational Context [25% of edge_vector_dim]
-┌─────────────────────┬─────────────────────┬─────────────────────┐
-│ Namespace Signals   │ Label Similarity    │ Relation Identity   │
-│ (same-namespace     │ (Jaccard word       │ (relation name +    │
-│  flag, cross-source │  overlap of         │  category hash)     │
-│  flag, ns hashes)   │  endpoint labels)   │                     │
-│ 40% of segment      │ 35% of segment      │ 25% of segment      │
-│ (3 dims @ 32)       │ (3 dims @ 32)       │ (2 dims @ 32)       │
-└─────────────────────┴─────────────────────┴─────────────────────┘
-```
+<svg viewBox="0 0 760 84" xmlns="http://www.w3.org/2000/svg"
+     role="img" aria-label="Segment 3 &#183; relational context, 8 dims"
+     style="width:100%;height:auto;display:block;margin:1rem auto">
+  <style>
+    .bt  { font: 600 11px var(--md-text-font-family, system-ui, sans-serif);
+           fill: var(--md-default-fg-color--light, #5a5a5a); letter-spacing: .06em; }
+    .bn  { font: 600 13px var(--md-text-font-family, system-ui, sans-serif);
+           fill: var(--md-default-fg-color, #1a1a1a); }
+    .bd  { font: 400 10.5px var(--md-text-font-family, system-ui, sans-serif);
+           fill: var(--md-default-fg-color--light, #5a5a5a); }
+    .bc  { fill: var(--md-code-bg-color, #f4f4f5);
+           stroke: var(--md-primary-fg-color, #3f51b5); stroke-width: 1.4; }
+  </style>
+  <text class="bt" x="0" y="14">SEGMENT 3 &#183; RELATIONAL CONTEXT, 8 DIMS</text>
+  <rect class="bc" x="3.0" y="26" width="279.0" height="54" rx="4"/>
+  <text class="bn" x="15.0" y="49">Namespace signals</text>
+  <text class="bd" x="15.0" y="66">3 dims &#183; 37.5%</text>
+  <rect class="bc" x="288.0" y="26" width="279.0" height="54" rx="4"/>
+  <text class="bn" x="300.0" y="49">Label similarity</text>
+  <text class="bd" x="300.0" y="66">3 dims &#183; 37.5%</text>
+  <rect class="bc" x="573.0" y="26" width="184.0" height="54" rx="4"/>
+  <text class="bn" x="585.0" y="49">Relation identity</text>
+  <text class="bd" x="585.0" y="66">2 dims &#183; 25%</text>
+</svg>
+
+- **Namespace signals** — same-namespace flag, cross-source flag, namespace hashes
+- **Label similarity** — Jaccard word overlap of the endpoint labels
+- **Relation identity** — relation name and category hash
 
 - **Namespace Signals**: Same-namespace flag (1.0 if both endpoints are from the same ontology, derived from PyG node type prefix), cross-source flag (inverse), and hashed namespace identity for finer-grained source encoding. These are driver-side string operations on type names, broadcast as literals — not Spark UDFs.
 - **Label Similarity**: For correlation and causal edges, Jaccard word overlap between endpoint `rdfs:label` values computed via Spark array functions (`array_intersect`, `array_union`). Distinguishes strong correlations (exact keyword match like "Energy" ↔ "Energy") from weak ones ("Food at Home" ↔ "Food Manufacturing"). For other edge types, a category indicator hash is used instead.
