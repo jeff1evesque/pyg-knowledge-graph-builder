@@ -6,8 +6,9 @@ partitioned into segments/sub-segments, scaled proportionally from vector_dim.
 These are pure-Python arithmetic tests — no SparkSession, no cluster.
 
 They pin the *actual* computed boundaries (which differ slightly from the
-README's hand-written 1024 table at seg2/seg3 due to rounding), and enforce the
-invariants the class guarantees for any dimension.
+hand-written 1024 table in documentation/design/node-features.md at seg2/seg3
+due to rounding), and enforce the invariants the class guarantees for any
+dimension.
 """
 import pytest
 

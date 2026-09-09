@@ -3,10 +3,10 @@
 # Run the test suites LOCALLY and (over)write reports/report.{html,json}.
 #
 # This is a local-only convenience: the end-to-end smoke suite is too heavy for
-# the GitHub Actions runners (see README "Testing"), so its results — and the
-# combined report — are produced on a developer machine, never in CI. The fast
-# unit suite IS covered by CI (the tests badge); it is included here only so the
-# report is a complete local picture.
+# the GitHub Actions runners (see documentation/operations/testing.md), so its
+# results — and the combined report — are produced on a developer machine, never
+# in CI. The fast unit suite IS covered by CI (the tests badge); it is included
+# here only so the report is a complete local picture.
 #
 # The report always overwrites the previous pair at a fixed path, so `reports/`
 # holds exactly one HTML + one JSON. JUnit XML is written to a temp dir and

@@ -2,7 +2,7 @@ name: tests
 
 # Fast unit suite — runs on every push and PR, and drives the README badge.
 # The heavier end-to-end pipeline smoke test is a separate, manual-only workflow
-# (.github/workflows/e2e.yml); see the README "Testing" section for why.
+# (.github/workflows/e2e.yml); see documentation/operations/testing.md for why.
 #
 # Runs against a local SparkSession (no cluster, no RAPIDS), so a stock
 # ubuntu-latest runner (Java 17 + Python 3.12) reproduces a local run exactly.

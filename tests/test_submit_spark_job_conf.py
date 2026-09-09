@@ -130,9 +130,10 @@ def test_map_in_arrow_stays_off_the_gpu(conf):
 def test_executor_requests_a_gpu(conf):
     """The executor asks for a GPU; the cluster's workers must advertise one.
 
-    Documented in the README under 'Cluster prerequisites for GPU runs' -- a worker
-    that does not advertise a GPU can never satisfy this request, and the job waits
-    forever without scheduling a task.
+    Documented under 'Cluster prerequisites for GPU runs' in
+    documentation/operations/running-a-job.md -- a worker that does not advertise
+    a GPU can never satisfy this request, and the job waits forever without
+    scheduling a task.
     """
     assert "spark.executor.resource.gpu.amount" in conf
     assert "spark.executor.resource.gpu.discoveryScript" in conf

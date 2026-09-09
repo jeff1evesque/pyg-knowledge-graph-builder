@@ -18,8 +18,8 @@ run on its own (``-m e2e``). It is HEAVY: the enrichment fans out into ~1,300
 Spark stages regardless of data size, so it does not reliably finish on a stock
 7 GB CI runner. It is therefore NOT run on push/PR — the ``e2e.yml`` workflow is
 manual-only (``workflow_dispatch``), and it's best run locally / on a capable
-machine (see the README "Testing" section). No cluster, no GPU/RAPIDS required —
-identical logic runs on CPU.
+machine (see documentation/operations/testing.md). No cluster, no GPU/RAPIDS
+required — identical logic runs on CPU.
 """
 
 import collections
