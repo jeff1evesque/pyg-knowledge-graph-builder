@@ -1,0 +1,109 @@
+site_name: PyG Knowledge Graph Builder
+site_description: >-
+  GPU-accelerated Apache Spark pipeline for constructing PyTorch Geometric
+  heterogeneous graphs from enriched RDF knowledge graphs
+site_url: https://jeff1evesque.github.io/pyg-knowledge-graph-builder/
+
+repo_url: https://github.com/jeff1evesque/pyg-knowledge-graph-builder
+repo_name: jeff1evesque/pyg-knowledge-graph-builder
+edit_uri: edit/master/documentation/
+
+##
+## MkDocs reads its pages from `docs/` by default. This repository ignores that
+## directory outright -- it is the scratch area for issue drafts, and keeping it
+## untracked is what stops one being swept into a commit -- so the pages live in
+## `documentation/` and MkDocs is pointed at them. `site/` is the build output
+## and is ignored as well.
+##
+docs_dir: documentation
+site_dir: site
+
+##
+## A link that does not resolve fails the build instead of shipping a 404. The
+## README was full of relative paths that only worked from the repository root,
+## and this is what catches the next one.
+##
+strict: true
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+theme:
+  name: material
+  icon:
+    logo: material/graph-outline
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - navigation.footer
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+    - toc.follow
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+
+  ##
+  ## Overview and Key Features are written once, in README.md, and pulled in
+  ## here. Two copies would drift, and the reason for keeping these pages in
+  ## this repository is that they change in the same commit as the code.
+  ##
+  ## `base_path` is the repository root, so `mkdocs build` has to run from
+  ## there. `check_paths` turns a missing include into a build failure rather
+  ## than a silently empty section.
+  ##
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Design:
+      - Node feature vectors: design/node-features.md
+      - Edge feature vectors: design/edge-features.md
+      - PyG construction: design/construction.md
+      - Enrichment: design/enrichment.md
+  - Reference:
+      - Metadata files: reference/outputs.md
+      - Data sources: reference/sources.md
+      - Project layout: reference/layout.md
+  - Operations:
+      - Memory and scaling: operations/memory-and-scaling.md
+      - Running a job: operations/running-a-job.md
+      - Testing: operations/testing.md
+      - Lint: operations/lint.md

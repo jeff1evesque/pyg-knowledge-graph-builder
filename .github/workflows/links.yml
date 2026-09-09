@@ -1,0 +1,47 @@
+name: links
+
+##
+## Checks that the URLs in the documentation still resolve. There are around 60
+## of them now -- badges, the 26 generated blob/master/ links into this
+## repository, the site's own pages, and a handful of upstream projects -- and a
+## dead one is a real defect.
+##
+## It is NOT on push or pull_request, deliberately. This check depends on other
+## people's servers, so it fails for reasons that have nothing to do with the
+## branch under review: an upstream outage would turn an untouched branch red and
+## block a merge that is perfectly fine. That is the same failure lint.yml pins
+## ruff to avoid. On a schedule a red run is information; on a PR it is a
+## roadblock.
+##
+## Scheduled workflows only run on the default branch, so this does nothing until
+## the branch is merged. Use the manual trigger to run it before then.
+##
+## Exclusions live in .lycheeignore.
+##
+
+on:
+  schedule:
+    # Mondays, 11:00 UTC (07:00 ET in summer, 06:00 in winter).
+    - cron: "0 11 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lychee:
+    name: lychee
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # GITHUB_TOKEN is not for permissions here -- most of these URLs point at
+      # github.com, and anonymous requests get rate-limited into false failures.
+      - name: Check links
+        uses: lycheeverse/lychee-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: --no-progress documentation README.md
+          fail: true

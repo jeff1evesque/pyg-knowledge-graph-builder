@@ -217,7 +217,7 @@ def test_generic_is_selectable_but_not_default(spark):
 
 
 @pytest.mark.parametrize("categories,expected_fragment", [
-    (["temporal", "corelation"], "corelation"),      # typo
+    (["temporal", "corelation"], "corelation"),      # typo, codespell:ignore
     (["Temporal"], "Temporal"),                      # wrong case
     (["structural"], "structural"),                  # never a verdict
 ])

@@ -382,10 +382,11 @@ fi
 # and fails on an idle one. Requiring the ordering makes the setting deterministic; to
 # genuinely want a bigger pool, raise both.
 #
-# THE 0.25/0.4 DEFAULT IS A HARDWARE FLOOR, NOT AN UNTUNED VALUE -- see README section 3
-# and conf/spark-rapids.conf.template. On an integrated / unified-memory GPU the "GPU
-# memory" IS the host's RAM, so a large pool starves the OS and the JVM and drives the
-# machine into swap. Do not raise it globally to fix one big run.
+# THE 0.25/0.4 DEFAULT IS A HARDWARE FLOOR, NOT AN UNTUNED VALUE -- see "Cluster
+# prerequisites for GPU runs" in documentation/operations/running-a-job.md and
+# conf/spark-rapids.conf.template. On an integrated / unified-memory GPU the "GPU
+# memory" IS the host's RAM, so a large pool starves the OS and the JVM and drives
+# the machine into swap. Do not raise it globally to fix one big run.
 #
 # It IS too small for a large run, and the symptom is worth recognising: task slots per
 # executor are min(cores/task.cpus, gpu/task.gpu), which at the GPU_PER_TASK default of

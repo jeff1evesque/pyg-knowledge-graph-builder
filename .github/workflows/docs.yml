@@ -1,0 +1,82 @@
+name: docs
+
+##
+## Push is scoped to the default branch. With a bare `push:` beside
+## `pull_request:`, every commit on a branch with an open pull request fires
+## this workflow twice and bills twice for the same answer -- see trivy.yml for
+## the longer note.
+##
+## The two events do different amounts of work here. On `pull_request` the site
+## is only built: that build is the check, because mkdocs.yml sets
+## `strict: true`, so a link that does not resolve or a snippet that has moved
+## fails review instead of shipping a 404. Only a push to master deploys, so a
+## branch can never publish over the live site.
+##
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+##
+## Naming any permission drops every one not named, so `contents: read` is
+## restated alongside the two that Pages needs.
+##
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+##
+## A second push while a deploy is in flight should replace it rather than queue
+## behind it -- but `cancel-in-progress` stays false, because cancelling a
+## deploy half-way leaves the site serving a partial upload.
+##
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Pinned in requirements-docs.txt, for the same reason ruff is pinned in
+      # lint.yml: an unpinned tool can turn an untouched branch red overnight.
+      - name: Install MkDocs
+        run: pip install -r requirements-docs.txt
+
+      # From the repository root, deliberately. mkdocs.yml pulls Overview and
+      # Key Features out of README.md by relative path, so a build started from
+      # anywhere else cannot find them.
+      - name: Build
+        run: mkdocs build
+
+      - name: Upload the site
+        if: github.event_name == 'push'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: deploy
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
+      - name: Publish to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

@@ -7,8 +7,9 @@ the suite HANGS FOREVER with no error -- it does not fail, it just sits there.
 SPARK_CONF_DIR names such a directory on its own, so it does the same thing.
 
 bin/generate_report.sh already unsets SPARK_HOME for the suites it runs, but a
-bare `pytest` never goes through it. The README's cluster smoke section tells
-you to export SPARK_HOME, so the next command typed in that same shell hangs.
+bare `pytest` never goes through it. The cluster smoke section of
+documentation/operations/testing.md tells you to export SPARK_HOME, so the next
+command typed in that same shell hangs.
 
 Both variables are put back on the way out. tests/e2e/test_cluster_submit.py
 submits through bin/submit_spark_job.sh, which needs SPARK_HOME to find

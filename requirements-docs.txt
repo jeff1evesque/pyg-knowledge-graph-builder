@@ -1,0 +1,16 @@
+##
+## Documentation site only. Nothing here is imported by the Spark job or by the
+## test suite -- bin/run_tests.sh does not need it, and neither does an
+## executor. Install it when you want to preview or build the pages:
+##
+##   pip install -r requirements-docs.txt
+##   mkdocs serve
+##
+## Pinned for the same reason ruff is pinned in .github/workflows/lint.yml: an
+## unpinned tool means a new upstream release can turn an untouched branch red
+## overnight. Bump it on purpose, in a commit that is about the bump.
+##
+## This pulls in mkdocs and pymdown-extensions as dependencies; mkdocs.yml uses
+## both directly.
+##
+mkdocs-material==9.7.7

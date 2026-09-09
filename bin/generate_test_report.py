@@ -7,7 +7,7 @@ mode, and writes ``report.json`` and ``report.html`` (same content, two
 formats) into the output directory, OVERWRITING any previous pair.
 
 This is a LOCAL-only tool: the end-to-end smoke suite it summarizes is too
-heavy for the GitHub Actions runners (see the Testing section of README.md), so
+heavy for the GitHub Actions runners (see documentation/operations/testing.md), so
 the report is produced on a developer machine, not in CI. ``bin/generate_report.sh``
 is the usual entry point; this script is the underlying renderer.
 

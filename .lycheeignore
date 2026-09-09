@@ -1,0 +1,11 @@
+# URLs the weekly link check must not follow (.github/workflows/links.yml).
+# One regular expression per line.
+
+# The local preview server, from the mkdocs instructions in README.md.
+^http://127\.0\.0\.1
+
+# Ontology namespace URIs. These are identifiers, not addresses: the vocabulary
+# this project mints is based under a domain it controls so that the terms are
+# attributed correctly, but nothing is served at those paths and nothing is meant
+# to be. A 404 there is the expected answer, not a broken link.
+^https://jefflevesque\.com/ontology/

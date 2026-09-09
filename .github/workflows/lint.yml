@@ -37,3 +37,33 @@ jobs:
       # you with a rule the hook did not apply.
       - name: Lint
         run: ruff check --output-format=github .
+
+  ##
+  ## Spelling, over the whole repository -- code comments and docstrings as much
+  ## as the documentation pages. It sits beside ruff rather than in docs.yml
+  ## because it is a check on the repository, not a step in publishing the site.
+  ##
+  ## It is a separate job so a typo does not hide a ruff failure, or the reverse.
+  ##
+  codespell:
+    name: codespell
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Pinned for the same reason ruff is.
+      - name: Install codespell
+        run: pip install codespell==2.4.3
+
+      # Scope and exclusions live in .codespellrc, so a bare `codespell` run
+      # locally is byte-for-byte this check. Deliberate spellings belong in that
+      # file's ignore list, or -- better, when the misspelling is local and on
+      # purpose -- behind an inline `codespell:ignore` comment on the line.
+      - name: Spell check
+        run: codespell

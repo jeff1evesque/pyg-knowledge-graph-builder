@@ -5,7 +5,7 @@ name: e2e (manual)
 # Spark stages regardless of data size, which is too heavy/slow for a stock
 # runner on every push — so this is MANUAL-ONLY (workflow_dispatch). It may not
 # complete on a 7 GB GitHub-hosted runner; prefer a larger/self-hosted runner,
-# or run it locally (see the README "Testing" section).
+# or run it locally (see documentation/operations/testing.md).
 on:
   workflow_dispatch:
 

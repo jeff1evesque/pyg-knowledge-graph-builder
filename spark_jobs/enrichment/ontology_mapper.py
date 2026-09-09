@@ -1092,11 +1092,11 @@ class OntologyMapper:
 
         ADDITIVE, not a rewrite. The source predicate stays, for two reasons:
         every other enrichment phase only adds triples, and per-source
-        predicates are a deliberate design decision (see the canonical-type
-        note in the README) -- sources agree on what a year *is* without being
-        forced to share measurement semantics. So a folded fact is available
-        both ways: cpi:hasMonth for source-specific signal, unified:hasMonth
-        for the cross-source view.
+        predicates are a deliberate design decision (see the canonical-type note
+        in documentation/design/enrichment.md) -- sources agree on what a year
+        *is* without being forced to share measurement semantics. So a folded
+        fact is available both ways: cpi:hasMonth for source-specific signal,
+        unified:hasMonth for the cross-source view.
 
         Unlike the two equivalence steps, this one is data-driven: only
         predicates actually present produce output, so loading one source does
