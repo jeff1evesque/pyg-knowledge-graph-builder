@@ -8,12 +8,15 @@ Two kinds of artifact live here, and they are not the same kind of thing:
     one -- the descriptor is how the second run learns what the first read
   * the FINAL artifacts -- the .pt, the six metadata JSON files, the node index
     and the job manifest -- written locally and, when an archive bucket is
-    configured, mirrored to S3
+    configured, mirrored to S3. Each driver-side one is digested as it is
+    written and the digests land in checksums.json beside them, so a consumer
+    can check the bytes it fetched before it loads them
 
 Both go through the filesystem helpers rather than plain ``open()``, because
 ``local_work_dir`` may be a bare POSIX path or an ``s3a://`` URI and the job
 must not care which.
 """
+import hashlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -27,8 +30,11 @@ from spark_jobs.pyg_builder.metadata_writer import (
     write_metadata_to_s3,
     write_metadata_to_local,
     write_latest_alias,
+    write_checksums_to_local,
+    write_checksums_to_s3,
     derive_metadata_prefix,
     derive_node_index_prefix,
+    metadata_dir_name,
 )
 
 # The job's logger, not this module's -- see the note in config.py.
@@ -188,7 +194,84 @@ def load_enriched_parquet(
 # ============================================
 # PyG output (driver → S3)
 # ============================================
-def save_pyg_to_s3(s3_client, hetero_data, bucket: str, key: str):
+class _HashingWriter:
+    """A file object that digests every byte on its way to the real one.
+
+    ``torch.save`` takes any object with ``write`` and ``flush``, so the .pt's
+    SHA-256 is computed during the write that already happens: no second read
+    of a file that reaches tens of gigabytes, and no second copy in memory --
+    the serializer hands over one memoryview per tensor storage and both the
+    digest and the file read it in place. What it costs is CPU: SHA-256 runs at
+    2.5 GB/s here against a write at ~2.0 GB/s, so about 0.4s per GB.
+
+    ``write`` and ``flush`` are the whole surface torch uses for a normal save.
+    Nothing else is implemented on purpose: a serializer that started seeking
+    past bytes would get an AttributeError here rather than a digest quietly
+    describing a file it does not match.
+
+    Handing torch a file object rather than a path has a second effect worth
+    knowing. Torch names the zip archive inside the .pt after the destination's
+    basename, so the same graph written as ``hetero_data.pt`` and written
+    through the ``mkstemp`` name the S3 and URI paths stage into came out as
+    different bytes. A file object has no name -- torch calls the archive
+    "archive" every time -- so every destination now gets identical bytes and
+    one digest describes them all.
+    """
+
+    def __init__(self, handle):
+        self._handle = handle
+        self._digest = hashlib.sha256()
+
+    def write(self, chunk):
+        self._digest.update(chunk)
+        return self._handle.write(chunk)
+
+    def flush(self):
+        return self._handle.flush()
+
+    def hexdigest(self) -> str:
+        return self._digest.hexdigest()
+
+
+def _save_hetero_data(hetero_data, path: str) -> Dict[str, Any]:
+    """Serialize to ``path``; return its byte count and SHA-256.
+
+    The size comes from the finished file rather than a counter in the writer,
+    so it is what a verifier will actually stat.
+    """
+    import os
+
+    import torch
+
+    with open(path, "wb") as handle:
+        writer = _HashingWriter(handle)
+        torch.save(hetero_data, writer)
+
+    return {"bytes": os.path.getsize(path), "sha256": writer.hexdigest()}
+
+
+def _artifact_records(
+    pyg_key: str,
+    pt_record: Dict[str, Any],
+    metadata_records: Dict[str, Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """Name each digested artifact relative to the period directory.
+
+    ``pyg/year=2024/month=12/hetero_data.pt`` becomes ``hetero_data.pt``, and
+    each metadata file becomes ``metadata/<name>`` (or the variant's derived
+    directory). The period directory is the unit that gets copied, archived or
+    deleted, so names relative to it keep verifying after a copy.
+    """
+    records = {pyg_key.rsplit("/", 1)[-1]: pt_record}
+    directory = metadata_dir_name(pyg_key)
+    records.update({
+        f"{directory}/{name}": record
+        for name, record in metadata_records.items()
+    })
+    return records
+
+
+def save_pyg_to_s3(s3_client, hetero_data, bucket: str, key: str) -> Dict[str, Any]:
     """
     Save PyTorch Geometric HeteroData to S3.
 
@@ -205,32 +288,47 @@ def save_pyg_to_s3(s3_client, hetero_data, bucket: str, key: str):
         hetero_data: PyG HeteroData object
         bucket: S3 bucket name
         key: S3 key
+
+    Returns:
+        {"bytes", "sha256"} over the object uploaded.
     """
     import os
     import tempfile
 
-    import torch
-
     handle, staged = tempfile.mkstemp(prefix="hetero_data.", suffix=".pt")
     os.close(handle)
     try:
-        torch.save(hetero_data, staged)
-        size_mb = os.path.getsize(staged) / (1024 * 1024)
+        record = _save_hetero_data(hetero_data, staged)
+        size_mb = record["bytes"] / (1024 * 1024)
         s3_client.upload_file(
             Filename=staged,
             Bucket=bucket,
             Key=key,
-            ExtraArgs={"ContentType": "application/octet-stream"},
+            ExtraArgs={
+                "ContentType": "application/octet-stream",
+                # S3 verifies the transfer against this and returns it from
+                # HeadObject, so a consumer can ask what an object is without
+                # downloading 42 GB of it. At this size the upload is
+                # multipart, which makes the stored value a checksum OF the
+                # part checksums with a "-N" suffix -- NOT the file's SHA-256.
+                # The whole-file digest is the one in checksums.json. (It is
+                # the same reason ETag is not a content hash.)
+                "ChecksumAlgorithm": "SHA256",
+            },
         )
     finally:
         os.unlink(staged)
 
     logger.info(
-        f"Saved PyG HeteroData ({size_mb:.2f} MB) to s3://{bucket}/{key}"
+        f"Saved PyG HeteroData ({size_mb:.2f} MB, sha256 {record['sha256']}) "
+        f"to s3://{bucket}/{key}"
     )
+    return record
 
 
-def save_pyg_local(hetero_data, local_path: str, spark: SparkSession = None) -> None:
+def save_pyg_local(
+    hetero_data, local_path: str, spark: SparkSession = None
+) -> Dict[str, Any]:
     """
     Save PyTorch Geometric HeteroData to the job's work dir.
 
@@ -258,11 +356,14 @@ def save_pyg_local(hetero_data, local_path: str, spark: SparkSession = None) -> 
         hetero_data: PyG HeteroData object
         local_path: Destination for the .pt file — bare path or URI
         spark: Active SparkSession; required when local_path is a non-local URI
+
+    Returns:
+        {"bytes", "sha256"} over the file written. Hadoop copies the staged
+        file across byte for byte, so the digest describes the destination in
+        both branches.
     """
     import os
     import tempfile
-
-    import torch
 
     from spark_jobs.utils.fs_utils import (
         is_local_path,
@@ -273,16 +374,19 @@ def save_pyg_local(hetero_data, local_path: str, spark: SparkSession = None) -> 
     if is_local_path(local_path):
         path = local_filesystem_path(local_path)
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        torch.save(hetero_data, path)
-        size_mb = os.path.getsize(path) / (1024 * 1024)
-        logger.info(f"Saved PyG HeteroData ({size_mb:.2f} MB) to {path}")
-        return
+        record = _save_hetero_data(hetero_data, path)
+        size_mb = record["bytes"] / (1024 * 1024)
+        logger.info(
+            f"Saved PyG HeteroData ({size_mb:.2f} MB, "
+            f"sha256 {record['sha256']}) to {path}"
+        )
+        return record
 
     handle, staged = tempfile.mkstemp(prefix="hetero_data.", suffix=".pt")
     os.close(handle)
     try:
-        torch.save(hetero_data, staged)
-        size_mb = os.path.getsize(staged) / (1024 * 1024)
+        record = _save_hetero_data(hetero_data, staged)
+        size_mb = record["bytes"] / (1024 * 1024)
         write_file(staged, local_path, spark=spark)
     finally:
         # write_file consumes the staged file on success; this is the failure path.
@@ -290,8 +394,10 @@ def save_pyg_local(hetero_data, local_path: str, spark: SparkSession = None) -> 
             os.unlink(staged)
 
     logger.info(
-        f"Saved PyG HeteroData ({size_mb:.2f} MB) to {local_path} (via Hadoop FS)"
+        f"Saved PyG HeteroData ({size_mb:.2f} MB, sha256 {record['sha256']}) "
+        f"to {local_path} (via Hadoop FS)"
     )
+    return record
 
 
 # ============================================
@@ -353,7 +459,14 @@ def save_final_artifacts(
     part of the boto3 mirror: it is a distributed Parquet dataset, not a
     single driver-side blob.
 
-    Returns a dict of output locations for the job result/manifest.
+    Every driver-side artifact is digested as it is written, and checksums.json
+    goes in last -- so whoever fetches the .pt can tell it is the file this job
+    wrote before torch.load() unpickles it. The node index is not covered: it
+    is written on executors, so digesting it would mean the driver re-reading
+    every part file.
+
+    Returns a dict of output locations for the job result/manifest, plus the
+    `artifacts` block those digests make up.
     """
     metadata_files = metadata.to_metadata_files()
 
@@ -362,9 +475,11 @@ def save_final_artifacts(
     logger.info("=" * 80)
     logger.info("PHASE: SAVING PyG HETERODATA + METADATA")
     logger.info("=" * 80)
-    save_pyg_local(hetero_data, config.pyg_output_path, spark=spark)
+    pt_record = save_pyg_local(hetero_data, config.pyg_output_path, spark=spark)
     local_metadata_dir = derive_metadata_prefix(config.pyg_output_path)
-    write_metadata_to_local(metadata_files, local_metadata_dir, spark=spark)
+    metadata_records = write_metadata_to_local(
+        metadata_files, local_metadata_dir, spark=spark
+    )
 
     # Overwritten by every build, so the fixed key always resolves to the most
     # recent one. Written unconditionally rather than only when archiving: it
@@ -381,11 +496,23 @@ def save_final_artifacts(
     if node_index_df is not None:
         save_node_index(node_index_df, node_index_dir)
 
+    # Last, so it describes a directory that is already complete.
+    artifacts = _artifact_records(
+        config.pyg_output_path, pt_record, metadata_records
+    )
+    write_checksums_to_local(artifacts, local_metadata_dir, spark=spark)
+
     locations: Dict[str, Any] = {
         "node_index_location": node_index_dir,
         "pyg_location": config.pyg_output_path,
         "metadata_location": local_metadata_dir,
         "latest_metadata_location": latest_metadata_dir,
+        # Also in checksums.json beside the artifacts. Both, deliberately: the
+        # manifest answers "what did run X produce", and checksums.json travels
+        # with the period directory when it is copied somewhere the manifest
+        # is not -- and manifests accumulate one per run, so someone holding a
+        # .pt cannot tell which of them describes it.
+        "artifacts": artifacts,
     }
 
     # --- S3 mirror (optional) ---
@@ -395,12 +522,19 @@ def save_final_artifacts(
         logger.info("PHASE: ARCHIVING FINAL ARTIFACTS TO S3")
         logger.info("=" * 80)
         s3_metadata_prefix = derive_metadata_prefix(config.s3_pyg_key)
-        save_pyg_to_s3(
+        s3_pt_record = save_pyg_to_s3(
             s3_client, hetero_data,
             config.s3_archive_bucket, config.s3_pyg_key,
         )
-        write_metadata_to_s3(
+        s3_metadata_records = write_metadata_to_s3(
             s3_client, metadata_files,
+            config.s3_archive_bucket, s3_metadata_prefix,
+        )
+        write_checksums_to_s3(
+            s3_client,
+            _artifact_records(
+                config.s3_pyg_key, s3_pt_record, s3_metadata_records
+            ),
             config.s3_archive_bucket, s3_metadata_prefix,
         )
         locations["pyg_s3_location"] = (
@@ -503,6 +637,9 @@ def save_job_manifest(
                 Key=rel_key,
                 Body=body,
                 ContentType="application/json",
+                # Single-part at this size, so S3 stores the body's own
+                # SHA-256 and verifies it on receipt.
+                ChecksumAlgorithm="SHA256",
             )
             logger.info(
                 f"Saved job manifest to "
