@@ -8,11 +8,11 @@ Accelerator for Apache Spark) that orchestrates the complete pipeline:
 Storage model (local-first):
   - Interim enriched Parquet is written to a shared local working
     directory only (regenerable; avoids remote-object-store write cost).
-  - Final artifacts (the .pt HeteroData and the six metadata JSON files)
-    are written locally AND, when an S3 archive is configured, mirrored
-    to S3 as a durable, reusable catalog. Each is digested as it is
-    written and checksums.json goes in beside them, so a consumer can
-    check the bytes it fetched before torch.load unpickles them.
+  - Final artifacts (the .pt HeteroData and the seven metadata JSON
+    files) are written locally AND, when an S3 archive is configured,
+    mirrored to S3 as a durable, reusable catalog. Each is digested as it
+    is written and checksums.json goes in last, so a consumer can check
+    the bytes it fetched before torch.load unpickles them.
 
 Source data may be read from local paths or from S3 via the s3a://
 scheme (both supported; local is the default).
