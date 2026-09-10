@@ -10,7 +10,7 @@
   <desc id="archDesc">Turtle from four sources is parsed into one triples
     DataFrame, enriched, and built into a PyTorch Geometric HeteroData graph.
     All three stages run on Spark executors with the RAPIDS Accelerator. The
-    outputs are enriched Parquet, a .pt graph, and six metadata JSON
+    outputs are enriched Parquet, a .pt graph, and seven metadata JSON
     files.</desc>
 
   <style>
@@ -89,7 +89,7 @@
   <text class="sub" x="624" y="162">GNN ready</text>
   <rect class="box" x="612" y="180" width="140" height="42" rx="5"/>
   <text class="lbl" x="624" y="200">Metadata JSON</text>
-  <text class="sub" x="624" y="214">six files per build</text>
+  <text class="sub" x="624" y="214">seven files per build</text>
 </svg>
 </div>
 
@@ -114,7 +114,7 @@ structure never pays for enrichment twice.
 
     ---
 
-    What a build produces: the six metadata files, the integrity record beside
+    What a build produces: the seven metadata files, the integrity record among
     them, the node index, the data sources, and the module map.
 
     [:octicons-arrow-right-24: Metadata files](reference/outputs.md)
@@ -156,7 +156,7 @@ Schema: `(subject: string, predicate: string, object: string)`.
 
 **N-Triples Parsing**: Raw `.nt` files are read as text by `spark.read.text()` and parsed on executors using Spark regex functions (`regexp_extract`). Subject and predicate URIs are extracted from angle brackets, and object values are cleaned (URI angle brackets stripped, literal datatype suffixes and language tags removed). No data passes through the driver during parsing.
 
-Enrichment steps read from this DataFrame, produce new triples DataFrames, and union them back. The enriched DataFrame is saved as **Parquet** for reuse. PyG construction reads the enriched DataFrame, assigns integer node IDs, resolves edges, extracts node and edge features — all on Spark executors. Only compact tensors cross to the driver for final `HeteroData` assembly. After the `.pt` file is saved, six metadata JSON files are written to a `metadata/` subdirectory alongside it.
+Enrichment steps read from this DataFrame, produce new triples DataFrames, and union them back. The enriched DataFrame is saved as **Parquet** for reuse. PyG construction reads the enriched DataFrame, assigns integer node IDs, resolves edges, extracts node and edge features — all on Spark executors. Only compact tensors cross to the driver for final `HeteroData` assembly. After the `.pt` file is saved, seven metadata JSON files are written to a `metadata/` subdirectory alongside it.
 
 ### Why PySpark Instead of rdflib/SPARQL
 

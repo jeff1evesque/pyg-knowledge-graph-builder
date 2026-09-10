@@ -25,7 +25,7 @@ Node feature vectors are **universal 1024-dimensional ontology-aware vectors** t
 
 Edge feature vectors are **selective 32-dimensional derived vectors** that encode per-instance signals for high-value edge types. Only edges with meaningful per-instance variation (temporal sequences, option-stock links, severity escalations) receive features — structural edges like `belongsToSector` and `owl:sameAs` are left featureless. Edge features encode three layers: temporal signals (time delta, period flags, direction), numeric contrast (differences, ratios, magnitudes between endpoints), and relational context (namespace, label similarity, relation identity). The edge vector dimension is configurable via `edge_vector_dim`, and all segment boundaries **scale proportionally** via `EdgeVectorLayout`. Edge features are derived entirely from endpoint node properties already present in the triples — **no enrichment changes are required**.
 
-After each PyG build, the pipeline writes **six metadata JSON files** alongside the `.pt` file. These files capture the complete graph inventory, feature vector structure, normalization statistics, encoding parameters, ontology structure, and dimension-to-meaning mappings needed for downstream GNN training and inference.
+After each PyG build, the pipeline writes **seven metadata JSON files** alongside the `.pt` file. Six capture the complete graph inventory, feature vector structure, normalization statistics, encoding parameters, ontology structure, and dimension-to-meaning mappings needed for downstream GNN training and inference. The seventh records the size and SHA-256 of everything written, so a consumer can tell the bytes it fetched are the bytes the job wrote before it loads them.
 
 The pipeline supports three execution modes:
 
@@ -46,7 +46,7 @@ The pipeline supports three execution modes:
 - **Proportionally Scalable Dimensions**: Overriding `vector_dim` or `edge_vector_dim` automatically rescales all segment and sub-segment boundaries via `VectorLayout` / `EdgeVectorLayout` — no hardcoded dim indices
 - **No Double-Join for Edge Features**: Edge features reuse the cached resolved edges DataFrame from EdgeMapper — the expensive double-join runs exactly once
 - **Driver Memory Safety**: Large node types use chunked collection with explicit memory management to prevent OOM
-- **Six Metadata Files Per Build**: `graph_schema.json`, `feature_spec.json`, `normalization.json`, `encoding_config.json`, `ontology_schema.json`, and `slot_mapping.json` written alongside every `.pt` file (locally, and mirrored to S3 when an archive is configured) — enabling consistent training, inference, and experiment tracking
+- **Seven Metadata Files Per Build**: `graph_schema.json`, `feature_spec.json`, `normalization.json`, `encoding_config.json`, `ontology_schema.json`, `slot_mapping.json`, and `checksums.json` written alongside every `.pt` file (locally, and mirrored to S3 when an archive is configured) — the first six enabling consistent training, inference, and experiment tracking, and the last letting a consumer verify the bytes it fetched before it loads a pickle
 - **Node Index Per Build**: a `node_index/` Parquet dataset mapping every `(node_type, node_id)` back to its source entity URI — the `.pt` holds only feature tensors, so this is what makes the graph joinable to training labels and lets a prediction be attributed to a real entity
 - **Temporal Unification**: Unified temporal entities across all data sources
 - **Intra-Source Linking**: Automatic relationship discovery within data source families
@@ -67,7 +67,7 @@ A single Spark job parses it into one triples DataFrame, enriches that DataFrame
 in place, and builds a PyTorch Geometric `HeteroData` object from the result.
 Parsing, enrichment and feature extraction all run on executors with the RAPIDS
 Accelerator; only compact tensors cross to the driver, where the graph is
-assembled and saved as a `.pt` file with six metadata JSON files beside it.
+assembled and saved as a `.pt` file with seven metadata JSON files beside it.
 
 The job runs in three modes — the full pipeline, enrichment only (which stops at
 the reusable enriched Parquet), and PyG only (which starts from it). The second
@@ -88,7 +88,7 @@ rdflib are in [Architecture](https://jeff1evesque.github.io/pyg-knowledge-graph-
 
 **Reference** — what a build produces
 
-- [Metadata files](https://jeff1evesque.github.io/pyg-knowledge-graph-builder/reference/outputs/) — the six JSON files and `node_index/`
+- [Metadata files](https://jeff1evesque.github.io/pyg-knowledge-graph-builder/reference/outputs/) — the seven JSON files and `node_index/`
 - [Data sources](https://jeff1evesque.github.io/pyg-knowledge-graph-builder/reference/sources/) — what is ingested
 - [Project layout](https://jeff1evesque.github.io/pyg-knowledge-graph-builder/reference/layout/) — the module map
 

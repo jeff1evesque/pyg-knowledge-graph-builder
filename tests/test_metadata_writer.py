@@ -856,8 +856,8 @@ def test_checksums_names_every_artifact_and_sorts_them():
 def test_checksums_is_written_as_its_own_file_not_added_to_the_six(tmp_path):
     """It is an integrity record about bytes, not metadata derived from the graph.
 
-    Keeping it out of to_metadata_files() is also what keeps every "six
-    metadata files" statement in the docs and the cluster tests true.
+    Keeping it out of to_metadata_files() is also what keeps the docs' split
+    true: seven files per build, six of them schema-level and this one last.
     """
     dest = tmp_path / "meta"
     files = _fully_registered_collector().to_metadata_files()

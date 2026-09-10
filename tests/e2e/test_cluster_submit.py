@@ -338,11 +338,13 @@ def test_full_mode_writes_the_pt_to_object_storage(full_submission):
 
 
 @requires_cluster
-def test_full_mode_writes_all_six_metadata_jsons(full_submission):
-    """All six metadata JSONs must reach the object store too.
+def test_full_mode_writes_all_seven_metadata_jsons(full_submission):
+    """All seven metadata JSONs must reach the object store too.
 
-    They are what a downstream trainer reads to interpret the .pt, so a graph
-    that arrives without them is not usable.
+    Six are what a downstream trainer reads to interpret the .pt, so a graph
+    that arrives without them is not usable. The seventh, checksums.json, is
+    what lets a consumer holding only this prefix tell the bytes it fetched are
+    the bytes the job wrote, and it rides a different entry point than the six.
     """
     _, work_dir = full_submission
 
@@ -356,6 +358,7 @@ def test_full_mode_writes_all_six_metadata_jsons(full_submission):
         "encoding_config.json",
         "ontology_schema.json",
         "slot_mapping.json",
+        "checksums.json",
     }
 
     bucket, keys = _s3_keys_under(work_dir)
@@ -430,7 +433,7 @@ def test_full_mode_creates_no_junk_uri_tree_on_the_driver(full_submission):
 # --mode full — the graph itself, not just the bytes
 #
 # Everything above asserts that artifacts ARRIVED: the .pt is present and
-# non-empty, the six JSONs are there, the commit is clean. None of it opens the
+# non-empty, the seven JSONs are there, the commit is clean. None of it opens the
 # .pt. A cluster run that produced a structurally broken graph -- dangling edge
 # indices, float64 features, a NaN column, metadata disagreeing with the tensors
 # -- passes every one of those checks, because the file is the right size in the

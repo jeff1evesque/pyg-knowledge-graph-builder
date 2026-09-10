@@ -1,8 +1,8 @@
 # Metadata Files
 
-Every PyG build produces six JSON metadata files written alongside the `.pt` file (locally, and mirrored to S3 when an archive is configured). These files enable downstream training and inference code to consistently use the `HeteroData` object without re-running the pipeline.
+Every PyG build produces seven JSON metadata files written alongside the `.pt` file (locally, and mirrored to S3 when an archive is configured). Six of them are schema-level: they enable downstream training and inference code to consistently use the `HeteroData` object without re-running the pipeline.
 
-A seventh file, [`checksums.json`](#checksumsjson), is written last and is not one of the six. It records the size and SHA-256 of the `.pt` and of each metadata file, so a consumer can tell the bytes it fetched are the bytes the job wrote — which matters here because the `.pt` is a pickle and loading one is running whatever is inside it.
+The seventh, [`checksums.json`](#checksumsjson), is written last and is not schema-level. It records the size and SHA-256 of the `.pt` and of the other six, so a consumer can tell the bytes it fetched are the bytes the job wrote — which matters here because the `.pt` is a pickle and loading one is running whatever is inside it.
 
 ## Output Location
 
@@ -73,7 +73,7 @@ This is the **stable key**. It is the same layout as a period path with `year=YY
 | variants | a non-default `--pyg_filename` aliases to `<base>/pyg/latest/{stem}_metadata/graph_schema.json`, so variants never collide |
 | scope | **only** `graph_schema.json` — there is no `.pt`, no node index and no `checksums.json` under `latest/` |
 
-Only the schema is aliased because it is the only artifact with an external reader. Copying all six metadata files would advertise `latest/` as a complete build, which it is not.
+Only the schema is aliased because it is the only artifact with an external reader. Copying all seven metadata files would advertise `latest/` as a complete build, which it is not.
 
 One consequence to know about: a consumer pinned to the alias has nothing to verify its copy against. The record beside a build covers that build's period directory, and the alias is a copy of one file out of it. Verify against the period copy, or treat the alias as a pointer to which period to fetch rather than as the artifact itself.
 
@@ -260,7 +260,7 @@ The six JSON files above are all schema-level: together they answer *"what does 
 
 **Contents:** one row per node — `node_type`, `node_id`, `uri`. Sorted by `(node_type, node_id)` and coalesced to a single file so the artifact is content-stable run to run.
 
-**Why Parquet, not a seventh JSON:** production volume is 322.7M triples for a single four-source day, so this can reach millions of rows. A single JSON would be hundreds of MB and would need parsing in full to resolve one entity; Parquet supports predicate pushdown and matches how the rest of the pipeline stores bulk data.
+**Why Parquet, not an eighth JSON:** production volume is 322.7M triples for a single four-source day, so this can reach millions of rows. A single JSON would be hundreds of MB and would need parsing in full to resolve one entity; Parquet supports predicate pushdown and matches how the rest of the pipeline stores bulk data.
 
 **Needed for:**
 - **Training** — labels arrive keyed by entity; without this there is nothing to join them on, so a target tensor aligned to the graph cannot be built
