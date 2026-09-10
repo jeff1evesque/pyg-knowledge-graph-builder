@@ -1,6 +1,6 @@
 # PyG Construction Pipeline
 
-The PyG builder converts the enriched triples DataFrame into a PyTorch Geometric `HeteroData` object through five steps, with all heavy computation on Spark executors. After the `.pt` file is saved, six metadata JSON files are written alongside it (locally, and mirrored to S3 when an archive is configured), and then `checksums.json` recording the size and SHA-256 of everything written:
+The PyG builder converts the enriched triples DataFrame into a PyTorch Geometric `HeteroData` object through five steps, with all heavy computation on Spark executors. After the `.pt` file is saved, seven metadata JSON files are written alongside it (locally, and mirrored to S3 when an archive is configured), the last of them `checksums.json` recording the size and SHA-256 of everything written:
 
 Starting from `triples_df` (enriched, on executors):
 
