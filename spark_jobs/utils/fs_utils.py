@@ -3,7 +3,7 @@ Filesystem access that honors the path's URI scheme.
 
 ``local_work_dir`` may be a bare POSIX path (``/data``) or a URI on shared
 storage (``s3a://bucket/prefix``). Every driver-side artifact — the job
-manifest, the ``.pt`` HeteroData, the six metadata JSONs — is written with
+manifest, the ``.pt`` HeteroData, the seven metadata JSONs — is written with
 plain Python I/O, and plain Python I/O treats ``s3a://bucket/x`` as a *relative
 path*: it creates a junk ``./s3a:/bucket/x`` tree on the driver's local disk and
 reports success. Nothing raises, so the job exits 0 having written its most
