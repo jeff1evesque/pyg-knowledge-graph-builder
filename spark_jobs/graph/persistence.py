@@ -6,11 +6,11 @@ Two kinds of artifact live here, and they are not the same kind of thing:
   * the INTERIM enriched Parquet plus its dataset.json descriptor, which exist
     so that `enrichment_only` and `pyg_only` can be two submissions instead of
     one -- the descriptor is how the second run learns what the first read
-  * the FINAL artifacts -- the .pt, the six metadata JSON files, the node index
-    and the job manifest -- written locally and, when an archive bucket is
-    configured, mirrored to S3. Each driver-side one is digested as it is
-    written and the digests land in checksums.json beside them, so a consumer
-    can check the bytes it fetched before it loads them
+  * the FINAL artifacts -- the .pt, the seven metadata JSON files, the node
+    index and the job manifest -- written locally and, when an archive bucket
+    is configured, mirrored to S3. Each driver-side one is digested as it is
+    written and the digests land in checksums.json, the last of the seven, so
+    a consumer can check the bytes it fetched before it loads them
 
 Both go through the filesystem helpers rather than plain ``open()``, because
 ``local_work_dir`` may be a bare POSIX path or an ``s3a://`` URI and the job
@@ -410,7 +410,7 @@ def save_node_index(node_index_df: DataFrame, output_path: str) -> None:
     graph is anonymous: nothing says which real-world entity each row is, which
     blocks joining training labels and attributing predictions.
 
-    Parquet rather than a seventh JSON: production is 322.7M triples for a
+    Parquet rather than an eighth JSON: production is 322.7M triples for a
     single four-source day, so this can reach millions of rows. A single JSON
     would be hundreds of MB and must be parsed whole to resolve one entity,
     where Parquet supports predicate pushdown and matches how the rest of the
@@ -437,7 +437,7 @@ def save_final_artifacts(
     spark: SparkSession = None,
 ) -> Dict[str, Any]:
     """
-    Persist the final .pt HeteroData, the six metadata JSON files, and the
+    Persist the final .pt HeteroData, the seven metadata JSON files, and the
     node index.
 
     Always writes under config.local_work_dir. When an S3 archive
