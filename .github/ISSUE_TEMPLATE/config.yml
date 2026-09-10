@@ -1,0 +1,8 @@
+##
+## Blank issues stay enabled deliberately. Issues here are often drafted in full
+## elsewhere and pasted in one piece, and a chooser that refuses that is friction
+## with no payoff at this repository's traffic. The templates beside this file
+## are a skeleton to overwrite, not a form to satisfy -- see #401.
+##
+
+blank_issues_enabled: true
