@@ -6,7 +6,7 @@ published table, and the chart below is all one hundred of them — hover a bar
 for the category behind it.
 
 <div>
-<svg viewBox="0 0 780 300" xmlns="http://www.w3.org/2000/svg" role="img"
+<svg viewBox="0 0 780 296" xmlns="http://www.w3.org/2000/svg" role="img"
      aria-labelledby="srcTitle srcDesc"
      style="width:100%;height:auto;display:block;margin:1.2rem auto">
   <title id="srcTitle">Mappers per source</title>
@@ -28,7 +28,9 @@ for the category behind it.
     .tick { font: 600 10px var(--md-text-font-family, system-ui, sans-serif);
             fill: var(--md-default-fg-color--light, #5a5a5a);
             text-anchor: middle; }
-    .band { fill: var(--md-code-bg-color, #f5f5f5); }
+    .frame { fill: transparent; pointer-events: all;
+             stroke: var(--md-default-fg-color--lightest, #d8d8dc);
+             transition: stroke 120ms; }
     .axis { stroke: var(--md-default-fg-color--lightest, #d8d8dc); }
     .bar  { fill: var(--md-primary-fg-color--light, #5d6cc0);
             transition: fill 120ms; }
@@ -41,181 +43,189 @@ for the category behind it.
     .col:hover .bar  { fill: var(--md-accent-fg-color, #526cfe); }
     .col:hover .lead { opacity: .6; }
     .col:hover .tip  { opacity: 1; }
+    .grp:hover .frame { stroke: #3aa76d; }
   </style>
 
   <text class="cap" x="12" y="22">MAPPERS PER SOURCE &#183; 100 TOTAL</text>
 
-  <rect class="band" x="12" y="82" width="560" height="210" rx="8"/>
-  <text class="cap" x="24" y="284">BLS &#183; 10 CATEGORIES &#183; 97 TABLES</text>
-  <text class="cap" x="608" y="284">ONE MAPPER EACH</text>
-  <line class="axis" x1="12" y1="248" x2="768" y2="248"/>
+  <g class="grp">
+    <rect class="frame" x="12" y="44" width="548" height="240" rx="8"/>
+    <line class="axis" x1="26" y1="234" x2="546" y2="234"/>
+    <text class="cap" x="26" y="270">BLS &#183; 10 CATEGORIES &#183; 97 TABLES</text>
 
-  <g class="col">
-    <rect class="hit" x="16" y="80" width="56" height="190"/>
-    <line class="lead" x1="44" y1="74" x2="44" y2="204"/>
-    <rect class="bar" x="32" y="204" width="24" height="44" rx="2"/>
-    <text class="val" x="44" y="198">8</text>
-    <text class="tick" x="44" y="264">CPI</text>
-    <g class="tip">
-      <rect class="tipbox" x="8" y="34" width="264" height="38" rx="4"/>
-      <text class="lbl" x="20" y="51">Consumer Price Index</text>
-      <text class="sub" x="20" y="66">8 tables &#183; 8 mappers</text>
+    <g class="col">
+      <rect class="hit" x="26" y="46" width="52" height="212"/>
+      <line class="lead" x1="52" y1="44" x2="52" y2="186"/>
+      <rect class="bar" x="40" y="186" width="24" height="48" rx="2"/>
+      <text class="val" x="52" y="180">8</text>
+      <text class="tick" x="52" y="250">CPI</text>
+      <g class="tip">
+        <rect class="tipbox" x="12" y="4" width="264" height="38" rx="4"/>
+        <text class="lbl" x="24" y="21">Consumer Price Index</text>
+        <text class="sub" x="24" y="36">8 tables &#183; 8 mappers</text>
+      </g>
+    </g>
+
+    <g class="col">
+      <rect class="hit" x="78" y="46" width="52" height="212"/>
+      <line class="lead" x1="104" y1="44" x2="104" y2="192"/>
+      <rect class="bar" x="92" y="192" width="24" height="42" rx="2"/>
+      <text class="val" x="104" y="186">7</text>
+      <text class="tick" x="104" y="250">PPI</text>
+      <g class="tip">
+        <rect class="tipbox" x="12" y="4" width="264" height="38" rx="4"/>
+        <text class="lbl" x="24" y="21">Producer Price Index</text>
+        <text class="sub" x="24" y="36">7 tables &#183; 7 mappers</text>
+      </g>
+    </g>
+
+    <g class="col">
+      <rect class="hit" x="130" y="46" width="52" height="212"/>
+      <line class="lead" x1="156" y1="44" x2="156" y2="150"/>
+      <rect class="bar" x="144" y="150" width="24" height="84" rx="2"/>
+      <text class="val" x="156" y="144">14</text>
+      <text class="tick" x="156" y="250">ECI</text>
+      <g class="tip">
+        <rect class="tipbox" x="24" y="4" width="264" height="38" rx="4"/>
+        <text class="lbl" x="36" y="21">Employment Cost Index</text>
+        <text class="sub" x="36" y="36">14 tables &#183; 14 mappers</text>
+      </g>
+    </g>
+
+    <g class="col">
+      <rect class="hit" x="182" y="46" width="52" height="212"/>
+      <line class="lead" x1="208" y1="44" x2="208" y2="72"/>
+      <rect class="bar" x="196" y="72" width="24" height="162" rx="2"/>
+      <text class="val" x="208" y="66">27</text>
+      <text class="tick" x="208" y="250">EMPSIT</text>
+      <g class="tip">
+        <rect class="tipbox" x="76" y="4" width="264" height="38" rx="4"/>
+        <text class="lbl" x="88" y="21">Employment Situation</text>
+        <text class="sub" x="88" y="36">27 tables &#183; 27 mappers</text>
+      </g>
+    </g>
+
+    <g class="col">
+      <rect class="hit" x="234" y="46" width="52" height="212"/>
+      <line class="lead" x1="260" y1="44" x2="260" y2="144"/>
+      <rect class="bar" x="248" y="144" width="24" height="90" rx="2"/>
+      <text class="val" x="260" y="138">15</text>
+      <text class="tick" x="260" y="250">JOLTS</text>
+      <g class="tip">
+        <rect class="tipbox" x="128" y="4" width="264" height="38" rx="4"/>
+        <text class="lbl" x="140" y="21">Job Openings and Labor Turnover</text>
+        <text class="sub" x="140" y="36">15 tables &#183; 15 mappers</text>
+      </g>
+    </g>
+
+    <g class="col">
+      <rect class="hit" x="286" y="46" width="52" height="212"/>
+      <line class="lead" x1="312" y1="44" x2="312" y2="216"/>
+      <rect class="bar" x="300" y="216" width="24" height="18" rx="2"/>
+      <text class="val" x="312" y="210">3</text>
+      <text class="tick" x="312" y="250">LAUS</text>
+      <g class="tip">
+        <rect class="tipbox" x="180" y="4" width="264" height="38" rx="4"/>
+        <text class="lbl" x="192" y="21">Local Area Unemployment Statistics</text>
+        <text class="sub" x="192" y="36">3 tables &#183; 3 mappers</text>
+      </g>
+    </g>
+
+    <g class="col">
+      <rect class="hit" x="338" y="46" width="52" height="212"/>
+      <line class="lead" x1="364" y1="44" x2="364" y2="210"/>
+      <rect class="bar" x="352" y="210" width="24" height="24" rx="2"/>
+      <text class="val" x="364" y="204">4</text>
+      <text class="tick" x="364" y="250">METRO</text>
+      <g class="tip">
+        <rect class="tipbox" x="232" y="4" width="264" height="38" rx="4"/>
+        <text class="lbl" x="244" y="21">Metropolitan Area Statistics</text>
+        <text class="sub" x="244" y="36">4 tables &#183; 4 mappers</text>
+      </g>
+    </g>
+
+    <g class="col">
+      <rect class="hit" x="390" y="46" width="52" height="212"/>
+      <line class="lead" x1="416" y1="44" x2="416" y2="222"/>
+      <rect class="bar" x="404" y="222" width="24" height="12" rx="2"/>
+      <text class="val" x="416" y="216">2</text>
+      <text class="tick" x="416" y="250">REALER</text>
+      <g class="tip">
+        <rect class="tipbox" x="284" y="4" width="264" height="38" rx="4"/>
+        <text class="lbl" x="296" y="21">Real Earnings</text>
+        <text class="sub" x="296" y="36">2 tables &#183; 2 mappers</text>
+      </g>
+    </g>
+
+    <g class="col">
+      <rect class="hit" x="442" y="46" width="52" height="212"/>
+      <line class="lead" x1="468" y1="44" x2="468" y2="198"/>
+      <rect class="bar" x="456" y="198" width="24" height="36" rx="2"/>
+      <text class="val" x="468" y="192">6</text>
+      <text class="tick" x="468" y="250">WKYENG</text>
+      <g class="tip">
+        <rect class="tipbox" x="336" y="4" width="264" height="38" rx="4"/>
+        <text class="lbl" x="348" y="21">Weekly Earnings</text>
+        <text class="sub" x="348" y="36">6 tables &#183; 6 mappers</text>
+      </g>
+    </g>
+
+    <g class="col">
+      <rect class="hit" x="494" y="46" width="52" height="212"/>
+      <line class="lead" x1="520" y1="44" x2="520" y2="168"/>
+      <rect class="bar" x="508" y="168" width="24" height="66" rx="2"/>
+      <text class="val" x="520" y="162">11</text>
+      <text class="tick" x="520" y="250">XIMPIM</text>
+      <g class="tip">
+        <rect class="tipbox" x="388" y="4" width="264" height="38" rx="4"/>
+        <text class="lbl" x="400" y="21">Import/Export Price Indexes</text>
+        <text class="sub" x="400" y="36">11 tables &#183; 11 mappers</text>
+      </g>
     </g>
   </g>
 
-  <g class="col">
-    <rect class="hit" x="72" y="80" width="56" height="190"/>
-    <line class="lead" x1="100" y1="74" x2="100" y2="209.5"/>
-    <rect class="bar" x="88" y="209.5" width="24" height="38.5" rx="2"/>
-    <text class="val" x="100" y="203.5">7</text>
-    <text class="tick" x="100" y="264">PPI</text>
-    <g class="tip">
-      <rect class="tipbox" x="8" y="34" width="264" height="38" rx="4"/>
-      <text class="lbl" x="20" y="51">Producer Price Index</text>
-      <text class="sub" x="20" y="66">7 tables &#183; 7 mappers</text>
-    </g>
-  </g>
+  <g class="grp">
+    <rect class="frame" x="584" y="44" width="184" height="240" rx="8"/>
+    <line class="axis" x1="598" y1="234" x2="754" y2="234"/>
+    <text class="cap" x="598" y="270">ONE MAPPER EACH</text>
 
-  <g class="col">
-    <rect class="hit" x="128" y="80" width="56" height="190"/>
-    <line class="lead" x1="156" y1="74" x2="156" y2="171"/>
-    <rect class="bar" x="144" y="171" width="24" height="77" rx="2"/>
-    <text class="val" x="156" y="165">14</text>
-    <text class="tick" x="156" y="264">ECI</text>
-    <g class="tip">
-      <rect class="tipbox" x="24" y="34" width="264" height="38" rx="4"/>
-      <text class="lbl" x="36" y="51">Employment Cost Index</text>
-      <text class="sub" x="36" y="66">14 tables &#183; 14 mappers</text>
+    <g class="col">
+      <rect class="hit" x="598" y="46" width="52" height="212"/>
+      <line class="lead" x1="624" y1="44" x2="624" y2="228"/>
+      <rect class="bar" x="612" y="228" width="24" height="6" rx="2"/>
+      <text class="val" x="624" y="222">1</text>
+      <text class="tick" x="624" y="250">SEC</text>
+      <g class="tip">
+        <rect class="tipbox" x="492" y="4" width="264" height="38" rx="4"/>
+        <text class="lbl" x="504" y="21">Filings &#183; 10-K, 10-Q, 8-K, Forms 3/4/5</text>
+        <text class="sub" x="504" y="36">1 of 8 SEC feeds &#183; 1 mapper</text>
+      </g>
     </g>
-  </g>
 
-  <g class="col">
-    <rect class="hit" x="184" y="80" width="56" height="190"/>
-    <line class="lead" x1="212" y1="74" x2="212" y2="99.5"/>
-    <rect class="bar" x="200" y="99.5" width="24" height="148.5" rx="2"/>
-    <text class="val" x="212" y="93.5">27</text>
-    <text class="tick" x="212" y="264">EMPSIT</text>
-    <g class="tip">
-      <rect class="tipbox" x="80" y="34" width="264" height="38" rx="4"/>
-      <text class="lbl" x="92" y="51">Employment Situation</text>
-      <text class="sub" x="92" y="66">27 tables &#183; 27 mappers</text>
+    <g class="col">
+      <rect class="hit" x="650" y="46" width="52" height="212"/>
+      <line class="lead" x1="676" y1="44" x2="676" y2="228"/>
+      <rect class="bar" x="664" y="228" width="24" height="6" rx="2"/>
+      <text class="val" x="676" y="222">1</text>
+      <text class="tick" x="676" y="250">Market</text>
+      <g class="tip">
+        <rect class="tipbox" x="504" y="4" width="264" height="38" rx="4"/>
+        <text class="lbl" x="516" y="21">Intraday equity and option snapshots</text>
+        <text class="sub" x="516" y="36">1 mapper</text>
+      </g>
     </g>
-  </g>
 
-  <g class="col">
-    <rect class="hit" x="240" y="80" width="56" height="190"/>
-    <line class="lead" x1="268" y1="74" x2="268" y2="165.5"/>
-    <rect class="bar" x="256" y="165.5" width="24" height="82.5" rx="2"/>
-    <text class="val" x="268" y="159.5">15</text>
-    <text class="tick" x="268" y="264">JOLTS</text>
-    <g class="tip">
-      <rect class="tipbox" x="136" y="34" width="264" height="38" rx="4"/>
-      <text class="lbl" x="148" y="51">Job Openings and Labor Turnover</text>
-      <text class="sub" x="148" y="66">15 tables &#183; 15 mappers</text>
-    </g>
-  </g>
-
-  <g class="col">
-    <rect class="hit" x="296" y="80" width="56" height="190"/>
-    <line class="lead" x1="324" y1="74" x2="324" y2="231.5"/>
-    <rect class="bar" x="312" y="231.5" width="24" height="16.5" rx="2"/>
-    <text class="val" x="324" y="225.5">3</text>
-    <text class="tick" x="324" y="264">LAUS</text>
-    <g class="tip">
-      <rect class="tipbox" x="192" y="34" width="264" height="38" rx="4"/>
-      <text class="lbl" x="204" y="51">Local Area Unemployment Statistics</text>
-      <text class="sub" x="204" y="66">3 tables &#183; 3 mappers</text>
-    </g>
-  </g>
-
-  <g class="col">
-    <rect class="hit" x="352" y="80" width="56" height="190"/>
-    <line class="lead" x1="380" y1="74" x2="380" y2="226"/>
-    <rect class="bar" x="368" y="226" width="24" height="22" rx="2"/>
-    <text class="val" x="380" y="220">4</text>
-    <text class="tick" x="380" y="264">METRO</text>
-    <g class="tip">
-      <rect class="tipbox" x="248" y="34" width="264" height="38" rx="4"/>
-      <text class="lbl" x="260" y="51">Metropolitan Area Statistics</text>
-      <text class="sub" x="260" y="66">4 tables &#183; 4 mappers</text>
-    </g>
-  </g>
-
-  <g class="col">
-    <rect class="hit" x="408" y="80" width="56" height="190"/>
-    <line class="lead" x1="436" y1="74" x2="436" y2="237"/>
-    <rect class="bar" x="424" y="237" width="24" height="11" rx="2"/>
-    <text class="val" x="436" y="231">2</text>
-    <text class="tick" x="436" y="264">REALER</text>
-    <g class="tip">
-      <rect class="tipbox" x="304" y="34" width="264" height="38" rx="4"/>
-      <text class="lbl" x="316" y="51">Real Earnings</text>
-      <text class="sub" x="316" y="66">2 tables &#183; 2 mappers</text>
-    </g>
-  </g>
-
-  <g class="col">
-    <rect class="hit" x="464" y="80" width="56" height="190"/>
-    <line class="lead" x1="492" y1="74" x2="492" y2="215"/>
-    <rect class="bar" x="480" y="215" width="24" height="33" rx="2"/>
-    <text class="val" x="492" y="209">6</text>
-    <text class="tick" x="492" y="264">WKYENG</text>
-    <g class="tip">
-      <rect class="tipbox" x="360" y="34" width="264" height="38" rx="4"/>
-      <text class="lbl" x="372" y="51">Weekly Earnings</text>
-      <text class="sub" x="372" y="66">6 tables &#183; 6 mappers</text>
-    </g>
-  </g>
-
-  <g class="col">
-    <rect class="hit" x="520" y="80" width="56" height="190"/>
-    <line class="lead" x1="548" y1="74" x2="548" y2="187.5"/>
-    <rect class="bar" x="536" y="187.5" width="24" height="60.5" rx="2"/>
-    <text class="val" x="548" y="181.5">11</text>
-    <text class="tick" x="548" y="264">XIMPIM</text>
-    <g class="tip">
-      <rect class="tipbox" x="416" y="34" width="264" height="38" rx="4"/>
-      <text class="lbl" x="428" y="51">Import/Export Price Indexes</text>
-      <text class="sub" x="428" y="66">11 tables &#183; 11 mappers</text>
-    </g>
-  </g>
-
-  <g class="col">
-    <rect class="hit" x="596" y="80" width="56" height="190"/>
-    <line class="lead" x1="624" y1="74" x2="624" y2="242.5"/>
-    <rect class="bar" x="612" y="242.5" width="24" height="5.5" rx="2"/>
-    <text class="val" x="624" y="236.5">1</text>
-    <text class="tick" x="624" y="264">SEC</text>
-    <g class="tip">
-      <rect class="tipbox" x="492" y="34" width="264" height="38" rx="4"/>
-      <text class="lbl" x="504" y="51">Filings &#183; 10-K, 10-Q, 8-K, Forms 3/4/5</text>
-      <text class="sub" x="504" y="66">1 of 8 SEC feeds &#183; 1 mapper</text>
-    </g>
-  </g>
-
-  <g class="col">
-    <rect class="hit" x="652" y="80" width="56" height="190"/>
-    <line class="lead" x1="680" y1="74" x2="680" y2="242.5"/>
-    <rect class="bar" x="668" y="242.5" width="24" height="5.5" rx="2"/>
-    <text class="val" x="680" y="236.5">1</text>
-    <text class="tick" x="680" y="264">Market</text>
-    <g class="tip">
-      <rect class="tipbox" x="508" y="34" width="264" height="38" rx="4"/>
-      <text class="lbl" x="520" y="51">Intraday equity and option snapshots</text>
-      <text class="sub" x="520" y="66">1 mapper</text>
-    </g>
-  </g>
-
-  <g class="col">
-    <rect class="hit" x="708" y="80" width="56" height="190"/>
-    <line class="lead" x1="736" y1="74" x2="736" y2="242.5"/>
-    <rect class="bar" x="724" y="242.5" width="24" height="5.5" rx="2"/>
-    <text class="val" x="736" y="236.5">1</text>
-    <text class="tick" x="736" y="264">NOAA</text>
-    <g class="tip">
-      <rect class="tipbox" x="508" y="34" width="264" height="38" rx="4"/>
-      <text class="lbl" x="520" y="51">US weather alerts, CAP format</text>
-      <text class="sub" x="520" y="66">1 mapper</text>
+    <g class="col">
+      <rect class="hit" x="702" y="46" width="52" height="212"/>
+      <line class="lead" x1="728" y1="44" x2="728" y2="228"/>
+      <rect class="bar" x="716" y="228" width="24" height="6" rx="2"/>
+      <text class="val" x="728" y="222">1</text>
+      <text class="tick" x="728" y="250">NOAA</text>
+      <g class="tip">
+        <rect class="tipbox" x="504" y="4" width="264" height="38" rx="4"/>
+        <text class="lbl" x="516" y="21">US weather alerts, CAP format</text>
+        <text class="sub" x="516" y="36">1 mapper</text>
+      </g>
     </g>
   </g>
 </svg>
