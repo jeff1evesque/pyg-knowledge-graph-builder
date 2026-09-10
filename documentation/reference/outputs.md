@@ -2,6 +2,8 @@
 
 Every PyG build produces six JSON metadata files written alongside the `.pt` file (locally, and mirrored to S3 when an archive is configured). These files enable downstream training and inference code to consistently use the `HeteroData` object without re-running the pipeline.
 
+A seventh file, [`checksums.json`](#checksumsjson), is written last and is not one of the six. It records the size and SHA-256 of the `.pt` and of each metadata file, so a consumer can tell the bytes it fetched are the bytes the job wrote — which matters here because the `.pt` is a pickle and loading one is running whatever is inside it.
+
 ## Output Location
 
 Written under `--local_work_dir` (and mirrored under the S3 archive bucket/key when `--s3_archive_bucket` is set).
@@ -17,7 +19,8 @@ The period is written as Hive-style partition directories (`year=2024/month=12`)
 │   ├── normalization.json
 │   ├── encoding_config.json
 │   ├── ontology_schema.json
-│   └── slot_mapping.json
+│   ├── slot_mapping.json
+│   └── checksums.json
 └── node_index/
     └── part-*.parquet
 ```
@@ -68,9 +71,11 @@ This is the **stable key**. It is the same layout as a period path with `year=YY
 | content | byte-identical to that build's period-partitioned copy |
 | freshness | overwritten by every build; always the most recent |
 | variants | a non-default `--pyg_filename` aliases to `<base>/pyg/latest/{stem}_metadata/graph_schema.json`, so variants never collide |
-| scope | **only** `graph_schema.json` — there is no `.pt` and no node index under `latest/` |
+| scope | **only** `graph_schema.json` — there is no `.pt`, no node index and no `checksums.json` under `latest/` |
 
 Only the schema is aliased because it is the only artifact with an external reader. Copying all six metadata files would advertise `latest/` as a complete build, which it is not.
+
+One consequence to know about: a consumer pinned to the alias has nothing to verify its copy against. The record beside a build covers that build's period directory, and the alias is a copy of one file out of it. Verify against the period copy, or treat the alias as a pointer to which period to fetch rather than as the artifact itself.
 
 `--s3_archive_bucket` mirrors the period copy using the same relative shape — `s3_pyg_key` defaults to `pyg/{period_partition}/{pyg_filename}` — so the archive and work-dir layouts already agree segment for segment. The alias is written to the work dir only; making it reachable to an external consumer (public-read, CORS, CDN) is a hosting concern outside this repository.
 
@@ -266,6 +271,50 @@ The six JSON files above are all schema-level: together they answer *"what does 
 
 **Changes between builds:** Every build — it is per-period by nature.
 
+### `checksums.json`
+
+What a build wrote, how big each file was, and its SHA-256. Written last, into the same metadata directory, so a period directory can be checked against itself:
+
+```json
+{
+  "algorithm": "sha256",
+  "written": "2026-09-09T23:14:02Z",
+  "artifacts": {
+    "hetero_data.pt":             {"bytes": 45566402048, "sha256": "…"},
+    "metadata/graph_schema.json": {"bytes": 184320,      "sha256": "…"}
+  }
+}
+```
+
+**Why it exists:** nothing else a build produced could be checked after the fact. A truncated upload, a half-copied period directory and a deliberately swapped file all read as a valid build. The last case is not a hypothetical inconvenience — `hetero_data.pt` is a pickle and every reader loads it with `torch.load(..., weights_only=False)`, so a replaced artifact runs whatever code is in it on whoever trains against the graph. Checking the digest first is what makes that risk manageable.
+
+**Paths are relative to the period directory**, not to the metadata directory the file sits in and not absolute. The period directory is the unit that gets copied, archived or deleted, so relative names keep resolving after a copy. A variant build (`--pyg_filename hetero_data_512d.pt`) records `hetero_data_512d.pt` and `hetero_data_512d_metadata/…`, in that variant's own metadata directory — two variants in one period cannot overwrite each other's record.
+
+**What it does not answer:** whether a rebuild would produce these bytes. `torch.save` is not byte-stable across environments and `normalization.json` is documented as non-reproducible byte-for-byte in the last digit of a float. This says *"is this the file the job wrote"*, which is the question a consumer actually has.
+
+**Not covered:** `node_index/part-*.parquet`. Spark writes those from the executors, so digesting them would mean the driver re-reading every part file — real cost on a 322.7M-triple day.
+
+**Verifying a copy:**
+
+```python
+import hashlib, json
+from pathlib import Path
+
+period = Path("pyg/year=2024/month=12")
+record = json.loads((period / "metadata" / "checksums.json").read_text())
+for name, entry in record["artifacts"].items():
+    body = (period / name).read_bytes()
+    assert hashlib.sha256(body).hexdigest() == entry["sha256"], name
+```
+
+**On S3:** the mirror carries its own copy of the record, over its own objects, so an archived period prefix verifies the same way. Every upload also sets `ChecksumAlgorithm="SHA256"`, so S3 checks the transfer on receipt and `HeadObject` returns a digest without downloading the object. For the `.pt` that stored value is a checksum *of the part checksums* with a `-N` suffix, because an upload that size is multipart — the whole-file digest is the one in `checksums.json`. (The same reason ETag is not a content hash.)
+
+**Not tamper evidence.** The same role writes the data and the digests, so this detects corruption, not an adversary who can write to the bucket.
+
+**Generated by:** `write_checksums_to_local()` / `write_checksums_to_s3()` in `metadata_writer.py`, from digests taken during each write by `save_pyg_local()`, `save_pyg_to_s3()` and the metadata writers. The same block is also recorded in the job manifest under `result.artifacts`.
+
+**Changes between builds:** Every build.
+
 ---
 
 ## Consumer Matrix
@@ -279,4 +328,5 @@ The six JSON files above are all schema-level: together they answer *"what does 
 | `encoding_config.json` | No | **Yes** — hash to same slots | **Yes** — compare `checksum.contract_digest` and refuse a mismatch | No | **Yes** — the digest identifies the encoding contract exactly |
 | `ontology_schema.json` | No | **Yes** — encode new nodes with correct hierarchy | No | Occasionally | **Yes** — detect schema drift |
 | `slot_mapping.json` | No | No | No | **Yes** — interpret model attention | No |
+| `checksums.json` | **Yes** — check the `.pt` before `torch.load` unpickles it | No | **Yes** — same check on the artifact being loaded | Occasionally — confirm a copy arrived intact | **Yes** — names the exact bytes a run produced |
 
