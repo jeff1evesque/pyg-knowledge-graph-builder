@@ -14,8 +14,16 @@ code to consistently use the PyG HeteroData object:
 All metadata is collected during PyG construction (Steps 1-5 in
 constructor.py) and written to S3 as a batch after the .pt file is saved.
 
+A seventh file, checksums.json, is written last and is NOT one of the six: it
+records the SHA-256 and byte count of the .pt and of each metadata file, so a
+consumer can tell the bytes it fetched are the bytes the job wrote before it
+loads a pickle. It is an integrity record about bytes rather than schema
+metadata derived from graph content, and it cannot be built until the six are
+serialized — so it has its own writer and stays out of to_metadata_files().
+
 Metadata files are small JSON (<1 MB each) — no driver memory concern.
 """
+import hashlib
 import json
 import logging
 import math
@@ -897,8 +905,6 @@ def _encoding_contract_digest(config: Dict[str, Any]) -> Dict[str, Any]:
     changes it -- which is what makes it usable as a compatibility gate in a
     deployed inference path.
     """
-    import hashlib
-
     payload = {k: v for k, v in config.items() if k != "checksum"}
     canonical = json.dumps(
         _sanitize_config(payload), sort_keys=True, separators=(",", ":")
@@ -931,12 +937,33 @@ def _sanitize_config(config: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def _serialized(content: Dict[str, Any]) -> bytes:
+    """The exact bytes one metadata file is written as.
+
+    One serializer for the work-dir copy, the S3 mirror and the `latest` alias,
+    so a digest taken over this buffer describes all three. Serializing per
+    destination instead would let indentation or key order drift between copies
+    that are meant to be the same object, and the digest would then be true of
+    only whichever one it was taken from.
+    """
+    return json.dumps(content, indent=2, default=str).encode("utf-8")
+
+
+def _integrity_record(body: bytes) -> Dict[str, Any]:
+    """What checksums.json records about one written artifact.
+
+    Size as well as digest: a truncated object is the common failure, and a
+    consumer can rule it out from a listing without reading a byte.
+    """
+    return {"bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
+
+
 def write_metadata_to_s3(
     s3_client,
     metadata_files: Dict[str, Dict[str, Any]],
     bucket: str,
     metadata_prefix: str,
-) -> None:
+) -> Dict[str, Dict[str, Any]]:
     """
     Write all metadata files to S3.
 
@@ -946,34 +973,47 @@ def write_metadata_to_s3(
         bucket: S3 bucket
         metadata_prefix: S3 prefix for metadata directory
             (e.g., "pyg/2024-12/metadata/")
+
+    Returns:
+        Dict[filename -> {"bytes", "sha256"}] over the bytes actually sent.
     """
     # Ensure prefix ends with /
     if not metadata_prefix.endswith("/"):
         metadata_prefix += "/"
 
+    records: Dict[str, Dict[str, Any]] = {}
     for filename, content in metadata_files.items():
         key = f"{metadata_prefix}{filename}"
-        body = json.dumps(content, indent=2, default=str).encode("utf-8")
+        body = _serialized(content)
 
         s3_client.put_object(
             Bucket=bucket,
             Key=key,
             Body=body,
             ContentType="application/json",
+            # S3 verifies the SHA-256 on receipt and rejects a body that does
+            # not match, and HeadObject then returns it -- so a consumer can
+            # ask what an object is without downloading it. put_object is a
+            # single request, so what S3 stores IS the body's SHA-256, unlike
+            # the .pt's multipart upload.
+            ChecksumAlgorithm="SHA256",
         )
 
+        records[filename] = _integrity_record(body)
         size_kb = len(body) / 1024
         logger.info(
             f"  Saved {filename} ({size_kb:.1f} KB) "
             f"to s3://{bucket}/{key}"
         )
 
+    return records
+
 
 def write_metadata_to_local(
     metadata_files: Dict[str, Dict[str, Any]],
     metadata_dir: str,
     spark=None,
-) -> None:
+) -> Dict[str, Dict[str, Any]]:
     """
     Write all metadata files to the job's work dir.
 
@@ -990,17 +1030,91 @@ def write_metadata_to_local(
         metadata_dir: Directory for the metadata JSON files — bare path or URI
             (e.g., "/data/pyg/year=2024/month=12/metadata/")
         spark: Active SparkSession; required when metadata_dir is a non-local URI
+
+    Returns:
+        Dict[filename -> {"bytes", "sha256"}] over the bytes actually written.
     """
     from spark_jobs.utils.fs_utils import join_path, write_bytes
 
+    records: Dict[str, Dict[str, Any]] = {}
     for filename, content in metadata_files.items():
         path = join_path(metadata_dir, filename)
-        body = json.dumps(content, indent=2, default=str).encode("utf-8")
+        body = _serialized(content)
 
         write_bytes(path, body, spark=spark)
 
+        records[filename] = _integrity_record(body)
         size_kb = len(body) / 1024
         logger.info(f"  Saved {filename} ({size_kb:.1f} KB) to {path}")
+
+    return records
+
+
+# ============================================
+# checksums.json — the integrity record
+# ============================================
+CHECKSUMS_FILE = "checksums.json"
+
+
+def build_checksums(artifacts: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """The content of checksums.json for one build.
+
+    Paths are relative to the PERIOD directory, not absolute and not relative
+    to the metadata directory the file sits in. The period directory is the
+    unit that gets copied, archived or deleted, so relative names keep
+    resolving after a copy — an absolute path stops naming anything the moment
+    the build is fetched somewhere else, which is the only time anyone checks.
+
+    Sorted, so two builds of the same artifact set produce the same key order
+    and a diff of two runs shows only what actually changed.
+    """
+    return {
+        "algorithm": "sha256",
+        "written": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "artifacts": {name: artifacts[name] for name in sorted(artifacts)},
+    }
+
+
+def write_checksums_to_local(
+    artifacts: Dict[str, Dict[str, Any]], metadata_dir: str, spark=None
+) -> Dict[str, Any]:
+    """Write checksums.json into the work dir's metadata directory.
+
+    Its own writer rather than a seventh entry in ``to_metadata_files()``: this
+    is an integrity record about bytes, not schema metadata derived from graph
+    content, and it cannot be built until the other six are serialized.
+
+    Deliberately NOT wrapped in a try/except, unlike the job manifest and the
+    dataset descriptor. Those describe a build that is already safely written;
+    this is what makes the build verifiable at all, and a run that quietly
+    reports success having recorded no digests is exactly the state the feature
+    exists to prevent.
+
+    Returns the content written, so the caller can put the same block in the
+    job manifest without rebuilding it.
+    """
+    content = build_checksums(artifacts)
+    write_metadata_to_local({CHECKSUMS_FILE: content}, metadata_dir, spark=spark)
+    return content
+
+
+def write_checksums_to_s3(
+    s3_client,
+    artifacts: Dict[str, Dict[str, Any]],
+    bucket: str,
+    metadata_prefix: str,
+) -> Dict[str, Any]:
+    """Write checksums.json beside the mirrored artifacts in S3.
+
+    The mirror stamps its own record over its own digests rather than copying
+    the work dir's. A consumer holding only the S3 period prefix has to be able
+    to verify it from what is inside it, and ``--s3_pyg_key`` can name the
+    ``.pt`` something other than the work dir does — so the two records are the
+    same facts about two sets of objects, not one document in two places.
+    """
+    content = build_checksums(artifacts)
+    write_metadata_to_s3(s3_client, {CHECKSUMS_FILE: content}, bucket, metadata_prefix)
+    return content
 
 
 # The partition segment standing in for `year=YYYY/month=MM` on the alias copy.
@@ -1072,6 +1186,16 @@ def derive_metadata_prefix(pyg_output_key: str) -> str:
     time period directory.
     """
     return _derive_sibling_prefix(pyg_output_key, "metadata")
+
+
+def metadata_dir_name(pyg_output_key: str) -> str:
+    """The metadata directory's own name, without the period root above it.
+
+    ``metadata`` for a default build, ``<stem>_metadata`` for a variant — the
+    prefix half of every metadata path recorded in checksums.json, which names
+    artifacts relative to the period directory.
+    """
+    return derive_metadata_prefix(pyg_output_key).rstrip("/").rsplit("/", 1)[-1]
 
 
 def derive_node_index_prefix(pyg_output_key: str) -> str:
