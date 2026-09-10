@@ -48,7 +48,7 @@ rewritten and nothing is removed:
     - prov:derivedBy ← how each of the above was arrived at
 
 The result is `triples_df` (enriched), written as Parquet locally, alongside
-the PyG `HeteroData` `.pt` and the six metadata JSON files (local, and
+the PyG `HeteroData` `.pt` and the seven metadata JSON files (local, and
 mirrored to S3 when an archive is configured).
 
 ## Intra-Source Linking
@@ -334,7 +334,7 @@ its own.
 
 ## Benefits for GNN Training
 
-This enriched structure combined with ontology-aware node feature vectors, derived edge feature vectors, and the six metadata files enables GNNs to learn:
+This enriched structure combined with ontology-aware node feature vectors, derived edge feature vectors, and the six schema metadata files enables GNNs to learn:
 - **Temporal Patterns**: How indicators evolve and correlate over time across 100+ sources, with edge features encoding the exact time gap and direction
 - **Cross-Domain Relationships**: How economic, financial, employment, and environmental factors interact, with edge features distinguishing intra-source from cross-source correlations
 - **Sector Dynamics**: How sector-wide shocks propagate across different data types
@@ -346,5 +346,5 @@ This enriched structure combined with ontology-aware node feature vectors, deriv
 - **Cross-Type Reasoning**: Universal node feature width enables shared GNN layers that learn patterns across all 100+ ontologies simultaneously
 - **Edge-Modulated Message Passing**: Edge features allow the GNN to modulate messages based on per-instance signals (time gap, moneyness, severity delta) rather than treating all edges of the same type identically
 - **Severity Escalation Detection**: Edge features on escalation edges encode the severity delta, enabling the GNN to learn escalation patterns in weather alert sequences
-- **Consistent Inference**: The six metadata files ensure that new data is encoded into the same feature space the model was trained on — same normalization stats, same hash seeds, same ontology structure
+- **Consistent Inference**: The six schema metadata files ensure that new data is encoded into the same feature space the model was trained on — same normalization stats, same hash seeds, same ontology structure
 
