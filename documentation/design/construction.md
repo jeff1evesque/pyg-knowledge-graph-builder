@@ -1,6 +1,6 @@
 # PyG Construction Pipeline
 
-The PyG builder converts the enriched triples DataFrame into a PyTorch Geometric `HeteroData` object through five steps, with all heavy computation on Spark executors. After the `.pt` file is saved, six metadata JSON files are written alongside it (locally, and mirrored to S3 when an archive is configured):
+The PyG builder converts the enriched triples DataFrame into a PyTorch Geometric `HeteroData` object through five steps, with all heavy computation on Spark executors. After the `.pt` file is saved, six metadata JSON files are written alongside it (locally, and mirrored to S3 when an archive is configured), and then `checksums.json` recording the size and SHA-256 of everything written:
 
 Starting from `triples_df` (enriched, on executors):
 
@@ -82,10 +82,13 @@ Starting from `triples_df` (enriched, on executors):
     - Release edges_final_df from executor cache
     - Release node_id_df from executor cache
     - Output: HeteroData ready for torch.save() and GNN training
-- **Post-construction: Save outputs (build_graph.py)**
-    - torch.save() → BytesIO → fs_utils.write_bytes() → work dir (.pt file) (local path → open(); s3a:// URI → Hadoop FileSystem)
+- **Post-construction: Save outputs (graph/persistence.py)**
+    - torch.save() → _HashingWriter → work dir (.pt file), digested as it streams (local path → open(); s3a:// URI → staged temp file, moved by the Hadoop FileSystem)
     - MetadataCollector.to_metadata_files() → six JSON dicts
     - write_metadata_to_local() → fs_utils.write_bytes() → six JSON files
         - (same scheme routing; write_metadata_to_s3() adds the boto3
             - mirror when an S3 archive is configured)
+        - each write returns the size and SHA-256 of the buffer it wrote
+    - write_checksums_to_local() → checksums.json, written last, naming every artifact relative to the period directory (write_checksums_to_s3() does the same beside the mirrored objects)
+    - the same digests go into the job manifest under result.artifacts
 

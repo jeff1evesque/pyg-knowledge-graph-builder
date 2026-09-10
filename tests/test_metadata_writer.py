@@ -14,21 +14,28 @@ mis-derived prefix fails loudly here instead of shipping silently.
 
 Pure Python: runs under ``pytest -m "not e2e"`` with no Spark fixture.
 """
+import hashlib
 import json
+from datetime import datetime
 
 import pytest
 
 from spark_jobs.pyg_builder.feature_extractor import VectorLayout
 from spark_jobs.pyg_builder.edge_feature_extractor import EdgeVectorLayout
 from spark_jobs.pyg_builder.metadata_writer import (
+    CHECKSUMS_FILE,
     LATEST_ALIAS_FILES,
     MetadataCollector,
     _round_floats,
     _sanitize_config,
+    build_checksums,
     derive_metadata_prefix,
     derive_node_index_prefix,
+    metadata_dir_name,
+    write_checksums_to_local,
     write_latest_alias,
     write_metadata_to_local,
+    write_metadata_to_s3,
 )
 
 
@@ -765,6 +772,144 @@ def test_latest_alias_prefix_separates_experiment_variants():
 
     assert default == "pyg/latest/metadata/"
     assert variant == "pyg/latest/hetero_data_512d_metadata/"
+
+
+# ======================================================================
+# checksums.json — the integrity record beside the artifacts
+# ======================================================================
+
+class _FakeS3:
+    """Captures put_object bodies so the mirror can be digested like a file."""
+
+    def __init__(self):
+        self.objects = {}
+
+    def put_object(self, Bucket, Key, Body, **kwargs):
+        self.objects[Key] = Body
+
+
+def test_metadata_digest_is_over_the_exact_bytes_written(tmp_path):
+    """Hash the buffer, not the dict.
+
+    Digesting the dict would mean re-serializing to check it, and a
+    re-serialization that drifted — different indent, different key order —
+    would produce a record that is true of nothing on disk.
+    """
+    files = _fully_registered_collector().to_metadata_files()
+    dest = tmp_path / "meta"
+
+    records = write_metadata_to_local(files, str(dest))
+
+    assert set(records) == EXPECTED_FILES
+    for name, record in records.items():
+        body = (dest / name).read_bytes()
+        assert record["bytes"] == len(body)
+        assert record["sha256"] == hashlib.sha256(body).hexdigest()
+
+
+def test_metadata_digest_is_stable_across_repeated_serialization(tmp_path):
+    """The same content must digest the same, or nothing downstream can compare."""
+    files = _fully_registered_collector().to_metadata_files()
+
+    first = write_metadata_to_local(files, str(tmp_path / "one"))
+    second = write_metadata_to_local(files, str(tmp_path / "two"))
+
+    assert first == second
+
+
+def test_the_s3_mirror_digests_to_the_same_value_as_the_local_copy(tmp_path):
+    """One serializer for both, so one digest describes both copies.
+
+    Two json.dumps() call sites would let the mirror and the period copy drift
+    into different bytes for the same content — same JSON, different object.
+    """
+    files = _fully_registered_collector().to_metadata_files()
+    s3 = _FakeS3()
+
+    local = write_metadata_to_local(files, str(tmp_path / "meta"))
+    mirrored = write_metadata_to_s3(s3, files, "bucket", "pyg/2099-01/metadata/")
+
+    assert local == mirrored
+    for name, record in mirrored.items():
+        body = s3.objects[f"pyg/2099-01/metadata/{name}"]
+        assert record["sha256"] == hashlib.sha256(body).hexdigest()
+
+
+def test_checksums_names_every_artifact_and_sorts_them():
+    """Sorted, so a diff of two runs shows what changed rather than key order."""
+    artifacts = {
+        "metadata/graph_schema.json": {"bytes": 12, "sha256": "b"},
+        "hetero_data.pt": {"bytes": 34, "sha256": "a"},
+    }
+
+    content = build_checksums(artifacts)
+
+    assert content["algorithm"] == "sha256"
+    assert list(content["artifacts"]) == [
+        "hetero_data.pt", "metadata/graph_schema.json"
+    ]
+    assert content["artifacts"]["hetero_data.pt"] == {"bytes": 34, "sha256": "a"}
+    # Parseable as a timestamp, not just a string that looks like one.
+    assert datetime.fromisoformat(content["written"].replace("Z", "+00:00"))
+
+
+def test_checksums_is_written_as_its_own_file_not_added_to_the_six(tmp_path):
+    """It is an integrity record about bytes, not metadata derived from the graph.
+
+    Keeping it out of to_metadata_files() is also what keeps every "six
+    metadata files" statement in the docs and the cluster tests true.
+    """
+    dest = tmp_path / "meta"
+    files = _fully_registered_collector().to_metadata_files()
+
+    assert CHECKSUMS_FILE not in files
+
+    write_metadata_to_local(files, str(dest))
+    write_checksums_to_local({"hetero_data.pt": {"bytes": 1, "sha256": "x"}}, str(dest))
+
+    assert {p.name for p in dest.iterdir()} == EXPECTED_FILES | {CHECKSUMS_FILE}
+
+
+def test_checksums_writer_returns_what_it_wrote(tmp_path):
+    """The caller puts the same block in the job manifest without rebuilding it."""
+    dest = tmp_path / "meta"
+    artifacts = {"hetero_data.pt": {"bytes": 7, "sha256": "abc"}}
+
+    returned = write_checksums_to_local(artifacts, str(dest))
+
+    assert json.loads((dest / CHECKSUMS_FILE).read_text()) == returned
+
+
+def test_checksums_writer_refuses_a_uri_without_spark(tmp_path, monkeypatch):
+    """It inherits the scheme-aware write, so it fails loudly.
+
+    A record silently written to a junk ./s3a:/... tree on the driver is worse
+    than none: the build reports success and the artifacts it describes have
+    nothing beside them to check.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValueError):
+        write_checksums_to_local(
+            {"hetero_data.pt": {"bytes": 1, "sha256": "x"}},
+            "s3a://bucket/pyg/year=2099/metadata/",
+        )
+
+    assert not (tmp_path / "s3a:").exists()
+
+
+@pytest.mark.parametrize("key,expected", [
+    ("pyg/year=2024/month=12/hetero_data.pt", "metadata"),
+    ("pyg/year=2024/month=12/hetero_data_512d.pt", "hetero_data_512d_metadata"),
+    ("hetero_data.pt", "metadata"),
+])
+def test_metadata_dir_name_is_the_prefix_paths_are_recorded_under(key, expected):
+    """checksums.json names artifacts relative to the PERIOD root, not itself.
+
+    So the metadata half of each path is the directory's own name, which is
+    derived per variant — two variants in one period cannot collide.
+    """
+    assert metadata_dir_name(key) == expected
 
 
 # ======================================================================

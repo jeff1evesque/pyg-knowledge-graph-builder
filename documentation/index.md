@@ -114,8 +114,8 @@ structure never pays for enrichment twice.
 
     ---
 
-    What a build produces: the six metadata files, the node index, the data
-    sources, and the module map.
+    What a build produces: the six metadata files, the integrity record beside
+    them, the node index, the data sources, and the module map.
 
     [:octicons-arrow-right-24: Metadata files](reference/outputs.md)
 

@@ -178,6 +178,9 @@ def _assert_valid_graph_and_metadata(config, work_dir):
         "latest alias differs from the period copy it should mirror"
     )
 
+    # --- the build is verifiable from files inside its own period directory ---
+    _assert_checksums_verify(config)
+
     # --- owl:sameAs only ever links temporal entities to temporal entities ---
     # cross_source_linker used to match subjects with "(January|...)$" -- anchored
     # only at the end -- so any URI merely ENDING with a month name was asserted
@@ -281,6 +284,51 @@ def _assert_valid_graph_and_metadata(config, work_dir):
 
     # --- a chain of N transactions is N-1 edges, not "some precedes present" ---
     _assert_transaction_chains_are_complete(config)
+
+
+def _assert_checksums_verify(config):
+    """checksums.json must describe the artifacts actually written beside it.
+
+    Asserted over a real pipeline run rather than only in unit tests because
+    the digests are taken in three separate writers and assembled in a fourth;
+    a path that stopped being covered — or a name recorded relative to the
+    wrong root — leaves every unit test passing and the shipped record wrong.
+
+    Verified the way a consumer would: read the record, re-hash what it names,
+    resolve each path against the period directory. That is the property the
+    file exists for — a downloaded period directory checks out using only files
+    inside it, before anything unpickles the .pt.
+    """
+    import hashlib
+
+    from spark_jobs.pyg_builder.metadata_writer import CHECKSUMS_FILE
+
+    metadata_dir = Path(derive_metadata_prefix(config.pyg_output_path))
+    record = metadata_dir / CHECKSUMS_FILE
+    assert record.is_file(), f"no integrity record written at {record}"
+
+    checksums = json.loads(record.read_bytes())
+    assert checksums["algorithm"] == "sha256"
+
+    period = Path(config.pyg_output_path).parent
+    named = set(checksums["artifacts"])
+    expected = {Path(config.pyg_output_path).name} | {
+        f"{metadata_dir.name}/{name}" for name in METADATA_FILES
+    }
+    assert named == expected, (
+        f"checksums.json covers {sorted(named)}; expected {sorted(expected)}"
+    )
+
+    for relative, entry in checksums["artifacts"].items():
+        target = period / relative
+        assert target.is_file(), (
+            f"checksums.json names {relative}, which is not in {period}"
+        )
+        body = target.read_bytes()
+        assert len(body) == entry["bytes"], f"{relative} is not the recorded size"
+        assert hashlib.sha256(body).hexdigest() == entry["sha256"], (
+            f"{relative} does not match its recorded digest"
+        )
 
 
 # --------------------------------------------------------------------------- #

@@ -106,8 +106,9 @@ numpy circular references that CPython's reference counting alone may not free.
 
 **Post-construction: save the outputs**
 
-- `torch.save()` writes the local `.pt` and, when archiving, a `BytesIO` buffer streamed to S3 via `upload_fileobj`. Peak is the `HeteroData` plus that buffer, the same size again; the buffer is freed after the upload.
-- `MetadataCollector.to_metadata_files()` produces six JSON dicts, under 1 MB in total. `write_metadata_to_local()` writes the six files locally, and `write_metadata_to_s3()` adds six `put_object` calls when archiving. `MetadataCollector` holds only small Python dicts throughout.
+- `torch.save()` writes the local `.pt` through a file handle, and when archiving serializes a second copy into a temp file that boto3's multipart upload streams from disk. Peak memory is the `HeteroData` itself either way — neither path ever holds the serialized graph in memory; the archiving path costs disk equal to one `.pt` while the upload runs.
+- Both writes go through `_HashingWriter`, which digests each chunk on its way to the file. No second pass over the `.pt` and no extra memory: the serializer hands over a memoryview per tensor storage and both the digest and the file read it in place. It costs CPU — SHA-256 measured at 2.5 GB/s here, so about 0.4s per GB serialized, against a write that runs at ~2.0 GB/s.
+- `MetadataCollector.to_metadata_files()` produces six JSON dicts, under 1 MB in total. `write_metadata_to_local()` writes the six files locally, and `write_metadata_to_s3()` adds six `put_object` calls when archiving. Each returns the size and SHA-256 of the exact bytes it wrote, and `checksums.json` goes in last from those. `MetadataCollector` holds only small Python dicts throughout.
 
 **Chunked collection for large node types**: When a node type has more than 500K nodes (configurable via `chunk_node_threshold`), the sparse `(node_id, dim, value)` entries are collected in chunks by node_id range. Each chunk's Pandas DataFrame is scattered into the pre-allocated dense array and immediately freed. This bounds peak Pandas memory to ~120 MB per chunk regardless of total type size.
 
@@ -150,9 +151,9 @@ numpy circular references that CPython's reference counting alone may not free.
 | Edge feature collection | Driver | Per-type sparse entries → dense [N, edge_vector_dim] float32, chunked for large types |
 | HeteroData assembly | Driver | Only compact tensors, no strings |
 | Metadata collection | Driver | Small aggregated DataFrames only (<5000 rows per collect), <1 MB total |
-| Metadata serialization | Driver | `json.dumps()` on small Python dicts; six local writes (+ `put_object` calls when archiving) |
+| Metadata serialization | Driver | `json.dumps()` on small Python dicts; six local writes (+ `put_object` calls when archiving), each digested from the buffer it writes |
 | Enriched Parquet write | Spark executors | `repartition` + `write.parquet` — executors write directly to the shared local dir |
-| PyG .pt write | Driver | `torch.save` to a `BytesIO` buffer, then written by scheme — direct local I/O for a POSIX `--local_work_dir`, Hadoop FileSystem for an `s3a://` one (+ `upload_fileobj` streaming to S3 when archiving) |
+| PyG .pt write | Driver | `torch.save` through a file handle, hashed as it streams — written by scheme: direct local I/O for a POSIX `--local_work_dir`, staged to a temp file and moved by the Hadoop FileSystem for an `s3a://` one (+ a second serialization that boto3 uploads from disk when archiving). Peak memory is the `HeteroData`, never the serialized copy |
 
 **Universal node feature width**: HeteroData stores node feature tensors of the same `vector_dim` for every node type. The ontology-aware encoding keeps vectors informative even for types with few literal properties — the ontology structure and property schema segments still carry meaningful signal.
 

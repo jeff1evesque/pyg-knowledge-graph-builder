@@ -40,6 +40,7 @@ def _config(work_dir: str, mode: str = "enrichment_only") -> SimpleNamespace:
         pyg_output_path=(
             f"{work_dir}/pyg/year=2099/month=01/hetero_data.pt"
         ),
+        latest_pyg_path=f"{work_dir}/pyg/latest/hetero_data.pt",
         s3_archive_bucket="",
         s3_pyg_key="",
         enable_ontology_mapping=False,
@@ -128,3 +129,46 @@ def test_manifest_does_not_claim_an_ontology_flag_the_mode_never_used(
     assert payload["config"]["enable_ontology_mapping"] is None, (
         f"{mode} manifest states an enrichment flag it never honored"
     )
+
+
+def test_manifest_carries_the_digests_of_what_the_run_produced(spark, tmp_path):
+    """The manifest answers what a run produced, which needs the digests.
+
+    They live in two places on purpose. checksums.json travels with the
+    period directory, which is what a consumer holds; the manifest is the
+    per-run record, and it is the right home for input digests too. This pins
+    the second half — that the block reaches the manifest, and that the two
+    agree — since save_final_artifacts is the only thing that puts it there.
+    """
+    import torch
+    from torch_geometric.data import HeteroData
+
+    from spark_jobs.graph.persistence import save_final_artifacts
+    from spark_jobs.pyg_builder.metadata_writer import (
+        CHECKSUMS_FILE, derive_metadata_prefix,
+    )
+
+    work = tmp_path / "produced"
+    config = _config(str(work), mode="pyg_only")
+
+    class _Metadata:
+        def to_metadata_files(self):
+            return {"graph_schema.json": {"version": "1.2"}}
+
+    data = HeteroData()
+    data["thing"].x = torch.zeros(2, 3)
+    result = {"mode": "pyg_only", **save_final_artifacts(config, None, data, _Metadata())}
+
+    save_job_manifest(spark, None, config, result, 12.5)
+
+    payload = json.loads(open(_find_manifest(work), "rb").read())
+    recorded = json.loads(
+        open(
+            os.path.join(
+                derive_metadata_prefix(config.pyg_output_path), CHECKSUMS_FILE
+            )
+        ).read()
+    )
+
+    assert payload["result"]["artifacts"] == recorded["artifacts"]
+    assert "hetero_data.pt" in payload["result"]["artifacts"]
