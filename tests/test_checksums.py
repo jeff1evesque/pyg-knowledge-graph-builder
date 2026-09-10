@@ -275,6 +275,42 @@ def test_a_tampered_pt_fails_the_check(tmp_path):
     assert swapped["sha256"] == _sha256(period / "hetero_data.pt")
 
 
+def test_a_uri_work_dir_gets_the_same_record_through_hadoop(
+    spark, tmp_path, monkeypatch
+):
+    """The cluster's configuration, where the work dir is an object-store URI.
+
+    Every driver-side artifact then goes through the Hadoop FileSystem instead
+    of open(), and a writer that forgets that routing writes a junk ``./file:``
+    tree on the driver's local disk and logs success — the defect fs_utils
+    exists to prevent, reintroduced one file at a time. The negative test in
+    test_metadata_writer.py proves the record REFUSES a URI with no session;
+    this proves it reaches one when it has it.
+
+    ``file://`` takes the same non-local branch as ``s3a://`` and resolves
+    somewhere readable, so the digests can be checked against real files.
+    """
+    monkeypatch.chdir(tmp_path)
+    work = tmp_path / "cluster"
+    config = _config(f"file://{work}")
+
+    locations = save_final_artifacts(
+        config, None, _hetero(), _Metadata(), spark=spark
+    )
+
+    assert not (tmp_path / "file:").exists(), "wrote to a literal ./file: dir"
+
+    period = work / "pyg" / "year=2099" / "month=01"
+    verified = _verify(period)
+    assert set(verified) == {"hetero_data.pt"} | {
+        f"metadata/{name}" for name in METADATA_FILES
+    }
+    assert all(verified.values()), f"digest mismatch: {verified}"
+    assert locations["artifacts"] == json.loads(
+        (period / "metadata" / CHECKSUMS_FILE).read_text()
+    )["artifacts"]
+
+
 def test_checksums_are_written_into_the_variant_directory(tmp_path):
     """Two experiment variants in one period must not overwrite each other.
 
