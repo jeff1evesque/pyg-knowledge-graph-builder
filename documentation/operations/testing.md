@@ -279,6 +279,41 @@ rather than failing. Watch the edge counts as well as the loop total — a loop
 count that falls to zero because the edge count collapsed means a dedupe took
 rows it should have kept.
 
+## Publishing a finished run
+
+A finished run is published by copying it, after the run, to a prefix that takes
+writes and listings but not reads or deletes.
+[`bin/publish_run.py`](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/blob/master/bin/publish_run.py)
+does the copy. Without `--upload` it only builds the upload tree and shows what
+would be sent:
+
+```bash
+export PYG_PUBLISH_ROOT=s3://BUCKET/PREFIX   # required
+export PYG_PUBLISH_DATASET=all-sources       # when the job ran without --dataset
+bin/publish_run.py <run-dir>                 # dry run
+bin/publish_run.py <run-dir> --upload
+```
+
+It reads the run directory the way the recorder does, and refuses a run whose
+`run.done` is not `0` or whose `outcome.txt` does not say every submission
+succeeded. Before anything is sent, every `.pt` and metadata file is checked
+against the size and SHA-256 in its `checksums.json`. The files go up with
+`aws s3 sync --size-only`. The destination's listing is then compared with the
+upload tree, name by name and size by size, and `index.json` is written last.
+
+A run folder without `index.json` is a publish that did not finish. Running the
+same command again resumes it, because files already there at the right size are
+skipped. Nothing can be deleted from the prefix, which is why a dry run is the
+default.
+
+`PYG_PUBLISH_DATA_DAY` names the day the sources were cut from. It is needed only
+when the day-level source paths in the manifests name more than one day. The exit
+code goes to `<run-dir>/publish.done` and the output to `<run-dir>/publish.log`:
+`0` published, `1` the upload or its check failed, `2` refused before anything
+was written. The layout it writes is under
+[Published Runs](../reference/outputs.md#published-runs), and
+`tests/test_publish_run.py` runs it against a stub `aws` CLI.
+
 ## Test tiers
 
 Test depth is calibrated to risk rather than applied uniformly — deeper coverage only where the logic is genuinely subtle, to keep maintenance debt proportional to value.
