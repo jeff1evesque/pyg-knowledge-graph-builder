@@ -14,6 +14,7 @@ pyg-knowledge-graph-builder/
 │   ├── generate_sec_e2e_fixtures.py        # rebuild the SEC e2e fixtures from the archive
 │   ├── generate_test_report.py             # the report renderer (reads pytest JUnit XML)
 │   ├── package_venv.sh                     # package the venv so executors can run our Python
+│   ├── publish_run.py                      # copy a finished run to the published prefix
 │   ├── record_run_outcome.sh               # summarise a finished (or abandoned) run
 │   ├── run_e2e_tests.sh                    # the e2e smoke suite, local SparkSession (CPU/GPU)
 │   ├── run_tests.sh                        # the fast suite, parallel (sibling of run_e2e_tests.sh)
