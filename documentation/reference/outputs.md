@@ -81,6 +81,56 @@ One consequence to know about: a consumer pinned to the alias has nothing to ver
 
 > **Edge case:** `--time_period latest` is a legal non-monthly label that renders to this same directory. The collision is benign — that period copy already *is* the newest build — and the alias write is skipped on the equality rather than duplicating it.
 
+## Published Runs
+
+A finished run can be copied to a separate prefix for consumers by [`bin/publish_run.py`](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/blob/master/bin/publish_run.py), after the run ends. [Publishing a finished run](../operations/testing.md#publishing-a-finished-run) covers running it. The job never writes this layout itself. One run is one folder, holding every variant the run built:
+
+```
+<prefix>/<dataset>/year=YYYY/month=MM/<run_id>/
+├── index.json
+├── 1024d/
+│   ├── hetero_data_1024d.pt
+│   ├── graph_schema.json
+│   ├── ...
+│   ├── checksums.json
+│   └── node_index/
+│       └── part-*.parquet
+├── no_edge_features/
+│   └── ...
+├── enriched/
+│   ├── dataset.json
+│   └── triples/
+│       └── part-*.parquet
+└── manifests/
+    └── *.json
+```
+
+It is the work directory with four changes:
+
+1. the period moves above the run id and is dropped below it, so `enriched/year=YYYY/month=MM/triples/` becomes `enriched/triples/`
+2. `hetero_data_<v>_metadata/*.json` becomes `<v>/*.json`
+3. `hetero_data_<v>_node_index/` becomes `<v>/node_index/`
+4. `hetero_data_<v>.pt` keeps its name, inside `<v>/`
+
+`<dataset>` names the source set, from the job's `--dataset` or, when the job had none, `PYG_PUBLISH_DATASET`. `<run_id>` is the time the run started, in UTC. Left out: `pyg/latest/`, which means nothing inside a folder for one run, `checkpoints/`, and Hadoop's `.crc` files.
+
+Unlike `--s3_archive_bucket`, which mirrors one build's `.pt`, metadata and manifest from inside the job in the work-directory shape, this copies a whole finished run: every variant, the node index, the enriched Parquet and the manifests.
+
+**`index.json`** is written last, so a run folder without one is a publish that did not finish. It records `run_id`, `dataset`, `time_period`, `data_day` (the day the sources were cut from, which `month=` cannot show), `sources`, `source_of_run` (the run directory's name), `published`, each variant's folder and `notebook_label` (the notebook's name for the leg that built it), and the files each variant folder holds.
+
+**`checksums.json` keeps the work directory's names.** Its paths are relative to the period directory, so inside a published variant folder `hetero_data_<v>_metadata/<name>` is `<v>/<name>`. Every entry resolves by its last path segment:
+
+```python
+import hashlib, json
+from pathlib import Path
+
+variant = Path("1024d")
+record = json.loads((variant / "checksums.json").read_text())
+for name, entry in record["artifacts"].items():
+    body = (variant / name.rsplit("/", 1)[-1]).read_bytes()
+    assert hashlib.sha256(body).hexdigest() == entry["sha256"], name
+```
+
 ## File Descriptions
 
 ### `graph_schema.json`
