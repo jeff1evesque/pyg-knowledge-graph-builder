@@ -148,6 +148,7 @@ def run_enrichment(
     enable_ontology_mapping: bool = True,
     market_sector_definitions_bucket: str = "",
     market_sector_definitions_key: str = "",
+    source_data_day: str = "",
     class_mappings: Dict[str, Any] = None,
 ) -> tuple:
     """
@@ -182,6 +183,7 @@ def run_enrichment(
         triples_df,
         sector_definitions_bucket=market_sector_definitions_bucket,
         sector_definitions_key=market_sector_definitions_key,
+        source_data_day=source_data_day,
     )
     stats = pipeline.run(
         enable_ontology_mapping=enable_ontology_mapping,
@@ -360,6 +362,7 @@ def execute_full_pipeline(
         config.enable_ontology_mapping,
         market_sector_definitions_bucket=config.market_sector_definitions_bucket,
         market_sector_definitions_key=config.market_sector_definitions_key,
+        source_data_day=config.source_data_day,
         class_mappings=config.class_mappings,
     )
 
@@ -440,6 +443,7 @@ def execute_enrichment_only(
         config.enable_ontology_mapping,
         market_sector_definitions_bucket=config.market_sector_definitions_bucket,
         market_sector_definitions_key=config.market_sector_definitions_key,
+        source_data_day=config.source_data_day,
         class_mappings=config.class_mappings,
     )
 
