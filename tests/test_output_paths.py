@@ -10,7 +10,11 @@ Pure Python: runs under ``pytest -m "not e2e"`` with no Spark fixture.
 """
 import pytest
 
-from spark_jobs.graph.config import JobConfig, period_partition
+from spark_jobs.graph.config import (
+    JobConfig,
+    period_partition,
+    source_data_day,
+)
 
 
 # ======================================================================
@@ -217,3 +221,57 @@ def test_enriched_input_path_is_used_verbatim():
     )
     assert c.enriched_input_path == "/somewhere/flat/triples"
     assert "year=" not in c.enriched_input_path
+
+
+# ======================================================================
+# source_data_day — the day the sources are partitioned under
+# ======================================================================
+#
+# Reference data that describes a point in time has to describe the day the
+# run is processing, not the day the run happens to execute. time_period is
+# monthly by construction, so the day is only recoverable from the paths.
+
+def test_source_data_day_reads_the_partition_triple():
+    assert source_data_day(
+        ["s3a://b/p/year=2026/month=09/day=12/"]
+    ) == "2026-09-12"
+
+
+def test_source_data_day_is_empty_without_a_day_partition():
+    """Every example in running-a-job.md is a month directory. Those resolve
+    to the undated export rather than to a guessed day."""
+    assert source_data_day(["s3a://b/raw/source=sec/feed=filings/2024-12/"]) == ""
+    assert source_data_day(["s3a://b/p/year=2026/month=09/"]) == ""
+    assert source_data_day([]) == ""
+
+
+def test_source_data_day_agrees_across_several_sources():
+    assert source_data_day([
+        "s3a://b/sec/year=2026/month=09/day=12/",
+        "s3a://b/noaa/year=2026/month=09/day=12/",
+    ]) == "2026-09-12"
+
+
+def test_disagreeing_days_yield_no_day_rather_than_an_arbitrary_one():
+    """Picking either would align reference data to one source and silently
+    misalign it for the other. Empty falls back to the undated export, which
+    is wrong for neither."""
+    assert source_data_day([
+        "s3a://b/sec/year=2026/month=09/day=12/",
+        "s3a://b/market/year=2026/month=09/day=11/",
+    ]) == ""
+
+
+def test_an_unpadded_partition_still_yields_a_padded_day():
+    """Padding is upstream's convention, not a guarantee. An unpadded
+    ``month=9`` must not become the key ``month=9/5.csv``."""
+    assert source_data_day(
+        ["s3a://b/p/year=2026/month=9/day=5/"]
+    ) == "2026-09-05"
+
+
+def test_source_data_day_is_exposed_on_the_config():
+    c = _config(source_paths="s3a://b/p/year=2026/month=09/day=12/")
+    assert c.source_data_day == "2026-09-12"
+
+    assert _config().source_data_day == ""
