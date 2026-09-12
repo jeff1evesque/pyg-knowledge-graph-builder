@@ -69,7 +69,7 @@ Everything above runs against a local `SparkSession`. That leaves one path untes
 
 [`tests/e2e/test_cluster_submit.py`](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/blob/master/tests/e2e/test_cluster_submit.py) (marker: `cluster`) submits the real job through [`bin/submit_spark_job.sh`](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/blob/master/bin/submit_spark_job.sh) and asserts it completes, writes its artifacts to shared storage, **produces a structurally valid graph**, and **actually placed operators on the GPU**. The submission is bounded by a timeout, because an unschedulable GPU request hangs rather than failing. It is **skipped unless `SPARK_MASTER_URL` and `CLUSTER_SMOKE_OUTPUT_PATH` are set**, so CI and contributors without a cluster are unaffected.
 
-It submits **two** jobs. `--mode enrichment_only` is the fast leg — the quick signal on launcher, submit, and IAM wiring. `--mode full` additionally runs PyG construction, which is the only place the **driver-side artifact writers** meet real object storage. That distinction is not academic: `save_pyg_local()` and `write_metadata_to_local()` both used `os.makedirs` + plain `open()`, and plain Python I/O treats `s3a://bucket/key` as a *relative path* — it creates a junk `./s3a:/bucket/key` tree under the driver's working directory, logs `Saved ... to s3a://...`, and exits 0. The graph and its metadata never reach the object store, and nothing raises. Because the cluster leg only ever ran `enrichment_only`, neither writer was ever invoked with a non-local URI and the defect survived undetected (it is the same defect `#197` fixed for the job manifest). All three writers now share one scheme-aware implementation, [`spark_jobs/utils/fs_utils.py`](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/blob/master/spark_jobs/utils/fs_utils.py) — **any new driver-side write must go through `write_bytes()`**, which routes local paths to direct I/O, URIs through the Hadoop FileSystem API, and *raises* rather than silently localizing a URI it cannot reach.
+It submits **two** jobs. `--mode enrichment_only` is the fast leg — the quick signal on launcher, submit, and IAM wiring. `--mode full` additionally runs PyG construction, which is the only place the **driver-side artifact writers** meet real object storage. That distinction is not academic: `save_pyg_local()` and `write_metadata_to_local()` both used `os.makedirs` + plain `open()`, and plain Python I/O treats `s3a://bucket/key` as a *relative path* — it creates a junk `./s3a:/bucket/key` tree under the driver's working directory, logs `Saved ... to s3a://...`, and exits 0. The graph and its metadata never reach the object store, and nothing raises. Because the cluster leg only ever ran `enrichment_only`, neither writer was ever invoked with a non-local URI and the defect survived undetected (it is the same defect [#197](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/issues/197) fixed for the job manifest). All three writers now share one scheme-aware implementation, [`spark_jobs/utils/fs_utils.py`](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/blob/master/spark_jobs/utils/fs_utils.py) — **any new driver-side write must go through `write_bytes()`**, which routes local paths to direct I/O, URIs through the Hadoop FileSystem API, and *raises* rather than silently localizing a URI it cannot reach.
 
 The `full` leg then **downloads its own artifacts back out of object storage and validates them**, using the very same `_assert_valid_graph_and_metadata` helper the local e2e suite uses — edge indices in range, tensor dtypes, finiteness, metadata/tensor agreement, node_index coverage, temporal structure, edge origins. Without this the cluster leg only ever asserted that *bytes arrived*: a run that produced a structurally broken graph passed every check, because the file was the right size in the right place. The helper is imported rather than reimplemented, so the cluster's graph is held to exactly the standard the local one is and the two cannot drift apart. The S3 tree is mirrored into a temp dir with its relative layout intact and handed a real `JobConfig`, so path derivation is the pipeline's own code rather than a second copy of it. Cost is ~2.5s of download and validation against a ~3-minute submission.
 
@@ -132,7 +132,8 @@ Everything it does is a read — HTTP GETs plus a few local files, and one `ssh`
 when the stuck task is on another node — so it never touches the job. It re-resolves the application between legs, so one invocation
 covers a whole notebook run, and it costs well under 100 KB of log per run.
 
-This is how #380 was diagnosed: the dumps showed the executor's reader thread in
+This is how [#380](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/issues/380)
+was diagnosed: the dumps showed the executor's reader thread in
 `BasePythonUDFRunner.read` and its writer thread in `PythonRDD.write`, both
 blocked on the same Python worker, with the worker itself burning no CPU — a
 deadlock, not a slow parse. See `turtle_batches_to_arrow` in
@@ -187,7 +188,9 @@ The two captures show this with *different* Python runners — one
 `GpuArrowPythonRunner`, one `BasePythonUDFRunner` — which is why "keep mapInArrow
 off the GPU" swapped the runner and the stall followed it. The runner was never
 the cause. The shared consumer was, and that consumer existed only because the
-parse frame was `.cache()`d: #380 converted five other frames and this file's
+parse frame was `.cache()`d:
+[#380](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/issues/380)
+converted five other frames and this file's
 *enriched* frame to `DISK_ONLY`, and left the parse frame behind. It is
 `DISK_ONLY` now — `doPutIterator` branches on `level.useMemory`, so the unroll
 never runs.
