@@ -220,6 +220,153 @@ def test_no_csv_means_no_map_rather_than_a_guessed_one():
     assert market.get_sector_patterns() is market.DEFAULT_MARKET_SECTOR_PATTERNS
 
 
+# ======================================================================
+# Which constituents CSV a run reads
+# ======================================================================
+#
+# A constituents list is a point-in-time membership: tickers join and leave the
+# index, so a run rebuilding an older day must read that day's export rather
+# than the current one.
+
+def test_the_days_own_export_is_preferred_to_the_undated_one():
+    assert market.constituents_keys("ref/tickers", "2026-09-12") == [
+        "ref/tickers/year=2026/month=09/12.csv",
+        "ref/tickers/latest.csv",
+    ]
+
+
+def test_without_a_data_day_only_the_undated_export_is_a_candidate():
+    assert market.constituents_keys("ref/tickers") == ["ref/tickers/latest.csv"]
+
+
+@pytest.mark.parametrize("data_day", [
+    "2026-9-12",     # unpadded
+    "26-09-12",      # two-digit year
+    "2026-09",       # a month, not a day
+    "latest",
+    "",
+])
+def test_a_day_that_is_not_a_date_does_not_become_a_key(data_day):
+    """Rendering an unparseable label into the path would request an object
+    that cannot exist, and the miss would read as 'no export for that day'."""
+    assert market.constituents_keys("ref/tickers", data_day) == [
+        "ref/tickers/latest.csv"
+    ]
+
+
+@pytest.mark.parametrize("prefix", ["ref/tickers", "ref/tickers/", "/ref/tickers/"])
+def test_the_prefix_is_normalised_rather_than_doubled(prefix):
+    assert market.constituents_keys(prefix) == ["ref/tickers/latest.csv"]
+
+
+def test_no_prefix_means_no_candidates():
+    assert market.constituents_keys("") == []
+    assert market.constituents_keys("   ") == []
+
+
+_FULL_HEADER = "Symbol,Security,GICS Sector,GICS Sub-Industry,CIK"
+
+
+def _keyed_csv(bodies, header=_FULL_HEADER):
+    """A stub S3 client serving only the keys in ``bodies``.
+
+    Records every key requested, in order, so a test can assert what was NOT
+    fetched as well as what was. A value may be a list of rows (rendered under
+    ``header``) or a complete CSV string.
+    """
+    from botocore.exceptions import ClientError
+
+    class _Client:
+        requested = []
+
+        @classmethod
+        def get_object(cls, Bucket, Key):
+            cls.requested.append(Key)
+            if Key not in bodies:
+                raise ClientError(
+                    {"Error": {"Code": "NoSuchKey", "Message": "missing"}},
+                    "GetObject",
+                )
+            content = bodies[Key]
+            if not isinstance(content, str):
+                content = "\n".join([header, *content])
+
+            class _Body:
+                @staticmethod
+                def read():
+                    return content.encode("utf-8")
+
+            return {"Body": _Body}
+
+    return _Client
+
+
+def test_the_days_export_is_used_and_the_undated_one_is_never_fetched():
+    client = _keyed_csv({
+        "ref/year=2026/month=09/12.csv": [
+            "AAPL,Apple Inc.,Information Technology,Technology Hardware,320193",
+        ],
+        "ref/latest.csv": [
+            "MSFT,Microsoft,Information Technology,Application Software,789019",
+        ],
+    })
+
+    assert market.load_ticker_cik_map_from_s3(
+        "b", "ref", client, data_day="2026-09-12"
+    ) == {"AAPL": "0000320193"}
+    assert client.requested == ["ref/year=2026/month=09/12.csv"]
+
+
+def test_a_missing_day_falls_back_to_the_undated_export():
+    client = _keyed_csv({
+        "ref/latest.csv": [
+            "MSFT,Microsoft,Information Technology,Application Software,789019",
+        ],
+    })
+
+    assert market.load_ticker_cik_map_from_s3(
+        "b", "ref", client, data_day="2026-09-12"
+    ) == {"MSFT": "0000789019"}
+    assert client.requested == [
+        "ref/year=2026/month=09/12.csv",
+        "ref/latest.csv",
+    ]
+
+
+def test_neither_export_present_is_an_absence_not_a_guess():
+    client = _keyed_csv({})
+
+    assert market.load_ticker_cik_map_from_s3(
+        "b", "ref", client, data_day="2026-09-12"
+    ) is None
+    assert market.get_ticker_cik_map(
+        "b", "ref", client, data_day="2026-09-12"
+    ) == {}
+
+
+@pytest.mark.parametrize("broken", [
+    "Symbol,Security,GICS Sector\nAAPL,Apple Inc.,Information Technology",
+    "",
+])
+def test_a_broken_days_export_is_reported_rather_than_routed_around(broken):
+    """The fallback is for a day that has not been published, not for one that
+    has been published wrong. Silently reading a different day's membership
+    because that day's file is malformed hides the defect and produces a graph
+    nobody can account for — so only a MISSING object is retried elsewhere.
+    """
+    client = _keyed_csv({
+        "ref/year=2026/month=09/12.csv": broken,
+        "ref/latest.csv": [
+            "MSFT,Microsoft,Information Technology,Application Software,789019",
+        ],
+    })
+
+    assert market.load_ticker_cik_map_from_s3(
+        "b", "ref", client, data_day="2026-09-12"
+    ) is None
+    assert client.requested == ["ref/year=2026/month=09/12.csv"]
+
+
 def test_market_option_strategy_patterns_well_formed():
     assert market.MARKET_OPTION_STRATEGY_PATTERNS
     for key, entry in market.MARKET_OPTION_STRATEGY_PATTERNS.items():
