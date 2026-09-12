@@ -65,10 +65,29 @@ When config is empty, sensible defaults are inferred from the data.
 | `--parquet_partitions` | No | `200` | Number of Parquet output partitions |
 | `--source_format` | No | `ntriples` | Source RDF format: `ntriples` (one triple per line in `.nt` files) or `turtle_parquet` (self-contained Turtle blobs in a Parquet column). Applies to modes `full` and `enrichment_only` only — `pyg_only` always reads enriched Parquet written by this pipeline |
 | `--turtle_column` | No | *(auto)* | Column name containing Turtle strings when `--source_format=turtle_parquet`. Ignored for `ntriples` format. Left unset, the column is resolved **per source** against `TURTLE_COLUMN_CANDIDATES` (`triples`, then `rdf_turtle`), so one run can span sources whose schemas disagree; set it to force a single name everywhere |
-| `--market_sector_definitions_bucket` | No | `""` | S3 bucket holding the S&P 500 constituents CSV. **Set this for real runs** — three cross-source links are empty or degraded without it; see the note under Cross-Source Linking |
-| `--market_sector_definitions_key` | No | `""` | S3 key for the S&P 500 constituents CSV. Supplies three things: the ticker to company-ID map that keys the company bridge, the GICS sector classification, and the sub-industry peer links. Without it the first and third are empty and sector classification falls back to a small built-in list |
+| `--market_sector_definitions_bucket` | No | `""` | S3 bucket holding the S&P 500 constituents CSVs. **Set this for real runs** — three cross-source links are empty or degraded without it; see the note under Cross-Source Linking |
+| `--market_sector_definitions_key` | No | `""` | S3 **prefix** holding those CSVs, not a single object key. Supplies three things: the ticker to company-ID map that keys the company bridge, the GICS sector classification, and the sub-industry peer links. Without it the first and third are empty and sector classification falls back to a small built-in list. Which CSV under the prefix a run reads is [Picking the constituents CSV](#picking-the-constituents-csv) |
 
 Metadata files are always written when mode is `full` or `pyg_only`. Mode `enrichment_only` does not produce metadata files (no PyG graph is built in that mode).
+
+### Picking the constituents CSV
+
+An index membership is a point in time: tickers join and leave, so a run
+rebuilding an older day needs that day's list rather than the current one. The
+run therefore reads, under `--market_sector_definitions_key`:
+
+| | Key |
+|---|---|
+| the day being processed | `<prefix>/year=YYYY/month=MM/DD.csv` |
+| otherwise | `<prefix>/latest.csv` |
+
+The day comes from `--source_paths` — the `year=`/`month=`/`day=` partition
+they are opened under, so the reference data and the data it describes are the
+same day by construction rather than by the caller remembering. Paths that name
+no day, and paths that disagree on one, both read `latest.csv`; so does a day
+whose CSV has not been published. A CSV that is *present but malformed* is not
+routed around — reading a different day's membership because one file is broken
+would hide the defect.
 
 Jobs are launched with `bin/submit_spark_job.sh`, which packages the code
 and submits to the Spark standalone master with the RAPIDS Accelerator
