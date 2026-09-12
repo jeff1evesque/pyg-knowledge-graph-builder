@@ -78,6 +78,43 @@ def period_partition(time_period: str) -> str:
 
 
 # ============================================
+# Source data day
+# ============================================
+_DAY_PARTITION_RE = re.compile(r"year=(\d{4})/month=(\d{1,2})/day=(\d{1,2})")
+
+
+def source_data_day(source_paths: List[str]) -> str:
+    """The ``YYYY-MM-DD`` the source paths are partitioned under, or ``""``.
+
+    Empty when no path carries a ``year=/month=/day=`` triple, and empty when
+    two of them carry different ones: the caller uses this to align reference
+    data with the day being processed, and there is no single day to align to.
+
+    ``time_period`` cannot answer this -- it is monthly by construction (see
+    ``period_partition``), so the day is only ever recoverable from the paths.
+    """
+    days = set()
+    for path in source_paths:
+        match = _DAY_PARTITION_RE.search(path)
+        if match:
+            year, month, day = match.groups()
+            days.add(f"{year}-{month.zfill(2)}-{day.zfill(2)}")
+
+    if not days:
+        return ""
+
+    if len(days) > 1:
+        logger.warning(
+            f"source_paths name {len(days)} different days "
+            f"({', '.join(sorted(days))}); reference data cannot be aligned "
+            f"to one of them"
+        )
+        return ""
+
+    return days.pop()
+
+
+# ============================================
 # Accepted values
 # ============================================
 # parse_only is a diagnostic and not part of any pipeline: it stops at the count
@@ -258,6 +295,11 @@ class JobConfig:
         self.source_paths: List[str] = [
             p.strip() for p in raw_sources.split(",") if p.strip()
         ]
+
+        # The day the sources are partitioned under, for reference data that
+        # has to describe the same day the quotes do. Empty when the paths
+        # name no day, which resolves to the prefix's latest.csv instead.
+        self.source_data_day = source_data_day(self.source_paths)
 
         # Where those sources are actually opened from. See VALID_INPUT_MODES.
         # source_paths keeps naming the object-storage locations either way, so
@@ -585,7 +627,14 @@ def parse_args() -> JobConfig:
     )
     parser.add_argument("--turtle_column", default="")
     parser.add_argument("--market_sector_definitions_bucket", default="")
-    parser.add_argument("--market_sector_definitions_key", default="")
+    parser.add_argument(
+        "--market_sector_definitions_key",
+        default="",
+        help="Prefix holding the constituents CSVs, not a single object key. "
+             "The run reads <prefix>/year=YYYY/month=MM/DD.csv for the day its "
+             "source_paths are partitioned under, and <prefix>/latest.csv when "
+             "that day is absent or the paths name no day",
+    )
 
     parsed = parser.parse_args()
     return JobConfig(vars(parsed))
