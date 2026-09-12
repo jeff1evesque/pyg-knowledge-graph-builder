@@ -333,9 +333,13 @@ _TRADING_SYMBOL_RE = re.compile(r'hasIssuerTradingSymbol\s+"([A-Za-z.\-]{1,6})"'
 
 # Where the index constituents are listed. Same table the pipeline reads for
 # sector and company resolution, and the same one the market fixture generator
-# anchors its peer selection on.
+# anchors its peer selection on. The env var names a PREFIX; a fixture run has
+# no data day to align to, so it takes the undated export -- see
+# constituents_keys in enrichment/intra_source/market/patterns.py, which is not
+# imported here because it carries the Spark stack in with it.
 SECTOR_DEFINITIONS_BUCKET_ENV = "MARKET_SECTOR_DEFINITIONS_BUCKET"
 SECTOR_DEFINITIONS_KEY_ENV = "MARKET_SECTOR_DEFINITIONS_KEY"
+CONSTITUENTS_LATEST_BASENAME = "latest.csv"
 SYMBOL_COLUMN = "Symbol"
 
 
@@ -355,8 +359,8 @@ def index_constituents(s3) -> set[str]:
     import os
 
     bucket = os.environ.get(SECTOR_DEFINITIONS_BUCKET_ENV, "").strip()
-    key = os.environ.get(SECTOR_DEFINITIONS_KEY_ENV, "").strip()
-    if not (bucket and key):
+    prefix = os.environ.get(SECTOR_DEFINITIONS_KEY_ENV, "").strip()
+    if not (bucket and prefix):
         _log(
             f"  no {SECTOR_DEFINITIONS_BUCKET_ENV}/{SECTOR_DEFINITIONS_KEY_ENV} "
             f"— cannot anchor on a tradeable issuer, so the market fixture will "
@@ -364,6 +368,7 @@ def index_constituents(s3) -> set[str]:
         )
         return set()
 
+    key = f"{prefix.strip('/')}/{CONSTITUENTS_LATEST_BASENAME}"
     body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
     rows = csv.DictReader(io.StringIO(body.decode("utf-8")))
     tickers = {
