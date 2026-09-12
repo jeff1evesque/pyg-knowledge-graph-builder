@@ -114,9 +114,14 @@ PEER_EQUITIES = 1
 # Where the sub-industry classification is read from. The same constituents CSV
 # the pipeline itself reads (--market_sector_definitions_bucket / _key), so the
 # fixture is anchored on exactly the table the join will use; a hardcoded pair
-# would drift the first time the index is rebalanced.
+# would drift the first time the index is rebalanced. The env var names a
+# PREFIX; a fixture run has no data day to align to, so it takes the undated
+# export -- see constituents_keys in
+# enrichment/intra_source/market/patterns.py, which is not imported here
+# because it carries the Spark stack in with it.
 SECTOR_DEFINITIONS_BUCKET_ENV = "MARKET_SECTOR_DEFINITIONS_BUCKET"
 SECTOR_DEFINITIONS_KEY_ENV = "MARKET_SECTOR_DEFINITIONS_KEY"
+CONSTITUENTS_LATEST_BASENAME = "latest.csv"
 SUB_INDUSTRY_COLUMN = "GICS Sub-Industry"
 SYMBOL_COLUMN = "Symbol"
 
@@ -185,8 +190,8 @@ def sub_industries(s3) -> dict[str, str]:
     import os
 
     bucket = os.environ.get(SECTOR_DEFINITIONS_BUCKET_ENV, "").strip()
-    key = os.environ.get(SECTOR_DEFINITIONS_KEY_ENV, "").strip()
-    if not (bucket and key):
+    prefix = os.environ.get(SECTOR_DEFINITIONS_KEY_ENV, "").strip()
+    if not (bucket and prefix):
         _log(
             f"  no {SECTOR_DEFINITIONS_BUCKET_ENV}/{SECTOR_DEFINITIONS_KEY_ENV} "
             f"— skipping the peer equity, so the sub-industry link will have "
@@ -194,6 +199,7 @@ def sub_industries(s3) -> dict[str, str]:
         )
         return {}
 
+    key = f"{prefix.strip('/')}/{CONSTITUENTS_LATEST_BASENAME}"
     body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
     rows = csv.DictReader(io.StringIO(body.decode("utf-8")))
     table = {
