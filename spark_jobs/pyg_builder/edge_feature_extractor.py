@@ -89,6 +89,7 @@ from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
+from spark_jobs import sources
 from spark_jobs.settle import settle
 from spark_jobs.pyg_builder.sparse_scatter import scatter_sparse_entries
 # The three segments themselves, plus the shapes of the endpoint property
@@ -138,52 +139,26 @@ _NON_FEATURE_PREDICATES = {
 # ============================================
 # Edge type classification
 # ============================================
-# Relation name fragments that identify temporal edges
-_TEMPORAL_RELATION_FRAGMENTS = (
-    "precedes", "follows", "hasNext", "hasPrevious",
-    "temporallyRelated",
-)
-
-# Relation name fragments that identify option-stock edges
-_OPTION_STOCK_RELATION_FRAGMENTS = (
-    "hasUnderlyingPriceObservation", "hasUnderlying",
-)
-
-# Relation name fragments that identify escalation edges
-_ESCALATION_RELATION_FRAGMENTS = (
-    "escalatesTo", "escalatesFrom", "severityChange",
-)
-
-# Relation name fragments that identify correlation edges
+# Relation name fragments per category: the shared ones, then each registered
+# source's (spark_jobs/sources/), in the order the edge encoding config records
+# them.
 #
 # "Correlation" is a suffix fragment, not a whole relation name: the
 # cross-source linkers emit one relation per sector
 # (bls_enrichment_energySectorCorrelation,
 # bls_enrichment_employmentSizeSectorCorrelation, ...), and matching only
-# the hand-written names below classified all 22 of them "generic" —
-# which no enabled_categories set contains, so every one was silently
-# dropped from featurization.
-_CORRELATION_RELATION_FRAGMENTS = (
-    "correlatesWith", "relatedTo", "Correlation",
-)
-
-# Relation name fragments that identify causal edges
-_CAUSAL_RELATION_FRAGMENTS = (
-    "leadsTo", "impacts", "causes", "affects",
-)
-
-# Relation name fragments that identify option strategy edges
-_STRATEGY_RELATION_FRAGMENTS = (
-    "straddleWith", "spreadWith", "strangleWith",
-)
+# correlatesWith and relatedTo classified all 22 of them "generic" — which no
+# enabled_categories set contains, so every one was silently dropped from
+# featurization.
+_TEMPORAL_RELATION_FRAGMENTS = sources.relation_fragments("temporal")
+_OPTION_STOCK_RELATION_FRAGMENTS = sources.relation_fragments("option_stock")
+_ESCALATION_RELATION_FRAGMENTS = sources.relation_fragments("escalation")
+_CORRELATION_RELATION_FRAGMENTS = sources.relation_fragments("correlation")
+_CAUSAL_RELATION_FRAGMENTS = sources.relation_fragments("causal")
+_STRATEGY_RELATION_FRAGMENTS = sources.relation_fragments("strategy")
 
 # Edge types that should never get features
-_SKIP_RELATION_FRAGMENTS = (
-    "belongsToSector", "sameAs", "hasParent", "hasChild",
-    "equivalentClass", "equivalentProperty", "imports",
-    "refersToCompany", "hasRegion", "affectsRegion",
-    "sameEventType", "affectsSameRegion",
-)
+_SKIP_RELATION_FRAGMENTS = sources.relation_fragments("skip")
 
 # Every category _classify_relation can return. "skip" is a verdict, not a
 # selectable category: structural edges are excluded before enabled_categories
