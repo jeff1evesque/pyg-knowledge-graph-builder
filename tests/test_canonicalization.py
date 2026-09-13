@@ -1,5 +1,7 @@
 """
-Tests for source-shape canonicalization (spark_jobs/utils/canonicalization.py).
+Tests for source-shape canonicalization: SEC's identifier repair
+(spark_jobs/utils/sec_identifiers.py) and the entry point the loader calls
+(spark_jobs/utils/canonicalization.py).
 
 The defect these pin is an identity split, not a dead join: upstream states one
 filer's CIK two ways in the SAME filing -- ``Issuer_0001729997`` with
@@ -16,10 +18,11 @@ from decimal import Decimal
 
 from rdflib import Graph
 
-from spark_jobs.utils.canonicalization import (
+from spark_jobs.sources import market, sec
+from spark_jobs.utils.canonicalization import canonicalize_source_triples
+from spark_jobs.utils.sec_identifiers import (
     CIK_DIGITS,
     canonicalize_sec_identifiers,
-    canonicalize_source_triples,
 )
 from spark_jobs.utils.rdf_utils import SEC_FILINGS, identifier_namespace
 
@@ -317,10 +320,20 @@ def test_dotted_uri_fragment_cannot_mint_a_third_node(spark, make_triples):
     }
 
 
-def test_entry_point_applies_the_sec_rule(spark, make_triples):
-    """canonicalize_source_triples is what the loader calls."""
-    result = _triples(canonicalize_source_triples(make_triples(_SPLIT_ROWS)))
+def test_entry_point_applies_the_sec_rule_to_sec_rows(spark, make_triples):
+    """canonicalize_source_triples is what the loader calls, once per path,
+    with the source that path matched."""
+    result = _triples(
+        canonicalize_source_triples(make_triples(_SPLIT_ROWS), sec.SPEC)
+    )
     assert _UNPADDED not in {s for s, _p, _o in result}
+
+
+def test_entry_point_leaves_a_source_without_a_repair_alone(spark, make_triples):
+    """Only SEC declares a repair. Rows read from another source's paths come
+    back untouched."""
+    rows = make_triples(_SPLIT_ROWS)
+    assert canonicalize_source_triples(rows, market.SPEC) is rows
 
 
 def test_padding_width_is_the_canonical_cik_width():
