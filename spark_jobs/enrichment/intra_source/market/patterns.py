@@ -172,35 +172,55 @@ def assert_ciks_are_padded(ticker_cik_map: Dict[str, str]) -> None:
 # Constituents key layout
 # ============================================
 #
-# The prefix is caller-supplied; only the layout under it is stated here.
+# The location is caller-supplied; only the layout under it is stated here.
 LATEST_BASENAME = "latest.csv"
 
 _DATA_DAY_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 
+# A day's export named in the setting: [<prefix>/]year=YYYY/month=MM/DD.csv
+_DAY_EXPORT_RE = re.compile(r"^(?:(.*)/)?year=\d{4}/month=\d{2}/\d{2}\.csv$")
+
+
+def _under(prefix: str, name: str) -> str:
+    return f"{prefix}/{name}" if prefix else name
+
 
 def constituents_keys(prefix: str, data_day: str = "") -> List[str]:
-    """Keys to try under ``prefix``, in order.
+    """Keys to try, in order: a day's export, then ``latest.csv``.
 
-    The day's own export first -- ``<prefix>/year=YYYY/month=MM/DD.csv`` --
-    then ``<prefix>/latest.csv``. A constituents list is a point-in-time
-    membership, so a run rebuilding an older day must read that day's export
-    rather than today's: tickers join and leave the index, and the current
-    list cannot resolve a symbol that has since been removed.
+    ``prefix`` is the prefix holding the CSVs, or a CSV under it. The first
+    key is a day's export -- the CSV named, or else the one for ``data_day``,
+    ``<prefix>/year=YYYY/month=MM/DD.csv`` -- and ``<prefix>/latest.csv`` is
+    the fallback when it is not there. Naming ``<prefix>/latest.csv`` is the
+    same as naming the prefix. The day's file and ``latest.csv`` sit at
+    different depths, so both are built from the prefix, and a file name is
+    never used as a folder.
 
-    ``latest.csv`` alone when no data day is known, which is also the fallback
-    when the dated object is simply not there yet.
+    A constituents list is a point-in-time membership, so a run rebuilding an
+    older day must read that day's export rather than today's: tickers join
+    and leave the index, and the current list cannot resolve a symbol that has
+    since been removed. ``latest.csv`` alone when no day is known.
     """
     base = prefix.strip().strip("/")
     if not base:
         return []
 
-    keys = []
-    match = _DATA_DAY_RE.match(data_day.strip())
-    if match:
-        year, month, day = match.groups()
-        keys.append(f"{base}/year={year}/month={month}/{day}.csv")
+    first = None
+    if base.lower().endswith(".csv"):
+        folder, _, name = base.rpartition("/")
+        if name != LATEST_BASENAME:
+            first = base
+        day_export = _DAY_EXPORT_RE.match(base)
+        base = (day_export.group(1) or "") if day_export else folder
 
-    keys.append(f"{base}/{LATEST_BASENAME}")
+    if first is None:
+        match = _DATA_DAY_RE.match(data_day.strip())
+        if match:
+            year, month, day = match.groups()
+            first = _under(base, f"year={year}/month={month}/{day}.csv")
+
+    keys = [first] if first else []
+    keys.append(_under(base, LATEST_BASENAME))
     return keys
 
 
@@ -300,8 +320,8 @@ def _read_constituents(
     sector column moved. Every failure path returns None and logs, because
     every caller has a defined behaviour without this file.
 
-    ``prefix`` is a prefix, not an object key; see ``constituents_keys`` for
-    what is tried under it and why.
+    ``prefix`` is the prefix holding the CSVs, or a CSV under it; see
+    ``constituents_keys`` for which keys that means and why.
     """
     if not bucket or not prefix:
         logger.debug(
@@ -311,7 +331,8 @@ def _read_constituents(
 
     client = s3_client or boto3.client("s3")
 
-    for key in constituents_keys(prefix, data_day):
+    keys = constituents_keys(prefix, data_day)
+    for key in keys:
         rows, absent = _fetch_constituents(
             client, bucket, key, required_columns
         )
@@ -320,6 +341,13 @@ def _read_constituents(
         if not absent:
             return None
 
+    # A warning, not info: a location was given and none of its keys exist.
+    if keys:
+        tried = " or ".join(f"s3://{bucket}/{key}" for key in keys)
+        logger.warning(
+            f"No constituents CSV at {tried} — check "
+            f"--market_sector_definitions_key; continuing without it"
+        )
     return None
 
 
