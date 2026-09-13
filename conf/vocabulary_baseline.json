@@ -32,5 +32,9 @@
     "expirationDate",
     "inTheMoney",
     "underlyingSymbol"
+  ],
+  "SEC_FILINGS": [
+    "hasAcceptanceDateTime",
+    "hasIssuerSic"
   ]
 }
