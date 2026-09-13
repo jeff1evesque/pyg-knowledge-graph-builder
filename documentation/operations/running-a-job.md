@@ -52,7 +52,7 @@ When config is empty, sensible defaults are inferred from the data.
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
 | `--mode` | Yes | `full` | `full`, `enrichment_only`, or `pyg_only`. `parse_only` also exists but is a diagnostic, not a pipeline stage: it stops at the count that materialises the parse and writes nothing — see [The parse stall](testing.md#the-parse-stall) |
-| `--source_paths` | Modes 1,2 | — | Comma-separated source path(s)/URI(s): local directories or `s3a://...`. Each is loaded independently and the results are unioned into a single triples DataFrame before enrichment. A path naming the archive's `source=sec` partition must also name `feed=filings`: that is the only SEC feed carrying RDF, and the job rejects the other seven up front rather than failing later on a missing Turtle column |
+| `--source_paths` | Modes 1,2 | — | Comma-separated source path(s)/URI(s): local directories or `s3a://...`. Each is loaded independently and the results are unioned into a single triples DataFrame before enrichment. Every path must belong to exactly one registered source: by a fragment such as `source=bls` or `quotes`, or else by a folder or file named after the source. A path that matches none, or two, is rejected before Spark starts, and the sources the paths name are the ones whose linkers and date links run — see [How a run picks its sources](../reference/sources.md#how-a-run-picks-its-sources). A path naming the archive's `source=sec` partition must also name `feed=filings`: that is the only SEC feed carrying RDF, and the job rejects the other seven up front rather than failing later on a missing Turtle column |
 | `--input_mode` | No | `s3` | Where `--source_paths` are opened from. `s3` reads the `s3a://` URIs directly — correct in the cloud, where executors sit beside the bucket. `local` reads a mirror of those same objects from node-local disk instead; see [Reading sources from local disk](#reading-sources-from-local-disk) |
 | `--local_source_root` | When `--input_mode local` | — | Root of the staged mirror. Must exist at the same path on every worker |
 | `--local_work_dir` | Yes | — | Working directory for the interim enriched Parquet and the final artifacts. Must be reachable by every worker — a shared mount (e.g. NFS) or a URI on shared storage (`s3a://...`); on a multi-node cluster a driver-local path won't do |
@@ -65,8 +65,8 @@ When config is empty, sensible defaults are inferred from the data.
 | `--time_period` | No | Current `YYYY-MM` | Time period label for output paths |
 | `--pyg_config` | No | `{}` | JSON string with PyG construction config |
 | `--parquet_partitions` | No | `200` | Number of Parquet output partitions |
-| `--source_format` | No | `ntriples` | Source RDF format: `ntriples` (one triple per line in `.nt` files) or `turtle_parquet` (self-contained Turtle blobs in a Parquet column). Applies to modes `full` and `enrichment_only` only — `pyg_only` always reads enriched Parquet written by this pipeline |
-| `--turtle_column` | No | *(auto)* | Column name containing Turtle strings when `--source_format=turtle_parquet`. Ignored for `ntriples` format. Left unset, the column is resolved **per source** against `TURTLE_COLUMN_CANDIDATES` (`triples`, then `rdf_turtle`), so one run can span sources whose schemas disagree; set it to force a single name everywhere |
+| `--source_format` | No | `ntriples` | Source RDF format: `ntriples` (one triple per line in `.nt` files) or `turtle_parquet` (self-contained Turtle blobs in a Parquet column). Applies to modes `full` and `enrichment_only` only — `pyg_only` always reads enriched Parquet written by this pipeline. A source whose spec sets its own `source_format` is read in that format instead, so a source that only arrives as N-Triples can share a run with Turtle-in-Parquet sources. The four registered sources set none |
+| `--turtle_column` | No | *(auto)* | Column name containing Turtle strings when `--source_format=turtle_parquet`. Ignored for `ntriples` format. Left unset, the column is resolved **per source path**, against the source's own `turtle_columns` when its spec lists them and `TURTLE_COLUMN_CANDIDATES` (`triples`, then `rdf_turtle`) otherwise, so one run can span sources whose schemas disagree; set it to force a single name everywhere |
 | `--market_sector_definitions_bucket` | No | `""` | S3 bucket holding the S&P 500 constituents CSVs. **Set this for real runs** — three cross-source links are empty or degraded without it; see the note under Cross-Source Linking |
 | `--market_sector_definitions_key` | No | `""` | S3 **prefix** holding those CSVs, or that prefix's `latest.csv` — both work the same. Supplies three things: the ticker to company-ID map that keys the company bridge, the GICS sector classification, and the sub-industry peer links. Without it the first and third are empty and sector classification falls back to a small built-in list. Which CSV a run reads is [Picking the constituents CSV](#picking-the-constituents-csv) |
 
@@ -116,7 +116,7 @@ launcher header for all environment variables.
 SPARK_MASTER_URL=spark://<host>:7077 \
   bin/submit_spark_job.sh \
     --mode full \
-    --source_paths /data/rdf/monthly/2024-12/ \
+    --source_paths /data/rdf/source=bls/2024-12/ \
     --local_work_dir /data \
     --s3_archive_bucket my-archive \
     --s3_pyg_key pyg/year=2024/month=12/hetero_data.pt \
@@ -205,9 +205,9 @@ If your Parquet column is named something other than `triples`, nothing needs to
 said: with `--turtle_column` unset the loader resolves the name against
 `TURTLE_COLUMN_CANDIDATES` for each source path independently, so
 `triples` and `rdf_turtle` sources can be submitted together and enrich into a single
-graph. Pass `--turtle_column rdf_turtle` only to force one name across every source —
-useful when a schema carries both columns and only one of them is meant, and the source
-of truth when a third name appears.
+graph. A source whose column has a third name lists it in its spec's `turtle_columns`.
+Pass `--turtle_column rdf_turtle` only to force one name across every source — useful
+when a schema carries both columns and only one of them is meant.
 
 Source Parquet written by pandas/pyarrow commonly carries **nanosecond** timestamps,
 which Spark's Parquet reader rejects outright (`Illegal Parquet type: INT64
