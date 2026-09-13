@@ -6,7 +6,7 @@ about 95 GB, none of it filterable by ticker, by date or by meaning, and the
 graph's structure only recoverable by unpickling a 42 GB blob. These tables are
 the same data in shapes something can query, at roughly 2.5% of the size.
 
-Six tables here:
+Six tables and a triple store:
 
     nodes/        (node_type, node_id, uri)
     edges/        (src_type, src_id, relation, dst_type, dst_id)
@@ -14,6 +14,7 @@ Six tables here:
     facts/        every non-market literal, long format
     entities/     the text each node carries, assembled
     snapshots/    market, pivoted wide -- one row per snapshot
+    graph/        the non-market subgraph as a triple store (graph_store.py)
 
 Three things about them are deliberate and easy to get wrong:
 
@@ -49,6 +50,7 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
 from spark_jobs.graph.config import JobConfig
+from spark_jobs.graph.graph_store import write_graph_store
 from spark_jobs.pyg_builder.naming import (
     EXCLUDED_EDGE_PREDICATES,
     RDF_TYPE,
@@ -384,6 +386,36 @@ def write_entities(facts_df: DataFrame, root: str, day: str) -> str:
 
 
 # ============================================
+# graph/
+# ============================================
+def non_market_triples(
+    triples_df: DataFrame, node_id_df: DataFrame
+) -> DataFrame:
+    """Every triple describing something other than a market node.
+
+    Non-market by SUBJECT: a triple belongs to the node it describes. So an
+    edge FROM a market node into a company is a market row and stays out, while
+    the company's own triples stay in -- the same line ``facts/`` and
+    ``snapshots/`` draw, applied to whole triples rather than to literals.
+    """
+    market_uris = (
+        node_id_df
+        .filter(_is_market("node_type"))
+        .select(F.col("uri").alias("_market_uri"))
+    )
+
+    return (
+        triples_df
+        .join(
+            market_uris,
+            triples_df["subject"] == market_uris["_market_uri"],
+            "left_anti",
+        )
+        .select("subject", "predicate", "object")
+    )
+
+
+# ============================================
 # snapshots/
 # ============================================
 def _numeric_columns(market_df: DataFrame) -> set:
@@ -547,6 +579,13 @@ def write_query_tables(
                 written["snapshots"] = snapshots
         finally:
             literals_df.unpersist()
+
+        store = write_graph_store(
+            non_market_triples(triples_df, node_id_df),
+            table_path(root, "graph", day),
+        )
+        if store:
+            written["graph"] = store
     finally:
         node_id_df.unpersist()
 
