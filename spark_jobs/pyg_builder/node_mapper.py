@@ -35,15 +35,10 @@ from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
-from spark_jobs.utils.rdf_utils import NAMESPACE_PREFIXES
+from spark_jobs.pyg_builder.naming import RDF_TYPE, prefixed_local_name_expr
 from spark_jobs.utils.spark_rdf_utils import collect_sorted
 
 logger = logging.getLogger(__name__)
-
-# ============================================
-# URI constants
-# ============================================
-RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 
 _EXCLUDED_TYPES = {
     "http://www.w3.org/2002/07/owl#NamedIndividual",
@@ -196,49 +191,6 @@ def _subsumed_node_types(
     return sorted(row["sub"] for row in rows)
 
 
-def _build_uri_to_pyg_name_expr(uri_col: str = "type_uri") -> F.Column:
-    """
-    Build a pure-Spark Column expression that converts a type URI to a
-    PyG-compatible node type name. No Python UDF — runs natively on the
-    JVM across all executors.
-
-    Strategy: chain of WHEN clauses checking startsWith for each known
-    namespace prefix, extracting the local name via substring.
-    Falls back to extracting the last segment after / or #.
-    """
-    col = F.col(uri_col)
-    expr = None
-
-    for namespace, prefix in NAMESPACE_PREFIXES:
-        ns_len = len(namespace)
-        # local_name = everything after the namespace prefix
-        local_name = F.substring(col, ns_len + 1, 1000)
-        # Clean trailing / and #
-        local_name = F.regexp_replace(local_name, r"^[/#]+|[/#]+$", "")
-        pyg_name = F.concat(F.lit(f"{prefix}_"), local_name)
-
-        condition = col.startswith(namespace) & (F.length(local_name) > 0)
-
-        if expr is None:
-            expr = F.when(condition, pyg_name)
-        else:
-            expr = expr.when(condition, pyg_name)
-
-    # Fallback: extract last segment after # or /
-    fallback_local = F.regexp_extract(col, r"[#/]([^#/]+)$", 1)
-    fallback_name = F.concat(F.lit("unknown_"), fallback_local)
-
-    expr = expr.otherwise(
-        F.when(
-            F.length(fallback_local) > 0, fallback_name
-        ).otherwise(
-            F.concat(F.lit("unknown_"), F.abs(F.hash(col)).cast("string"))
-        )
-    )
-
-    return expr
-
-
 def build_type_uri_mapping(
     triples_df: DataFrame,
     node_id_df: DataFrame,
@@ -295,7 +247,7 @@ def build_type_uri_mapping(
         .distinct()
         # The same expression NodeMapper named the node types with, so the
         # comparison below cannot drift from the naming rule.
-        .withColumn("derived_name", _build_uri_to_pyg_name_expr("type_uri"))
+        .withColumn("derived_name", prefixed_local_name_expr("type_uri"))
     )
     # Sorted, NOT a bare collect(): Spark returns rows in task-completion
     # order, so the fallback below would pick a different URI on different
@@ -376,7 +328,7 @@ class NodeMapper:
         # Step 3: Convert type URIs to PyG names (pure Spark, no UDF)
         # ============================================
         type_triples = type_triples.withColumn(
-            "node_type", _build_uri_to_pyg_name_expr("type_uri")
+            "node_type", prefixed_local_name_expr("type_uri")
         )
 
         # ============================================
