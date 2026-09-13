@@ -3,10 +3,10 @@ What the job was asked to do: the CLI, and the JobConfig that validates it.
 
 ``JobConfig`` is the whole of the job's contract with its caller. It resolves
 every path the run will read and write, and it REJECTS a configuration that
-cannot work -- a mode without its inputs, a staged mirror that is not there, an
-SEC prefix naming a feed this pipeline does not handle -- before Spark starts,
-because the alternative is a failure an hour in with a message about a missing
-column.
+cannot work -- a mode without its inputs, a source path no registered source
+claims, a staged mirror that is not there, an SEC prefix naming a feed this
+pipeline does not handle -- before Spark starts, because the alternative is a
+failure an hour in with a message about a missing column.
 
 Pure Python. No SparkSession, no Spark types: this has to be constructible in a
 test without a cluster, which is how most of its validation is covered.
@@ -16,9 +16,11 @@ import logging
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from spark_jobs import sources
 from spark_jobs.pyg_builder.metadata_writer import LATEST_PARTITION
+from spark_jobs.sources.spec import SOURCE_FORMATS, SourceSpec
 
 # The job's logger, not this module's. bin/profiles/extra-checks.example.sh
 # greps run logs for `[INFO] build_graph - PHASE:`, and every line this package
@@ -174,7 +176,7 @@ def resolve_source_data_day(source_paths: List[str], given: str = "") -> str:
 # is what makes it reachable from --mode, which is the point -- the stall it
 # reproduces only happens on a real submission. See execute_parse_only.
 VALID_MODES = {"full", "enrichment_only", "pyg_only", "parse_only"}
-VALID_SOURCE_FORMATS = {"ntriples", "turtle_parquet"}
+VALID_SOURCE_FORMATS = set(SOURCE_FORMATS)
 
 # Where the parse reads its input from.
 #
@@ -193,83 +195,6 @@ VALID_INPUT_MODES = {"s3", "local"}
 DEFAULT_PARQUET_PARTITIONS = 200
 
 # ============================================
-# Source coverage: which SEC feed this job handles
-# ============================================
-# The archive holds eight SEC feeds under raw/source=sec/. This pipeline
-# handles exactly one of them, and the restriction has until now been
-# incidental — a property of whichever prefix the caller happened to pass —
-# rather than stated anywhere. Measured against the archive:
-#
-#   feed=filings             218 objects,   2.4 GB   RDF (rdf_turtle column)
-#   feed=filings_documents   712,351 objects, 150 GB  raw filing documents
-#   feed=filing-detail       364 objects            crawler telemetry columns
-#   feed=litigation            1 object              only, no Turtle column
-#   feed=press-release         2 objects             (parsed / parse-start /
-#   feed=speeches              2 objects              failures / user-agent)
-#   feed=statements            2 objects
-#   feed=testimony             1 object
-#
-# filings_documents is not Parquet at all and not one format either: sampled
-# over 400,000 keys it is 233,759 .xml, 160,196 .zip (upstream now packages
-# each filing's documents together with its XBRL members), plus .txt, .htm,
-# .pdf and images. Nothing there is RDF.
-#
-# So a run pointed at the SEC source root does not under-cover quietly — the
-# six telemetry feeds have no Turtle column at all and resolve_turtle_column
-# raises, while filings_documents is not something the Parquet reader can open.
-# It fails, but it fails deep in the loader with a column-name error that says
-# nothing about feeds. This turns that into a statement of scope at the point
-# the job is configured.
-#
-# The one thing NOT guarded here, because storage says it is already resolved:
-# the retired crawler also wrote into feed=filings itself, on a 10-column
-# schema whose RDF column was named `triples` rather than `rdf_turtle`. All 218
-# objects now carry the same 29-column scraper schema, so the migration ran to
-# completion and no mixed-schema read is possible. Worth re-checking if that
-# object count ever jumps backwards.
-#
-# Keyed on the partition name rather than on "sec" anywhere in the path: a
-# local fixture directory called /data/sec/ is not the archive convention and
-# is none of this check's business.
-SEC_SOURCE_PARTITION = "source=sec"
-SEC_HANDLED_FEED = "feed=filings"
-# filings_documents starts with the handled feed's name, so a plain substring
-# test would accept it. It is a different feed and carries no RDF.
-SEC_UNHANDLED_FEEDS = (
-    "feed=filings_documents", "feed=filing-detail", "feed=litigation",
-    "feed=press-release", "feed=speeches", "feed=statements",
-    "feed=testimony",
-)
-
-
-def assert_sec_paths_name_the_handled_feed(source_paths: List[str]) -> None:
-    """Every SEC source path must name feed=filings explicitly.
-
-    Raises:
-        ValueError: if a path under the SEC source partition names a feed this
-            pipeline does not handle, or names no feed at all.
-    """
-    for path in source_paths:
-        if SEC_SOURCE_PARTITION not in path:
-            continue
-        unhandled = [f for f in SEC_UNHANDLED_FEEDS if f in path]
-        if unhandled:
-            raise ValueError(
-                f"source path names an unhandled SEC feed {unhandled[0]!r}: "
-                f"{path}. Only {SEC_HANDLED_FEED!r} carries RDF; the others "
-                f"hold crawler telemetry or raw XML and no pipeline step reads "
-                f"them."
-            )
-        if SEC_HANDLED_FEED not in path:
-            raise ValueError(
-                f"SEC source path does not name a feed: {path}. This pipeline "
-                f"handles {SEC_HANDLED_FEED!r} only, and the SEC source "
-                f"partition holds seven other feeds it cannot read. Point at "
-                f"raw/{SEC_SOURCE_PARTITION}/{SEC_HANDLED_FEED}/... instead."
-            )
-
-
-# ============================================
 # Parameter parsing
 # ============================================
 DEFAULT_PYG_FILENAME = "hetero_data.pt"
@@ -280,10 +205,10 @@ def staged_local_path(source_path: str, local_source_root: str) -> str:
 
     ``s3a://bucket/key/...`` becomes ``file://<root>/bucket/key/...``. Carrying
     the bucket and the whole key under the root is what makes the two input
-    modes interchangeable: source_label() reads the source out of path
-    fragments (``source=sec``, ``quotes``), so a mirror that keeps the key
-    layout reports the same per-source statistics as reading the bucket
-    directly. It also keeps two buckets that share a key prefix apart.
+    modes interchangeable: a path's source is read out of path fragments
+    (``source=sec``, ``quotes``), so a mirror that keeps the key layout reports
+    the same per-source statistics as reading the bucket directly. It also
+    keeps two buckets that share a key prefix apart.
 
     A path that is already local is returned unchanged, so one run can mix a
     staged bucket with a directory that was never in object storage.
@@ -314,7 +239,11 @@ def staged_local_path(source_path: str, local_source_root: str) -> str:
 class JobConfig:
     """Parsed and validated job configuration."""
 
-    def __init__(self, args: Dict[str, str]):
+    def __init__(
+        self,
+        args: Dict[str, str],
+        specs: Optional[Sequence[SourceSpec]] = None,
+    ):
         self.mode = args.get("mode", "full").lower().strip()
 
         # Shared local working directory (must be on a filesystem visible
@@ -337,16 +266,28 @@ class JobConfig:
         )
 
         # Source path(s)/URI(s): a single value or a comma-separated list.
-        # Each entry is a local directory or an s3a:// URI. Whitespace
-        # around each entry is stripped. Required for full/enrichment_only.
+        # Each entry is a local directory or an s3a:// URI, and belongs to one
+        # registered source. Whitespace around each entry is stripped.
+        # Required for full/enrichment_only.
         # Examples:
-        #   local:    "/data/rdf/monthly/2024-12/"
-        #   s3a:      "s3a://my-data-lake/rdf/monthly/2024-12/"
-        #   multiple: "/data/sec/filings/,/data/sec/litigations/"
+        #   local:    "/data/rdf/source=bls/2024-12/"
+        #   s3a:      "s3a://my-data-lake/raw/source=bls/2024-12/"
+        #   multiple: "/data/rdf/source=bls/2024-12/,/data/rdf/noaa/2024-12/"
         raw_sources = args.get("source_paths", "") or ""
         self.source_paths: List[str] = [
             p.strip() for p in raw_sources.split(",") if p.strip()
         ]
+
+        # The sources a path may belong to: every registered one, unless a test
+        # passes its own. _validate matches the paths in the modes that read
+        # sources, filling path_specs (one per path, in path order) and
+        # source_specs (the sources picked, in registration order). pyg_only
+        # reads no source paths, so it picks nothing.
+        self.registered_specs: Tuple[SourceSpec, ...] = (
+            sources.REGISTERED if specs is None else tuple(specs)
+        )
+        self.path_specs: List[SourceSpec] = []
+        self.source_specs: Tuple[SourceSpec, ...] = ()
 
         # The day the sources are partitioned under, for reference data that
         # has to describe the same day the quotes do, and for the day partition
@@ -552,6 +493,28 @@ class JobConfig:
                 f"--nodes <every worker> --source <each source path>"
             )
 
+    def _match_source_paths(self) -> None:
+        """Match every source path to one registered source, then run each
+        picked source's own check on the paths matched to it.
+
+        Raises:
+            ValueError: for a path that matches no registered source or more
+                than one, or that its source's check rejects.
+        """
+        self.path_specs = [
+            sources.match_path(path, self.registered_specs)
+            for path in self.source_paths
+        ]
+        self.source_specs = sources.pick(self.source_paths, self.registered_specs)
+        for spec in self.source_specs:
+            if spec.check_paths is None:
+                continue
+            spec.check_paths([
+                path
+                for path, matched in zip(self.source_paths, self.path_specs)
+                if matched is spec
+            ])
+
     def _validate(self):
         if self.mode not in VALID_MODES:
             raise ValueError(
@@ -593,7 +556,7 @@ class JobConfig:
                 raise ValueError(
                     f"source_paths is required for mode '{self.mode}'"
                 )
-            assert_sec_paths_name_the_handled_feed(self.source_paths)
+            self._match_source_paths()
             if self.input_mode == "local":
                 self._assert_staged_mirror_present()
         if self.mode in ("full", "pyg_only"):
