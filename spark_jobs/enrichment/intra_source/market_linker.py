@@ -186,10 +186,12 @@ class MarketIntraSourceLinker:
         spark: SparkSession,
         sector_definitions_bucket: str = "",
         sector_definitions_key: str = "",
+        source_data_day: str = "",
     ):
         self.spark = spark
         self._sector_definitions_bucket = sector_definitions_bucket
         self._sector_definitions_key = sector_definitions_key
+        self._source_data_day = source_data_day
 
     def enrich(self, triples_df: DataFrame) -> DataFrame:
         """
@@ -707,7 +709,8 @@ class MarketIntraSourceLinker:
         """
         sector_patterns = get_sector_patterns(
             bucket=self._sector_definitions_bucket,
-            key=self._sector_definitions_key,
+            prefix=self._sector_definitions_key,
+            data_day=self._source_data_day,
         )
 
         # Build ticker → sector lookup

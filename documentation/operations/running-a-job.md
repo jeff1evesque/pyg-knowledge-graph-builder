@@ -60,15 +60,50 @@ When config is empty, sensible defaults are inferred from the data.
 | `--s3_pyg_key` | No | `pyg/{time_period}/{pyg_filename}` | Optional S3 key for the archived `.pt`; the metadata prefix is derived from it |
 | `--pyg_filename` | No | `hetero_data.pt` | Local `.pt` filename (override for experiment variants, e.g. `hetero_data_512d.pt`); determines the metadata directory name |
 | `--enable_ontology_mapping` | No | `true` | Run the ontology-mapping phase: equivalences, predicate folding, and the derived `rdfs:subClassOf` hierarchy that fills the `class_hierarchy` sub-segment. Applies to modes `full` and `enrichment_only`; `pyg_only` never reaches this phase, so the flag is inert there (and meaningless in that mode's manifest — see [`ontology_schema.json`](../reference/outputs.md#ontology_schemajson)) |
+| `--enable_query_tables` | No | `true` | Write the day-partitioned [query tables](../reference/tables.md) beside the enriched triples. `false` skips every table write and leaves the existing artifact set untouched. Applies to modes `full` and `enrichment_only`; `pyg_only` never reaches the phase that writes them |
+| `--source_data_day` | No | *(from the paths)* | `YYYY-MM-DD` the run's data describes: which constituents CSV it reads, and the day partition its query tables are written under. Defaults to the day `--source_paths` are partitioned under; state it when they name none, or name more than one |
 | `--time_period` | No | Current `YYYY-MM` | Time period label for output paths |
 | `--pyg_config` | No | `{}` | JSON string with PyG construction config |
 | `--parquet_partitions` | No | `200` | Number of Parquet output partitions |
 | `--source_format` | No | `ntriples` | Source RDF format: `ntriples` (one triple per line in `.nt` files) or `turtle_parquet` (self-contained Turtle blobs in a Parquet column). Applies to modes `full` and `enrichment_only` only — `pyg_only` always reads enriched Parquet written by this pipeline |
 | `--turtle_column` | No | *(auto)* | Column name containing Turtle strings when `--source_format=turtle_parquet`. Ignored for `ntriples` format. Left unset, the column is resolved **per source** against `TURTLE_COLUMN_CANDIDATES` (`triples`, then `rdf_turtle`), so one run can span sources whose schemas disagree; set it to force a single name everywhere |
-| `--market_sector_definitions_bucket` | No | `""` | S3 bucket holding the S&P 500 constituents CSV. **Set this for real runs** — three cross-source links are empty or degraded without it; see the note under Cross-Source Linking |
-| `--market_sector_definitions_key` | No | `""` | S3 key for the S&P 500 constituents CSV. Supplies three things: the ticker to company-ID map that keys the company bridge, the GICS sector classification, and the sub-industry peer links. Without it the first and third are empty and sector classification falls back to a small built-in list |
+| `--market_sector_definitions_bucket` | No | `""` | S3 bucket holding the S&P 500 constituents CSVs. **Set this for real runs** — three cross-source links are empty or degraded without it; see the note under Cross-Source Linking |
+| `--market_sector_definitions_key` | No | `""` | S3 **prefix** holding those CSVs, or that prefix's `latest.csv` — both work the same. Supplies three things: the ticker to company-ID map that keys the company bridge, the GICS sector classification, and the sub-industry peer links. Without it the first and third are empty and sector classification falls back to a small built-in list. Which CSV a run reads is [Picking the constituents CSV](#picking-the-constituents-csv) |
 
 Metadata files are always written when mode is `full` or `pyg_only`. Mode `enrichment_only` does not produce metadata files (no PyG graph is built in that mode).
+
+### Picking the constituents CSV
+
+An index membership is a point in time: tickers join and leave, so a run
+rebuilding an older day needs that day's list rather than the current one. The
+run therefore tries, in order:
+
+| | Key |
+|---|---|
+| the day being processed | `<prefix>/year=YYYY/month=MM/DD.csv` |
+| otherwise | `<prefix>/latest.csv` |
+
+The two keys sit at different depths under the same prefix, and the run builds
+both from it; a file name is never used as a folder. The setting can also name a
+CSV under the prefix. `<prefix>/latest.csv` works the same as `<prefix>`. A
+day's CSV, such as `<prefix>/year=2026/month=09/11.csv`, is tried first in place
+of the day being processed, and `<prefix>/latest.csv` is still the fallback when
+it does not exist. When no key exists, the run logs a warning naming the keys it
+tried and carries on without the CSV.
+
+The day comes from `--source_paths` — the `year=`/`month=`/`day=` partition
+they are opened under, so the reference data and the data it describes are the
+same day by construction rather than by the caller remembering. Paths that name
+no day, and paths that disagree on one, both read `latest.csv`; so does a day
+whose CSV has not been published. A CSV that is *present but malformed* is not
+routed around — reading a different day's membership because one file is broken
+would hide the defect.
+
+`--source_data_day` overrides the derivation, and is checked against the paths
+so it cannot quietly relabel one day's data as another's. It is the same day the
+[query tables](../reference/tables.md) are partitioned under, which is why a run
+whose paths name no day writes none: there is no partition to write them to, and
+the day the job happens to execute on is not the day its data describes.
 
 Jobs are launched with `bin/submit_spark_job.sh`, which packages the code
 and submits to the Spark standalone master with the RAPIDS Accelerator
@@ -441,6 +476,27 @@ DRIVER_MEMORY=64g DRIVER_MAX_RESULT_SIZE=8g \
 from file metadata without touching the GPU. Set `spark.rapids.sql.explain=ALL`,
 or confirm that `Gpu*` operators (e.g. `GpuFileSourceScanExec`) appear in the
 physical plan.
+
+## How long a run takes
+
+One day of all four sources through `notebook/multi_experiment.ipynb`, on the two-node
+GPU cluster, reading the staged local mirror with the notebook's default profiles:
+
+| Step | Time | Measured on |
+|---|---|---|
+| Seed leg: load, parse, enrich, save the enriched triples | 65.9 min | run 20260910T214553Z |
+| Query tables, written inside the seed leg | 10.5 min | the same day's enriched triples, as a standalone job (2026-09-13) |
+| Assembly leg: `baseline_1024d` | 59.2 min | run 20260910T214553Z |
+
+Together that is about 2 hours 16 minutes of Spark jobs, and about 2 hours 20 minutes
+from launch to the finished report, since the notebook's own start-up and reporting cells
+add a few minutes. It is a sum of separate measurements rather than one timed run, so
+treat it as a guide: leg times move with the day's data, and on run 20260908T202009Z the
+same two legs took 62.0 and 61.1 minutes.
+
+A finished run records its real times. The notebook prints each submission's minutes as
+it ends, and `bin/run_cluster_notebook.sh` lists them per submission in the run
+directory's `outcome.txt`.
 
 ## Sizing a large run
 

@@ -121,6 +121,8 @@ nav:
       - Enrichment: design/enrichment.md
   - Reference:
       - Metadata files: reference/outputs.md
+      - Query tables: reference/tables.md
+      - What the graph answers: reference/questions.md
       - Data sources: reference/sources.md
       - Project layout: reference/layout.md
   - Operations:

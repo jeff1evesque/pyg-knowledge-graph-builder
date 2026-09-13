@@ -5,10 +5,11 @@ Sector definitions are loaded dynamically from the S&P 500 tickers CSV
 at runtime (preferred), falling back to hardcoded defaults if the CSV
 is unavailable.
 
-The tickers CSV is produced upstream and its location is supplied at run
-time by --market_sector_definitions_bucket / --market_sector_definitions_key.
-Neither the bucket nor its prefix is named in this repository: the code is
-public and the storage layout is not.
+The tickers CSVs are produced upstream and the prefix holding them is supplied
+at run time by --market_sector_definitions_bucket /
+--market_sector_definitions_key. Neither the bucket nor its prefix is named in
+this repository: the code is public and the storage layout is not. Which CSV
+under that prefix a run reads is ``constituents_keys``.
 
 Expected CSV format (GitHub S&P 500 constituents):
     Symbol,Security,GICS Sector,GICS Sub-Industry,Headquarters Location,Date added,CIK,Founded
@@ -34,6 +35,7 @@ underlying equity via the `underlyingSymbol` property.
 import csv
 import io
 import logging
+import re
 from typing import Dict, Any, List, Optional, Tuple
 
 import boto3
@@ -167,31 +169,79 @@ def assert_ciks_are_padded(ticker_cik_map: Dict[str, str]) -> None:
 
 
 # ============================================
+# Constituents key layout
+# ============================================
+#
+# The location is caller-supplied; only the layout under it is stated here.
+LATEST_BASENAME = "latest.csv"
+
+_DATA_DAY_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+
+# A day's export named in the setting: [<prefix>/]year=YYYY/month=MM/DD.csv
+_DAY_EXPORT_RE = re.compile(r"^(?:(.*)/)?year=\d{4}/month=\d{2}/\d{2}\.csv$")
+
+
+def _under(prefix: str, name: str) -> str:
+    return f"{prefix}/{name}" if prefix else name
+
+
+def constituents_keys(prefix: str, data_day: str = "") -> List[str]:
+    """Keys to try, in order: a day's export, then ``latest.csv``.
+
+    ``prefix`` is the prefix holding the CSVs, or a CSV under it. The first
+    key is a day's export -- the CSV named, or else the one for ``data_day``,
+    ``<prefix>/year=YYYY/month=MM/DD.csv`` -- and ``<prefix>/latest.csv`` is
+    the fallback when it is not there. Naming ``<prefix>/latest.csv`` is the
+    same as naming the prefix. The day's file and ``latest.csv`` sit at
+    different depths, so both are built from the prefix, and a file name is
+    never used as a folder.
+
+    A constituents list is a point-in-time membership, so a run rebuilding an
+    older day must read that day's export rather than today's: tickers join
+    and leave the index, and the current list cannot resolve a symbol that has
+    since been removed. ``latest.csv`` alone when no day is known.
+    """
+    base = prefix.strip().strip("/")
+    if not base:
+        return []
+
+    first = None
+    if base.lower().endswith(".csv"):
+        folder, _, name = base.rpartition("/")
+        if name != LATEST_BASENAME:
+            first = base
+        day_export = _DAY_EXPORT_RE.match(base)
+        base = (day_export.group(1) or "") if day_export else folder
+
+    if first is None:
+        match = _DATA_DAY_RE.match(data_day.strip())
+        if match:
+            year, month, day = match.groups()
+            first = _under(base, f"year={year}/month={month}/{day}.csv")
+
+    keys = [first] if first else []
+    keys.append(_under(base, LATEST_BASENAME))
+    return keys
+
+
+# ============================================
 # S3 Loader — reads the tickers CSV
 # ============================================
 
 
-def _read_constituents(
+def _fetch_constituents(
+    client,
     bucket: str,
     key: str,
     required_columns: set,
-    s3_client=None,
-) -> Optional[List[Dict[str, str]]]:
-    """Fetch and parse the constituents CSV, or None if it is unusable.
+) -> Tuple[Optional[List[Dict[str, str]]], bool]:
+    """``(rows, absent)`` for one key. ``rows`` is None when it is unusable.
 
-    Shared by the three readers below so the S3 error taxonomy, the empty-body
-    check and the missing-column check are stated once. Each reader passes the
-    columns IT needs: the sector reader must not fail because a CSV vintage
-    predates the CIK column, and the CIK reader must not fail because the
-    sector column moved. Every failure path returns None and logs, because
-    every caller has a defined behaviour without this file.
+    ``absent`` is True only for a key that is not there, which is the one
+    failure the caller retries at another key. A file that exists and is
+    broken is not retried: it is a defect to report, not a gap to route
+    around.
     """
-    if not bucket or not key:
-        logger.debug("No S3 bucket/key provided for market sector definitions")
-        return None
-
-    client = s3_client or boto3.client("s3")
-
     try:
         response = client.get_object(Bucket=bucket, Key=key)
         body = response["Body"].read().decode("utf-8")
@@ -201,7 +251,7 @@ def _read_constituents(
                 f"Empty file at s3://{bucket}/{key} — "
                 f"falling back to defaults"
             )
-            return None
+            return None, False
 
         reader = csv.DictReader(io.StringIO(body))
 
@@ -210,7 +260,7 @@ def _read_constituents(
                 f"No CSV headers in s3://{bucket}/{key} — "
                 f"falling back to defaults"
             )
-            return None
+            return None, False
 
         missing = set(required_columns) - set(reader.fieldnames)
         if missing:
@@ -219,18 +269,16 @@ def _read_constituents(
                 f"{missing}. Available: {reader.fieldnames} — "
                 f"falling back to defaults"
             )
-            return None
+            return None, False
 
-        return list(reader)
+        return list(reader), False
 
     except ClientError as e:
         error_code = e.response["Error"]["Code"]
-        if error_code == "NoSuchKey":
-            logger.info(
-                f"Tickers file not found at s3://{bucket}/{key} — "
-                f"using defaults"
-            )
-        elif error_code == "NoSuchBucket":
+        if error_code in ("NoSuchKey", "404"):
+            logger.info(f"No tickers file at s3://{bucket}/{key}")
+            return None, True
+        if error_code == "NoSuchBucket":
             logger.warning(
                 f"Bucket does not exist: {bucket} — using defaults"
             )
@@ -239,27 +287,77 @@ def _read_constituents(
                 f"S3 error loading tickers from "
                 f"s3://{bucket}/{key}: {e} — using defaults"
             )
-        return None
+        return None, False
 
     except (csv.Error, ValueError, TypeError, UnicodeDecodeError) as e:
         logger.warning(
             f"Failed to parse tickers CSV from "
             f"s3://{bucket}/{key}: {e} — using defaults"
         )
-        return None
+        return None, False
 
     except Exception as e:
         logger.warning(
             f"Unexpected error loading tickers from "
             f"s3://{bucket}/{key}: {e} — using defaults"
         )
-        return None
+        return None, False
+
+
+def _read_constituents(
+    bucket: str,
+    prefix: str,
+    required_columns: set,
+    s3_client=None,
+    data_day: str = "",
+) -> Tuple[Optional[List[Dict[str, str]]], str]:
+    """``(rows, key)`` for the constituents CSV; ``rows`` is None if unusable.
+
+    Shared by the three readers below so the S3 error taxonomy, the empty-body
+    check and the missing-column check are stated once. Each reader passes the
+    columns IT needs: the sector reader must not fail because a CSV vintage
+    predates the CIK column, and the CIK reader must not fail because the
+    sector column moved. Every failure path returns None and logs, because
+    every caller has a defined behaviour without this file.
+
+    ``prefix`` is the prefix holding the CSVs, or a CSV under it; see
+    ``constituents_keys`` for which keys that means and why. ``key`` is the
+    object the rows came from, and it is what the readers log: it is not the
+    setting whenever a day's export was read.
+    """
+    if not bucket or not prefix:
+        logger.debug(
+            "No S3 bucket/prefix provided for market sector definitions"
+        )
+        return None, ""
+
+    client = s3_client or boto3.client("s3")
+
+    keys = constituents_keys(prefix, data_day)
+    for key in keys:
+        rows, absent = _fetch_constituents(
+            client, bucket, key, required_columns
+        )
+        if rows is not None:
+            return rows, key
+        if not absent:
+            return None, key
+
+    # A warning, not info: a location was given and none of its keys exist.
+    if keys:
+        tried = " or ".join(f"s3://{bucket}/{key}" for key in keys)
+        logger.warning(
+            f"No constituents CSV at {tried} — check "
+            f"--market_sector_definitions_key; continuing without it"
+        )
+    return None, ""
 
 
 def load_sector_patterns_from_s3(
     bucket: str,
-    key: str,
+    prefix: str,
     s3_client=None,
+    data_day: str = "",
 ) -> Optional[Dict[str, Any]]:
     """
     Load market sector patterns from the S&P 500 tickers CSV in S3.
@@ -272,14 +370,16 @@ def load_sector_patterns_from_s3(
             caller via --market_sector_definitions_bucket; deliberately
             not named here, because this repository is public and the
             storage layout is not.
-        key: S3 key of that CSV, likewise caller-supplied.
+        prefix: S3 prefix holding those CSVs, likewise caller-supplied.
         s3_client: Optional pre-built S3 client (for testability)
+        data_day: ``YYYY-MM-DD`` to read the export for; see
+            ``constituents_keys``.
 
     Returns:
         Dict matching MARKET_SECTOR_PATTERNS structure, or None on failure.
     """
-    rows = _read_constituents(
-        bucket, key, {SYMBOL_COLUMN, SECTOR_COLUMN}, s3_client
+    rows, key = _read_constituents(
+        bucket, prefix, {SYMBOL_COLUMN, SECTOR_COLUMN}, s3_client, data_day
     )
     if rows is None:
         return None
@@ -299,7 +399,7 @@ def load_sector_patterns_from_s3(
 
     if not sector_tickers:
         logger.warning(
-            f"No valid (Symbol, GICS Sector) pairs in "
+            f"No valid (Symbol, GICS Sector) pairs under "
             f"s3://{bucket}/{key} — falling back to defaults"
         )
         return None
@@ -329,8 +429,9 @@ def load_sector_patterns_from_s3(
 
 def load_ticker_cik_map_from_s3(
     bucket: str,
-    key: str,
+    prefix: str,
     s3_client=None,
+    data_day: str = "",
 ) -> Optional[Dict[str, str]]:
     """Ticker -> 10-digit padded CIK, from the constituents CSV already loaded.
 
@@ -352,8 +453,8 @@ def load_ticker_cik_map_from_s3(
     but carries no usable pair -- the caller treats both as "no bridge", but
     only the first means the file was the problem.
     """
-    rows = _read_constituents(
-        bucket, key, {SYMBOL_COLUMN, CIK_COLUMN}, s3_client
+    rows, key = _read_constituents(
+        bucket, prefix, {SYMBOL_COLUMN, CIK_COLUMN}, s3_client, data_day
     )
     if rows is None:
         return None
@@ -377,8 +478,9 @@ def load_ticker_cik_map_from_s3(
 
 def load_sub_industries_from_s3(
     bucket: str,
-    key: str,
+    prefix: str,
     s3_client=None,
+    data_day: str = "",
 ) -> Optional[List[Tuple[str, str]]]:
     """(ticker, GICS sub-industry) pairs, for the constituent peer edges.
 
@@ -394,8 +496,9 @@ def load_sub_industries_from_s3(
     to its company node, and a ticker with no company node in the graph drops
     out before the grouping rather than after.
     """
-    rows = _read_constituents(
-        bucket, key, {SYMBOL_COLUMN, SUB_INDUSTRY_COLUMN}, s3_client
+    rows, key = _read_constituents(
+        bucket, prefix, {SYMBOL_COLUMN, SUB_INDUSTRY_COLUMN}, s3_client,
+        data_day,
     )
     if rows is None:
         return None
@@ -419,23 +522,27 @@ def load_sub_industries_from_s3(
 
 def get_sector_patterns(
     bucket: str = "",
-    key: str = "",
+    prefix: str = "",
     s3_client=None,
+    data_day: str = "",
 ) -> Dict[str, Any]:
     """
     Get market sector patterns, attempting S3 first with fallback to defaults.
 
     Args:
         bucket: S3 bucket for tickers CSV (empty = skip S3)
-        key: S3 key for tickers CSV (empty = skip S3)
+        prefix: S3 prefix holding the tickers CSVs (empty = skip S3)
         s3_client: Optional pre-built S3 client
+        data_day: ``YYYY-MM-DD`` to read the export for; see
+            ``constituents_keys``
 
     Returns:
         Dict matching MARKET_SECTOR_PATTERNS structure (always non-empty)
     """
-    if bucket and key:
+    if bucket and prefix:
         s3_patterns = load_sector_patterns_from_s3(
-            bucket=bucket, key=key, s3_client=s3_client
+            bucket=bucket, prefix=prefix, s3_client=s3_client,
+            data_day=data_day,
         )
         if s3_patterns is not None:
             return s3_patterns
@@ -446,8 +553,9 @@ def get_sector_patterns(
 
 def get_ticker_cik_map(
     bucket: str = "",
-    key: str = "",
+    prefix: str = "",
     s3_client=None,
+    data_day: str = "",
 ) -> Dict[str, str]:
     """Ticker -> padded CIK, or an empty map when the CSV is unavailable.
 
@@ -463,9 +571,10 @@ def get_ticker_cik_map(
     all. This widens the market half to constituents whose filings were not
     ingested; it is not what makes the bridge exist.
     """
-    if bucket and key:
+    if bucket and prefix:
         loaded = load_ticker_cik_map_from_s3(
-            bucket=bucket, key=key, s3_client=s3_client
+            bucket=bucket, prefix=prefix, s3_client=s3_client,
+            data_day=data_day,
         )
         if loaded is not None:
             return loaded
@@ -479,8 +588,9 @@ def get_ticker_cik_map(
 
 def get_sub_industries(
     bucket: str = "",
-    key: str = "",
+    prefix: str = "",
     s3_client=None,
+    data_day: str = "",
 ) -> List[Tuple[str, str]]:
     """(ticker, sub-industry) pairs, or empty when the CSV is unavailable.
 
@@ -488,9 +598,10 @@ def get_sub_industries(
     DEFAULT patterns above carry sector only, and inventing a sub-industry
     split of them would assert competitor relationships nobody checked.
     """
-    if bucket and key:
+    if bucket and prefix:
         loaded = load_sub_industries_from_s3(
-            bucket=bucket, key=key, s3_client=s3_client
+            bucket=bucket, prefix=prefix, s3_client=s3_client,
+            data_day=data_day,
         )
         if loaded is not None:
             return loaded

@@ -44,6 +44,8 @@ def _config(work_dir: str, mode: str = "enrichment_only") -> SimpleNamespace:
         s3_archive_bucket="",
         s3_pyg_key="",
         enable_ontology_mapping=False,
+        enable_query_tables=True,
+        source_data_day="2099-01-15",
         pyg_config={},
         parquet_partitions=2,
         archive_to_s3=False,
@@ -129,6 +131,38 @@ def test_manifest_does_not_claim_an_ontology_flag_the_mode_never_used(
     assert payload["config"]["enable_ontology_mapping"] is None, (
         f"{mode} manifest states an enrichment flag it never honored"
     )
+
+
+def test_manifest_records_the_query_tables_flag_and_the_day(spark, tmp_path):
+    """Both, because neither answers the question alone.
+
+    The tables are day-partitioned, so a run with the flag on and no day
+    writes none. And the day is worth recording on its own: it names the
+    constituents CSV the run read, which is rewritten daily, so it is the only
+    thing separating two runs over identical sources that built different
+    graphs.
+    """
+    work = tmp_path / "tables"
+    config = _config(str(work), mode="full")
+    save_job_manifest(spark, None, config, {"mode": "full"}, 0.5)
+
+    payload = json.loads(open(_find_manifest(work), "rb").read())
+    assert payload["config"]["enable_query_tables"] is True
+    assert payload["config"]["source_data_day"] == "2099-01-15"
+
+
+@pytest.mark.parametrize("mode", ["pyg_only", "parse_only"])
+def test_manifest_does_not_claim_a_tables_flag_the_mode_never_used(
+    spark, tmp_path, mode
+):
+    """Neither mode reaches the phase that writes tables, so neither can
+    report on it -- the same reasoning as the ontology flag above."""
+    work = tmp_path / f"{mode}-tables"
+    config = _config(str(work), mode=mode)
+    save_job_manifest(spark, None, config, {"mode": mode}, 0.5)
+
+    payload = json.loads(open(_find_manifest(work), "rb").read())
+    assert payload["config"]["enable_query_tables"] is None
 
 
 def test_manifest_carries_the_digests_of_what_the_run_produced(spark, tmp_path):

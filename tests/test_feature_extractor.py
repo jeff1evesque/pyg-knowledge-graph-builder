@@ -1727,3 +1727,89 @@ def test_namespace_publishes_both_columns_it_occupies(spark):
         assert e["node_uri_slot"] == (e["slot"] + os_dim // 2) % os_dim
         for dim in (e["global_dim"], e["node_uri_global_dim"]):
             assert os_start <= dim < os_start + os_dim
+
+
+# ======================================================================
+# Values that must not be encoded, from predicates that are real properties
+# ======================================================================
+#
+# Measured against the real classifier on 2026-09-12, after upstream backfilled
+# both terms into every stored SEC object. Neither is hypothetical: both are in
+# the data today, and both were being encoded wrongly.
+
+from spark_jobs.utils.rdf_utils import SEC_FILINGS  # noqa: E402
+
+SEC_HAS_SIC = str(SEC_FILINGS.hasSic)
+SEC_HAS_ACCEPTED = str(SEC_FILINGS.hasAcceptanceDateTime)
+
+# The lexical form the loader actually produces: rdflib converts xsd:dateTime
+# and str() puts a space where the source Turtle had a T.
+ACCEPTED_VALUE = "2026-09-09 06:47:44-04:00"
+
+SEC_ROWS = [
+    ("https://ex/f0", RDF_TYPE, CPI_INDEX),
+    ("https://ex/f1", RDF_TYPE, CPI_INDEX),
+    ("https://ex/f0", SEC_HAS_SIC, "5812"),
+    ("https://ex/f1", SEC_HAS_SIC, "3571"),
+    ("https://ex/f0", SEC_HAS_ACCEPTED, ACCEPTED_VALUE),
+    ("https://ex/f1", SEC_HAS_ACCEPTED, "2026-09-08 19:17:43-04:00"),
+]
+
+
+def test_an_industry_code_is_not_z_scored_as_a_magnitude(spark):
+    """Every SIC value parses as a number, so the majority rule sends it to the
+    numeric segment and encodes 5812 as 1.6x 3571. The rule cannot catch this
+    -- it exists to spot a property whose values are mostly labels, and these
+    are all numbers -- so the predicate is named instead."""
+    assert SEC_HAS_SIC not in _numeric_predicates(spark, SEC_ROWS)
+
+
+def test_an_instant_is_not_hashed_as_a_label(spark):
+    """One distinct value per filing against a 127-slot categorical segment,
+    which it shares with every other label in the graph."""
+    triples = spark.createDataFrame(
+        SEC_ROWS, schema="subject STRING, predicate STRING, object STRING"
+    )
+    node_id_df, _counts = NodeMapper(spark, CONFIG).build_node_id_table(triples)
+    fx = FeatureExtractor(spark, CONFIG)
+
+    reaching = {
+        row["predicate"]
+        for row in fx._literal_triples(triples, node_id_df)
+        .select("predicate").distinct().collect()
+    }
+    assert SEC_HAS_ACCEPTED not in reaching
+    assert SEC_HAS_SIC not in reaching
+
+
+def test_the_property_is_still_present_and_still_a_data_predicate(spark):
+    """The narrow exclusion is the point. These describe the data rather than
+    the vocabulary, so "this filing states a SIC" stays a fact about the node,
+    and ontology_schema.json's coverage still counts them -- which a blanket
+    _NON_FEATURE_PREDICATES entry would have silently changed."""
+    from spark_jobs.pyg_builder.feature_extractor import (
+        _NON_FEATURE_PREDICATES,
+        _UNENCODED_VALUE_PREDICATES,
+    )
+
+    # The two sets must stay separate. Folding one into the other is the
+    # tempting simplification, and it would quietly shrink the coverage
+    # report's denominator and drop these terms from its published gap lists.
+    assert _UNENCODED_VALUE_PREDICATES
+    assert _UNENCODED_VALUE_PREDICATES.isdisjoint(_NON_FEATURE_PREDICATES)
+
+    triples = spark.createDataFrame(
+        SEC_ROWS, schema="subject STRING, predicate STRING, object STRING"
+    )
+    node_id_df, _counts = NodeMapper(spark, CONFIG).build_node_id_table(triples)
+    fx = FeatureExtractor(spark, CONFIG)
+
+    present = {
+        row["predicate"]
+        for row in fx._compute_node_properties(triples, node_id_df)
+        .select("predicate").distinct().collect()
+    }
+    assert {SEC_HAS_SIC, SEC_HAS_ACCEPTED} <= present
+
+    coverage = fx._property_schema_coverage(triples, {})
+    assert coverage["data_predicates"] >= 2

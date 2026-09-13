@@ -36,11 +36,13 @@ class EnrichmentPipeline:
         triples_df: DataFrame,
         sector_definitions_bucket: str = "",
         sector_definitions_key: str = "",
+        source_data_day: str = "",
     ):
         self.spark = spark
         self.triples_df = triples_df
         self._sector_definitions_bucket = sector_definitions_bucket
         self._sector_definitions_key = sector_definitions_key
+        self._source_data_day = source_data_day
         self.stats: Dict[str, any] = {
             'initial_triples': 0,
             'intra_source': {},
@@ -108,6 +110,7 @@ class EnrichmentPipeline:
             self.triples_df,
             sector_definitions_bucket=self._sector_definitions_bucket,
             sector_definitions_key=self._sector_definitions_key,
+            source_data_day=self._source_data_day,
         )
 
         self.stats['intra_source'] = intra_result.get('stats', {})
@@ -168,11 +171,13 @@ class EnrichmentPipeline:
             self.triples_df,
             ticker_cik_map=get_ticker_cik_map(
                 bucket=self._sector_definitions_bucket,
-                key=self._sector_definitions_key,
+                prefix=self._sector_definitions_key,
+                data_day=self._source_data_day,
             ),
             sub_industries=get_sub_industries(
                 bucket=self._sector_definitions_bucket,
-                key=self._sector_definitions_key,
+                prefix=self._sector_definitions_key,
+                data_day=self._source_data_day,
             ),
         )
 

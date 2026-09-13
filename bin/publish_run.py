@@ -25,8 +25,16 @@ resumes it, because files already there at the right size are skipped.
 id, run-config.txt for the work directory, run.done and outcome.txt for whether the
 run succeeded. A run that did not succeed is refused.
 
+The query tables go somewhere else, and are keyed by day rather than by run. They
+outlive the run -- runs expire at 21 days, the tables keep a year -- and S3 applies
+the shortest expiration where two prefix rules overlap, so a table under the run's
+prefix would be deleted with it. They get their own root, their own sync and their own
+per-day marker under _days/.
+
 Environment:
   PYG_PUBLISH_ROOT      where published runs go, s3://BUCKET/PREFIX. Required.
+  PYG_TABLES_ROOT       where query tables go, s3://BUCKET/PREFIX. Required when the
+                        run wrote any; they land under <root>/<dataset>/<table>/day=.
   PYG_PUBLISH_DATASET   the source set's name, e.g. all-sources. Defaults to the name
                         the job wrote into dataset.json. One of the two must be set.
   PYG_PUBLISH_DATA_DAY  YYYY-MM-DD, the day the sources were cut from. Defaults to the
@@ -51,6 +59,12 @@ from pathlib import Path
 CHECKSUMS = "checksums.json"
 INDEX = "index.json"
 TREE = "publish"
+TABLES = "tables"
+TABLES_TREE = "publish-tables"
+# The marker saying a day's tables finished publishing, under the dataset. Its
+# own name is a day rather than a run, because that is what the tables are
+# keyed by -- two runs over the same day publish the same day.
+TABLES_MARKER = "_days"
 
 # A day-level source path: .../year=2026/month=09/09.snappy.parquet or .../day=09/
 DAY_IN_PATH = re.compile(r"year=(\d{4})/month=(\d{2})/(?:day=)?(\d{2})(?:\.[\w.]+)?/?$")
@@ -279,13 +293,50 @@ def plan(work: Path, period_dirs: str, graphs) -> list:
     return items
 
 
-def make_index(run_id, dataset, period, day, sources, rd, graphs, labels, items) -> dict:
+def tables_plan(work: Path, day: str) -> list:
+    """(published name, file on disk) for one day of query tables.
+
+    Names are relative to the dataset, so a table lands at
+    ``{PYG_TABLES_ROOT}/{dataset}/{table}/day={day}/...`` -- outside the run
+    folder, because the tables outlive the run. Runs expire at 21 days and the
+    tables at a year, and S3 applies the SHORTEST expiration where two prefix
+    rules overlap, so a table under the run's prefix would be deleted with it
+    whatever the second rule said.
+
+    graph/ is a triple store directory rather than Parquet. It is a tree of
+    ordinary files and publishes like one.
+    """
+    root = work / TABLES
+    if not root.is_dir():
+        return []
+
+    items = []
+    for table in sorted(p for p in root.iterdir() if p.is_dir()):
+        partition = table / f"day={day}"
+        if partition.is_dir():
+            items += files_under(partition, f"{table.name}/day={day}")
+    return items
+
+
+def tables_destination(env, dataset: str) -> str:
+    root = env.get("PYG_TABLES_ROOT", "").strip().rstrip("/")
+    if not root.startswith("s3://") or len(root) == len("s3://"):
+        raise Refused(
+            "this run wrote query tables; set PYG_TABLES_ROOT to "
+            "s3://BUCKET/PREFIX to say where they go. They are published "
+            "outside the run prefix because they outlive the run")
+    return f"{root}/{dataset}"
+
+
+def make_index(run_id, dataset, period, day, sources, rd, graphs, labels, items,
+               tables=(), tables_root="") -> dict:
     metadata = sorted({name.split("/", 1)[1] for name, _ in items
                        if name.count("/") == 1 and name.split("/", 1)[0] in graphs
                        and name.endswith(".json")})
     run_level = {"enriched": "enriched/triples/", "manifests": "manifests/"}
     if any(name == "enriched/dataset.json" for name, _ in items):
         run_level["dataset"] = "enriched/dataset.json"
+    published_tables = sorted({name.split("/", 1)[0] for name, _ in tables})
     return {
         "run_id": run_id,
         "dataset": dataset,
@@ -299,20 +350,35 @@ def make_index(run_id, dataset, period, day, sources, rd, graphs, labels, items)
         "variants": {g: {"path": f"{g}/", "notebook_label": labels.get(g)} for g in graphs},
         "run_level": run_level,
         "per_variant_files": metadata + ["hetero_data_<variant>.pt", "node_index/"],
+        # Named here, published elsewhere. A consumer holding this index would
+        # otherwise have no way to learn the tables exist, and the tables are
+        # the part of a run that is still there a year later.
+        "tables": {
+            "root": f"{tables_root}/" if tables_root else "",
+            "day": f"day={day}/" if published_tables else "",
+            "published": published_tables,
+            "note": "Node ids are day-scoped: edges from a day may only be "
+                    "joined to that same day's nodes.",
+        },
     }
 
 
-def build_tree(tree: Path, items, index: dict) -> None:
-    """Lay the files out as they will be published, as symlinks. aws s3 sync follows them."""
+def build_tree(tree: Path, items, index: dict, marker: str = INDEX) -> None:
+    """Lay the files out as they will be published, as symlinks. aws s3 sync follows them.
+
+    ``marker`` is the file that goes up last and says the publish finished --
+    index.json for a run, a day's entry for the tables.
+    """
     if tree.is_symlink():
         raise Refused(f"{tree} is a symlink; not clearing it")
     if tree.exists():
-        shutil.rmtree(tree)  # symlinks and index.json only; rmtree does not follow the links
+        shutil.rmtree(tree)  # symlinks and the marker only; rmtree does not follow the links
     for name, source in items:
         link = tree / name
         link.parent.mkdir(parents=True, exist_ok=True)
         link.symlink_to(source)
-    (tree / INDEX).write_text(json.dumps(index, indent=2) + "\n")
+    (tree / marker).parent.mkdir(parents=True, exist_ok=True)
+    (tree / marker).write_text(json.dumps(index, indent=2) + "\n")
 
 
 def summarize(items, log: Log) -> None:
@@ -368,13 +434,22 @@ def published(dst: str) -> dict:
             for obj in body.get("Contents") or []}
 
 
-def check_upload(items, tree: Path, dst: str, log: Log) -> bool:
-    """Compare the destination's listing with the upload tree, name by name."""
+def check_upload(items, tree: Path, dst: str, log: Log, marker: str = INDEX,
+                 scope: str = "") -> bool:
+    """Compare the destination's listing with the upload tree, name by name.
+
+    ``scope`` narrows which of the destination's keys count as unexpected. A run
+    prefix holds one run, so nothing there is out of scope. The tables root
+    holds every day ever published, and the days this publish did not write are
+    not extras -- they are the point.
+    """
     want = {name: (tree / name).stat().st_size for name, _ in items}
     have = published(dst)
+    if scope:
+        have = {name: value for name, value in have.items() if scope in name}
     missing = sorted(set(want) - set(have))
     wrong = sorted(name for name in want if name in have and have[name][0] != want[name])
-    extra = sorted(set(have) - set(want) - {INDEX})
+    extra = sorted(set(have) - set(want) - {marker})
     for label, names in (("missing", missing), ("wrong size", wrong),
                          ("not in the upload tree", extra)):
         for name in names[:20]:
@@ -388,6 +463,75 @@ def check_upload(items, tree: Path, dst: str, log: Log) -> bool:
     log(f"check ok: all {len(want)} files are there at the right size; {carrying} carry "
         f"an S3 checksum ({', '.join(algorithms) or 'none'})")
     return True
+
+
+def publish_tables(rd: Path, items, dst: str, day: str, run_id: str,
+                   upload: bool, log: Log) -> int:
+    """Send one day of tables to the tables root. Returns an exit code.
+
+    Its own destination, its own guard and its own completion marker, because
+    the run's are all keyed by run id and these are keyed by day -- two runs
+    over the same day publish the same day, and a run publishing a second day
+    must not be refused for having published a first.
+
+    The guard refuses a day that already finished. It is not caution: the
+    destination takes writes and listings but not DELETES, so a rewritten day
+    whose part-file count went down would leave the extra old parts in place,
+    and a reader would see their rows twice. An unfinished day has no marker
+    and resumes normally.
+    """
+    marker = f"{TABLES_MARKER}/{day}.json"
+    tree = rd / TABLES_TREE
+    index = {
+        "day": day,
+        "run_id": run_id,
+        "published": utc_now(),
+        "tables": sorted({name.split("/", 1)[0] for name, _ in items}),
+        "files": len(items),
+    }
+    build_tree(tree, items, index, marker)
+
+    log(f"tables tree {tree}:")
+    summarize(items, log)
+    log(f"to   {dst}/")
+
+    try:
+        already = published(dst)
+    except Failed as why:
+        raise Refused(str(why))
+    if marker in already:
+        raise Refused(
+            f"{dst}/{marker} already exists, so this day's tables are already "
+            f"published. The destination has no delete, so a day cannot be "
+            f"rewritten in place")
+
+    # No --size-only, unlike the run sync. A day is written once, but an
+    # interrupted publish can leave a part file short, and size alone would
+    # call a truncated object done.
+    sync = ["s3", "sync", str(tree), f"{dst}/", "--exclude", marker,
+            "--no-progress"]
+    if not upload:
+        rc, lines = aws_streamed(log, False, *sync, "--dryrun")
+        if rc != 0:
+            raise Refused(f"aws s3 sync --dryrun failed for the tables (rc={rc})")
+        count = sum(1 for line in lines if line.startswith("(dryrun) upload:"))
+        log(f"dry run: {count} table files would be uploaded, then {marker}.")
+        return 0
+
+    log("uploading the tables")
+    rc, _ = aws_streamed(log, True, *sync)
+    if rc != 0:
+        log(f"TABLE UPLOAD FAILED (rc={rc}). {marker} was not written. "
+            f"Running again resumes.")
+        return 1
+    if not check_upload(items, tree, dst, log, marker, scope=f"day={day}/"):
+        return 1
+    r = aws("s3", "cp", str(tree / marker), f"{dst}/{marker}", "--no-progress")
+    if r.returncode != 0:
+        log(f"{marker} upload failed: {r.stderr.strip()}")
+        return 1
+    log(f"published {len(items)} table files to {dst}/")
+    return 0
 
 
 def publish(rd: Path, upload: bool, env, log: Log) -> int:
@@ -406,9 +550,16 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
         raise Refused("set PYG_PUBLISH_ROOT to s3://BUCKET/PREFIX")
     dst = f"{root}/{dataset}/{period_dirs}/{run_id}"
 
+    # Resolved before anything is written: a run that produced tables and has
+    # nowhere to send them should say so at the prompt, not after the .pt is up.
+    tables = tables_plan(work, day)
+    tables_dst = tables_destination(env, dataset) if tables else ""
+
     log(f"run {run_id}, sources from {day}, dataset {dataset}, graphs: {', '.join(graphs)}")
     log(f"from {work}")
     log(f"to   {dst}/")
+    if tables:
+        log(f"and  {tables_dst}/ ({len(tables)} table files for day={day})")
 
     log("checking the graph files against checksums.json")
     for graph in graphs:
@@ -417,7 +568,8 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
     items = plan(work, period_dirs, graphs)
     tree = rd / TREE
     build_tree(tree, items, make_index(run_id, dataset, f"{year}-{month}", day, sources,
-                                       rd, graphs, notebook_labels(rd), items))
+                                       rd, graphs, notebook_labels(rd), items,
+                                       tables, tables_dst))
     log(f"upload tree {tree}:")
     summarize(items, log)
 
@@ -439,6 +591,8 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
             raise Refused(f"aws s3 sync --dryrun failed (rc={rc}); see publish.log")
         count = sum(1 for line in lines if line.startswith("(dryrun) upload:"))
         log(f"dry run: {count} files would be uploaded, then index.json. Nothing was written.")
+        if tables:
+            publish_tables(rd, tables, tables_dst, day, run_id, False, log)
         log("Run again with --upload to publish.")
         return 0
 
@@ -457,6 +611,14 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
         log("index.json does not show up in the listing at the right size")
         return 1
     log(f"published {dst}/")
+
+    # After the run, and reported separately: the run is published either way,
+    # and a table failure must not read as "the run did not go up".
+    if tables:
+        rc = publish_tables(rd, tables, tables_dst, day, run_id, True, log)
+        if rc != 0:
+            log(f"the run is published at {dst}/, but its tables are not")
+            return rc
     return 0
 
 

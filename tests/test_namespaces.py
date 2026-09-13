@@ -20,6 +20,7 @@ import pytest
 from spark_jobs.utils import rdf_utils
 from spark_jobs.utils.rdf_utils import (
     ENRICHMENT_NAMESPACES,
+    MARKET_NODE_TYPE_PREFIXES,
     NAMESPACE_PREFIXES,
     ONTOLOGY_BASE,
     PIPELINE_NODE_TYPE_PREFIXES,
@@ -427,6 +428,17 @@ def test_pipeline_node_type_prefixes_still_resolve():
     assert PIPELINE_NODE_TYPE_PREFIXES
     prefixes = {p for _ns, p in NAMESPACE_PREFIXES}
     for entry in PIPELINE_NODE_TYPE_PREFIXES:
+        assert entry.endswith("_")
+        assert entry[:-1] in prefixes
+
+
+def test_market_node_type_prefixes_still_resolve():
+    """Derived the same way, and the test the query tables ask to decide what
+    stays out of the long tables and the triple store. An empty tuple would
+    put 9.3M market rows a day into a table sized for 1.4M."""
+    assert MARKET_NODE_TYPE_PREFIXES
+    prefixes = {p for _ns, p in NAMESPACE_PREFIXES}
+    for entry in MARKET_NODE_TYPE_PREFIXES:
         assert entry.endswith("_")
         assert entry[:-1] in prefixes
 

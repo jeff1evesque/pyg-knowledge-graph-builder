@@ -17,11 +17,11 @@ fixtures over the shared local SparkSession (`spark` / `make_triples`):
 Type URIs / prefixes are taken from the code (NAMESPACE_PREFIXES, RDF_TYPE) so the
 tests track the implementation rather than hardcoding IRIs.
 """
-from spark_jobs.pyg_builder.node_mapper import (
-    NodeMapper,
+from spark_jobs.pyg_builder.naming import (
     RDF_TYPE,
-    _build_uri_to_pyg_name_expr,
+    prefixed_local_name_expr,
 )
+from spark_jobs.pyg_builder.node_mapper import NodeMapper
 
 # Concrete type URIs whose PyG names are fixed by NAMESPACE_PREFIXES.
 CPI_INDEX = "https://jefflevesque.com/ontology/cpi/Index"        # -> cpi_Index
@@ -45,14 +45,14 @@ def _mapping(node_id_df):
 
 def test_uri_to_pyg_name_maps_known_namespace(spark):
     df = spark.createDataFrame([(CPI_INDEX,)], ["type_uri"])
-    name = df.withColumn("n", _build_uri_to_pyg_name_expr("type_uri")).collect()[0]["n"]
+    name = df.withColumn("n", prefixed_local_name_expr("type_uri")).collect()[0]["n"]
     assert name == "cpi_Index"
 
 
 def test_uri_to_pyg_name_falls_back_to_last_segment(spark):
     # Unknown namespace -> fallback extracts the trailing segment as unknown_<seg>.
     df = spark.createDataFrame([("http://nonexistent.invalid/Widget",)], ["type_uri"])
-    name = df.withColumn("n", _build_uri_to_pyg_name_expr("type_uri")).collect()[0]["n"]
+    name = df.withColumn("n", prefixed_local_name_expr("type_uri")).collect()[0]["n"]
     assert name == "unknown_Widget"
 
 
@@ -434,7 +434,7 @@ def test_every_node_type_round_trips_through_the_naming_rule(
         # name here, so the assertion tracks the rule instead of copying it.
         derived = (
             spark.createDataFrame([(uri,)], "uri STRING")
-            .select(_build_uri_to_pyg_name_expr("uri").alias("name"))
+            .select(prefixed_local_name_expr("uri").alias("name"))
             .first()["name"]
         )
         assert derived == node_type, (
@@ -451,3 +451,32 @@ def test_single_typed_entities_are_unaffected(spark, make_triples):
     ], make_triples)
     assert type_uris["cpi_Index"] == CPI_INDEX
     assert type_uris["cpi_Series"] == CPI_SERIES
+
+
+def test_exclude_node_types_drops_only_the_named_types(spark):
+    """Excluding one source means naming its few types. Everything else stays,
+    including a type the config never mentions -- which is the difference from
+    the node_types allowlist, and the reason this exists: a run that builds its
+    graph without weather must not also drop a type that first appeared today.
+    """
+    triples = spark.createDataFrame([
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/b", RDF_TYPE, CPI_SERIES),
+        ("https://ex/c", RDF_TYPE, "https://jefflevesque.com/ontology/weather/WeatherAlert"),
+    ], schema="subject STRING, predicate STRING, object STRING")
+
+    mapper = NodeMapper(spark, {"exclude_node_types": ["weather_WeatherAlert"]})
+    node_id_df, counts = mapper.build_node_id_table(triples)
+
+    assert "weather_WeatherAlert" not in counts
+    assert {"cpi_Index", "cpi_Series"} <= set(counts)
+
+
+def test_exclude_node_types_is_inert_when_unset(spark):
+    triples = spark.createDataFrame([
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/c", RDF_TYPE, "https://jefflevesque.com/ontology/weather/WeatherAlert"),
+    ], schema="subject STRING, predicate STRING, object STRING")
+
+    _df, counts = NodeMapper(spark, {}).build_node_id_table(triples)
+    assert "weather_WeatherAlert" in counts

@@ -42,6 +42,11 @@ Launch with spark-submit (see bin/submit_spark_job.sh). Parameters:
     --s3_pyg_key:              optional S3 key for the .pt (metadata prefix
                                is derived from it)
     --enable_ontology_mapping: true | false (default: true)
+    --enable_query_tables:     true | false (default: true). Off, the run
+        writes no query tables and its other artifacts are unchanged.
+    --source_data_day:         YYYY-MM-DD the data describes. Defaults to the
+        day source_paths are partitioned under; state it when they name none,
+        or name more than one
     --allow_overwrite: true | false (default: false). Off, the job refuses to
         start when the artifacts it would write are already present.
     --time_period:             label (e.g. "2024-12") for output naming
@@ -116,6 +121,11 @@ from spark_jobs.graph.persistence import (
     utcnow,
 )
 
+# The day-partitioned tables a downstream service queries. Written from the
+# enriched triples, in the leg that produces them, and over everything the
+# sources carried rather than the subset the .pt is built from.
+from spark_jobs.graph.tables import write_query_tables
+
 # What the job was asked to do. The PyG availability flag comes from here too:
 # JobConfig has to reject a pyg-requiring mode before the job starts, so the
 # probe lives beside the validation that reads it.
@@ -148,6 +158,7 @@ def run_enrichment(
     enable_ontology_mapping: bool = True,
     market_sector_definitions_bucket: str = "",
     market_sector_definitions_key: str = "",
+    source_data_day: str = "",
     class_mappings: Dict[str, Any] = None,
 ) -> tuple:
     """
@@ -182,6 +193,7 @@ def run_enrichment(
         triples_df,
         sector_definitions_bucket=market_sector_definitions_bucket,
         sector_definitions_key=market_sector_definitions_key,
+        source_data_day=source_data_day,
     )
     stats = pipeline.run(
         enable_ontology_mapping=enable_ontology_mapping,
@@ -360,6 +372,7 @@ def execute_full_pipeline(
         config.enable_ontology_mapping,
         market_sector_definitions_bucket=config.market_sector_definitions_bucket,
         market_sector_definitions_key=config.market_sector_definitions_key,
+        source_data_day=config.source_data_day,
         class_mappings=config.class_mappings,
     )
 
@@ -375,6 +388,10 @@ def execute_full_pipeline(
         enriched_df, config.enriched_parquet_path, config.parquet_partitions
     )
     save_dataset_descriptor(config, spark)
+
+    # Step 3b: Query tables, from the same enriched frame and before any of the
+    # PyG node filters narrow it.
+    query_tables = write_query_tables(spark, enriched_df, config)
 
     # Step 4: Build PyG (executors → compact tensors → driver)
     hetero_data, metadata, node_index_df = run_pyg_construction(
@@ -403,6 +420,7 @@ def execute_full_pipeline(
         "sources": source_stats,
         "enrichment": enrichment_stats,
         "enriched_parquet_location": config.enriched_parquet_path,
+        "query_tables": query_tables,
         **locations,
     }
 
@@ -440,6 +458,7 @@ def execute_enrichment_only(
         config.enable_ontology_mapping,
         market_sector_definitions_bucket=config.market_sector_definitions_bucket,
         market_sector_definitions_key=config.market_sector_definitions_key,
+        source_data_day=config.source_data_day,
         class_mappings=config.class_mappings,
     )
 
@@ -456,6 +475,11 @@ def execute_enrichment_only(
     )
     save_dataset_descriptor(config, spark)
 
+    # Step 3b: Query tables, from the same enriched frame. This mode builds no
+    # PyG object at all, which changes nothing here -- the tables never
+    # depended on one.
+    query_tables = write_query_tables(spark, enriched_df, config)
+
     return {
         "mode": "enrichment_only",
         "source_format": config.source_format,
@@ -467,6 +491,7 @@ def execute_enrichment_only(
         "sources": source_stats,
         "enrichment": enrichment_stats,
         "enriched_parquet_location": config.enriched_parquet_path,
+        "query_tables": query_tables,
     }
 
 

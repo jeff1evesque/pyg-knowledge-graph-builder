@@ -57,6 +57,7 @@ from pyspark.sql import functions as F
 from spark_jobs.utils.rdf_utils import (
     NAMESPACE_PREFIXES,
     ONTOLOGY_NAMESPACE_INDICES,
+    SEC_FILINGS,
     PROV_DERIVED_BY,
     PROV_OBSERVED_LITERAL_DATATYPE,
     PROV_CLASS_HIERARCHY,
@@ -71,7 +72,12 @@ from spark_jobs.utils.rdf_utils import (
     PROV_ROUTE_OBSERVED_RANGE,
     PROV_ROUTE_DATATYPE_RANGE,
 )
-from spark_jobs.utils.spark_rdf_utils import collect_sorted
+from spark_jobs.utils.spark_rdf_utils import (
+    NUMERIC_PREDICATE_MIN_SHARE,
+    collect_sorted,
+    is_finite,
+    numeric_literal_expr,
+)
 # One resolution of "which class is this node type from", shared with the
 # mapping graph_schema.json publishes. node_mapper does not import this module,
 # so there is no cycle.
@@ -95,41 +101,6 @@ from spark_jobs.pyg_builder.vector_layout import (
 
 logger = logging.getLogger(__name__)
 
-# Default for feature_config.numeric_predicate_min_share. A literal property
-# is numeric only if MORE THAN this share of its values parse as a number;
-# otherwise every one of its values is treated as a category label.
-# Classification is per-predicate and mutually exclusive: a property is
-# numeric or categorical, never both.
-#
-# Per-value classification (the previous behaviour) split a single property
-# across both branches whenever some of its labels happened to parse. SEC
-# hasDocumentType is the motivating case: of 2,372 values, 315 (13.3%) are
-# bare-digit form types -- Form 4, 144, 3, 425, 497, 487, 25 -- while the rest
-# are hyphenated (10-K, 8-K, S-1). Those 315 were z-scored into the numeric
-# segment as if a form number were a magnitude (mean 62.24, std 128.64),
-# injecting a spurious continuous ordering over what are labels.
-#
-# A simple majority is deliberate. It is the least presumptuous rule that
-# still fixes the above, and it tolerates a genuinely numeric measurement
-# carrying a minority of unparseable sentinels ("N/A", "unknown") without
-# demoting the whole property out of the numeric segment.
-_NUMERIC_PREDICATE_MIN_SHARE = 0.5
-
-
-def _is_finite(col):
-    """Whether a double column holds a real, usable number.
-
-    Null, NaN and +/-infinity all mean the same thing here -- there is no
-    magnitude to encode -- but they arrive by different routes and only the
-    first is caught by an ``isNotNull()``. The other two are what let a single
-    overflowing literal reach the arithmetic, where a mean goes infinite, a
-    stddev goes NaN, and every value of that predicate is silently poisoned.
-    """
-    return (
-        col.isNotNull()
-        & ~F.isnan(col)
-        & (F.abs(col) != float("inf"))
-    )
 
 
 # ============================================
@@ -162,6 +133,50 @@ _NON_FEATURE_PREDICATES = {
     "http://www.w3.org/2000/01/rdf-schema#isDefinedBy",
     "http://www.w3.org/2002/07/owl#sameAs",
     "http://www.w3.org/2002/07/owl#imports",
+}
+
+# Predicates whose VALUE is not a feature, though the predicate itself is a
+# real data property. Narrower than _NON_FEATURE_PREDICATES on purpose: those
+# describe the vocabulary and are excluded from everything, including the
+# property-schema coverage report, which counts "predicates that actually carry
+# data". These do carry data. Their presence is still encoded -- "this filing
+# states a SIC" is a fact about the node -- and they still count as data
+# predicates. Only the value is kept out of the numeric and categorical
+# segments.
+#
+# Both entries are things the encoder would otherwise get wrong, measured
+# through the real classifier on 2026-09-12:
+#
+#   filings:hasSic and filings:hasIssuerSic are 4-digit industry codes, so
+#   100% of their values parse and the majority rule routes them to the
+#   NUMERIC segment, where they are z-scored as magnitudes. SIC 5812 (eating
+#   places) is then encoded as 1.6x SIC 3571 (computers). The majority rule
+#   cannot catch this -- it exists to spot a property whose values are MOSTLY
+#   labels, and every SIC value is a number. Industry is not lost: it reaches
+#   the graph as structure, through belongsToSector.
+#
+#   filings:hasAcceptanceDateTime arrives as "2026-09-09 06:47:44-04:00"
+#   (the loader converts xsd:dateTime through rdflib, which puts a space where
+#   the source had a T). Nothing parses that as a number, so it lands in the
+#   CATEGORICAL segment -- 127 slots, against one distinct timestamp per
+#   filing and thousands of filings a day. That is not a label, it is an
+#   instant, and hashing it fills the segment every other categorical value
+#   shares with noise.
+#
+# The instant is genuinely useful and is published in the query tables'
+# facts/, where ordering by it needs no encoding. Encoding it as epoch seconds
+# was the alternative and is deliberately not taken: absent reads as 0.0, and
+# after z-scoring 0.0 is "average", so an unstamped filing would look like one
+# filed at the mean time -- and upstream fetches the timestamp for at most 60
+# filings per run, so unstamped rows are the normal state on a fresh day.
+#
+# Named from the vocabulary rather than spelled out, so a re-homed namespace
+# moves the term and this together instead of leaving a filter that matches
+# nothing.
+_UNENCODED_VALUE_PREDICATES = {
+    str(SEC_FILINGS.hasSic),
+    str(SEC_FILINGS.hasIssuerSic),
+    str(SEC_FILINGS.hasAcceptanceDateTime),
 }
 
 # Predicates whose presence proves the ontology-mapping phase ran over the
@@ -412,7 +427,7 @@ class FeatureExtractor:
             "chunk_node_threshold", _CHUNK_NODE_THRESHOLD
         )
         self._numeric_min_share = feat_config.get(
-            "numeric_predicate_min_share", _NUMERIC_PREDICATE_MIN_SHARE
+            "numeric_predicate_min_share", NUMERIC_PREDICATE_MIN_SHARE
         )
         self._class_identity_dim = feat_config.get(
             "class_identity_dim", None
@@ -1117,7 +1132,15 @@ class FeatureExtractor:
 
         The anti-join drops any triple whose object is a known node URI —
         what remains is the literal-valued tail of the graph.
+
+        _UNENCODED_VALUE_PREDICATES drops out here and ONLY here: an industry
+        code is not a magnitude and an instant is not a label, but both are
+        real data properties, so their presence still encodes and the coverage
+        report still counts them.
         """
+        excluded = list(
+            _NON_FEATURE_PREDICATES | _UNENCODED_VALUE_PREDICATES
+        )
         return (
             triples_df
             .join(
@@ -1125,30 +1148,8 @@ class FeatureExtractor:
                 triples_df["object"] == F.col("_obj_uri"),
                 "left_anti",
             )
-            .filter(~F.col("predicate").isin(list(_NON_FEATURE_PREDICATES)))
+            .filter(~F.col("predicate").isin(excluded))
         )
-
-    @staticmethod
-    def _numeric_cast(col: str = "object"):
-        """Lexical form of a literal cast to double — null unless it is finite.
-
-        ``cast("double")`` fails to null on a value it cannot read, but it does
-        NOT fail on one it reads as a number too large to hold: Java's parser
-        follows the float64 rules and returns infinity. The CUSIP ``46120E602``
-        is a real identifier and valid scientific notation, so it arrives here
-        as 46120 x 10^602 and lands as ``inf`` -- not null, so it survived the
-        ``isNotNull()`` filter downstream, made that predicate's mean infinite
-        and its stddev NaN, and put NaN in 5,396 node feature rows (#351).
-
-        Infinity is not a measurement whatever produced it, so it is treated
-        exactly like an unparseable value: no number here. Both callers ask
-        this the same question -- the classifier via ``isNotNull()`` and the
-        value extraction via its filter -- so answering it once keeps the share
-        that decides "is this predicate numeric" consistent with the values
-        that are actually encoded.
-        """
-        parsed = F.split(F.col(col), r"\^\^").getItem(0).cast("double")
-        return F.when(_is_finite(parsed), parsed)
 
     def _classify_literal_predicates(
         self,
@@ -1167,7 +1168,7 @@ class FeatureExtractor:
         """
         shares = (
             literal_triples
-            .withColumn("_is_numeric", self._numeric_cast().isNotNull())
+            .withColumn("_is_numeric", numeric_literal_expr("object").isNotNull())
             .groupBy("predicate")
             .agg(
                 F.count("*").alias("total"),
@@ -1220,7 +1221,7 @@ class FeatureExtractor:
         candidates = literal_triples.filter(
             F.col("predicate").isin(list(numeric_predicates))
         ).withColumn(
-            "numeric_value", self._numeric_cast(),
+            "numeric_value", numeric_literal_expr("object"),
         ).filter(F.col("numeric_value").isNotNull())
 
         if not candidates.head(1):
@@ -1318,8 +1319,9 @@ class FeatureExtractor:
         The fallbacks reject any statistic that is not a finite number, not
         merely a null or a zero. NaN is neither null nor equal to 0.0, so the
         older guard passed it straight through and ``(value - mu) / sigma``
-        produced NaN for every row of that predicate (#351). ``_numeric_cast``
-        now keeps non-finite values out of ``numeric_df`` in the first place,
+        produced NaN for every row of that predicate (#351).
+        ``numeric_literal_expr`` now keeps non-finite values out of
+        ``numeric_df`` in the first place,
         so this should never fire; it stays because the failure it prevents is
         silent, and a graph full of NaN costs hours to discover downstream.
         """
@@ -1333,13 +1335,13 @@ class FeatureExtractor:
             .withColumn(
                 "sigma",
                 F.when(
-                    _is_finite(F.col("sigma")) & (F.col("sigma") != 0.0),
+                    is_finite(F.col("sigma")) & (F.col("sigma") != 0.0),
                     F.col("sigma"),
                 ).otherwise(F.lit(1.0)),
             )
             .withColumn(
                 "mu",
-                F.when(_is_finite(F.col("mu")), F.col("mu"))
+                F.when(is_finite(F.col("mu")), F.col("mu"))
                 .otherwise(F.lit(0.0)),
             )
         )

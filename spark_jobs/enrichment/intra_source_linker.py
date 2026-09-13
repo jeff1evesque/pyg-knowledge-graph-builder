@@ -22,6 +22,7 @@ def enrich_intra_source(
     triples_df: DataFrame,
     sector_definitions_bucket: str = "",
     sector_definitions_key: str = "",
+    source_data_day: str = "",
 ) -> Dict:
     """
     Run intra-source enrichment for all detected data sources.
@@ -78,6 +79,7 @@ def enrich_intra_source(
             spark,
             sector_definitions_bucket=sector_definitions_bucket,
             sector_definitions_key=sector_definitions_key,
+            source_data_day=source_data_day,
         )
         market_new_df = market_linker.enrich(triples_df)
         spark_new_dfs.append(market_new_df)

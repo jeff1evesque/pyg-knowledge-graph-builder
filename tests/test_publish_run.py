@@ -117,6 +117,7 @@ class Run:
         self.s3.mkdir()
         self.published = (self.s3 / "bucket" / "runs" / "all-sources"
                           / f"year={YEAR}" / f"month={MONTH}" / RUN_ID)
+        self.published_tables = self.s3 / "bucket" / "tables" / "all-sources"
         self.calls = tmp_path / "aws-calls.txt"
         self.bin = tmp_path / "stubbin"
         _write(self.bin / "aws", STUB_AWS).chmod(0o755)
@@ -171,6 +172,26 @@ class Run:
         _write(index / "_SUCCESS", b"")
         _write(index / "._SUCCESS.crc", b"c")
 
+    def add_tables(self, day: str = DAY) -> set:
+        """Write one day of query tables into the work dir, as the job leaves them.
+
+        graph/ is a triple store directory rather than Parquet, so it is a tree
+        of ordinary files under the same day partition.
+        """
+        names = set()
+        for table in ("nodes", "edges", "facts"):
+            partition = self.work / "tables" / table / f"day={day}"
+            _write(partition / "part-00000.zstd.parquet", f"{table} rows".encode())
+            _write(partition / ".part-00000.zstd.parquet.crc", b"c")
+            _write(partition / "_SUCCESS", b"")
+            names |= {f"{table}/day={day}/part-00000.zstd.parquet",
+                      f"{table}/day={day}/_SUCCESS"}
+        store = self.work / "tables" / "graph" / f"day={day}"
+        _write(store / "CURRENT", b"MANIFEST-000001\n")
+        _write(store / "MANIFEST-000001", b"rocksdb")
+        names |= {f"graph/day={day}/CURRENT", f"graph/day={day}/MANIFEST-000001"}
+        return names
+
     def set_recorded_dataset(self, name: str) -> None:
         _write(self.enriched / "dataset.json", json.dumps(
             {"dataset": name, "sources": ["a", "b"], "time_period": f"{YEAR}-{MONTH}"}))
@@ -191,6 +212,7 @@ class Run:
             "FAKE_S3": str(self.s3),
             "FAKE_S3_CALLS": str(self.calls),
             "PYG_PUBLISH_ROOT": "s3://bucket/runs",
+            "PYG_TABLES_ROOT": "s3://bucket/tables",
             "PYG_PUBLISH_DATASET": "all-sources",
         })
         env.pop("PYG_PUBLISH_DATA_DAY", None)
@@ -321,3 +343,91 @@ def test_a_file_lost_in_the_upload_fails_the_check_and_leaves_index_json_unwritt
     assert "missing: 1024d/normalization.json" in r.stdout
     assert not (run.published / "index.json").exists()
     assert (run.rd / "publish.done").read_text().strip() == "1"
+
+
+# --------------------------------------------------------------------------- #
+# The query tables: a second destination, keyed by day
+# --------------------------------------------------------------------------- #
+
+def test_tables_are_published_outside_the_run_folder(run):
+    """Runs expire at 21 days and the tables keep a year. S3 applies the
+    SHORTEST expiration where two prefix rules overlap, so a table under the
+    run's prefix would be deleted with the run whatever the second rule said."""
+    expected = run.add_tables()
+    assert run.publish("--upload").returncode == 0
+
+    assert files(run.published_tables) == expected | {f"_days/{DAY}.json"}
+    assert not [name for name in files(run.published) if name.startswith("nodes/")]
+    assert not [name for name in files(run.published_tables) if name.endswith(".crc")]
+
+
+def test_the_day_marker_goes_up_last(run):
+    """Same contract as index.json: a day without its marker is a publish that
+    did not finish, and running again resumes it."""
+    run.add_tables()
+    assert run.publish("--upload").returncode == 0
+
+    calls = run.calls_text().splitlines()
+    copies = [i for i, call in enumerate(calls) if call.startswith("s3 cp")]
+    marker = next(i for i in copies if f"_days/{DAY}.json" in calls[i])
+    table_sync = next(i for i, call in enumerate(calls)
+                      if call.startswith("s3 sync") and "tables" in call)
+    assert table_sync < marker
+
+
+def test_index_json_names_the_tables_and_where_they_went(run):
+    """A consumer holding the run index has no other way to learn they exist,
+    and the tables are the part still there a year later."""
+    run.add_tables()
+    assert run.publish("--upload").returncode == 0
+
+    tables = json.loads((run.published / "index.json").read_text())["tables"]
+    assert tables["root"] == "s3://bucket/tables/all-sources/"
+    assert tables["day"] == f"day={DAY}/"
+    assert tables["published"] == ["edges", "facts", "graph", "nodes"]
+    assert "day-scoped" in tables["note"]
+
+
+def test_a_day_already_published_is_refused_but_the_run_still_goes(run):
+    """The destination has no delete, so a rewritten day whose part count went
+    down would leave the old parts behind and a reader would see their rows
+    twice. The run itself is published either way and says so."""
+    run.add_tables()
+    _write(run.published_tables / "_days" / f"{DAY}.json", "{}")
+
+    r = run.publish("--upload")
+    assert r.returncode != 0
+    assert "already published" in r.stdout
+    assert (run.published / "index.json").exists()
+
+
+def test_a_second_day_is_not_refused_for_the_first_one_being_there(run):
+    """The tables are keyed by day, not by run: days accumulate under one root
+    and an earlier one must not block a later one."""
+    run.add_tables()
+    _write(run.published_tables / "_days" / "2026-01-01.json", "{}")
+    _write(run.published_tables / "nodes" / "day=2026-01-01" / "part-00000.zstd.parquet",
+           b"older")
+
+    r = run.publish("--upload")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (run.published_tables / "_days" / f"{DAY}.json").exists()
+    # The earlier day is still there, and was not counted as unexpected.
+    assert (run.published_tables / "nodes" / "day=2026-01-01"
+            / "part-00000.zstd.parquet").exists()
+
+
+def test_tables_with_nowhere_to_go_are_refused_before_anything_is_written(run):
+    """Said at the prompt rather than after the .pt is up."""
+    run.add_tables()
+    r = run.publish("--upload", PYG_TABLES_ROOT=None)
+    assert r.returncode == 2
+    assert "PYG_TABLES_ROOT" in r.stdout
+    assert "s3 sync" not in run.calls_text()
+
+
+def test_a_run_with_no_tables_needs_no_tables_root(run):
+    """Every run before this feature existed is that run."""
+    r = run.publish("--upload", PYG_TABLES_ROOT=None)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert json.loads((run.published / "index.json").read_text())["tables"]["published"] == []

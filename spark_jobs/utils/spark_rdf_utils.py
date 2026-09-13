@@ -48,6 +48,68 @@ def collect_sorted(df: DataFrame) -> List:
     return sorted(df.collect(), key=lambda row: tuple(str(v) for v in row))
 
 
+# Default for feature_config.numeric_predicate_min_share, and the rule the
+# query tables' wide market table types its columns by. A literal property
+# is numeric only if MORE THAN this share of its values parse as a number;
+# otherwise every one of its values is treated as a category label.
+# Classification is per-predicate and mutually exclusive: a property is
+# numeric or categorical, never both.
+#
+# Per-value classification (the previous behaviour) split a single property
+# across both branches whenever some of its labels happened to parse. SEC
+# hasDocumentType is the motivating case: of 2,372 values, 315 (13.3%) are
+# bare-digit form types -- Form 4, 144, 3, 425, 497, 487, 25 -- while the rest
+# are hyphenated (10-K, 8-K, S-1). Those 315 were z-scored into the numeric
+# segment as if a form number were a magnitude (mean 62.24, std 128.64),
+# injecting a spurious continuous ordering over what are labels.
+#
+# A simple majority is deliberate. It is the least presumptuous rule that
+# still fixes the above, and it tolerates a genuinely numeric measurement
+# carrying a minority of unparseable sentinels ("N/A", "unknown") without
+# demoting the whole property out of the numeric segment.
+NUMERIC_PREDICATE_MIN_SHARE = 0.5
+
+
+def is_finite(col):
+    """Whether a double column holds a real, usable number.
+
+    Null, NaN and +/-infinity all mean the same thing here -- there is no
+    magnitude to encode -- but they arrive by different routes and only the
+    first is caught by an ``isNotNull()``. The other two are what let a single
+    overflowing literal reach the arithmetic, where a mean goes infinite, a
+    stddev goes NaN, and every value of that predicate is silently poisoned.
+    """
+    return (
+        col.isNotNull()
+        & ~F.isnan(col)
+        & (F.abs(col) != float("inf"))
+    )
+
+
+def numeric_literal_expr(col: str = "object"):
+    """Lexical form of a literal cast to double -- null unless it is finite.
+
+    ``cast("double")`` fails to null on a value it cannot read, but it does
+    NOT fail on one it reads as a number too large to hold: Java's parser
+    follows the float64 rules and returns infinity. The CUSIP ``46120E602``
+    is a real identifier and valid scientific notation, so it arrives here
+    as 46120 x 10^602 and lands as ``inf`` -- not null, so it survived the
+    ``isNotNull()`` filter downstream, made that predicate's mean infinite
+    and its stddev NaN, and put NaN in 5,396 node feature rows (#351).
+
+    Infinity is not a measurement whatever produced it, so it is treated
+    exactly like an unparseable value: no number here.
+
+    Every caller asks this the same question -- the feature extractor's
+    classifier via ``isNotNull()``, its value extraction via a filter, and the
+    query tables' ``is_numeric`` column -- so answering it once keeps the share
+    that decides "is this predicate numeric" consistent with the values that
+    are actually encoded, and keeps the published tables consistent with both.
+    """
+    parsed = F.split(F.col(col), r"\^\^").getItem(0).cast("double")
+    return F.when(is_finite(parsed), parsed)
+
+
 def literal_datatype_observations(
     parsed_df: DataFrame, carry: Optional[List[str]] = None
 ) -> DataFrame:

@@ -78,6 +78,95 @@ def period_partition(time_period: str) -> str:
 
 
 # ============================================
+# Source data day
+# ============================================
+# A day-level source path, in the two shapes the archive actually uses: a day
+# DIRECTORY (`year=2026/month=09/day=09/`, market) and a day FILE
+# (`year=2026/month=09/09.snappy.parquet`, SEC and NOAA). Anchored at the end,
+# so a month directory with nothing under it names no day.
+#
+# bin/publish_run.py's DAY_IN_PATH reads the same paths for the published day
+# and must keep agreeing with this; tests/test_output_paths.py runs both over
+# the same list. An earlier version here matched only the `day=` form, which
+# silently made every day-file path undated -- a run with no market source then
+# wrote no query tables and read the undated constituents CSV.
+_DAY_PARTITION_RE = re.compile(
+    r"year=(\d{4})/month=(\d{1,2})/(?:day=)?(\d{1,2})(?:\.[\w.]+)?/?$"
+)
+_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def days_in_source_paths(source_paths: List[str]) -> set:
+    """Every ``YYYY-MM-DD`` the source paths are partitioned under.
+
+    Usually one. Two means the run spans days, and nothing here decides which
+    of them the run's output describes -- see the two callers below.
+    """
+    days = set()
+    for path in source_paths:
+        match = _DAY_PARTITION_RE.search(path)
+        if match:
+            year, month, day = match.groups()
+            days.add(f"{year}-{month.zfill(2)}-{day.zfill(2)}")
+    return days
+
+
+def source_data_day(source_paths: List[str]) -> str:
+    """The ``YYYY-MM-DD`` the source paths are partitioned under, or ``""``.
+
+    Empty when no path carries a ``year=/month=/day=`` triple, and empty when
+    two of them carry different ones: the caller uses this to align reference
+    data with the day being processed, and there is no single day to align to.
+
+    ``time_period`` cannot answer this -- it is monthly by construction (see
+    ``period_partition``), so the day is only ever recoverable from the paths.
+    """
+    days = days_in_source_paths(source_paths)
+
+    if not days:
+        return ""
+
+    if len(days) > 1:
+        logger.warning(
+            f"source_paths name {len(days)} different days "
+            f"({', '.join(sorted(days))}); reference data cannot be aligned "
+            f"to one of them"
+        )
+        return ""
+
+    return days.pop()
+
+
+def resolve_source_data_day(source_paths: List[str], given: str = "") -> str:
+    """The day this run's data describes: ``given`` if it was stated,
+    otherwise the day the paths are partitioned under.
+
+    The override answers the two cases the paths cannot -- paths carrying no
+    day at all, and a run deliberately spanning two of them -- and it is
+    checked against the paths so it cannot quietly relabel one day's data as
+    another day's. ``bin/publish_run.py`` resolves the published day the same
+    way, from the same paths, through ``PYG_PUBLISH_DATA_DAY``.
+    """
+    given = (given or "").strip()
+    if not given:
+        return source_data_day(source_paths)
+
+    if not _DAY_RE.match(given):
+        raise ValueError(
+            f"source_data_day '{given}' is not YYYY-MM-DD"
+        )
+
+    named = days_in_source_paths(source_paths)
+    if named and given not in named:
+        raise ValueError(
+            f"source_data_day is {given}, but source_paths name "
+            f"{', '.join(sorted(named))}"
+        )
+
+    return given
+
+
+# ============================================
 # Accepted values
 # ============================================
 # parse_only is a diagnostic and not part of any pipeline: it stops at the count
@@ -259,6 +348,15 @@ class JobConfig:
             p.strip() for p in raw_sources.split(",") if p.strip()
         ]
 
+        # The day the sources are partitioned under, for reference data that
+        # has to describe the same day the quotes do, and for the day partition
+        # the query tables are written under. Empty when the paths name no day
+        # and none was given, which resolves to the prefix's latest.csv
+        # instead, and writes no tables.
+        self.source_data_day = resolve_source_data_day(
+            self.source_paths, args.get("source_data_day", "")
+        )
+
         # Where those sources are actually opened from. See VALID_INPUT_MODES.
         # source_paths keeps naming the object-storage locations either way, so
         # the manifest records what the run was asked for and read_paths records
@@ -299,6 +397,13 @@ class JobConfig:
         self.enable_ontology_mapping = (
             args.get("enable_ontology_mapping", "true").lower() == "true"
         )
+
+        # On by default. The query tables are what a downstream service reads;
+        # a run that skipped them produces a graph nothing can query, so
+        # skipping is the thing that has to be asked for.
+        self.enable_query_tables = (
+            args.get("enable_query_tables", "true") or "true"
+        ).lower() == "true"
 
         # Off by default: overwriting a finished run is a deliberate act, and
         # the artifacts it destroys cost hours to produce.
@@ -358,6 +463,13 @@ class JobConfig:
             f"{self.local_work_dir}/pyg/"
             f"{self.period_partition}/{self.pyg_filename}"
         )
+
+        # Where the query tables are written before they are published. No
+        # period partition: each table carries its own day= directories, and
+        # they are published to a root that outlives this run's folder, so a
+        # consumer reads a year of days under one path rather than reaching
+        # into one run at a time.
+        self.query_tables_path = f"{self.local_work_dir}/tables"
 
         # Fixed-key alias for the newest build, at the same depth as the period
         # copy with only the partition segment replaced -- so a consumer's URL
@@ -493,6 +605,21 @@ class JobConfig:
         if self.parquet_partitions < 1:
             raise ValueError("parquet_partitions must be >= 1")
 
+        # Every query table is day-partitioned, so a run that cannot name its
+        # day has nowhere to write them. A warning rather than a failure: the
+        # graph this run builds is unaffected, and every source path in
+        # running-a-job.md is a month directory.
+        if (
+            self.enable_query_tables
+            and self.mode in ("full", "enrichment_only")
+            and not self.source_data_day
+        ):
+            logger.warning(
+                "query tables are enabled, but source_paths name no single "
+                "day, so none will be written. Pass --source_data_day "
+                "YYYY-MM-DD to say which day this run's data describes."
+            )
+
     def __repr__(self):
         return (
             f"JobConfig(mode={self.mode}, "
@@ -512,6 +639,8 @@ class JobConfig:
             f"s3_archive_bucket={self.s3_archive_bucket or '(none)'}, "
             f"s3_pyg_key={self.s3_pyg_key or '(none)'}, "
             f"ontology_mapping={self.enable_ontology_mapping}, "
+            f"query_tables={self.enable_query_tables}, "
+            f"source_data_day={self.source_data_day or '(none)'}, "
             + ("allow_overwrite=True, " if self.allow_overwrite else "")
             + f"parquet_partitions={self.parquet_partitions})"
         )
@@ -563,6 +692,21 @@ def parse_args() -> JobConfig:
     )
     parser.add_argument("--pyg_filename", default=DEFAULT_PYG_FILENAME)
     parser.add_argument("--enable_ontology_mapping", default="true")
+    parser.add_argument(
+        "--enable_query_tables",
+        default="true",
+        help="Write the day-partitioned query tables beside the enriched "
+             "triples. 'false' skips every table write and leaves the "
+             "existing artifact set untouched",
+    )
+    parser.add_argument(
+        "--source_data_day",
+        default="",
+        help="YYYY-MM-DD this run's data describes: which constituents CSV it "
+             "reads, and the day partition its query tables are written "
+             "under. Defaults to the day source_paths are partitioned under; "
+             "state it when they name none, or name more than one",
+    )
     parser.add_argument("--allow_overwrite", default="false")
     parser.add_argument("--time_period", default="")
     # Names the combination of sources, e.g. "all-sources" or "no-market".
@@ -585,7 +729,15 @@ def parse_args() -> JobConfig:
     )
     parser.add_argument("--turtle_column", default="")
     parser.add_argument("--market_sector_definitions_bucket", default="")
-    parser.add_argument("--market_sector_definitions_key", default="")
+    parser.add_argument(
+        "--market_sector_definitions_key",
+        default="",
+        help="Prefix holding the constituents CSVs, or a CSV under it. The run "
+             "reads <prefix>/year=YYYY/month=MM/DD.csv for the day its "
+             "source_paths are partitioned under (or the day CSV named here), "
+             "and <prefix>/latest.csv when that file is absent or no day is "
+             "known. <prefix>/latest.csv works the same as <prefix>",
+    )
 
     parsed = parser.parse_args()
     return JobConfig(vars(parsed))

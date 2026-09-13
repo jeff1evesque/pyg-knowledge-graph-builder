@@ -608,6 +608,19 @@ def save_job_manifest(
                 None if config.mode in ("pyg_only", "parse_only")
                 else config.enable_ontology_mapping
             ),
+            # null for the same reason, and for the same modes: neither reaches
+            # the phase that writes tables. True does not on its own mean
+            # tables were written -- they are day-partitioned, so a run with no
+            # source_data_day writes none. The two fields answer that together.
+            "enable_query_tables": (
+                None if config.mode in ("pyg_only", "parse_only")
+                else config.enable_query_tables
+            ),
+            # Which day's data this is, and with it which constituents CSV the
+            # run read. That CSV is rewritten daily, so two runs over the same
+            # sources on either side of the rewrite produce different graphs;
+            # without this recorded there is nothing to tell them apart.
+            "source_data_day": config.source_data_day,
             "pyg_config": config.pyg_config,
             "parquet_partitions": config.parquet_partitions,
         },

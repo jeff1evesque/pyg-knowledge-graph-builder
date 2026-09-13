@@ -90,6 +90,19 @@ from pathlib import Path
 
 QUOTES_PREFIX = os.environ.get("MARKET_QUOTES_PREFIX", "")
 
+# Prefix label to write for each namespace, replacing the source's own.
+# Upstream's label for this one names a third party, and these fixtures are
+# public. The label is cosmetic, so the triples are unchanged either way.
+# Fixed by hand once before (56e39c7) and undone by the next regeneration;
+# tests/test_fixture_hygiene.py now fails on a non-neutral label.
+#
+# tests/test_fixture_hygiene.py is the backstop: it fails on any prefix label in
+# a committed fixture that is not a known-neutral one, so a future regeneration
+# cannot quietly reintroduce a vendor name here or in any other source.
+PREFERRED_PREFIXES = {
+    "https://jefflevesque.com/ontology/market-quotes/": "mq",
+}
+
 # Anchored tickers to keep, and how many option snapshots to keep per anchored
 # equity. Sized against the other fixtures (~11 KiB per BLS feed): a snapshot is
 # ~33 triples, so this lands near the previous market fixture's footprint while
@@ -114,11 +127,25 @@ PEER_EQUITIES = 1
 # Where the sub-industry classification is read from. The same constituents CSV
 # the pipeline itself reads (--market_sector_definitions_bucket / _key), so the
 # fixture is anchored on exactly the table the join will use; a hardcoded pair
-# would drift the first time the index is rebalanced.
+# would drift the first time the index is rebalanced. The env var names the
+# prefix holding them or a CSV under it. A fixture run has no data day to align
+# to, so it reads the first key constituents_keys in
+# enrichment/intra_source/market/patterns.py would try, without the fallback --
+# that module is not imported here because it carries the Spark stack in with it.
 SECTOR_DEFINITIONS_BUCKET_ENV = "MARKET_SECTOR_DEFINITIONS_BUCKET"
 SECTOR_DEFINITIONS_KEY_ENV = "MARKET_SECTOR_DEFINITIONS_KEY"
+CONSTITUENTS_LATEST_BASENAME = "latest.csv"
 SUB_INDUSTRY_COLUMN = "GICS Sub-Industry"
 SYMBOL_COLUMN = "Symbol"
+
+
+def constituents_key(location: str) -> str:
+    """The key itself when it names a .csv, else the prefix's latest.csv."""
+    base = location.strip().strip("/")
+    if base.lower().endswith(".csv"):
+        return base
+    return f"{base}/{CONSTITUENTS_LATEST_BASENAME}"
+
 
 # How many crawl rows to spread the sample across, matching the other
 # generators: the production loader reads one Turtle document per row, so
@@ -185,8 +212,8 @@ def sub_industries(s3) -> dict[str, str]:
     import os
 
     bucket = os.environ.get(SECTOR_DEFINITIONS_BUCKET_ENV, "").strip()
-    key = os.environ.get(SECTOR_DEFINITIONS_KEY_ENV, "").strip()
-    if not (bucket and key):
+    prefix = os.environ.get(SECTOR_DEFINITIONS_KEY_ENV, "").strip()
+    if not (bucket and prefix):
         _log(
             f"  no {SECTOR_DEFINITIONS_BUCKET_ENV}/{SECTOR_DEFINITIONS_KEY_ENV} "
             f"— skipping the peer equity, so the sub-industry link will have "
@@ -194,6 +221,7 @@ def sub_industries(s3) -> dict[str, str]:
         )
         return {}
 
+    key = f"{prefix.strip('/')}/{CONSTITUENTS_LATEST_BASENAME}"
     body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
     rows = csv.DictReader(io.StringIO(body.decode("utf-8")))
     table = {
@@ -380,7 +408,10 @@ def split_rows(graph, rows: int) -> list[str]:
     def emit(keep: set) -> str:
         part = rdflib.Graph()
         for prefix, uri in graph.namespaces():
-            part.bind(prefix, uri)
+            part.bind(
+                PREFERRED_PREFIXES.get(str(uri), prefix), uri,
+                override=True, replace=True,
+            )
         for subj in keep:
             for pred, obj in graph.predicate_objects(subj):
                 part.add((subj, pred, obj))
