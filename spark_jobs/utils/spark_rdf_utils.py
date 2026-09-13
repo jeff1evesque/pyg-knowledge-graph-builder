@@ -48,6 +48,28 @@ def collect_sorted(df: DataFrame) -> List:
     return sorted(df.collect(), key=lambda row: tuple(str(v) for v in row))
 
 
+# Default for feature_config.numeric_predicate_min_share, and the rule the
+# query tables' wide market table types its columns by. A literal property
+# is numeric only if MORE THAN this share of its values parse as a number;
+# otherwise every one of its values is treated as a category label.
+# Classification is per-predicate and mutually exclusive: a property is
+# numeric or categorical, never both.
+#
+# Per-value classification (the previous behaviour) split a single property
+# across both branches whenever some of its labels happened to parse. SEC
+# hasDocumentType is the motivating case: of 2,372 values, 315 (13.3%) are
+# bare-digit form types -- Form 4, 144, 3, 425, 497, 487, 25 -- while the rest
+# are hyphenated (10-K, 8-K, S-1). Those 315 were z-scored into the numeric
+# segment as if a form number were a magnitude (mean 62.24, std 128.64),
+# injecting a spurious continuous ordering over what are labels.
+#
+# A simple majority is deliberate. It is the least presumptuous rule that
+# still fixes the above, and it tolerates a genuinely numeric measurement
+# carrying a minority of unparseable sentinels ("N/A", "unknown") without
+# demoting the whole property out of the numeric segment.
+NUMERIC_PREDICATE_MIN_SHARE = 0.5
+
+
 def is_finite(col):
     """Whether a double column holds a real, usable number.
 
