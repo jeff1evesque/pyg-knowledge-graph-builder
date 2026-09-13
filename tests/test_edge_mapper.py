@@ -22,10 +22,10 @@ fully known and this test isolates EdgeMapper.
 """
 import torch
 
-from spark_jobs.pyg_builder.edge_mapper import (
-    EdgeMapper,
+from spark_jobs.pyg_builder.edge_mapper import EdgeMapper
+from spark_jobs.pyg_builder.naming import (
     RDF_TYPE,
-    _build_predicate_to_relation_expr,
+    prefixed_local_name_expr,
 )
 
 # Built from the namespace table rather than spelled out, so re-homing the
@@ -70,7 +70,7 @@ def _build(spark, triple_rows, config=None):
 def test_predicate_to_relation_maps_known_namespace(spark):
     df = spark.createDataFrame([(PRECEDES,)], ["predicate"])
     rel = df.withColumn(
-        "r", _build_predicate_to_relation_expr("predicate")
+        "r", prefixed_local_name_expr("predicate")
     ).collect()[0]["r"]
     assert rel == RELATION
 
@@ -78,7 +78,7 @@ def test_predicate_to_relation_maps_known_namespace(spark):
 def test_predicate_to_relation_falls_back_to_last_segment(spark):
     df = spark.createDataFrame([("http://nonexistent.invalid/links",)], ["predicate"])
     rel = df.withColumn(
-        "r", _build_predicate_to_relation_expr("predicate")
+        "r", prefixed_local_name_expr("predicate")
     ).collect()[0]["r"]
     assert rel == "unknown_links"
 

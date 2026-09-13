@@ -17,11 +17,11 @@ fixtures over the shared local SparkSession (`spark` / `make_triples`):
 Type URIs / prefixes are taken from the code (NAMESPACE_PREFIXES, RDF_TYPE) so the
 tests track the implementation rather than hardcoding IRIs.
 """
-from spark_jobs.pyg_builder.node_mapper import (
-    NodeMapper,
+from spark_jobs.pyg_builder.naming import (
     RDF_TYPE,
-    _build_uri_to_pyg_name_expr,
+    prefixed_local_name_expr,
 )
+from spark_jobs.pyg_builder.node_mapper import NodeMapper
 
 # Concrete type URIs whose PyG names are fixed by NAMESPACE_PREFIXES.
 CPI_INDEX = "https://jefflevesque.com/ontology/cpi/Index"        # -> cpi_Index
@@ -45,14 +45,14 @@ def _mapping(node_id_df):
 
 def test_uri_to_pyg_name_maps_known_namespace(spark):
     df = spark.createDataFrame([(CPI_INDEX,)], ["type_uri"])
-    name = df.withColumn("n", _build_uri_to_pyg_name_expr("type_uri")).collect()[0]["n"]
+    name = df.withColumn("n", prefixed_local_name_expr("type_uri")).collect()[0]["n"]
     assert name == "cpi_Index"
 
 
 def test_uri_to_pyg_name_falls_back_to_last_segment(spark):
     # Unknown namespace -> fallback extracts the trailing segment as unknown_<seg>.
     df = spark.createDataFrame([("http://nonexistent.invalid/Widget",)], ["type_uri"])
-    name = df.withColumn("n", _build_uri_to_pyg_name_expr("type_uri")).collect()[0]["n"]
+    name = df.withColumn("n", prefixed_local_name_expr("type_uri")).collect()[0]["n"]
     assert name == "unknown_Widget"
 
 
@@ -434,7 +434,7 @@ def test_every_node_type_round_trips_through_the_naming_rule(
         # name here, so the assertion tracks the rule instead of copying it.
         derived = (
             spark.createDataFrame([(uri,)], "uri STRING")
-            .select(_build_uri_to_pyg_name_expr("uri").alias("name"))
+            .select(prefixed_local_name_expr("uri").alias("name"))
             .first()["name"]
         )
         assert derived == node_type, (
