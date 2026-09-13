@@ -90,7 +90,7 @@ DAY = "2026-09-12"
 def _config(tmp_path, **overrides):
     args = {
         "mode": "enrichment_only",
-        "source_paths": "s3a://b/raw/year=2026/month=09/day=12/",
+        "source_paths": "s3a://b/raw/quotes/year=2026/month=09/day=12/",
         "source_format": "turtle_parquet",
         "local_work_dir": str(tmp_path),
         "time_period": "2026-09",
@@ -391,7 +391,7 @@ def test_a_uri_written_on_two_days_keeps_both_rows(spark, tmp_path):
         spark, triples,
         _config(
             tmp_path,
-            source_paths="s3a://b/raw/year=2026/month=09/day=13/",
+            source_paths="s3a://b/raw/quotes/year=2026/month=09/day=13/",
         ),
     )
 
