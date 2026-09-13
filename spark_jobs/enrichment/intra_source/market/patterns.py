@@ -41,7 +41,7 @@ from typing import Dict, Any, List, Optional, Tuple
 import boto3
 from botocore.exceptions import ClientError
 
-from spark_jobs.utils.canonicalization import CIK_DIGITS
+from spark_jobs.utils.sec_identifiers import CIK_DIGITS
 from spark_jobs.utils.rdf_utils import MARKET_ENRICHMENT
 
 logger = logging.getLogger(__name__)
@@ -115,7 +115,7 @@ def padded_cik(raw: str) -> Optional[str]:
     when the input is longer than the target width, so a malformed 11-digit
     value would silently become a different, plausible filer. zfill leaves an
     over-long value alone, which lets the length guard below reject it
-    instead. The same trap is documented in utils/canonicalization._padded and
+    instead. The same trap is documented in utils/sec_identifiers._padded and
     cost a wrong-state bug in cross_source_linker's FIPS matching.
 
     Returns None -- with a warning -- for anything that is not a CIK: an empty
