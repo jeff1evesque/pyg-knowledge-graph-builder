@@ -36,6 +36,9 @@ REFERS_TO_COMPANY = f"{ONT}market/refersToCompany"
 CPI_VALUE = f"{ONT}cpi/hasValue"
 STRIKE_PRICE = f"{ONT}market-quotes/strikePrice"
 ALERT_HEADLINE = f"{ONT}weather/hasHeadline"
+AFFECTS_REGION = f"{ONT}noaa/affectsRegion"
+HAS_REGION = f"{ONT}bls/hasRegion"
+REGION_TYPE = f"{ONT}noaa/Region"
 RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
 
 INDEX_A = "https://ex/index/a"
@@ -43,6 +46,7 @@ INDEX_B = "https://ex/index/b"
 QUOTE = "https://ex/quote/1"
 QUOTE_2 = "https://ex/quote/2"
 ALERT = "https://ex/alert/1"
+REGION = "https://ex/region/1"
 UNTYPED = "https://ex/untyped/1"
 
 TRIPLES = [
@@ -50,10 +54,16 @@ TRIPLES = [
     (INDEX_B, RDF_TYPE, CPI_INDEX),
     (QUOTE, RDF_TYPE, OPTION_SNAPSHOT),
     (ALERT, RDF_TYPE, WEATHER_ALERT),
+    (REGION, RDF_TYPE, REGION_TYPE),
 
     # Edges: one within a source, one from market into it.
     (INDEX_A, PRECEDES, INDEX_B),
     (QUOTE, REFERS_TO_COMPANY, INDEX_A),
+
+    # The two hops the store exists for: an alert and a measurement meeting
+    # at a region.
+    (ALERT, AFFECTS_REGION, REGION),
+    (INDEX_A, HAS_REGION, REGION),
 
     # A URI object nothing ever typed. Neither an edge nor a fact.
     (INDEX_A, PRECEDES, UNTYPED),
@@ -86,17 +96,34 @@ def _config(tmp_path, **overrides):
 
 
 @pytest.fixture(scope="module")
-def written(spark, tmp_path_factory):
-    """One write of the whole set, read back as {table: [row dicts]}."""
+def paths(spark, tmp_path_factory):
+    """One write of the whole set: {artifact: path}."""
     tmp_path = tmp_path_factory.mktemp("tables")
     triples = spark.createDataFrame(
         TRIPLES, "subject string, predicate string, object string"
     )
-    paths = write_query_tables(spark, triples, _config(tmp_path))
+    return write_query_tables(spark, triples, _config(tmp_path))
+
+
+@pytest.fixture(scope="module")
+def written(spark, paths):
+    """The Parquet tables, read back as {table: [row dicts]}.
+
+    graph/ is left out: it is a triple store directory, not Parquet, and it is
+    read through its own fixture below.
+    """
     return {
         table: [row.asDict() for row in spark.read.parquet(path).collect()]
         for table, path in paths.items()
+        if table != "graph"
     }
+
+
+@pytest.fixture(scope="module")
+def store(paths):
+    import pyoxigraph
+
+    return pyoxigraph.Store.read_only(paths["graph"])
 
 
 # ======================================================================
@@ -105,7 +132,7 @@ def written(spark, tmp_path_factory):
 
 def test_nodes_carries_every_typed_entity_with_its_id(written):
     rows = {row["uri"]: row for row in written["nodes"]}
-    assert set(rows) == {INDEX_A, INDEX_B, QUOTE, QUOTE_2, ALERT}
+    assert set(rows) == {INDEX_A, INDEX_B, QUOTE, QUOTE_2, ALERT, REGION}
     assert rows[INDEX_A]["node_type"] == "cpi_Index"
     assert rows[QUOTE]["node_type"] == "market_quotes_OptionSnapshot"
 
@@ -142,7 +169,7 @@ def test_edges_resolve_both_endpoints_through_the_node_table(written):
     assert (
         *ids[QUOTE], "market_enrichment_refersToCompany", *ids[INDEX_A]
     ) in edges
-    assert len(edges) == 2
+    assert len(edges) == 4
 
 
 def test_a_triple_pointing_at_an_untyped_uri_is_neither_edge_nor_fact(written):
@@ -429,3 +456,42 @@ def test_a_run_with_no_market_writes_no_snapshots(spark, tmp_path):
     paths = write_query_tables(spark, triples, _config(tmp_path))
     assert "snapshots" not in paths
     assert paths["facts"]
+
+
+# ======================================================================
+# graph/
+# ======================================================================
+
+def test_the_store_holds_the_non_market_triples(store):
+    rows = list(store.quads_for_pattern(None, None, None))
+    subjects = {str(quad.subject.value) for quad in rows}
+    assert INDEX_A in subjects
+    assert ALERT in subjects
+
+
+def test_market_never_enters_the_store(store):
+    """At the measured byte rate market would be roughly 58 GB a day against
+    194 MB for everything else, and it is numbers, not a graph."""
+    subjects = {
+        str(quad.subject.value)
+        for quad in store.quads_for_pattern(None, None, None)
+    }
+    assert QUOTE not in subjects
+    assert QUOTE_2 not in subjects
+
+
+def test_a_two_hop_traversal_answers_from_the_store(store):
+    """The shape the store exists for, and the one edges/ answers badly: a
+    self-join carrying a same-day guard, versus one query."""
+    import pyoxigraph
+
+    answer = list(store.query(
+        "SELECT ?measurement WHERE {{ "
+        "<{alert}> <{affects}> ?region . "
+        "?measurement <{has_region}> ?region "
+        "}}".format(
+            alert=ALERT, affects=AFFECTS_REGION, has_region=HAS_REGION
+        )
+    ))
+    assert [str(row["measurement"].value) for row in answer] == [INDEX_A]
+    assert isinstance(answer[0]["measurement"], pyoxigraph.NamedNode)
