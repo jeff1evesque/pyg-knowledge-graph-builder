@@ -130,7 +130,15 @@ def test_edge_types_describes_every_edge_type_the_schema_names(spark, run):
         assert published[key]["predicate_uri"] == entry["predicate_uri"], key
 
 
-def test_the_store_holds_the_non_market_triples_and_no_market_ones(run):
+def test_the_store_holds_no_market_data(spark, run):
+    """No market NODE, which is what "market never enters the store" means.
+
+    Market terms do appear, and that is not the same thing: the vocabulary
+    statements -- the derived subClassOf hierarchy, the observed domains and
+    ranges, the provenance markers -- have predicate and class URIs as their
+    subjects rather than entities, so they are in no node table and belong to
+    no source's data. They are the store's schema, and they stay.
+    """
     import pyoxigraph
 
     config, _ = run
@@ -143,7 +151,14 @@ def test_the_store_holds_the_non_market_triples_and_no_market_ones(run):
         for quad in store.quads_for_pattern(None, None, None)
     }
     assert subjects, "the store is empty"
-    assert not [uri for uri in subjects if "market-quotes" in uri]
+
+    market_nodes = {
+        row["uri"]
+        for row in _rows(spark, config, "nodes").collect()
+        if row["node_type"].startswith("market_")
+    }
+    assert market_nodes, "the fixtures carry no market nodes to exclude"
+    assert market_nodes.isdisjoint(subjects)
 
 
 def test_the_flag_off_leaves_the_existing_artifact_set_unchanged(
