@@ -451,3 +451,32 @@ def test_single_typed_entities_are_unaffected(spark, make_triples):
     ], make_triples)
     assert type_uris["cpi_Index"] == CPI_INDEX
     assert type_uris["cpi_Series"] == CPI_SERIES
+
+
+def test_exclude_node_types_drops_only_the_named_types(spark):
+    """Excluding one source means naming its few types. Everything else stays,
+    including a type the config never mentions -- which is the difference from
+    the node_types allowlist, and the reason this exists: a run that builds its
+    graph without weather must not also drop a type that first appeared today.
+    """
+    triples = spark.createDataFrame([
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/b", RDF_TYPE, CPI_SERIES),
+        ("https://ex/c", RDF_TYPE, "https://jefflevesque.com/ontology/weather/WeatherAlert"),
+    ], schema="subject STRING, predicate STRING, object STRING")
+
+    mapper = NodeMapper(spark, {"exclude_node_types": ["weather_WeatherAlert"]})
+    node_id_df, counts = mapper.build_node_id_table(triples)
+
+    assert "weather_WeatherAlert" not in counts
+    assert {"cpi_Index", "cpi_Series"} <= set(counts)
+
+
+def test_exclude_node_types_is_inert_when_unset(spark):
+    triples = spark.createDataFrame([
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/c", RDF_TYPE, "https://jefflevesque.com/ontology/weather/WeatherAlert"),
+    ], schema="subject STRING, predicate STRING, object STRING")
+
+    _df, counts = NodeMapper(spark, {}).build_node_id_table(triples)
+    assert "weather_WeatherAlert" in counts
