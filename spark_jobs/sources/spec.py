@@ -17,6 +17,10 @@ RELATION_CATEGORIES: Tuple[str, ...] = (
     "strategy", "skip",
 )
 
+# The formats a source path can be read in. --source_format takes the same
+# values (graph/config.py).
+SOURCE_FORMATS: Tuple[str, ...] = ("ntriples", "turtle_parquet")
+
 
 @dataclass(frozen=True)
 class RunOptions:
@@ -54,6 +58,9 @@ class SourceSpec:
     # The format this source's paths are read in. Empty means the run's
     # --source_format.
     source_format: str = ""
+    # Parquet columns that may hold this source's Turtle, in the order they
+    # are tried. Empty means the loader's TURTLE_COLUMN_CANDIDATES.
+    turtle_columns: Tuple[str, ...] = ()
     # Date predicates that place the source's entities in time, and where the
     # period individuals made from them are minted. Both empty for a source
     # whose periods arrive as URIs, as BLS's do.
@@ -94,6 +101,11 @@ class SourceSpec:
             raise ValueError(
                 f"source {self.name!r}: enrichment namespace "
                 f"{self.enrichment_namespace!r} is not one of its namespaces"
+            )
+        if self.source_format and self.source_format not in SOURCE_FORMATS:
+            raise ValueError(
+                f"source {self.name!r}: unknown source format "
+                f"{self.source_format!r}, expected one of {list(SOURCE_FORMATS)}"
             )
         if bool(self.date_predicates) != bool(self.temporal_prefix):
             raise ValueError(
