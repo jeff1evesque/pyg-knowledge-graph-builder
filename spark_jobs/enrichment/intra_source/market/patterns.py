@@ -310,8 +310,8 @@ def _read_constituents(
     required_columns: set,
     s3_client=None,
     data_day: str = "",
-) -> Optional[List[Dict[str, str]]]:
-    """Fetch and parse the constituents CSV, or None if it is unusable.
+) -> Tuple[Optional[List[Dict[str, str]]], str]:
+    """``(rows, key)`` for the constituents CSV; ``rows`` is None if unusable.
 
     Shared by the three readers below so the S3 error taxonomy, the empty-body
     check and the missing-column check are stated once. Each reader passes the
@@ -321,13 +321,15 @@ def _read_constituents(
     every caller has a defined behaviour without this file.
 
     ``prefix`` is the prefix holding the CSVs, or a CSV under it; see
-    ``constituents_keys`` for which keys that means and why.
+    ``constituents_keys`` for which keys that means and why. ``key`` is the
+    object the rows came from, and it is what the readers log: it is not the
+    setting whenever a day's export was read.
     """
     if not bucket or not prefix:
         logger.debug(
             "No S3 bucket/prefix provided for market sector definitions"
         )
-        return None
+        return None, ""
 
     client = s3_client or boto3.client("s3")
 
@@ -337,9 +339,9 @@ def _read_constituents(
             client, bucket, key, required_columns
         )
         if rows is not None:
-            return rows
+            return rows, key
         if not absent:
-            return None
+            return None, key
 
     # A warning, not info: a location was given and none of its keys exist.
     if keys:
@@ -348,7 +350,7 @@ def _read_constituents(
             f"No constituents CSV at {tried} — check "
             f"--market_sector_definitions_key; continuing without it"
         )
-    return None
+    return None, ""
 
 
 def load_sector_patterns_from_s3(
@@ -376,7 +378,7 @@ def load_sector_patterns_from_s3(
     Returns:
         Dict matching MARKET_SECTOR_PATTERNS structure, or None on failure.
     """
-    rows = _read_constituents(
+    rows, key = _read_constituents(
         bucket, prefix, {SYMBOL_COLUMN, SECTOR_COLUMN}, s3_client, data_day
     )
     if rows is None:
@@ -398,7 +400,7 @@ def load_sector_patterns_from_s3(
     if not sector_tickers:
         logger.warning(
             f"No valid (Symbol, GICS Sector) pairs under "
-            f"s3://{bucket}/{prefix} — falling back to defaults"
+            f"s3://{bucket}/{key} — falling back to defaults"
         )
         return None
 
@@ -418,7 +420,7 @@ def load_sector_patterns_from_s3(
 
     logger.info(
         f"Loaded {len(patterns)} market sector patterns from "
-        f"s3://{bucket}/{prefix} — "
+        f"s3://{bucket}/{key} — "
         f"{sum(len(p['tickers']) for p in patterns.values())} "
         f"total tickers across {len(patterns)} GICS sectors"
     )
@@ -451,7 +453,7 @@ def load_ticker_cik_map_from_s3(
     but carries no usable pair -- the caller treats both as "no bridge", but
     only the first means the file was the problem.
     """
-    rows = _read_constituents(
+    rows, key = _read_constituents(
         bucket, prefix, {SYMBOL_COLUMN, CIK_COLUMN}, s3_client, data_day
     )
     if rows is None:
@@ -469,7 +471,7 @@ def load_ticker_cik_map_from_s3(
 
     logger.info(
         f"Loaded {len(ticker_cik)} ticker->CIK pairs from "
-        f"s3://{bucket}/{prefix}"
+        f"s3://{bucket}/{key}"
     )
     return ticker_cik
 
@@ -494,7 +496,7 @@ def load_sub_industries_from_s3(
     to its company node, and a ticker with no company node in the graph drops
     out before the grouping rather than after.
     """
-    rows = _read_constituents(
+    rows, key = _read_constituents(
         bucket, prefix, {SYMBOL_COLUMN, SUB_INDUSTRY_COLUMN}, s3_client,
         data_day,
     )
@@ -513,7 +515,7 @@ def load_sub_industries_from_s3(
 
     logger.info(
         f"Loaded {len(pairs)} ticker->sub-industry pairs from "
-        f"s3://{bucket}/{prefix}"
+        f"s3://{bucket}/{key}"
     )
     return pairs
 
