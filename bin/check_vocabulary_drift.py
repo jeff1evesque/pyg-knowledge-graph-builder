@@ -68,17 +68,29 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "e2e" / "turtle_parquet"
 
-# The SOURCE vocabularies — terms minted by the upstream mappers, which is the
-# only half that can drift out from under us. The pipeline's own enrichment
-# namespaces are deliberately excluded: it emits those itself, so a term it
-# references and never emits is a different (and much louder) kind of bug.
-SOURCE_NAMESPACE_NAMES = (
-    "SEC_FILINGS", "SEC_COMMON",
-    "MARKET_QUOTES",
-    "CAP", "WEATHER",
-    "CPI", "PPI", "ECI", "EMPSIT", "JOLTS", "LAUS", "METRO", "REALER",
-    "WKYENG", "XIMPIM", "BLS_COMMON",
-)
+def source_namespace_names() -> tuple[str, ...]:
+    """The constants in utils/namespaces.py that name a source vocabulary.
+
+    The SOURCE vocabularies are terms minted by the upstream mappers, which is
+    the only half that can drift out from under us. Read from the source
+    registry, so a new source's vocabularies are checked with no edit here. The
+    pipeline's own enrichment namespaces are deliberately excluded: it emits
+    those itself, so a term it references and never emits is a different (and
+    much louder) kind of bug.
+    """
+    from spark_jobs import sources
+    from spark_jobs.utils import namespaces
+
+    vocabularies = set(sources.source_vocabularies())
+    return tuple(sorted(
+        name for name, value in vars(namespaces).items()
+        if name.isupper() and isinstance(value, str) and str(value) in vocabularies
+    ))
+
+
+# Names, not URIs: referenced_terms() matches `NAME.term` in the code, and
+# analyze() reads each namespace back with getattr(rdf_utils, name).
+SOURCE_NAMESPACE_NAMES = source_namespace_names()
 
 # Attribute names that are not ontology terms.
 _NOT_TERMS = frozenset({"value", "title", "n3", "toPython", "encode", "strip"})
