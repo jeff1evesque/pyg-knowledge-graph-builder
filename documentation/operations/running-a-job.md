@@ -148,6 +148,10 @@ SPARK_MASTER_URL=spark://<host>:7077 \
     --pyg_config '{"edge_feature_config": {"enabled": false}}'
 ```
 
+The default build already holds this graph: it is the same graph with `edge_attr`
+ignored (see [Published Runs](../reference/outputs.md#published-runs)). Turn edge
+features off only to skip the edge-feature step when nothing will read them.
+
 **Turtle Parquet source (SEC filings), reading from S3 via s3a://:**
 
 ```bash
