@@ -282,6 +282,7 @@ class NodeMapper:
         self.spark = spark
         self.config = config
         self._requested_node_types = config.get("node_types", None)
+        self._excluded_node_types = config.get("exclude_node_types", None)
         self._include_temporal = config.get("include_temporal_nodes", True)
         self._include_sector = config.get("include_sector_nodes", True)
 
@@ -467,6 +468,16 @@ class NodeMapper:
             )
             return type_triples.join(
                 F.broadcast(requested_df), "node_type", "inner"
+            )
+
+        # Named types are dropped; everything else is kept, including types
+        # this run has never seen. That is the difference from node_types: an
+        # allowlist freezes the set, so a type that appears for the first time
+        # in today's data is silently absent from the graph. Excluding one
+        # source means naming its handful of types, not the 152 others.
+        if self._excluded_node_types:
+            type_triples = type_triples.filter(
+                ~F.col("node_type").isin(list(self._excluded_node_types))
             )
 
         # Temporal filter: single regex instead of per-fragment loop
