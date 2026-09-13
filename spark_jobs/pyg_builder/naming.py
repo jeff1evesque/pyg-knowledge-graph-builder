@@ -18,6 +18,7 @@ This module imports no torch, which is what lets the enrichment leg name
 relations without the PyG builder installed.
 """
 import logging
+import re
 
 from pyspark.sql import functions as F
 
@@ -82,6 +83,34 @@ def prefixed_local_name_expr(uri_col: str) -> F.Column:
         ).otherwise(
             F.concat(F.lit("unknown_"), F.abs(F.hash(col)).cast("string"))
         )
+    )
+
+
+def prefixed_local_name(uri: str) -> str:
+    """The name ``prefixed_local_name_expr`` would give this URI.
+
+    The driver-side twin, for the few places that need to name a COLUMN after a
+    vocabulary term rather than compute a name per row. Kept honest by a test
+    that runs both over the same URIs.
+
+    One case is not covered: a URI with no ``/`` or ``#`` to take a local name
+    from, where the expression falls back to Spark's own hash. Nothing can
+    reproduce that in Python, and no vocabulary term looks like that, so this
+    says so instead of guessing.
+    """
+    for namespace, prefix in NAMESPACE_PREFIXES:
+        if uri.startswith(namespace):
+            local = uri[len(namespace):].strip("/#")
+            if local:
+                return f"{prefix}_{local}"
+
+    match = re.search(r"[#/]([^#/]+)$", uri)
+    if match:
+        return f"unknown_{match.group(1)}"
+
+    raise ValueError(
+        f"{uri!r} has no local name; only the Spark expression can name it, "
+        f"and it does so with a hash"
     )
 
 
