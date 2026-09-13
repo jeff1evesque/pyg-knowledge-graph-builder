@@ -275,7 +275,7 @@ def test_an_unpadded_partition_still_yields_a_padded_day():
 
 
 def test_source_data_day_is_exposed_on_the_config():
-    c = _config(source_paths="s3a://b/p/year=2026/month=09/day=12/")
+    c = _config(source_paths="s3a://b/quotes/year=2026/month=09/day=12/")
     assert c.source_data_day == "2026-09-12"
 
     assert _config().source_data_day == ""
@@ -313,7 +313,7 @@ def test_a_stated_day_the_paths_contradict_is_refused():
     and nothing downstream could tell."""
     with pytest.raises(ValueError, match="but source_paths name"):
         _config(
-            source_paths="s3a://b/p/year=2026/month=09/day=12/",
+            source_paths="s3a://b/quotes/year=2026/month=09/day=12/",
             source_data_day="2026-09-11",
         )
 
