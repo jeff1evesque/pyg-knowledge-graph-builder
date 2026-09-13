@@ -31,14 +31,6 @@ An entry leaving the baseline is also a failure. A term that starts being
 emitted means either a fixture regeneration covered it or a defect was fixed,
 and both should update the file rather than leave it overstating the damage.
 
-SEC_FILINGS hasAcceptanceDateTime and hasIssuerSic are the sampling-artifact
-case, not the dead-code case, and the difference was checked rather than
-assumed. Upstream backfilled both into every stored SEC object on 2026-09-12
-and the `--s3` verdict run that afternoon reported no absent terms at all. The
-committed fixtures were generated before that window, so they carry neither.
-Regenerating the SEC fixtures is what removes these two entries; until then
-they record that the fixtures are older than the data.
-
 The verdict run is `--s3` against real volume, which is what can distinguish a
 dead term from an unsampled one. That needs credentials, so it is not run here.
 No Spark session is created: this is pure AST + rdflib parsing.
