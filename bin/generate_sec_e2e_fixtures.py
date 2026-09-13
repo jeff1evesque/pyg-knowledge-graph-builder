@@ -333,14 +333,23 @@ _TRADING_SYMBOL_RE = re.compile(r'hasIssuerTradingSymbol\s+"([A-Za-z.\-]{1,6})"'
 
 # Where the index constituents are listed. Same table the pipeline reads for
 # sector and company resolution, and the same one the market fixture generator
-# anchors its peer selection on. The env var names a PREFIX; a fixture run has
-# no data day to align to, so it takes the undated export -- see
-# constituents_keys in enrichment/intra_source/market/patterns.py, which is not
-# imported here because it carries the Spark stack in with it.
+# anchors its peer selection on. The env var names the prefix holding them or a
+# CSV under it. A fixture run has no data day to align to, so it reads the first
+# key constituents_keys in enrichment/intra_source/market/patterns.py would try,
+# without the fallback -- that module is not imported here because it carries
+# the Spark stack in with it.
 SECTOR_DEFINITIONS_BUCKET_ENV = "MARKET_SECTOR_DEFINITIONS_BUCKET"
 SECTOR_DEFINITIONS_KEY_ENV = "MARKET_SECTOR_DEFINITIONS_KEY"
 CONSTITUENTS_LATEST_BASENAME = "latest.csv"
 SYMBOL_COLUMN = "Symbol"
+
+
+def constituents_key(location: str) -> str:
+    """The key itself when it names a .csv, else the prefix's latest.csv."""
+    base = location.strip().strip("/")
+    if base.lower().endswith(".csv"):
+        return base
+    return f"{base}/{CONSTITUENTS_LATEST_BASENAME}"
 
 
 def document_trading_symbols(doc: str) -> set[str]:
