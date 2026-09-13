@@ -5,7 +5,10 @@ The enrichment pipeline creates a unified knowledge graph by establishing relati
 ## Enrichment Pipeline Flow
 
 Each enricher below reads `triples_df` and only adds to it — nothing is
-rewritten and nothing is removed:
+rewritten and nothing is removed. The four intra-source enrichers are declared in
+their sources' specs (`spark_jobs/sources/`), and a run calls only those of the
+sources its paths picked, in registration order. The temporal unifier reads each
+picked source's date predicates, or its period collector, from the same specs:
 
 - **BLS Intra-Source Enricher**
     - Temporal sequences (precedes links)
@@ -31,7 +34,7 @@ rewritten and nothing is removed:
     - Event type linking (sameEventType)
     - Severity escalation detection (escalatesTo)
 - **Temporal Unifier** (cross-source)
-    - Unified months/years/quarters (owl:sameAs)
+    - Unified days/months/years/quarters (owl:sameAs), from each picked source's date predicates or, for BLS, its period URIs
 - **Cross-Source Linker**
     - Sector-based linking across sources
     - Company/ticker linking (SEC ↔ Market)
