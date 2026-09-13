@@ -30,6 +30,8 @@ OPTION_SNAPSHOT = f"{ONT}market-quotes/OptionSnapshot"
 WEATHER_ALERT = f"{ONT}weather/WeatherAlert"
 
 PRECEDES = f"{ONT}bls/precedes"
+UNDERLYING_SYMBOL = f"{ONT}market-quotes/underlyingSymbol"
+CONTRACT_SYMBOL = f"{ONT}market-quotes/symbol"
 REFERS_TO_COMPANY = f"{ONT}market/refersToCompany"
 CPI_VALUE = f"{ONT}cpi/hasValue"
 STRIKE_PRICE = f"{ONT}market-quotes/strikePrice"
@@ -39,6 +41,7 @@ RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
 INDEX_A = "https://ex/index/a"
 INDEX_B = "https://ex/index/b"
 QUOTE = "https://ex/quote/1"
+QUOTE_2 = "https://ex/quote/2"
 ALERT = "https://ex/alert/1"
 UNTYPED = "https://ex/untyped/1"
 
@@ -60,6 +63,11 @@ TRIPLES = [
     (INDEX_A, RDFS_LABEL, "All items"),
     (ALERT, ALERT_HEADLINE, "Coastal flood warning"),
     (QUOTE, STRIKE_PRICE, "100.5"),
+    (QUOTE, UNDERLYING_SYMBOL, "MSFT"),
+    (QUOTE, CONTRACT_SYMBOL, "MSFT260918C00100500"),
+    (QUOTE_2, RDF_TYPE, OPTION_SNAPSHOT),
+    (QUOTE_2, UNDERLYING_SYMBOL, "AAPL"),
+    (QUOTE_2, CONTRACT_SYMBOL, "AAPL260918C00200000"),
 ]
 
 DAY = "2026-09-12"
@@ -97,7 +105,7 @@ def written(spark, tmp_path_factory):
 
 def test_nodes_carries_every_typed_entity_with_its_id(written):
     rows = {row["uri"]: row for row in written["nodes"]}
-    assert set(rows) == {INDEX_A, INDEX_B, QUOTE, ALERT}
+    assert set(rows) == {INDEX_A, INDEX_B, QUOTE, QUOTE_2, ALERT}
     assert rows[INDEX_A]["node_type"] == "cpi_Index"
     assert rows[QUOTE]["node_type"] == "market_quotes_OptionSnapshot"
 
@@ -366,3 +374,58 @@ def test_a_stated_day_supplies_the_partition_the_paths_lack(spark, tmp_path):
 
     paths = write_query_tables(spark, triples, config)
     assert paths["nodes"].endswith("day=2026-09-12")
+
+
+# ======================================================================
+# snapshots/
+# ======================================================================
+
+def test_snapshots_pivots_market_wide(written):
+    rows = {row["uri"]: row for row in written["snapshots"]}
+    assert set(rows) == {QUOTE, QUOTE_2}
+    assert rows[QUOTE]["market_quotes_underlyingSymbol"] == "MSFT"
+    assert rows[QUOTE]["market_quotes_strikePrice"] == 100.5
+
+
+def test_a_snapshot_missing_a_property_gets_a_null_not_a_dropped_row(written):
+    """A quote with no strike is still a quote. Dropping the row would lose a
+    snapshot; the null says the property was not stated."""
+    second = next(
+        row for row in written["snapshots"] if row["uri"] == QUOTE_2
+    )
+    assert second["market_quotes_strikePrice"] is None
+    assert second["market_quotes_underlyingSymbol"] == "AAPL"
+
+
+def test_a_numeric_property_is_a_number_and_a_symbol_is_not(written):
+    """Typed off the same majority rule the feature extractor classifies
+    predicates by, so `strikePrice > 100` is answerable for every row rather
+    than for whichever ones happened to parse."""
+    row = next(r for r in written["snapshots"] if r["uri"] == QUOTE)
+    assert isinstance(row["market_quotes_strikePrice"], float)
+    assert isinstance(row["market_quotes_underlyingSymbol"], str)
+
+
+def test_snapshots_are_sorted_by_the_underlying_ticker(spark, tmp_path):
+    """Sorted partitions are what let Parquet prune row groups: a single-ticker
+    filter wants 0.14% of a day, and unsorted every ticker is in every group."""
+    triples = spark.createDataFrame(
+        TRIPLES, "subject string, predicate string, object string"
+    )
+    paths = write_query_tables(spark, triples, _config(tmp_path))
+    symbols = [
+        row["market_quotes_underlyingSymbol"]
+        for row in spark.read.parquet(paths["snapshots"]).collect()
+    ]
+    assert symbols == sorted(symbols)
+
+
+def test_a_run_with_no_market_writes_no_snapshots(spark, tmp_path):
+    """A no-market dataset is a legitimate configuration, not a failure."""
+    triples = spark.createDataFrame(
+        [t for t in TRIPLES if "quote" not in t[0]],
+        "subject string, predicate string, object string",
+    )
+    paths = write_query_tables(spark, triples, _config(tmp_path))
+    assert "snapshots" not in paths
+    assert paths["facts"]
