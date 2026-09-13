@@ -60,6 +60,8 @@ When config is empty, sensible defaults are inferred from the data.
 | `--s3_pyg_key` | No | `pyg/{time_period}/{pyg_filename}` | Optional S3 key for the archived `.pt`; the metadata prefix is derived from it |
 | `--pyg_filename` | No | `hetero_data.pt` | Local `.pt` filename (override for experiment variants, e.g. `hetero_data_512d.pt`); determines the metadata directory name |
 | `--enable_ontology_mapping` | No | `true` | Run the ontology-mapping phase: equivalences, predicate folding, and the derived `rdfs:subClassOf` hierarchy that fills the `class_hierarchy` sub-segment. Applies to modes `full` and `enrichment_only`; `pyg_only` never reaches this phase, so the flag is inert there (and meaningless in that mode's manifest — see [`ontology_schema.json`](../reference/outputs.md#ontology_schemajson)) |
+| `--enable_query_tables` | No | `true` | Write the day-partitioned [query tables](../reference/tables.md) beside the enriched triples. `false` skips every table write and leaves the existing artifact set untouched. Applies to modes `full` and `enrichment_only`; `pyg_only` never reaches the phase that writes them |
+| `--source_data_day` | No | *(from the paths)* | `YYYY-MM-DD` the run's data describes: which constituents CSV it reads, and the day partition its query tables are written under. Defaults to the day `--source_paths` are partitioned under; state it when they name none, or name more than one |
 | `--time_period` | No | Current `YYYY-MM` | Time period label for output paths |
 | `--pyg_config` | No | `{}` | JSON string with PyG construction config |
 | `--parquet_partitions` | No | `200` | Number of Parquet output partitions |
@@ -88,6 +90,12 @@ no day, and paths that disagree on one, both read `latest.csv`; so does a day
 whose CSV has not been published. A CSV that is *present but malformed* is not
 routed around — reading a different day's membership because one file is broken
 would hide the defect.
+
+`--source_data_day` overrides the derivation, and is checked against the paths
+so it cannot quietly relabel one day's data as another's. It is the same day the
+[query tables](../reference/tables.md) are partitioned under, which is why a run
+whose paths name no day writes none: there is no partition to write them to, and
+the day the job happens to execute on is not the day its data describes.
 
 Jobs are launched with `bin/submit_spark_job.sh`, which packages the code
 and submits to the Spark standalone master with the RAPIDS Accelerator

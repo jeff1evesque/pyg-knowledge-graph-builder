@@ -118,6 +118,10 @@ Unlike `--s3_archive_bucket`, which mirrors one build's `.pt`, metadata and mani
 
 **`index.json`** is written last, so a run folder without one is a publish that did not finish. It records `run_id`, `dataset`, `time_period`, `data_day` (the day the sources were cut from, which `month=` cannot show), `sources`, `source_of_run` (the run directory's name), `published`, each variant's folder and `notebook_label` (the notebook's name for the leg that built it), and the files each variant folder holds.
 
+**The query tables go somewhere else.** They are keyed by day rather than by
+run, and they outlive it — see [Query tables](tables.md). `index.json` names
+them and the root they went to, so a consumer holding a run can find them.
+
 **`checksums.json` keeps the work directory's names.** Its paths are relative to the period directory, so inside a published variant folder `hetero_data_<v>_metadata/<name>` is `<v>/<name>`. Every entry resolves by its last path segment:
 
 ```python

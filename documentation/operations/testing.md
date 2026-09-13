@@ -292,6 +292,7 @@ would be sent:
 
 ```bash
 export PYG_PUBLISH_ROOT=s3://BUCKET/PREFIX   # required
+export PYG_TABLES_ROOT=s3://BUCKET/PREFIX    # required when the run wrote tables
 export PYG_PUBLISH_DATASET=all-sources       # when the job ran without --dataset
 bin/publish_run.py <run-dir>                 # dry run
 bin/publish_run.py <run-dir> --upload
@@ -308,6 +309,15 @@ A run folder without `index.json` is a publish that did not finish. Running the
 same command again resumes it, because files already there at the right size are
 skipped. Nothing can be deleted from the prefix, which is why a dry run is the
 default.
+
+The [query tables](../reference/tables.md) go to a second destination in the
+same command. They are keyed by day rather than by run, so they get their own
+root, their own sync and their own per-day marker under `_days/`; a day that
+already has its marker is refused, because the destination cannot delete and a
+rewritten day would leave its old part files behind. They are published after
+the run's `index.json`, and a table failure says so rather than reading as "the
+run did not go up". A run that wrote tables and has no `PYG_TABLES_ROOT` is
+refused before anything is written.
 
 `PYG_PUBLISH_DATA_DAY` names the day the sources were cut from. It is needed only
 when the day-level source paths in the manifests name more than one day. The exit
