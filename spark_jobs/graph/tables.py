@@ -129,6 +129,17 @@ def _write(df: DataFrame, root: str, table: str, day: str) -> str:
     return path
 
 
+def _quoted(name: str) -> str:
+    """A column named from the data, referenced safely.
+
+    A predicate's local name can carry a dot, and ``F.col("a.b")`` reads that as
+    a field inside a struct called ``a`` rather than as a column called ``a.b``.
+    Every column in the wide market table is named from a predicate, so every
+    reference to one goes through here.
+    """
+    return f"`{name}`"
+
+
 def _is_market(column: str = "node_type") -> F.Column:
     """Whether a node type belongs to market data."""
     expr = F.lit(False)
@@ -492,8 +503,8 @@ def write_snapshots(market_df: DataFrame, root: str, day: str) -> str:
         "node_type",
         "uri",
         *[
-            numeric_literal_expr(name).alias(name) if name in numeric
-            else F.col(name)
+            numeric_literal_expr(_quoted(name)).alias(name) if name in numeric
+            else F.col(_quoted(name))
             for name in columns
         ],
     )
@@ -503,7 +514,7 @@ def write_snapshots(market_df: DataFrame, root: str, day: str) -> str:
     # underlying symbol, and sorting by a column that is not there would fail
     # the write rather than the query.
     sort_keys = [
-        name for name in _SNAPSHOT_SORT_TERMS if name in columns
+        _quoted(name) for name in _SNAPSHOT_SORT_TERMS if name in columns
     ] + ["uri"]
 
     return _write(typed.orderBy(*sort_keys), root, "snapshots", day)
