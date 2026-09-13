@@ -1,16 +1,18 @@
-"""The registered data sources, and the per-source tables built from them.
+"""The registered data sources, the per-source tables built from them, and
+which sources a run's paths pick.
 
 Each source is declared once, as a SourceSpec in its own module here. Tables
 that used to be written out source by source are built from every registered
 spec: the namespace table and its source and enrichment subsets, the synthetic
-period prefixes, the ontology mapping rows, the edge relation fragments and
-the loader's path labels.
+period prefixes, the ontology mapping rows and the edge relation fragments.
+Every input path belongs to exactly one registered source, and the sources a
+run's paths name are the ones whose functions the job calls.
 
 This package imports neither pyspark nor rdf_utils. rdf_utils builds its
 namespace tables from it, and every module that imports rdf_utils would
 otherwise load pyspark too.
 """
-from typing import Dict, FrozenSet, List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 from rdflib.namespace import OWL, RDFS
 
@@ -57,6 +59,71 @@ SHARED_RELATION_FRAGMENTS: Dict[str, Tuple[str, ...]] = {
 }
 
 
+# ======================================================================
+# Which source a path belongs to
+# ======================================================================
+
+def specs_for_path(
+    path: str, specs: Sequence[SourceSpec] = REGISTERED,
+) -> Tuple[SourceSpec, ...]:
+    """The sources a path could belong to.
+
+    First by path fragment (source=sec, quotes, /noaa/). Fragments rather than
+    whole paths, so a path keeps its source across a bucket or prefix change.
+    When no fragment matches, by a whole path segment named after the source,
+    which is how the committed fixtures (ntriples/sec.nt, turtle_parquet/bls/cpi)
+    are recognised. Whole segments only, never substrings: a bucket called
+    secure-data or a directory named marketing holds a source's name but is not
+    that source.
+    """
+    lowered = path.lower()
+    by_fragment = tuple(
+        spec for spec in specs
+        if any(fragment in lowered for fragment in spec.path_fragments)
+    )
+    if by_fragment:
+        return by_fragment
+
+    stems = {
+        segment.split(".", 1)[0]
+        for segment in lowered.replace("\\", "/").split("/")
+    }
+    return tuple(spec for spec in specs if spec.name in stems)
+
+
+def match_path(path: str, specs: Sequence[SourceSpec] = REGISTERED) -> SourceSpec:
+    """The one source a path belongs to.
+
+    Raises:
+        ValueError: when the path matches no source, or more than one.
+    """
+    found = specs_for_path(path, specs)
+    if len(found) == 1:
+        return found[0]
+    if not found:
+        raise ValueError(
+            f"source path matches no registered source: {path}. A path has to "
+            f"carry one source's path fragment, or a folder or file named after "
+            f"it. Registered sources: {', '.join(spec.name for spec in specs)}."
+        )
+    raise ValueError(
+        f"source path matches more than one source "
+        f"({', '.join(spec.name for spec in found)}): {path}"
+    )
+
+
+def pick(
+    paths: Sequence[str], specs: Sequence[SourceSpec] = REGISTERED,
+) -> Tuple[SourceSpec, ...]:
+    """The sources a run's paths name, once each, in registration order."""
+    matched = {match_path(path, specs) for path in paths}
+    return tuple(spec for spec in specs if spec in matched)
+
+
+# ======================================================================
+# Tables built from every registered source, whatever a run picks
+# ======================================================================
+
 def namespace_prefixes(
     specs: Sequence[SourceSpec] = REGISTERED,
 ) -> List[Tuple[str, str]]:
@@ -97,7 +164,7 @@ def synthetic_temporal_ids(
     """Where each date-bearing source's period individuals are minted.
 
     Keyed by the prefix's last segment (sec, noaa, market-quotes), which is the
-    name the temporal unifier looks a prefix up by.
+    name the temporal unifier's tests look a prefix up by.
     """
     return {
         spec.temporal_prefix.rstrip("/").rsplit("/", 1)[-1]: spec.temporal_prefix
@@ -138,17 +205,3 @@ def relation_fragments(
     for spec in specs:
         fragments.extend(spec.relation_fragments.get(category, ()))
     return tuple(fragments)
-
-
-def source_label_patterns(
-    specs: Sequence[SourceSpec] = REGISTERED,
-) -> Tuple[Tuple[str, str], ...]:
-    """(path fragment, source name) pairs the loader labels input paths by."""
-    return tuple(
-        (fragment, spec.name) for spec in specs for fragment in spec.path_fragments
-    )
-
-
-def source_names(specs: Sequence[SourceSpec] = REGISTERED) -> FrozenSet[str]:
-    """Every registered source's name."""
-    return frozenset(spec.name for spec in specs)
