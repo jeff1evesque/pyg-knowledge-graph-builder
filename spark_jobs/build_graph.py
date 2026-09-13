@@ -60,7 +60,7 @@ Launch with spark-submit (see bin/submit_spark_job.sh). Parameters:
 Example (N-Triples, local source, local + S3 archive):
     spark_jobs/build_graph.py \\
         --mode full \\
-        --source_paths /data/rdf/monthly/2024-12/ \\
+        --source_paths /data/rdf/source=bls/2024-12/ \\
         --local_work_dir /data \\
         --s3_archive_bucket my-archive \\
         --s3_pyg_key pyg/year=2024/month=12/hetero_data.pt \\
@@ -107,7 +107,7 @@ from spark_jobs.enrichment.pipeline import EnrichmentPipeline
 # Getting triples in, and the per-source accounting that goes with it. The
 # Turtle parsing under it runs on executors and lives in graph/turtle.py, whose
 # imports are constrained; nothing here is.
-from spark_jobs.graph.loading import load_source_triples, source_label
+from spark_jobs.graph.loading import load_source_triples
 
 # Reading and writing the job's artifacts -- the interim enriched Parquet and
 # its descriptor, the final .pt and metadata, the manifest.
@@ -134,6 +134,7 @@ from spark_jobs.graph.config import (
     JobConfig,
     parse_args,
 )
+from spark_jobs.sources.spec import SourceSpec
 
 if PYG_BUILDER_AVAILABLE:
     from spark_jobs.pyg_builder.constructor import build_hetero_data
@@ -160,6 +161,7 @@ def run_enrichment(
     market_sector_definitions_key: str = "",
     source_data_day: str = "",
     class_mappings: Dict[str, Any] = None,
+    specs: Optional[Tuple[SourceSpec, ...]] = None,
 ) -> tuple:
     """
     Run the enrichment pipeline on a triples DataFrame.
@@ -172,6 +174,8 @@ def run_enrichment(
         enable_ontology_mapping: Whether to run ontology mapping
         class_mappings: Per-run additions/overrides to the built-in
             CLASS_MAPPINGS table (see ontology_mapper)
+        specs: The sources the run's paths picked (JobConfig.source_specs).
+            None runs the steps of every registered source.
 
     Returns:
         Tuple of (enriched_triples_df, enrichment_stats_dict)
@@ -194,6 +198,7 @@ def run_enrichment(
         sector_definitions_bucket=market_sector_definitions_bucket,
         sector_definitions_key=market_sector_definitions_key,
         source_data_day=source_data_day,
+        specs=specs,
     )
     stats = pipeline.run(
         enable_ontology_mapping=enable_ontology_mapping,
@@ -374,6 +379,7 @@ def execute_full_pipeline(
         market_sector_definitions_key=config.market_sector_definitions_key,
         source_data_day=config.source_data_day,
         class_mappings=config.class_mappings,
+        specs=config.source_specs,
     )
 
     # Unpersist raw triples — enriched_df is independently cached
@@ -398,10 +404,7 @@ def execute_full_pipeline(
         spark, enriched_df, config.pyg_config,
         time_period=config.time_period,
         dataset=config.dataset,
-        sources=sorted({
-            source_label(path, index)
-            for index, path in enumerate(config.source_paths)
-        }),
+        sources=sorted(spec.name for spec in config.source_specs),
     )
 
     # Step 5: Save final artifacts (local + optional S3)
@@ -460,6 +463,7 @@ def execute_enrichment_only(
         market_sector_definitions_key=config.market_sector_definitions_key,
         source_data_day=config.source_data_day,
         class_mappings=config.class_mappings,
+        specs=config.source_specs,
     )
 
     # Unpersist raw triples
