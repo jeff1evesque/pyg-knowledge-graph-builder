@@ -477,6 +477,27 @@ from file metadata without touching the GPU. Set `spark.rapids.sql.explain=ALL`,
 or confirm that `Gpu*` operators (e.g. `GpuFileSourceScanExec`) appear in the
 physical plan.
 
+## How long a run takes
+
+One day of all four sources through `notebook/multi_experiment.ipynb`, on the two-node
+GPU cluster, reading the staged local mirror with the notebook's default profiles:
+
+| Step | Time | Measured on |
+|---|---|---|
+| Seed leg: load, parse, enrich, save the enriched triples | 65.9 min | run 20260910T214553Z |
+| Query tables, written inside the seed leg | 10.5 min | the same day's enriched triples, as a standalone job (2026-09-13) |
+| Assembly leg: `baseline_1024d` | 59.2 min | run 20260910T214553Z |
+
+Together that is about 2 hours 16 minutes of Spark jobs, and about 2 hours 20 minutes
+from launch to the finished report, since the notebook's own start-up and reporting cells
+add a few minutes. It is a sum of separate measurements rather than one timed run, so
+treat it as a guide: leg times move with the day's data, and on run 20260908T202009Z the
+same two legs took 62.0 and 61.1 minutes.
+
+A finished run records its real times. The notebook prints each submission's minutes as
+it ends, and `bin/run_cluster_notebook.sh` lists them per submission in the run
+directory's `outcome.txt`.
+
 ## Sizing a large run
 
 Every default above is a **floor**, chosen so that a run on unfamiliar hardware fails
