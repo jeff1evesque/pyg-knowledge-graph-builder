@@ -35,6 +35,9 @@ CONTRACT_SYMBOL = f"{ONT}market-quotes/symbol"
 REFERS_TO_COMPANY = f"{ONT}market/refersToCompany"
 CPI_VALUE = f"{ONT}cpi/hasValue"
 STRIKE_PRICE = f"{ONT}market-quotes/strikePrice"
+# A local name carrying a dot. F.col("a.b") reads that as a struct field, so
+# every reference to a column named from the data has to be quoted.
+DOTTED_GREEK = f"{ONT}market-quotes/greeks.delta"
 ALERT_HEADLINE = f"{ONT}weather/hasHeadline"
 AFFECTS_REGION = f"{ONT}noaa/affectsRegion"
 HAS_REGION = f"{ONT}bls/hasRegion"
@@ -78,6 +81,7 @@ TRIPLES = [
     (QUOTE_2, RDF_TYPE, OPTION_SNAPSHOT),
     (QUOTE_2, UNDERLYING_SYMBOL, "AAPL"),
     (QUOTE_2, CONTRACT_SYMBOL, "AAPL260918C00200000"),
+    (QUOTE, DOTTED_GREEK, "0.42"),
 ]
 
 DAY = "2026-09-12"
@@ -422,6 +426,14 @@ def test_a_snapshot_missing_a_property_gets_a_null_not_a_dropped_row(written):
     )
     assert second["market_quotes_strikePrice"] is None
     assert second["market_quotes_underlyingSymbol"] == "AAPL"
+
+
+def test_a_property_whose_name_carries_a_dot_still_becomes_a_column(written):
+    """F.col("a.b") reads a dot as a struct field. Nothing stops a vocabulary
+    from putting one in a local name, and the whole wide table is named from
+    the data."""
+    row = next(r for r in written["snapshots"] if r["uri"] == QUOTE)
+    assert row["market_quotes_greeks.delta"] == 0.42
 
 
 def test_a_numeric_property_is_a_number_and_a_symbol_is_not(written):
