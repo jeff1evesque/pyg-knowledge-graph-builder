@@ -57,7 +57,6 @@ pyg-knowledge-graph-builder/
 │   │   ├── ontology_mapper.py              # Ontology mapping utilities
 │   │   └── intra_source/                   # Intra-source enrichment modules
 │   │       ├── __init__.py
-│   │       ├── base.py                     # Base classes/interfaces
 │   │       ├── bls_linker.py               # BLS orchestrator
 │   │       ├── sec_linker.py               # SEC orchestrator
 │   │       ├── market_linker.py            # Market orchestrator
@@ -124,11 +123,22 @@ pyg-knowledge-graph-builder/
 │   │                                       # write_checksums_to_local() / _to_s3()
 │   │                                       # (checksums.json, written last);
 │   │                                       # derive_metadata_prefix() (naming convention)
+│   ├── sources/                            # One SourceSpec per data source, and
+│   │                                       # the per-source tables built from them
+│   │   ├── __init__.py                     # The registry and the table builders
+│   │   ├── spec.py                         # SourceSpec
+│   │   ├── bls.py                          # One spec per source
+│   │   ├── sec.py
+│   │   ├── market.py
+│   │   └── noaa.py
 │   └── utils/
 │       ├── __init__.py
-│       └── rdf_utils.py                    # Namespace constants, URI helpers, canonical
-│                                           # namespace registry (NAMESPACE_PREFIXES,
-│                                           # ONTOLOGY_NAMESPACE_INDICES)
+│       ├── namespaces.py                   # Namespace constants; imports nothing
+│       │                                   # from spark_jobs
+│       └── rdf_utils.py                    # URI helpers and the namespace tables
+│                                           # (NAMESPACE_PREFIXES,
+│                                           # ONTOLOGY_NAMESPACE_INDICES), built
+│                                           # from spark_jobs/sources/
 ├── tests/                                  # Unit and integration tests
 ├── documentation/                          # These pages (MkDocs reads from here,
 │                                           # not docs/, which is ignored)
@@ -143,7 +153,9 @@ pyg-knowledge-graph-builder/
 
 | Module | Role | Uses PySpark? |
 |--------|------|--------------|
-| `rdf_utils.py` | Namespace constants, URI string helpers, canonical `NAMESPACE_PREFIXES` and `ONTOLOGY_NAMESPACE_INDICES` registries (single source of truth for all PyG builder modules) | No (pure Python) |
+| `rdf_utils.py` | URI string helpers, edge-origin classification, and the canonical `NAMESPACE_PREFIXES` and `ONTOLOGY_NAMESPACE_INDICES` registries (single source of truth for all PyG builder modules), built from the source specs in `sources/`. Re-exports every constant in `namespaces.py`, so imports from here keep working | No (pure Python) |
+| `namespaces.py` | The namespace constants: each source's vocabularies, the publisher vocabularies reused at their real URIs, and the namespaces this pipeline mints. Imports nothing from `spark_jobs`, which is what lets the source specs use them while `rdf_utils.py` builds its tables from those specs | No (pure Python) |
+| `sources/` | One `SourceSpec` per data source (`bls.py`, `sec.py`, `market.py`, `noaa.py`). `__init__.py` holds the registry and builds the per-source tables from every spec: the namespace table and its source and enrichment subsets, the synthetic period prefixes, the ontology mapping rows, the edge relation fragments and the loader's path labels. The mapping rows, fragments, date predicates and path labels are still read from their old modules until [#406](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/issues/406) moves those readers, and `tests/test_source_registry.py` holds the two copies equal | No (pure Python) |
 | `patterns.py` / `correlations.py` / `measurements.py` | Configuration dictionaries (sector keywords, correlation definitions) | No (pure Python) |
 | `pipeline.py` | Orchestrates enrichment steps, manages triples DataFrame | Yes |
 | `temporal_unifier.py` | Produces unified month/year/quarter triples | Yes |
@@ -189,6 +201,6 @@ The pipeline is designed to handle:
 - **One parse per source** — the datatype markers are derived from the cached parse rather than from a second, uncached read of the same frame, so the rdflib UDF runs once per source instead of twice (measured: load phase 1,346.3s → 727.7s on identical input)
 - **Loaded partitions track the data, not the shuffle default** — the datatype markers are coalesced to one partition and unioned once after that cached parse, not once per source, so a vocabulary-sized frame no longer adds 200 partitions per source to the cached triples that every enrichment stage reads (see [Sizing a large run](../operations/running-a-job.md#sizing-a-large-run))
 - **Efficient literal isolation** — anti-join against node_id_df filters out edge triples before numeric parsing, avoiding wasted computation on URI-valued objects
-- **Canonical namespace registry** — `NAMESPACE_PREFIXES` and `ONTOLOGY_NAMESPACE_INDICES` in `rdf_utils.py` are the single source of truth, imported by `naming.py`, `feature_extractor.py`, and `edge_feature_extractor.py` to eliminate duplication
+- **Canonical namespace registry** — `NAMESPACE_PREFIXES` and `ONTOLOGY_NAMESPACE_INDICES` in `rdf_utils.py`, built from the source specs in `spark_jobs/sources/`, are the single source of truth, imported by `naming.py`, `feature_extractor.py`, and `edge_feature_extractor.py` to eliminate duplication
 - **Negligible metadata overhead** — all metadata collect calls target small aggregated DataFrames (<5000 rows each); total metadata memory is under 1 MB; seven JSON files are written after the `.pt` file with no impact on tensor collection or HeteroData assembly
 
