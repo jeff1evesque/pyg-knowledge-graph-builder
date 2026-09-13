@@ -12,6 +12,8 @@ Mirrors the linker test files (test_{bls,noaa,market,sec,cross_source}_linker.py
     exists; that pair is also where a reference to a non-existent
     MARKET_OPTIONS symbol once broke build_graph in all modes (Bug B).
   - Non-temporal input short-circuits to zero triples.
+  - Sources come from their specs: one date predicate puts a new source on the
+    period spine, and a source the run did not pick contributes no period.
 
 Drives enrich() over tiny in-memory triples on the shared local SparkSession
 (`spark` / `make_triples` fixtures from conftest.py).
@@ -25,13 +27,15 @@ from spark_jobs.enrichment.temporal_unifier import (
     UNIFIED_MONTH_TYPE,
     SOURCE_MONTH_TYPE,
     SOURCE_YEAR_TYPE,
-    MARKET_CAPTURE_TIME,
     OBSERVED_IN_PERIOD_PRED,
     COVERS_DAY_PRED,
     SOURCE_DAY_TYPE,
     UNIFIED_DAY_TYPE,
 )
 
+from spark_jobs import sources
+from spark_jobs.sources.spec import SourceSpec
+from spark_jobs.utils.namespaces import IDENTIFIER_BASE, ONTOLOGY_BASE
 from spark_jobs.utils.rdf_utils import (
     CPI as _CPI_NS,
     MARKET_QUOTES,
@@ -55,6 +59,7 @@ CPI_ID = identifier_namespace(CPI)
 SEC_TEMPORAL = SYNTHETIC_TEMPORAL_IDS["sec"]
 MARKET_TEMPORAL = SYNTHETIC_TEMPORAL_IDS["market-quotes"]
 QUOTES_TEMPORAL = MARKET_TEMPORAL
+MARKET_CAPTURE_TIME = str(MARKET_QUOTES.captureTime)
 
 
 def _triple_set(result):
@@ -401,3 +406,55 @@ def test_a_date_with_no_day_still_reaches_its_month(spark, make_triples):
         "an entity whose date carries no day was orphaned"
     )
     assert not [t for t in triples if t[2] == UNIFIED_DAY_TYPE]
+
+
+# --------------------------------------------------------------------------- #
+# sources come from their specs
+# --------------------------------------------------------------------------- #
+
+TOY = f"{ONTOLOGY_BASE}toy/"
+TOY_ID = f"{IDENTIFIER_BASE}toy/"
+
+
+def test_one_date_predicate_puts_a_new_source_on_the_period_spine(spark, make_triples):
+    """A source the unifier has never named, declared by its spec alone,
+    reaches the unified day through observedInPeriod and owl:sameAs."""
+    toy = SourceSpec(
+        name="toy",
+        path_fragments=("source=toy",),
+        namespaces=((TOY, "toy"),),
+        enrichment_namespace=TOY,
+        date_predicates=(TOY + "hasDate",),
+        temporal_prefix=f"{IDENTIFIER_BASE}temporal/toy/",
+    )
+    thing = TOY_ID + "thing/1"
+    rows = [(thing, TOY + "hasDate", "2026-02-14T09:30:00Z")]
+
+    triples = _triple_set(
+        TemporalUnifier(spark, specs=(*sources.REGISTERED, toy))
+        .enrich(make_triples(rows))
+    )
+
+    day = toy.temporal_prefix + "2026-02-14"
+    assert (thing, OBSERVED_IN_PERIOD_PRED, day) in triples
+    assert (day, RDF_TYPE, SOURCE_DAY_TYPE) in triples
+    assert (UNIFIED_BASE + "Day2026-02-14", OWL_SAME_AS, day) in triples
+
+
+def test_a_source_the_run_did_not_pick_contributes_no_period(spark, make_triples):
+    """Market's capture time is read only when the run picked market."""
+    rows = [
+        ("https://jefflevesque.com/id/market-quotes/snap/1", MARKET_CAPTURE_TIME,
+         "2024-11-15T10:00:00"),
+    ]
+    without_market = tuple(
+        spec for spec in sources.REGISTERED if spec.name != "market"
+    )
+
+    picked = _triple_set(TemporalUnifier(spark).enrich(make_triples(rows)))
+    not_picked = _triple_set(
+        TemporalUnifier(spark, specs=without_market).enrich(make_triples(rows))
+    )
+
+    assert (UNIFIED_BASE + "November", OWL_SAME_AS, MARKET_TEMPORAL + "November") in picked
+    assert not_picked == set()
