@@ -389,9 +389,9 @@ def write_entities(facts_df: DataFrame, root: str, day: str) -> str:
     "; ". Deterministic rather than clever: the assembly is stable run to run,
     which is what lets a vector index be rebuilt and compared.
 
-    This emits the text that exists and nothing more. Five of 155 node types
-    carry any at all, so a search over it reaches those five and no further --
-    see _TEXT_PREDICATE_TERMS for which predicates count as text, and why that
+    This emits the text that exists and nothing more. On 2026-09-09 that was
+    12,607 nodes across 49 node types, mostly names and labels -- see
+    _TEXT_PREDICATE_TERMS for which predicates count as text, and why that
     is a written-down list rather than something derived.
     """
     is_text = F.lit(False)
