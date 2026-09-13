@@ -732,10 +732,11 @@ def parse_args() -> JobConfig:
     parser.add_argument(
         "--market_sector_definitions_key",
         default="",
-        help="Prefix holding the constituents CSVs, not a single object key. "
-             "The run reads <prefix>/year=YYYY/month=MM/DD.csv for the day its "
-             "source_paths are partitioned under, and <prefix>/latest.csv when "
-             "that day is absent or the paths name no day",
+        help="Prefix holding the constituents CSVs, or a CSV under it. The run "
+             "reads <prefix>/year=YYYY/month=MM/DD.csv for the day its "
+             "source_paths are partitioned under (or the day CSV named here), "
+             "and <prefix>/latest.csv when that file is absent or no day is "
+             "known. <prefix>/latest.csv works the same as <prefix>",
     )
 
     parsed = parser.parse_args()
