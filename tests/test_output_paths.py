@@ -275,3 +275,66 @@ def test_source_data_day_is_exposed_on_the_config():
     assert c.source_data_day == "2026-09-12"
 
     assert _config().source_data_day == ""
+
+
+# ======================================================================
+# --source_data_day — stating the day the paths cannot
+# ======================================================================
+#
+# The override covers the two cases the paths do not answer: paths carrying no
+# day at all (every example in running-a-job.md, and the e2e fixtures), and a
+# run deliberately spanning two of them. bin/publish_run.py resolves the
+# published day the same way through PYG_PUBLISH_DATA_DAY.
+
+def test_a_stated_day_supplies_one_the_paths_do_not_carry():
+    c = _config(
+        source_paths="/data/raw/sec", source_data_day="2026-09-12"
+    )
+    assert c.source_data_day == "2026-09-12"
+
+
+def test_a_stated_day_picks_one_of_the_days_the_paths_span():
+    c = _config(
+        source_paths=(
+            "s3a://b/sec/year=2026/month=09/day=12/,"
+            "s3a://b/market/year=2026/month=09/day=11/"
+        ),
+        source_data_day="2026-09-11",
+    )
+    assert c.source_data_day == "2026-09-11"
+
+
+def test_a_stated_day_the_paths_contradict_is_refused():
+    """Accepting it would file one day's data under another day's partition,
+    and nothing downstream could tell."""
+    with pytest.raises(ValueError, match="but source_paths name"):
+        _config(
+            source_paths="s3a://b/p/year=2026/month=09/day=12/",
+            source_data_day="2026-09-11",
+        )
+
+
+@pytest.mark.parametrize("given", ["2026-9-12", "20260912", "yesterday"])
+def test_a_stated_day_that_is_not_a_date_is_refused(given):
+    with pytest.raises(ValueError, match="not YYYY-MM-DD"):
+        _config(source_data_day=given)
+
+
+# ======================================================================
+# Query tables — the flag and where they are written
+# ======================================================================
+
+def test_query_tables_are_on_unless_asked_otherwise():
+    """A run that skipped them produces a graph nothing can query, so
+    skipping is the thing that has to be asked for."""
+    assert _config().enable_query_tables is True
+    assert _config(enable_query_tables="false").enable_query_tables is False
+    assert _config(enable_query_tables="FALSE").enable_query_tables is False
+
+
+def test_query_tables_path_carries_no_period_partition():
+    """Each table carries its own day= directories and is published to a root
+    that outlives this run, so a month segment here would only bury them."""
+    c = _config()
+    assert c.query_tables_path == "/work/tables"
+    assert "year=" not in c.query_tables_path
