@@ -367,6 +367,166 @@ def test_a_broken_days_export_is_reported_rather_than_routed_around(broken):
     assert client.requested == ["ref/year=2026/month=09/12.csv"]
 
 
+# Run 20260913T032118Z was configured with .../latest.csv rather than the
+# prefix. The lookup built both keys under that file name, neither existed, and
+# the run lost its company and sector links with only an info line to say so.
+
+def test_a_latest_csv_setting_still_tries_the_days_export_first():
+    assert market.constituents_keys("ref/tickers/latest.csv", "2026-09-12") == [
+        "ref/tickers/year=2026/month=09/12.csv",
+        "ref/tickers/latest.csv",
+    ]
+
+
+@pytest.mark.parametrize("setting", [
+    "ref/tickers/latest.csv",
+    "/ref/tickers/latest.csv",
+    " ref/tickers/latest.csv ",
+])
+@pytest.mark.parametrize("data_day", ["2026-09-12", ""])
+def test_a_latest_csv_setting_means_the_same_place_as_its_prefix(setting, data_day):
+    assert market.constituents_keys(setting, data_day) == (
+        market.constituents_keys("ref/tickers", data_day)
+    )
+
+
+def test_a_named_days_csv_is_tried_first_then_latest_csv():
+    """A day's CSV named in the setting takes the place of the day being
+    processed. latest.csv is still the fallback, and it sits two folders up
+    from the day's file, not beside it."""
+    named = "ref/tickers/year=2026/month=09/11.csv"
+    assert market.constituents_keys(named, "2026-09-12") == [
+        named,
+        "ref/tickers/latest.csv",
+    ]
+
+
+@pytest.mark.parametrize("setting", [
+    "ref/tickers",
+    "ref/tickers/",
+    "ref/tickers/latest.csv",
+    "ref/tickers/year=2026/month=09/11.csv",
+])
+@pytest.mark.parametrize("data_day", ["2026-09-12", ""])
+def test_every_setting_ends_at_latest_csv_and_never_looks_under_a_file(
+    setting, data_day
+):
+    keys = market.constituents_keys(setting, data_day)
+    assert keys[-1] == "ref/tickers/latest.csv"
+    for key in keys:
+        assert ".csv/" not in key, key
+        assert key.endswith(".csv"), key
+
+
+def test_a_setting_at_the_bucket_root_builds_no_leading_slash():
+    assert market.constituents_keys("latest.csv", "2026-09-12") == [
+        "year=2026/month=09/12.csv",
+        "latest.csv",
+    ]
+
+
+def test_a_latest_csv_setting_reads_the_days_export_in_every_reader():
+    """The failed run's exact setting, through all three readers."""
+    client = _keyed_csv({
+        "ref/tickers/year=2026/month=09/09.csv": [
+            "AAPL,Apple Inc.,Information Technology,Technology Hardware,320193",
+        ],
+        "ref/tickers/latest.csv": [
+            "MSFT,Microsoft,Information Technology,Application Software,789019",
+        ],
+    })
+    where = dict(bucket="b", prefix="ref/tickers/latest.csv",
+                 s3_client=client, data_day="2026-09-09")
+
+    assert market.get_ticker_cik_map(**where) == {"AAPL": "0000320193"}
+    assert market.get_sub_industries(**where) == [
+        ("AAPL", "Technology Hardware"),
+    ]
+    patterns = market.get_sector_patterns(**where)
+    assert patterns is not market.DEFAULT_MARKET_SECTOR_PATTERNS
+    assert patterns["information_technology_sector"]["tickers"] == ["AAPL"]
+    assert set(client.requested) == {"ref/tickers/year=2026/month=09/09.csv"}
+
+
+def test_a_latest_csv_setting_falls_back_to_latest_when_the_day_is_missing():
+    client = _keyed_csv({
+        "ref/tickers/latest.csv": [
+            "MSFT,Microsoft,Information Technology,Application Software,789019",
+        ],
+    })
+
+    assert market.get_ticker_cik_map(
+        "b", "ref/tickers/latest.csv", client, data_day="2026-09-09"
+    ) == {"MSFT": "0000789019"}
+    assert client.requested == [
+        "ref/tickers/year=2026/month=09/09.csv",
+        "ref/tickers/latest.csv",
+    ]
+
+
+def test_a_named_days_csv_that_is_missing_falls_back_to_latest_csv():
+    client = _keyed_csv({
+        "ref/tickers/latest.csv": [
+            "MSFT,Microsoft,Information Technology,Application Software,789019",
+        ],
+    })
+
+    assert market.get_ticker_cik_map(
+        "b", "ref/tickers/year=2026/month=09/11.csv", client,
+        data_day="2026-09-12",
+    ) == {"MSFT": "0000789019"}
+    assert client.requested == [
+        "ref/tickers/year=2026/month=09/11.csv",
+        "ref/tickers/latest.csv",
+    ]
+
+
+def test_no_csv_at_any_key_is_a_warning_naming_the_keys_tried(caplog):
+    """A missing day is normal and stays at info. Ending up with no CSV at all
+    is not, and an info line is how the failed run hid it."""
+    import logging
+
+    client = _keyed_csv({})
+    with caplog.at_level(logging.WARNING, logger=market.logger.name):
+        assert market.load_ticker_cik_map_from_s3(
+            "b", "ref/tickers/latest.csv", client, data_day="2026-09-12"
+        ) is None
+
+    warnings = [record.getMessage() for record in caplog.records
+                if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "s3://b/ref/tickers/year=2026/month=09/12.csv" in warnings[0]
+    assert "s3://b/ref/tickers/latest.csv" in warnings[0]
+
+
+@pytest.mark.parametrize("script", [
+    "generate_market_e2e_fixtures",
+    "generate_sec_e2e_fixtures",
+])
+def test_the_fixture_generators_read_the_first_csv_the_run_tries(
+    script, monkeypatch
+):
+    """The generators copy the rule rather than import it, because importing it
+    brings the Spark stack along. With no data day they read the first key the
+    run would try."""
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "bin" / f"{script}.py"
+    spec = importlib.util.spec_from_file_location(f"_{script}", path)
+    generator = importlib.util.module_from_spec(spec)
+    # A dataclass looks its own module up in sys.modules as it is defined.
+    monkeypatch.setitem(sys.modules, spec.name, generator)
+    spec.loader.exec_module(generator)
+
+    for setting in ("ref/tickers", "ref/tickers/", "ref/tickers/latest.csv",
+                    "ref/tickers/year=2026/month=09/11.csv"):
+        assert generator.constituents_key(setting) == (
+            market.constituents_keys(setting)[0]
+        ), setting
+
+
 def test_market_option_strategy_patterns_well_formed():
     assert market.MARKET_OPTION_STRATEGY_PATTERNS
     for key, entry in market.MARKET_OPTION_STRATEGY_PATTERNS.items():
