@@ -41,7 +41,11 @@ from pyspark import StorageLevel
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 
-from spark_jobs.utils.rdf_utils import NAMESPACE_PREFIXES
+from spark_jobs.pyg_builder.naming import (
+    EXCLUDED_EDGE_PREDICATES,
+    prefixed_local_name_expr,
+    relation_to_predicate_uri,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,62 +54,6 @@ logger = logging.getLogger(__name__)
 # comfortably under the 1g spark.driver.maxResultSize default, and small
 # enough that the pandas frame and the tensors built from it coexist.
 _COLLECT_ROW_BUDGET = 20_000_000
-
-# ============================================
-# URI constants
-# ============================================
-RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
-
-_EXCLUDED_PREDICATES = {
-    RDF_TYPE,
-    "http://www.w3.org/2000/01/rdf-schema#label",
-    "http://www.w3.org/2000/01/rdf-schema#comment",
-    "http://www.w3.org/2000/01/rdf-schema#isDefinedBy",
-    "http://www.w3.org/2002/07/owl#imports",
-}
-
-
-def _build_predicate_to_relation_expr(
-    pred_col: str = "predicate",
-) -> F.Column:
-    """
-    Build a pure-Spark Column expression that converts a predicate URI
-    to a PyG-compatible relation name. No Python UDF.
-
-    Same strategy as node_mapper's URI-to-name: chain of WHEN clauses
-    for known namespace prefixes, with a fallback for unknown namespaces.
-    """
-    col = F.col(pred_col)
-    expr = None
-
-    for namespace, prefix in NAMESPACE_PREFIXES:
-        ns_len = len(namespace)
-        local_name = F.substring(col, ns_len + 1, 1000)
-        local_name = F.regexp_replace(local_name, r"^[/#]+|[/#]+$", "")
-        relation_name = F.concat(F.lit(f"{prefix}_"), local_name)
-
-        condition = col.startswith(namespace) & (F.length(local_name) > 0)
-
-        if expr is None:
-            expr = F.when(condition, relation_name)
-        else:
-            expr = expr.when(condition, relation_name)
-
-    # Fallback
-    fallback_local = F.regexp_extract(col, r"[#/]([^#/]+)$", 1)
-    fallback_name = F.concat(F.lit("unknown_"), fallback_local)
-
-    expr = expr.otherwise(
-        F.when(
-            F.length(fallback_local) > 0, fallback_name
-        ).otherwise(
-            F.concat(
-                F.lit("unknown_"), F.abs(F.hash(col)).cast("string")
-            )
-        )
-    )
-
-    return expr
 
 
 class EdgeMapper:
@@ -177,7 +125,7 @@ class EdgeMapper:
         # ============================================
         # Step 1: Filter to edge-candidate triples
         # ============================================
-        excluded_list = list(_EXCLUDED_PREDICATES)
+        excluded_list = list(EXCLUDED_EDGE_PREDICATES)
         edge_triples = triples_df.filter(
             ~F.col("predicate").isin(excluded_list)
         )
@@ -217,7 +165,7 @@ class EdgeMapper:
         # Step 3: Derive relation names (pure Spark, no UDF)
         # ============================================
         edges_resolved = edges_resolved.withColumn(
-            "relation", _build_predicate_to_relation_expr("predicate")
+            "relation", prefixed_local_name_expr("predicate")
         )
 
         # ============================================
@@ -419,17 +367,7 @@ class EdgeMapper:
             .collect()
         )
 
-        result: Dict[str, str] = {}
-        for row in relation_rows:
-            rel = row.relation
-            # Reverse the prefix_localName → namespace/localName mapping
-            for namespace, prefix in NAMESPACE_PREFIXES:
-                if rel.startswith(f"{prefix}_"):
-                    local = rel[len(prefix) + 1:]
-                    result[rel] = f"{namespace}{local}"
-                    break
-            else:
-                # Unknown prefix — store relation name as-is
-                result[rel] = rel
-
-        return result
+        return {
+            row.relation: relation_to_predicate_uri(row.relation)
+            for row in relation_rows
+        }
