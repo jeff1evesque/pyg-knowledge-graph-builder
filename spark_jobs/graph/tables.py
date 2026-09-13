@@ -286,9 +286,10 @@ def write_edge_types(
         "src_type string, relation string, dst_type string, count long, "
         "predicate_uri string, origin string, relation_group string"
     )
-    frame = spark.createDataFrame(described, schema) if described else (
-        spark.createDataFrame([], schema)
-    )
+    # An empty list is fine against a DDL schema, so a run with no edges at all
+    # publishes an empty table rather than no table -- a consumer reading it
+    # gets zero rows instead of a missing path.
+    frame = spark.createDataFrame(described, schema)
 
     return _write(frame.coalesce(1), root, "edge_types", day)
 
@@ -372,8 +373,9 @@ def write_entities(facts_df: DataFrame, root: str, day: str) -> str:
     which is what lets a vector index be rebuilt and compared.
 
     This emits the text that exists and nothing more. Five of 155 node types
-    carry any at all, so a search over it reaches those five -- see the module
-    docstring on _TEXT_PREDICATE_TERMS.
+    carry any at all, so a search over it reaches those five and no further --
+    see _TEXT_PREDICATE_TERMS for which predicates count as text, and why that
+    is a written-down list rather than something derived.
     """
     is_text = F.lit(False)
     for term in _TEXT_PREDICATE_TERMS:
