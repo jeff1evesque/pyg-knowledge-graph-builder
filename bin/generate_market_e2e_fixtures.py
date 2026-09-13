@@ -90,6 +90,19 @@ from pathlib import Path
 
 QUOTES_PREFIX = os.environ.get("MARKET_QUOTES_PREFIX", "")
 
+# Prefix label to write for each namespace, replacing the source's own.
+# Upstream's label for this one names a third party, and these fixtures are
+# public. The label is cosmetic, so the triples are unchanged either way.
+# Fixed by hand once before (56e39c7) and undone by the next regeneration;
+# tests/test_fixture_hygiene.py now fails on a non-neutral label.
+#
+# tests/test_fixture_hygiene.py is the backstop: it fails on any prefix label in
+# a committed fixture that is not a known-neutral one, so a future regeneration
+# cannot quietly reintroduce a vendor name here or in any other source.
+PREFERRED_PREFIXES = {
+    "https://jefflevesque.com/ontology/market-quotes/": "mq",
+}
+
 # Anchored tickers to keep, and how many option snapshots to keep per anchored
 # equity. Sized against the other fixtures (~11 KiB per BLS feed): a snapshot is
 # ~33 triples, so this lands near the previous market fixture's footprint while
@@ -386,7 +399,10 @@ def split_rows(graph, rows: int) -> list[str]:
     def emit(keep: set) -> str:
         part = rdflib.Graph()
         for prefix, uri in graph.namespaces():
-            part.bind(prefix, uri)
+            part.bind(
+                PREFERRED_PREFIXES.get(str(uri), prefix), uri,
+                override=True, replace=True,
+            )
         for subj in keep:
             for pred, obj in graph.predicate_objects(subj):
                 part.add((subj, pred, obj))
