@@ -8,6 +8,8 @@ directory gives it nothing.
 
 Pure Python: runs under ``pytest -m "not e2e"`` with no Spark fixture.
 """
+from pathlib import Path
+
 import pytest
 
 from spark_jobs.graph.config import (
@@ -15,6 +17,8 @@ from spark_jobs.graph.config import (
     period_partition,
     source_data_day,
 )
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 # ======================================================================
@@ -338,3 +342,58 @@ def test_query_tables_path_carries_no_period_partition():
     c = _config()
     assert c.query_tables_path == "/work/tables"
     assert "year=" not in c.query_tables_path
+
+
+# ======================================================================
+# The two shapes a day-level source path actually takes
+# ======================================================================
+#
+# Measured off a real run's PYG_SOURCE_PATHS: market names the day as a
+# DIRECTORY and SEC/NOAA name it as a FILE. An earlier regex here matched only
+# the directory form, so every SEC and NOAA path read as undated. It went
+# unnoticed because market was always in the list and supplied the day.
+
+REAL_PATHS = [
+    "s3a://b/raw/noaa/nws/alerts/year=2026/month=09/09.snappy.parquet",
+    "s3a://b/raw/source=sec/feed=filings/year=2026/month=09/09.snappy.parquet",
+    "s3a://b/raw/source=bls/feed=cpi/2026.snappy.parquet",
+    "s3a://b/quotes/year=2026/month=09/day=09/",
+]
+
+
+@pytest.mark.parametrize("path", REAL_PATHS[:2])
+def test_a_day_named_as_a_file_is_a_day(path):
+    assert source_data_day([path]) == "2026-09-09"
+
+
+def test_a_yearly_source_names_no_day():
+    """BLS ships a year per object, so it contributes no day and must not stop
+    the others from naming one."""
+    assert source_data_day([REAL_PATHS[2]]) == ""
+
+
+def test_the_real_source_list_resolves_to_one_day():
+    assert source_data_day(REAL_PATHS) == "2026-09-09"
+
+
+def test_the_day_resolves_without_the_market_source():
+    """The case the old regex got wrong: market supplied the only `day=` path,
+    so dropping it left the run undated and writing no tables."""
+    assert source_data_day(REAL_PATHS[:3]) == "2026-09-09"
+
+
+def test_the_job_and_the_publisher_agree_on_the_day():
+    """bin/publish_run.py resolves the published day from the same paths. Two
+    regexes reading one list is how they drifted; this is what catches it."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_publish_run", _REPO_ROOT / "bin" / "publish_run.py"
+    )
+    publisher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(publisher)
+
+    for path in REAL_PATHS:
+        found = publisher.DAY_IN_PATH.search(path)
+        publisher_day = "-".join(found.groups()) if found else ""
+        assert publisher_day == source_data_day([path]), path
