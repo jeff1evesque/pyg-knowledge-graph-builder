@@ -57,6 +57,7 @@ from pyspark.sql import functions as F
 from spark_jobs.utils.rdf_utils import (
     NAMESPACE_PREFIXES,
     ONTOLOGY_NAMESPACE_INDICES,
+    SEC_FILINGS,
     PROV_DERIVED_BY,
     PROV_OBSERVED_LITERAL_DATATYPE,
     PROV_CLASS_HIERARCHY,
@@ -132,6 +133,50 @@ _NON_FEATURE_PREDICATES = {
     "http://www.w3.org/2000/01/rdf-schema#isDefinedBy",
     "http://www.w3.org/2002/07/owl#sameAs",
     "http://www.w3.org/2002/07/owl#imports",
+}
+
+# Predicates whose VALUE is not a feature, though the predicate itself is a
+# real data property. Narrower than _NON_FEATURE_PREDICATES on purpose: those
+# describe the vocabulary and are excluded from everything, including the
+# property-schema coverage report, which counts "predicates that actually carry
+# data". These do carry data. Their presence is still encoded -- "this filing
+# states a SIC" is a fact about the node -- and they still count as data
+# predicates. Only the value is kept out of the numeric and categorical
+# segments.
+#
+# Both entries are things the encoder would otherwise get wrong, measured
+# through the real classifier on 2026-09-12:
+#
+#   filings:hasSic and filings:hasIssuerSic are 4-digit industry codes, so
+#   100% of their values parse and the majority rule routes them to the
+#   NUMERIC segment, where they are z-scored as magnitudes. SIC 5812 (eating
+#   places) is then encoded as 1.6x SIC 3571 (computers). The majority rule
+#   cannot catch this -- it exists to spot a property whose values are MOSTLY
+#   labels, and every SIC value is a number. Industry is not lost: it reaches
+#   the graph as structure, through belongsToSector.
+#
+#   filings:hasAcceptanceDateTime arrives as "2026-09-09 06:47:44-04:00"
+#   (the loader converts xsd:dateTime through rdflib, which puts a space where
+#   the source had a T). Nothing parses that as a number, so it lands in the
+#   CATEGORICAL segment -- 127 slots, against one distinct timestamp per
+#   filing and thousands of filings a day. That is not a label, it is an
+#   instant, and hashing it fills the segment every other categorical value
+#   shares with noise.
+#
+# The instant is genuinely useful and is published in the query tables'
+# facts/, where ordering by it needs no encoding. Encoding it as epoch seconds
+# was the alternative and is deliberately not taken: absent reads as 0.0, and
+# after z-scoring 0.0 is "average", so an unstamped filing would look like one
+# filed at the mean time -- and upstream fetches the timestamp for at most 60
+# filings per run, so unstamped rows are the normal state on a fresh day.
+#
+# Named from the vocabulary rather than spelled out, so a re-homed namespace
+# moves the term and this together instead of leaving a filter that matches
+# nothing.
+_UNENCODED_VALUE_PREDICATES = {
+    str(SEC_FILINGS.hasSic),
+    str(SEC_FILINGS.hasIssuerSic),
+    str(SEC_FILINGS.hasAcceptanceDateTime),
 }
 
 # Predicates whose presence proves the ontology-mapping phase ran over the
@@ -1087,7 +1132,15 @@ class FeatureExtractor:
 
         The anti-join drops any triple whose object is a known node URI —
         what remains is the literal-valued tail of the graph.
+
+        _UNENCODED_VALUE_PREDICATES drops out here and ONLY here: an industry
+        code is not a magnitude and an instant is not a label, but both are
+        real data properties, so their presence still encodes and the coverage
+        report still counts them.
         """
+        excluded = list(
+            _NON_FEATURE_PREDICATES | _UNENCODED_VALUE_PREDICATES
+        )
         return (
             triples_df
             .join(
@@ -1095,7 +1148,7 @@ class FeatureExtractor:
                 triples_df["object"] == F.col("_obj_uri"),
                 "left_anti",
             )
-            .filter(~F.col("predicate").isin(list(_NON_FEATURE_PREDICATES)))
+            .filter(~F.col("predicate").isin(excluded))
         )
 
     def _classify_literal_predicates(
