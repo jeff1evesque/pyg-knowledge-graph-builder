@@ -193,9 +193,16 @@ window is 5.8 GB and a year is 71 GB, against 194 MB for a day. So the store
 supplements the tables rather than replacing them: load one day for traversal,
 and fall back to `edges/` for anything spanning more.
 
-**Market never enters it.** At the same byte rate its ~415M triples a day would
-be roughly 58 GB, and market is a time series of numbers carrying one edge per
+**No market data enters it.** At the same byte rate market's ~415M triples a day
+would be roughly 58 GB, and it is a time series of numbers carrying one edge per
 snapshot — not a shape a triple store earns anything on.
+
+Market *terms* do appear, which is not the same thing. The statements about the
+vocabulary — the derived `rdfs:subClassOf` hierarchy, the observed domains and
+ranges, the provenance markers — have predicate and class URIs as their subjects
+rather than entities, so they describe no source's data and belong to none of
+them. They are the store's schema, a few hundred triples, and most of what makes
+a SPARQL query over it worth writing.
 
 The store holds the *enriched* frame's view of the data: literals are the plain
 strings the loader converted them to, with their source datatypes already folded
