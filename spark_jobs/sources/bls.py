@@ -16,8 +16,22 @@ from spark_jobs.utils.namespaces import (
     XIMPIM,
 )
 
+
+def _linker(spark, options):
+    from spark_jobs.enrichment.intra_source.bls_linker import BLSIntraSourceLinker
+
+    return BLSIntraSourceLinker(spark)
+
+
+def _collect_periods(triples_df):
+    from spark_jobs.enrichment.intra_source.bls.temporal import collect_bls_periods
+
+    return collect_bls_periods(triples_df)
+
+
 SPEC = SourceSpec(
     name="bls",
+    label="BLS",
     path_fragments=("source=bls",),
     namespaces=(
         (str(CPI), "cpi"),
@@ -35,7 +49,9 @@ SPEC = SourceSpec(
     ),
     enrichment_namespace=str(BLS_ENRICHMENT),
     # No date predicates: BLS states its periods as URIs (id/cpi/February),
-    # which the temporal unifier reads directly.
+    # which _collect_periods reads directly.
+    temporal_collector=_collect_periods,
+    linker=_linker,
     property_mappings={
         str(CPI.hasMonth): str(UNIFIED.hasMonth),
         str(PPI.hasStartMonth): str(UNIFIED.hasMonth),
