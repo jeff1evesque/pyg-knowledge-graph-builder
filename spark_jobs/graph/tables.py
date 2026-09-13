@@ -117,15 +117,32 @@ def table_path(root: str, table: str, day: str) -> str:
     return f"{root}/{table}/day={day}"
 
 
+# The RAPIDS Parquet writer crashes the executor writing these tables as zstd --
+# an illegal memory access, again on every retry -- where the CPU writer wrote the
+# same 9,447,814 nodes. So only the encoding runs on the CPU; every step that
+# builds the frame stays on the GPU. Snappy on the GPU writer also works, but came
+# out five times larger.
+_GPU_PARQUET_WRITE = "spark.rapids.sql.format.parquet.write.enabled"
+
+
 def _write(df: DataFrame, root: str, table: str, day: str) -> str:
     path = table_path(root, table, day)
-    (
-        df
-        .write
-        .mode("overwrite")
-        .option("compression", COMPRESSION)
-        .parquet(path)
-    )
+    conf = df.sparkSession.conf
+    previous = conf.get(_GPU_PARQUET_WRITE, None)
+    conf.set(_GPU_PARQUET_WRITE, "false")
+    try:
+        (
+            df
+            .write
+            .mode("overwrite")
+            .option("compression", COMPRESSION)
+            .parquet(path)
+        )
+    finally:
+        if previous is None:
+            conf.unset(_GPU_PARQUET_WRITE)
+        else:
+            conf.set(_GPU_PARQUET_WRITE, previous)
     return path
 
 
