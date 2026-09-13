@@ -9,8 +9,16 @@ from spark_jobs.utils.namespaces import (
     WEATHER,
 )
 
+
+def _linker(spark, options):
+    from spark_jobs.enrichment.intra_source.noaa_linker import NOAAIntraSourceLinker
+
+    return NOAAIntraSourceLinker(spark)
+
+
 SPEC = SourceSpec(
     name="noaa",
+    label="NOAA",
     path_fragments=("/noaa/",),
     namespaces=(
         (str(CAP), "cap"),
@@ -19,7 +27,9 @@ SPEC = SourceSpec(
         (str(NOAA_ENRICHMENT), "noaa_enrichment"),
     ),
     enrichment_namespace=str(NOAA_ENRICHMENT),
-    # All five are stated on the alert's Info subject.
+    # All five are stated on the alert's Info subject, not on the alert. The
+    # date collection keys on the predicate alone, so the entity it links to a
+    # period is whichever subject stated the date.
     date_predicates=(
         str(CAP.hasSentTime),
         str(CAP.hasEffectiveTime),
@@ -28,6 +38,7 @@ SPEC = SourceSpec(
         str(CAP.hasEndsTime),
     ),
     temporal_prefix=f"{IDENTIFIER_BASE}temporal/noaa/",
+    linker=_linker,
     property_mappings={
         str(CAP.hasSentTime): str(UNIFIED.hasTimestamp),
         str(CAP.hasEffectiveTime): str(UNIFIED.hasTimestamp),
