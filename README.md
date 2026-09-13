@@ -57,7 +57,7 @@ The pipeline supports three execution modes:
 - **GPU-Accelerated Spark**: Runs on an Apache Spark standalone cluster with the RAPIDS Accelerator; DataFrame operators execute on GPU
 - **Local-First Storage**: Interim enriched Parquet stays on a shared local filesystem; final artifacts are written locally and optionally mirrored to S3 as a durable catalog
 - **Controlled Parquet Output**: Configurable partition count for optimal file sizes
-- **Canonical Namespace Registry**: Single source of truth for all namespace-to-prefix mappings in `rdf_utils.py`
+- **Canonical Namespace Registry**: The namespace-to-prefix table in `rdf_utils.py` is built from the source declarations in `spark_jobs/sources/`, one per data source
 <!-- --8<-- [end:overview] -->
 
 ## Architecture
