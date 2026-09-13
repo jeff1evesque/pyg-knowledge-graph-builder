@@ -576,7 +576,7 @@ class CrossSourceLinker:
         is what moves this from a quarter to all of them.
 
         The CIK arrives already zero-padded to ten, because
-        utils/canonicalization.canonicalize_sec_identifiers runs in the LOADER,
+        utils/sec_identifiers.canonicalize_sec_identifiers runs in the LOADER,
         before any enricher sees the frame. Nothing is re-padded here on
         purpose: if that ever stops being true the join under-covers visibly
         rather than being silently patched in two places that can disagree.
