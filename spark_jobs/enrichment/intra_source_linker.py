@@ -1,18 +1,18 @@
 """
 Intra-Source Enrichment Entry Point
 
-Routes enrichment to the appropriate enricher per source family.
-All sources use PySpark — returns a combined new triples DataFrame.
+Runs the intra-source linker of each source a run picked and returns their
+combined new triples. Which linker a source uses is declared in its spec
+(spark_jobs/sources/), so nothing here names a source.
 
 All sources: PySpark (returns DataFrame on executors)
 """
 from pyspark.sql import SparkSession, DataFrame
-from spark_jobs.enrichment.intra_source.bls_linker import BLSIntraSourceLinker
-from spark_jobs.enrichment.intra_source.sec_linker import SECIntraSourceLinker
-from spark_jobs.enrichment.intra_source.market_linker import MarketIntraSourceLinker
-from spark_jobs.enrichment.intra_source.noaa_linker import NOAAIntraSourceLinker
-from typing import Dict, List
+from typing import Dict, List, Optional, Sequence
 import logging
+
+from spark_jobs import sources
+from spark_jobs.sources.spec import RunOptions, SourceSpec
 
 logger = logging.getLogger(__name__)
 
@@ -23,87 +23,47 @@ def enrich_intra_source(
     sector_definitions_bucket: str = "",
     sector_definitions_key: str = "",
     source_data_day: str = "",
+    specs: Optional[Sequence[SourceSpec]] = None,
 ) -> Dict:
     """
-    Run intra-source enrichment for all detected data sources.
+    Run intra-source enrichment for each picked source.
 
     Args:
         spark: Active SparkSession
         triples_df: DataFrame with columns [subject, predicate, object]
+        specs: The sources the run's paths picked. Defaults to every
+            registered source; a linker finds nothing in data it does not have.
 
     Returns:
         Dict with:
-        - 'stats': per-source enrichment statistics
+        - 'stats': per-source enrichment statistics, keyed by source name
         - 'spark_new_triples': DataFrame of all enrichment output
           (stays on executors, never collected here)
     """
+    specs = sources.REGISTERED if specs is None else specs
+    options = RunOptions(
+        sector_definitions_bucket=sector_definitions_bucket,
+        sector_definitions_key=sector_definitions_key,
+        source_data_day=source_data_day,
+    )
     stats: Dict[str, Dict[str, any]] = {}
     spark_new_dfs: List[DataFrame] = []
 
-    # ----------------------------------------
-    # BLS Enrichment (PySpark — returns DataFrame)
-    # ----------------------------------------
-    logger.info("Checking for BLS data...")
-    try:
-        bls_linker = BLSIntraSourceLinker(spark)
-        bls_new_df = bls_linker.enrich(triples_df)
-        spark_new_dfs.append(bls_new_df)
-        bls_count = bls_new_df.count()
-        stats['bls'] = {'total_triples_added': bls_count}
-        logger.info(f"BLS enrichment produced {bls_count} new triples")
-    except Exception as e:
-        logger.error(f"BLS enrichment failed: {e}", exc_info=True)
-        stats['bls'] = {'total_triples_added': 0, 'error': str(e)}
-
-    # ----------------------------------------
-    # SEC Enrichment (PySpark — returns DataFrame)
-    # ----------------------------------------
-    logger.info("Checking for SEC data...")
-    try:
-        sec_linker = SECIntraSourceLinker(spark)
-        sec_new_df = sec_linker.enrich(triples_df)
-        spark_new_dfs.append(sec_new_df)
-        sec_count = sec_new_df.count()
-        stats['sec'] = {'total_triples_added': sec_count}
-        logger.info(f"SEC enrichment produced {sec_count} new triples")
-    except Exception as e:
-        logger.error(f"SEC enrichment failed: {e}", exc_info=True)
-        stats['sec'] = {'total_triples_added': 0, 'error': str(e)}
-
-    # ----------------------------------------
-    # Market Enrichment (PySpark — returns DataFrame)
-    # ----------------------------------------
-    logger.info("Checking for Market data...")
-    try:
-        market_linker = MarketIntraSourceLinker(
-            spark,
-            sector_definitions_bucket=sector_definitions_bucket,
-            sector_definitions_key=sector_definitions_key,
-            source_data_day=source_data_day,
-        )
-        market_new_df = market_linker.enrich(triples_df)
-        spark_new_dfs.append(market_new_df)
-        market_count = market_new_df.count()
-        stats['market'] = {'total_triples_added': market_count}
-        logger.info(f"Market enrichment produced {market_count} new triples")
-    except Exception as e:
-        logger.error(f"Market enrichment failed: {e}", exc_info=True)
-        stats['market'] = {'total_triples_added': 0, 'error': str(e)}
-
-    # ----------------------------------------
-    # NOAA Enrichment (PySpark — returns DataFrame)
-    # ----------------------------------------
-    logger.info("Checking for NOAA data...")
-    try:
-        noaa_linker = NOAAIntraSourceLinker(spark)
-        noaa_new_df = noaa_linker.enrich(triples_df)
-        spark_new_dfs.append(noaa_new_df)
-        noaa_count = noaa_new_df.count()
-        stats['noaa'] = {'total_triples_added': noaa_count}
-        logger.info(f"NOAA enrichment produced {noaa_count} new triples")
-    except Exception as e:
-        logger.error(f"NOAA enrichment failed: {e}", exc_info=True)
-        stats['noaa'] = {'total_triples_added': 0, 'error': str(e)}
+    for spec in specs:
+        if spec.linker is None:
+            continue
+        # Run tooling reads these lines ("Market enrichment produced ..."), so
+        # their wording is part of what a run reports.
+        logger.info(f"Checking for {spec.label} data...")
+        try:
+            new_df = spec.linker(spark, options).enrich(triples_df)
+            spark_new_dfs.append(new_df)
+            count = new_df.count()
+            stats[spec.name] = {'total_triples_added': count}
+            logger.info(f"{spec.label} enrichment produced {count} new triples")
+        except Exception as e:
+            logger.error(f"{spec.label} enrichment failed: {e}", exc_info=True)
+            stats[spec.name] = {'total_triples_added': 0, 'error': str(e)}
 
     # ----------------------------------------
     # Combine PySpark outputs (stays on executors)
