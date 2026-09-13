@@ -338,6 +338,46 @@ def test_tables_are_written_under_the_data_day(spark, tmp_path):
     assert {str(row["day"]) for row in parent.select("day").collect()} == {DAY}
 
 
+def test_each_table_write_turns_the_gpu_parquet_writer_off_then_back(
+    spark, tmp_path, monkeypatch
+):
+    """The RAPIDS Parquet writer crashes the executor writing these tables as
+    zstd, so every write here turns it off. It must hand the setting back as it
+    found it, or every write after the tables would lose the GPU too."""
+    from pyspark.sql.readwriter import DataFrameWriter
+
+    from spark_jobs.graph import tables
+
+    setting = tables._GPU_PARQUET_WRITE
+    seen = []
+    parquet = DataFrameWriter.parquet
+
+    def recording(self, path, *args, **kwargs):
+        seen.append(spark.conf.get(setting, None))
+        return parquet(self, path, *args, **kwargs)
+
+    monkeypatch.setattr(DataFrameWriter, "parquet", recording)
+    triples = spark.createDataFrame(
+        TRIPLES, "subject string, predicate string, object string"
+    )
+
+    spark.conf.unset(setting)
+    write_query_tables(spark, triples, _config(tmp_path))
+    assert seen and set(seen) == {"false"}
+    assert spark.conf.get(setting, None) is None
+
+    nodes = spark.createDataFrame(
+        [("cpi_Index", 0, CPI_INDEX)], "node_type string, node_id long, uri string"
+    )
+    spark.conf.set(setting, "true")
+    try:
+        tables.write_nodes(nodes, str(tmp_path / "set"), DAY)
+        assert seen[-1] == "false"
+        assert spark.conf.get(setting) == "true"
+    finally:
+        spark.conf.unset(setting)
+
+
 def test_a_uri_written_on_two_days_keeps_both_rows(spark, tmp_path):
     """No upsert, deliberately: merging into a published table means reading it
     back, which the builder identity cannot do. Both rows are kept and a
