@@ -410,6 +410,14 @@ def non_market_triples(
     edge FROM a market node into a company is a market row and stays out, while
     the company's own triples stay in -- the same line ``facts/`` and
     ``snapshots/`` draw, applied to whole triples rather than to literals.
+
+    A triple whose subject is no node at all stays in, whatever vocabulary it
+    names. Those are the statements ABOUT the terms -- the derived
+    ``rdfs:subClassOf`` hierarchy, the observed domains and ranges, the
+    provenance markers -- whose subjects are predicate and class URIs rather
+    than entities. They are the store's schema, which is most of what makes a
+    SPARQL query over it worth writing, and a few hundred triples carry them.
+    So the store holds market TERMS while holding no market data.
     """
     market_uris = (
         node_id_df
