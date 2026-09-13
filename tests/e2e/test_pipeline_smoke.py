@@ -350,10 +350,12 @@ def test_full_turtle_parquet(spark, tmp_path):
 def test_full_ntriples(spark, tmp_path):
     from spark_jobs.build_graph import execute_full_pipeline
 
+    # One path per file. Every path belongs to one source, and the folder
+    # holds three.
     config = _make_config(
         local_work_dir=str(tmp_path),
         source_format="ntriples",
-        source_paths=str(NTRIPLES),
+        source_paths=",".join(str(path) for path in sorted(NTRIPLES.glob("*.nt"))),
     )
     execute_full_pipeline(config, spark, s3_client=None)
     _assert_valid_graph_and_metadata(config, tmp_path)
@@ -1945,7 +1947,7 @@ def _assert_transaction_chains_are_complete(config):
 
 # Identifier locals that upstream keys on a CIK, and the shape of the URI it
 # mints from one. Written out here rather than imported from
-# utils/canonicalization.py deliberately: a check built from the same constants
+# utils/sec_identifiers.py deliberately: a check built from the same constants
 # as the code under test agrees with that code's mistakes.
 _CIK_KEYED_URI = re.compile(
     r"^(.*/id/sec-filings/(?:Issuer|ReportingOwner|Owner)_)(\d+)(?:\.0+)?$"
