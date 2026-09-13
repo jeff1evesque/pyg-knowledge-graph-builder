@@ -1,9 +1,13 @@
-"""The source registry rebuilds today's per-source tables (#406, step 1).
+"""The source registry (#406).
 
 Pure Python, no SparkSession. Each table built from the registered specs is
-pinned to the values the pipeline had before the registry existed. Where the
-old table still lives in its own module, it is compared as well, so the two
-copies cannot drift apart before that module reads the registry.
+pinned to the values the pipeline had before the registry existed. The modules
+that held the old tables now read the registry, so the pins are literal:
+comparing a table with one of those modules would test the registry against
+itself.
+
+Also here: which source a path belongs to, what a spec may state, and the
+modules that must not name a source.
 """
 import ast
 from pathlib import Path
@@ -43,6 +47,9 @@ from spark_jobs.utils.namespaces import (
     XIMPIM,
 )
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+FIXTURES = REPO_ROOT / "tests" / "fixtures" / "e2e"
+
 # NAMESPACE_PREFIXES as it was, entry for entry. A namespace's position is its
 # ontology-source feature slot, so this order is part of every trained model.
 TODAYS_NAMESPACE_PREFIXES = [
@@ -73,6 +80,105 @@ TODAYS_NAMESPACE_PREFIXES = [
     (str(OWL), "owl"),
     (str(RDFS), "rdfs"),
 ]
+
+# PROPERTY_MAPPINGS and CLASS_MAPPINGS as ontology_mapper.py wrote them out.
+TODAYS_PROPERTY_MAPPINGS = {
+    str(CPI.hasMonth): str(UNIFIED.hasMonth),
+    str(PPI.hasStartMonth): str(UNIFIED.hasMonth),
+    str(PPI.hasEndMonth): str(UNIFIED.hasMonth),
+    str(ECI.hasMonth): str(UNIFIED.hasMonth),
+    str(JOLTS.hasMonth): str(UNIFIED.hasMonth),
+    str(EMPSIT.hasMonth): str(UNIFIED.hasMonth),
+    str(XIMPIM.hasMonth): str(UNIFIED.hasMonth),
+    str(LAUS.hasMonth): str(UNIFIED.hasMonth),
+    str(METRO.hasMonth): str(UNIFIED.hasMonth),
+    str(REALER.hasMonth): str(UNIFIED.hasMonth),
+    str(CPI.hasYear): str(UNIFIED.hasYear),
+    str(PPI.hasStartYear): str(UNIFIED.hasYear),
+    str(PPI.hasEndYear): str(UNIFIED.hasYear),
+    str(ECI.hasYear): str(UNIFIED.hasYear),
+    str(JOLTS.hasYear): str(UNIFIED.hasYear),
+    str(EMPSIT.hasYear): str(UNIFIED.hasYear),
+    str(XIMPIM.hasYear): str(UNIFIED.hasYear),
+    str(LAUS.hasYear): str(UNIFIED.hasYear),
+    str(METRO.hasYear): str(UNIFIED.hasYear),
+    str(REALER.hasYear): str(UNIFIED.hasYear),
+    str(CPI.indexValue): str(UNIFIED.measurementValue),
+    str(PPI.changeValue): str(UNIFIED.measurementValue),
+    str(PPI.indexValue): str(UNIFIED.measurementValue),
+    str(JOLTS.levelValue): str(UNIFIED.measurementValue),
+    str(JOLTS.rateValue): str(UNIFIED.measurementValue),
+    str(EMPSIT.value): str(UNIFIED.measurementValue),
+    str(ECI.indexValue): str(UNIFIED.measurementValue),
+    str(MARKET_QUOTES.lastPrice): str(UNIFIED.measurementValue),
+    str(MARKET_QUOTES.mark): str(UNIFIED.measurementValue),
+    str(CPI.hasCategory): str(UNIFIED.hasCategory),
+    str(PPI.hasCommodityGrouping): str(UNIFIED.hasCategory),
+    str(ECI.hasOccupationalGroup): str(UNIFIED.hasCategory),
+    str(JOLTS.hasIndustry): str(UNIFIED.hasCategory),
+    str(EMPSIT.hasIndustry): str(UNIFIED.hasCategory),
+    str(EMPSIT.hasLaborForceCategory): str(UNIFIED.hasCategory),
+    str(MARKET_QUOTES.symbol): str(UNIFIED.ticker),
+    str(LAUS.hasState): str(UNIFIED.hasRegion),
+    str(METRO.hasRegion): str(UNIFIED.hasRegion),
+    str(CAP.hasSentTime): str(UNIFIED.hasTimestamp),
+    str(CAP.hasEffectiveTime): str(UNIFIED.hasTimestamp),
+    str(CAP.hasOnsetTime): str(UNIFIED.hasTimestamp),
+    str(CAP.hasExpirationTime): str(UNIFIED.hasTimestamp),
+    str(CAP.hasEvent): str(UNIFIED.hasEventName),
+    str(CAP.hasSeverity): str(UNIFIED.hasSeverity),
+    str(CAP.hasUrgency): str(UNIFIED.hasUrgency),
+    str(CAP.hasAreaDescription): str(UNIFIED.hasRegionDescription),
+}
+
+TODAYS_CLASS_MAPPINGS = {
+    str(CPI.Index): str(BLS_ENRICHMENT.PriceIndex),
+    str(PPI.IndexValue): str(BLS_ENRICHMENT.PriceIndex),
+    str(JOLTS.JobOpeningsRate): str(BLS_ENRICHMENT.RateMeasurement),
+    str(JOLTS.HiresRate): str(BLS_ENRICHMENT.RateMeasurement),
+    str(JOLTS.QuitsRate): str(BLS_ENRICHMENT.RateMeasurement),
+    str(LAUS.UnemploymentRate): str(BLS_ENRICHMENT.RateMeasurement),
+    str(METRO.UnemploymentRate): str(BLS_ENRICHMENT.RateMeasurement),
+    str(CPI.OneMonthPercentChange): str(BLS_ENRICHMENT.ChangeMeasurement),
+    str(CPI.TwelveMonthPercentChange): str(BLS_ENRICHMENT.ChangeMeasurement),
+    str(PPI.MonthlyChange): str(BLS_ENRICHMENT.ChangeMeasurement),
+    str(PPI.TwelveMonthChange): str(BLS_ENRICHMENT.ChangeMeasurement),
+    str(ECI.ThreeMonthPercentChangeData): str(BLS_ENRICHMENT.ChangeMeasurement),
+    str(ECI.TwelveMonthPercentChangeData): str(BLS_ENRICHMENT.ChangeMeasurement),
+    str(JOLTS.JobOpeningsLevel): str(BLS_ENRICHMENT.LevelMeasurement),
+    str(JOLTS.HiresLevel): str(BLS_ENRICHMENT.LevelMeasurement),
+    str(EMPSIT.EmployeeCount): str(BLS_ENRICHMENT.LevelMeasurement),
+    str(LAUS.LaborForceData): str(BLS_ENRICHMENT.LevelMeasurement),
+    str(CPI.Category): str(BLS_ENRICHMENT.EconomicIndicator),
+    str(PPI.Grouping): str(BLS_ENRICHMENT.EconomicIndicator),
+    str(JOLTS.Industry): str(BLS_ENRICHMENT.IndustryClassification),
+    str(EMPSIT.Industry): str(BLS_ENRICHMENT.IndustryClassification),
+    str(ECI.Industry): str(BLS_ENRICHMENT.IndustryClassification),
+    str(ECI.OccupationalGroup): str(BLS_ENRICHMENT.OccupationalClassification),
+    str(EMPSIT.LaborForceCategory): str(BLS_ENRICHMENT.OccupationalClassification),
+    str(WEATHER.WeatherAlert): str(NOAA_ENRICHMENT.EmergencyAlert),
+    str(CAP.Info): str(NOAA_ENRICHMENT.AlertInfo),
+    str(CAP.Area): str(NOAA_ENRICHMENT.AlertArea),
+}
+
+# The relation fragments as edge_feature_extractor.py wrote them out, in the
+# order the edge encoding config records them.
+TODAYS_RELATION_FRAGMENTS = {
+    "temporal": (
+        "precedes", "follows", "hasNext", "hasPrevious", "temporallyRelated",
+    ),
+    "option_stock": ("hasUnderlyingPriceObservation", "hasUnderlying"),
+    "escalation": ("escalatesTo", "escalatesFrom", "severityChange"),
+    "correlation": ("correlatesWith", "relatedTo", "Correlation"),
+    "causal": ("leadsTo", "impacts", "causes", "affects"),
+    "strategy": ("straddleWith", "spreadWith", "strangleWith"),
+    "skip": (
+        "belongsToSector", "sameAs", "hasParent", "hasChild",
+        "equivalentClass", "equivalentProperty", "imports",
+        "refersToCompany", "hasRegion", "affectsRegion",
+        "sameEventType", "affectsSameRegion",
+    ),
+}
 
 
 def _spec(name):
@@ -143,15 +249,15 @@ def test_the_synthetic_period_prefixes_are_todays():
 
 
 def test_the_mapping_rows_are_todays():
-    from spark_jobs.enrichment.ontology_mapper import (
-        CLASS_MAPPINGS,
-        PROPERTY_MAPPINGS,
-    )
+    """The ontology mapper's tables are the registry's, row for row."""
+    from spark_jobs.enrichment import ontology_mapper
 
-    assert len(sources.property_mappings()) == 46
-    assert len(sources.class_mappings()) == 27
-    assert sources.property_mappings() == PROPERTY_MAPPINGS
-    assert sources.class_mappings() == CLASS_MAPPINGS
+    assert len(TODAYS_PROPERTY_MAPPINGS) == 46
+    assert len(TODAYS_CLASS_MAPPINGS) == 27
+    assert sources.property_mappings() == TODAYS_PROPERTY_MAPPINGS
+    assert sources.class_mappings() == TODAYS_CLASS_MAPPINGS
+    assert ontology_mapper.PROPERTY_MAPPINGS == TODAYS_PROPERTY_MAPPINGS
+    assert ontology_mapper.CLASS_MAPPINGS == TODAYS_CLASS_MAPPINGS
 
 
 @pytest.mark.parametrize("category", RELATION_CATEGORIES)
@@ -159,7 +265,7 @@ def test_the_relation_fragments_are_todays_in_order(category):
     """In order, because the edge encoding config records the lists as they are."""
     from spark_jobs.pyg_builder import edge_feature_extractor as extractor
 
-    todays = {
+    read_by_the_extractor = {
         "temporal": extractor._TEMPORAL_RELATION_FRAGMENTS,
         "option_stock": extractor._OPTION_STOCK_RELATION_FRAGMENTS,
         "escalation": extractor._ESCALATION_RELATION_FRAGMENTS,
@@ -168,7 +274,9 @@ def test_the_relation_fragments_are_todays_in_order(category):
         "strategy": extractor._STRATEGY_RELATION_FRAGMENTS,
         "skip": extractor._SKIP_RELATION_FRAGMENTS,
     }
-    assert sources.relation_fragments(category) == todays[category]
+    todays = TODAYS_RELATION_FRAGMENTS[category]
+    assert sources.relation_fragments(category) == todays
+    assert read_by_the_extractor[category] == todays
 
 
 def test_the_relation_categories_are_the_extractors():
@@ -182,25 +290,178 @@ def test_the_relation_categories_are_the_extractors():
 
 
 def test_the_date_predicates_are_todays():
-    from spark_jobs.enrichment.temporal_unifier import (
-        MARKET_CAPTURE_TIME,
-        NOAA_DATE_PREDS,
-        SEC_DATE_PREDS,
+    assert _spec("sec").date_predicates == (
+        str(SEC_FILINGS.hasPeriodOfReport),
+        str(SEC_FILINGS.hasFilingDate),
     )
-
-    assert list(_spec("sec").date_predicates) == SEC_DATE_PREDS
-    assert list(_spec("noaa").date_predicates) == NOAA_DATE_PREDS
-    assert list(_spec("market").date_predicates) == [MARKET_CAPTURE_TIME]
+    assert _spec("noaa").date_predicates == (
+        str(CAP.hasSentTime),
+        str(CAP.hasEffectiveTime),
+        str(CAP.hasOnsetTime),
+        str(CAP.hasExpirationTime),
+        str(CAP.hasEndsTime),
+    )
+    assert _spec("market").date_predicates == (str(MARKET_QUOTES.captureTime),)
     assert _spec("bls").date_predicates == ()
 
 
-def test_the_path_labels_are_todays():
-    """Compared as a set. The loader takes the first fragment that matches,
-    and no source's paths contain another source's fragment."""
-    from spark_jobs.graph.loading import _SOURCE_LABEL_PATTERNS, _SOURCE_NAMES
+def test_the_path_fragments_are_todays():
+    assert {spec.name: spec.path_fragments for spec in sources.REGISTERED} == {
+        "bls": ("source=bls",),
+        "sec": ("source=sec",),
+        "market": ("quotes",),
+        "noaa": ("/noaa/",),
+    }
 
-    assert set(sources.source_label_patterns()) == set(_SOURCE_LABEL_PATTERNS)
-    assert sources.source_names() == _SOURCE_NAMES
+
+def test_the_log_labels_are_todays():
+    """bin/profiles/extra-checks.example.sh reads "Market enrichment produced"
+    out of the driver log, and the linker loop builds that line from the label."""
+    assert [spec.label for spec in sources.REGISTERED] == [
+        "BLS", "SEC", "Market", "NOAA",
+    ]
+
+
+# ======================================================================
+# Which source a path belongs to
+# ======================================================================
+
+def _fixture_paths():
+    """(path, source) for every committed fixture path a test run reads: the
+    .nt files, and each leaf folder of Turtle Parquet."""
+    paths = [
+        (str(path), path.stem)
+        for path in sorted((FIXTURES / "ntriples").glob("*.nt"))
+    ]
+    turtle = FIXTURES / "turtle_parquet"
+    for leaf in sorted({path.parent for path in turtle.rglob("*.parquet")}):
+        paths.append((str(leaf), leaf.relative_to(turtle).parts[0]))
+    return paths
+
+
+def test_every_committed_fixture_path_matches_its_source():
+    """The fixture paths carry no archive partition, so each is matched by a
+    folder or file named after its source. Without that, every e2e run would
+    be rejected."""
+    paths = _fixture_paths()
+    assert {source for _path, source in paths} == {"bls", "market", "noaa", "sec"}
+    for path, source in paths:
+        assert sources.match_path(path).name == source, path
+
+
+@pytest.mark.parametrize("path, source", [
+    ("s3a://b/raw/source=sec/feed=filings/year=2026/month=09/12.snappy.parquet", "sec"),
+    ("s3a://b/raw/source=bls/feed=cpi/year=2026/month=09/12.snappy.parquet", "bls"),
+    ("s3a://b/raw/noaa/year=2026/month=09/12.snappy.parquet", "noaa"),
+    ("s3a://b/vendor/intraday/quotes/year=2026/month=09/day=12/", "market"),
+])
+def test_an_archive_path_matches_by_its_fragment(path, source):
+    assert sources.match_path(path).name == source
+
+
+def test_a_fragment_outranks_a_folder_named_after_another_source():
+    """A mirror kept under a folder called sec still holds BLS data."""
+    assert sources.match_path("/srv/sec/raw/source=bls/feed=cpi/").name == "bls"
+
+
+def test_a_source_name_inside_a_longer_name_is_not_a_match():
+    """A bucket called secure-data or a folder called marketing holds a
+    source's name but is not that source."""
+    with pytest.raises(ValueError, match="matches no registered source"):
+        sources.match_path("/data/secure-data/marketing/x.parquet")
+
+
+def test_a_path_matching_no_source_is_rejected():
+    with pytest.raises(ValueError, match="matches no registered source"):
+        sources.match_path("s3a://b/raw/year=2026/month=09/day=12/")
+
+
+def test_a_path_matching_two_sources_is_rejected():
+    with pytest.raises(ValueError, match=r"more than one source \(sec, market\)"):
+        sources.match_path("s3a://b/raw/source=sec/quotes/")
+
+
+def test_a_run_picks_each_source_once_in_registration_order():
+    picked = sources.pick([
+        "s3a://b/raw/noaa/year=2026/month=09/12.snappy.parquet",
+        "s3a://b/raw/source=sec/feed=filings/year=2026/month=09/12.snappy.parquet",
+        "s3a://b/raw/noaa/year=2026/month=09/13.snappy.parquet",
+    ])
+    assert [spec.name for spec in picked] == ["sec", "noaa"]
+
+
+def test_a_new_source_is_matched_by_its_own_fragment():
+    toy = _toy("toy")
+    assert sources.match_path("s3a://b/raw/toy/x.parquet", (*sources.REGISTERED, toy)) is toy
+
+
+def test_leaving_sec_out_of_a_run_moves_no_namespace_slot():
+    """The namespace table is built from every registered source, never from a
+    run's pick. Built from the pick, market's and NOAA's slots would move down
+    by SEC's three namespaces."""
+    picked = sources.pick([
+        "s3a://b/raw/source=bls/feed=cpi/",
+        "s3a://b/vendor/intraday/quotes/",
+        "s3a://b/raw/noaa/",
+    ])
+    assert [spec.name for spec in picked] == ["bls", "market", "noaa"]
+
+    slots = dict(rdf_utils.ONTOLOGY_NAMESPACE_INDICES)
+    assert [slots[ns] for ns, _prefix in _spec("market").namespaces] == [15, 16]
+    assert [slots[ns] for ns, _prefix in _spec("noaa").namespaces] == [17, 18, 19, 20]
+
+    from_the_pick = {
+        ns: slot for slot, (ns, _prefix) in enumerate(sources.namespace_prefixes(picked))
+    }
+    assert [from_the_pick[ns] for ns, _prefix in _spec("market").namespaces] == [12, 13]
+
+
+# ======================================================================
+# Modules that run every source through its spec
+# ======================================================================
+
+GENERIC_MODULES = (
+    "spark_jobs/enrichment/intra_source_linker.py",
+    "spark_jobs/enrichment/temporal_unifier.py",
+    "spark_jobs/utils/canonicalization.py",
+)
+
+
+def _source_namespace_constants():
+    """Names in utils/namespaces.py for the namespaces a source's own data
+    uses: each registered spec's namespaces except its enrichment namespace."""
+    used_by_sources = {
+        namespace
+        for spec in sources.REGISTERED
+        for namespace, _prefix in spec.namespaces
+        if namespace != spec.enrichment_namespace
+    }
+    return {
+        name
+        for name, value in vars(namespaces).items()
+        if name.isupper() and isinstance(value, str)
+        and str(value) in used_by_sources
+    }
+
+
+def test_the_rule_covers_every_source_vocabulary():
+    assert _source_namespace_constants() == {
+        "CPI", "PPI", "ECI", "EMPSIT", "JOLTS", "LAUS", "METRO", "REALER",
+        "WKYENG", "XIMPIM", "BLS_COMMON", "SEC_FILINGS", "SEC_COMMON",
+        "MARKET_QUOTES", "CAP", "WEATHER", "ALERT",
+    }
+
+
+@pytest.mark.parametrize("module", GENERIC_MODULES)
+def test_a_generic_module_imports_no_source_namespace(module):
+    """These modules reach each source through its spec. A source namespace
+    imported here would wire that source in by name again."""
+    imported = set()
+    for node in ast.walk(ast.parse((REPO_ROOT / module).read_text())):
+        if isinstance(node, ast.ImportFrom):
+            imported.update(alias.name for alias in node.names)
+    stray = sorted(imported & _source_namespace_constants())
+    assert not stray, f"{module} imports {stray}"
 
 
 # ======================================================================
@@ -239,6 +500,11 @@ def test_a_spec_cannot_name_an_unknown_edge_category():
         _toy("toy", relation_fragments={"sideways": ("affects",)})
 
 
+def test_a_spec_cannot_name_an_unknown_format():
+    with pytest.raises(ValueError, match="unknown source format"):
+        _toy("toy", source_format="csv")
+
+
 def test_two_sources_cannot_map_the_same_term():
     row = {f"{ONTOLOGY_BASE}toy/hasMonth": str(UNIFIED.hasMonth)}
     specs = (_toy("toy", property_mappings=row), _toy("other", property_mappings=row))
@@ -253,7 +519,7 @@ def test_a_registered_table_cannot_be_edited_in_place():
 
 def test_the_registry_imports_neither_pyspark_nor_rdf_utils():
     """rdf_utils imports the registry, so importing rdf_utils back is a cycle.
-    And specs will carry functions that use Spark: those import it inside the
+    And specs carry functions that use Spark: those import it inside the
     function, or every module that imports rdf_utils would load pyspark."""
     paths = [
         *sorted(Path(sources.__file__).parent.glob("*.py")),
