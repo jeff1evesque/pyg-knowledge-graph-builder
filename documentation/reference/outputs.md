@@ -95,8 +95,6 @@ A finished run can be copied to a separate prefix for consumers by [`bin/publish
 │   ├── checksums.json
 │   └── node_index/
 │       └── part-*.parquet
-├── no_edge_features/
-│   └── ...
 ├── enriched/
 │   ├── dataset.json
 │   └── triples/
@@ -105,7 +103,26 @@ A finished run can be copied to a separate prefix for consumers by [`bin/publish
     └── *.json
 ```
 
-It is the work directory with four changes:
+**One graph per run, with edge features.** There is no separate graph without edge
+features: it is this one with `edge_attr` ignored. A model that does not pass
+`edge_attr` to its layers already ignores it. To drop the tensors from a loaded graph:
+
+```python
+import torch
+
+data = torch.load("1024d/hetero_data_1024d.pt", map_location="cpu",
+                  weights_only=False, mmap=True)
+for edge_type in data.edge_types:
+    if "edge_attr" in data[edge_type]:
+        del data[edge_type].edge_attr
+```
+
+The node features, the node index and the encoding digest match what a build with
+`edge_feature_config.enabled: false` writes. Check the `.pt` against
+[`checksums.json`](#checksumsjson) before loading it: `torch.load` with
+`weights_only=False` runs whatever the pickle contains.
+
+The published layout is the work directory with four changes:
 
 1. the period moves above the run id and is dropped below it, so `enriched/year=YYYY/month=MM/triples/` becomes `enriched/triples/`
 2. `hetero_data_<v>_metadata/*.json` becomes `<v>/*.json`
