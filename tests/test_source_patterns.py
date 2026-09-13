@@ -499,6 +499,37 @@ def test_no_csv_at_any_key_is_a_warning_naming_the_keys_tried(caplog):
     assert "s3://b/ref/tickers/latest.csv" in warnings[0]
 
 
+@pytest.mark.parametrize("reader", [
+    "load_sector_patterns_from_s3",
+    "load_ticker_cik_map_from_s3",
+    "load_sub_industries_from_s3",
+])
+@pytest.mark.parametrize("served", [
+    "ref/tickers/year=2026/month=09/09.csv",
+    "ref/tickers/latest.csv",
+])
+def test_the_loaded_line_names_the_csv_actually_read(reader, served, caplog):
+    """Not the setting. With a latest.csv setting the two differ whenever the
+    day's export exists, and naming the setting made a run that read the day's
+    CSV look like one that read latest.csv."""
+    import logging
+
+    client = _keyed_csv({
+        served: [
+            "AAPL,Apple Inc.,Information Technology,Technology Hardware,320193",
+        ],
+    })
+    with caplog.at_level(logging.INFO, logger=market.logger.name):
+        assert getattr(market, reader)(
+            "b", "ref/tickers/latest.csv", client, data_day="2026-09-09"
+        )
+
+    loaded = [record.getMessage() for record in caplog.records
+              if record.getMessage().startswith("Loaded ")]
+    assert len(loaded) == 1
+    assert f"from s3://b/{served}" in loaded[0]
+
+
 @pytest.mark.parametrize("script", [
     "generate_market_e2e_fixtures",
     "generate_sec_e2e_fixtures",
