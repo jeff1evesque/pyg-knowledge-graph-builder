@@ -80,7 +80,19 @@ def period_partition(time_period: str) -> str:
 # ============================================
 # Source data day
 # ============================================
-_DAY_PARTITION_RE = re.compile(r"year=(\d{4})/month=(\d{1,2})/day=(\d{1,2})")
+# A day-level source path, in the two shapes the archive actually uses: a day
+# DIRECTORY (`year=2026/month=09/day=09/`, market) and a day FILE
+# (`year=2026/month=09/09.snappy.parquet`, SEC and NOAA). Anchored at the end,
+# so a month directory with nothing under it names no day.
+#
+# bin/publish_run.py's DAY_IN_PATH reads the same paths for the published day
+# and must keep agreeing with this; tests/test_output_paths.py runs both over
+# the same list. An earlier version here matched only the `day=` form, which
+# silently made every day-file path undated -- a run with no market source then
+# wrote no query tables and read the undated constituents CSV.
+_DAY_PARTITION_RE = re.compile(
+    r"year=(\d{4})/month=(\d{1,2})/(?:day=)?(\d{1,2})(?:\.[\w.]+)?/?$"
+)
 _DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
