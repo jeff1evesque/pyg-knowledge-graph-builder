@@ -6,13 +6,14 @@ about 95 GB, none of it filterable by ticker, by date or by meaning, and the
 graph's structure only recoverable by unpickling a 42 GB blob. These tables are
 the same data in shapes something can query, at roughly 2.5% of the size.
 
-Five tables here:
+Six tables here:
 
     nodes/        (node_type, node_id, uri)
     edges/        (src_type, src_id, relation, dst_type, dst_id)
     edge_types/   one row per edge type: origin, predicate_uri, count
     facts/        every non-market literal, long format
     entities/     the text each node carries, assembled
+    snapshots/    market, pivoted wide -- one row per snapshot
 
 Three things about them are deliberate and easy to get wrong:
 
@@ -35,8 +36,10 @@ stable-versus-daily split is right for both, so there is no split -- a consumer
 takes the newest row per URI with
 ``ROW_NUMBER() OVER (PARTITION BY uri ORDER BY day DESC)``.
 
-Market is not here. It is 99.5% of the graph, a time series of numbers carrying
-one edge per snapshot, and it gets its own wide table.
+Market is in ``edges/`` and in ``snapshots/`` and nowhere else. It is 99.5% of
+the graph, a time series of numbers carrying one edge per snapshot -- not a
+shape a long table or a triple store serves well, and the links it has to
+everything else are the part that matters.
 """
 import logging
 from typing import Dict
@@ -49,15 +52,21 @@ from spark_jobs.graph.config import JobConfig
 from spark_jobs.pyg_builder.naming import (
     EXCLUDED_EDGE_PREDICATES,
     RDF_TYPE,
+    prefixed_local_name,
     prefixed_local_name_expr,
     relation_to_predicate_uri,
 )
 from spark_jobs.pyg_builder.node_mapper import NodeMapper
 from spark_jobs.utils.rdf_utils import (
     MARKET_NODE_TYPE_PREFIXES,
+    MARKET_QUOTES,
     classify_edge_origin,
 )
-from spark_jobs.utils.spark_rdf_utils import collect_sorted, numeric_literal_expr
+from spark_jobs.utils.spark_rdf_utils import (
+    NUMERIC_PREDICATE_MIN_SHARE,
+    collect_sorted,
+    numeric_literal_expr,
+)
 
 # The job's logger, not this module's -- see the note in graph/config.py.
 logger = logging.getLogger("build_graph")
@@ -66,6 +75,14 @@ logger = logging.getLogger("build_graph")
 # more often than they are written, and the measurements the issue sizes them
 # from (an edge at 9.41 bytes, a fact at 26.7) are zstd numbers.
 COMPRESSION = "zstd"
+
+# What a snapshot row is sorted by, in order, when the run carries them: the
+# underlying ticker first, then the contract's own symbol. Named from the
+# vocabulary so a re-homed namespace moves the column and this together.
+_SNAPSHOT_SORT_TERMS = (
+    prefixed_local_name(str(MARKET_QUOTES.underlyingSymbol)),
+    prefixed_local_name(str(MARKET_QUOTES.symbol)),
+)
 
 # Local names whose values are prose rather than a code, a date or a
 # measurement. Matched against the local name, case-insensitively, so
@@ -266,15 +283,12 @@ def write_edge_types(
 # ============================================
 # facts/ and entities/
 # ============================================
-def non_market_facts(
-    triples_df: DataFrame, node_id_df: DataFrame
-) -> DataFrame:
-    """Every literal a non-market node carries, one row per value.
+def literals(triples_df: DataFrame, node_id_df: DataFrame) -> DataFrame:
+    """Every literal every node carries, one row per value.
 
-    Long format, one shape for every source, because wide would mean about 150
-    tables: the median non-market type holds two literal predicates, the widest
-    holds 21, and 119 of 155 types hold under a thousand nodes. A new source
-    appears in this table with no code change.
+    The frame both long and wide tables come from -- ``facts/`` takes the
+    non-market rows as they are, ``snapshots/`` pivots the market ones -- so
+    the split between the two is one filter and not two code paths.
 
     The anti-join is the same test the feature extractor uses to separate
     literals from edges -- a triple whose object is a known node URI is an edge,
@@ -303,21 +317,20 @@ def non_market_facts(
     objects = node_id_df.select(F.col("uri").alias("_object_uri"))
 
     candidates = triples_df.filter(F.col("predicate") != RDF_TYPE)
-    literals = candidates.join(
+    valued = candidates.join(
         objects,
         candidates["object"] == objects["_object_uri"],
         "left_anti",
     )
 
     return (
-        literals
+        valued
         .join(
             subjects,
-            literals["subject"] == subjects["_subject_uri"],
+            valued["subject"] == subjects["_subject_uri"],
             "inner",
         )
         .drop("_subject_uri")
-        .filter(~_is_market("node_type"))
         .filter(~F.col("object").rlike(r"^(https?://|_:)"))
         .select(
             "node_type",
@@ -368,6 +381,100 @@ def write_entities(facts_df: DataFrame, root: str, day: str) -> str:
         .orderBy("node_type", "uri"),
         root, "entities", day,
     )
+
+
+# ============================================
+# snapshots/
+# ============================================
+def _numeric_columns(market_df: DataFrame) -> set:
+    """Which pivoted columns should hold numbers rather than strings.
+
+    The same majority rule the feature extractor classifies literal predicates
+    by, for the same reason: a predicate whose values mostly parse as numbers
+    is a measurement, and one where only a minority do is a set of labels that
+    happen to look numeric. A column typed off a per-value test would make
+    ``strikePrice > 100`` answerable for some rows and not others.
+
+    One aggregation over the market literals, collected at one row per
+    predicate -- 56 on a production day.
+    """
+    shares = (
+        market_df
+        .groupBy("predicate_name")
+        .agg(
+            F.count("*").alias("total"),
+            F.sum(F.col("is_numeric").cast("int")).alias("numeric"),
+        )
+        .collect()
+    )
+
+    return {
+        row["predicate_name"]
+        for row in shares
+        if row["total"]
+        and row["numeric"] / row["total"] > NUMERIC_PREDICATE_MIN_SHARE
+    }
+
+
+def write_snapshots(market_df: DataFrame, root: str, day: str) -> str:
+    """Market, pivoted wide: one row per snapshot, one column per property.
+
+    Wide earns its keep here and nowhere else. Market is a single type with
+    9.3M rows a day and 56 stable columns, 77.7% of them populated -- a shape
+    a long table serves badly and a pivot serves well. Every other source has
+    a median of two literal predicates per type, which is why they stay long.
+
+    Sorted by the underlying ticker. Measured: 525 underlying tickers, 19
+    snapshots a day, a median 13,224 rows per ticker -- so a single-ticker
+    filter wants 0.14% of a day. Parquet prunes row groups on min/max
+    statistics, so sorted, a 30-day ticker query reads a few hundred MB;
+    unsorted, every ticker appears in every row group, nothing prunes, and the
+    same query reads all 39 GB.
+
+    A snapshot missing a property gets a null, not a dropped row.
+
+    Returns "" when the run carried no market data at all, which is a legitimate
+    configuration (a no-market dataset) rather than a failure.
+    """
+    columns = sorted(
+        row["predicate_name"]
+        for row in market_df.select("predicate_name").distinct().collect()
+    )
+    if not columns:
+        logger.info("  No market literals in this run -- no snapshots table")
+        return ""
+
+    numeric = _numeric_columns(market_df)
+
+    # max() rather than first(): a subject carrying two values for one
+    # predicate has to resolve the same way on every run, and first() over a
+    # shuffled frame does not.
+    pivoted = (
+        market_df
+        .groupBy("node_type", "uri")
+        .pivot("predicate_name", columns)
+        .agg(F.max("value"))
+    )
+
+    typed = pivoted.select(
+        "node_type",
+        "uri",
+        *[
+            numeric_literal_expr(name).alias(name) if name in numeric
+            else F.col(name)
+            for name in columns
+        ],
+    )
+
+    # The sort keys are named after the vocabulary rather than spelled out, and
+    # only used when the run actually carries them -- an equity-only day has no
+    # underlying symbol, and sorting by a column that is not there would fail
+    # the write rather than the query.
+    sort_keys = [
+        name for name in _SNAPSHOT_SORT_TERMS if name in columns
+    ] + ["uri"]
+
+    return _write(typed.orderBy(*sort_keys), root, "snapshots", day)
 
 
 # ============================================
@@ -423,14 +530,23 @@ def write_query_tables(
         finally:
             edges_df.unpersist()
 
-        facts_df = non_market_facts(triples_df, node_id_df).persist(
+        # One frame, two shapes: the market rows pivot wide and the rest stay
+        # long. Cached because both readings scan it.
+        literals_df = literals(triples_df, node_id_df).persist(
             StorageLevel.DISK_ONLY
         )
         try:
+            facts_df = literals_df.filter(~_is_market("node_type"))
             written["facts"] = write_facts(facts_df, root, day)
             written["entities"] = write_entities(facts_df, root, day)
+
+            snapshots = write_snapshots(
+                literals_df.filter(_is_market("node_type")), root, day
+            )
+            if snapshots:
+                written["snapshots"] = snapshots
         finally:
-            facts_df.unpersist()
+            literals_df.unpersist()
     finally:
         node_id_df.unpersist()
 
