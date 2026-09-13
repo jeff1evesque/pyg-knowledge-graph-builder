@@ -68,7 +68,7 @@ When config is empty, sensible defaults are inferred from the data.
 | `--source_format` | No | `ntriples` | Source RDF format: `ntriples` (one triple per line in `.nt` files) or `turtle_parquet` (self-contained Turtle blobs in a Parquet column). Applies to modes `full` and `enrichment_only` only — `pyg_only` always reads enriched Parquet written by this pipeline |
 | `--turtle_column` | No | *(auto)* | Column name containing Turtle strings when `--source_format=turtle_parquet`. Ignored for `ntriples` format. Left unset, the column is resolved **per source** against `TURTLE_COLUMN_CANDIDATES` (`triples`, then `rdf_turtle`), so one run can span sources whose schemas disagree; set it to force a single name everywhere |
 | `--market_sector_definitions_bucket` | No | `""` | S3 bucket holding the S&P 500 constituents CSVs. **Set this for real runs** — three cross-source links are empty or degraded without it; see the note under Cross-Source Linking |
-| `--market_sector_definitions_key` | No | `""` | S3 **prefix** holding those CSVs, not a single object key. Supplies three things: the ticker to company-ID map that keys the company bridge, the GICS sector classification, and the sub-industry peer links. Without it the first and third are empty and sector classification falls back to a small built-in list. Which CSV under the prefix a run reads is [Picking the constituents CSV](#picking-the-constituents-csv) |
+| `--market_sector_definitions_key` | No | `""` | S3 **prefix** holding those CSVs, or that prefix's `latest.csv` — both work the same. Supplies three things: the ticker to company-ID map that keys the company bridge, the GICS sector classification, and the sub-industry peer links. Without it the first and third are empty and sector classification falls back to a small built-in list. Which CSV a run reads is [Picking the constituents CSV](#picking-the-constituents-csv) |
 
 Metadata files are always written when mode is `full` or `pyg_only`. Mode `enrichment_only` does not produce metadata files (no PyG graph is built in that mode).
 
@@ -76,12 +76,20 @@ Metadata files are always written when mode is `full` or `pyg_only`. Mode `enric
 
 An index membership is a point in time: tickers join and leave, so a run
 rebuilding an older day needs that day's list rather than the current one. The
-run therefore reads, under `--market_sector_definitions_key`:
+run therefore tries, in order:
 
 | | Key |
 |---|---|
 | the day being processed | `<prefix>/year=YYYY/month=MM/DD.csv` |
 | otherwise | `<prefix>/latest.csv` |
+
+The two keys sit at different depths under the same prefix, and the run builds
+both from it; a file name is never used as a folder. The setting can also name a
+CSV under the prefix. `<prefix>/latest.csv` works the same as `<prefix>`. A
+day's CSV, such as `<prefix>/year=2026/month=09/11.csv`, is tried first in place
+of the day being processed, and `<prefix>/latest.csv` is still the fallback when
+it does not exist. When no key exists, the run logs a warning naming the keys it
+tried and carries on without the CSV.
 
 The day comes from `--source_paths` — the `year=`/`month=`/`day=` partition
 they are opened under, so the reference data and the data it describes are the
