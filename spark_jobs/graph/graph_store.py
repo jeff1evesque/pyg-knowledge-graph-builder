@@ -2,23 +2,25 @@
 A day of the non-market graph, as something you can ask questions of.
 
 ``edges/`` and ``nodes/`` hold the same structure, and answer a one-hop
-question well. They answer a two-hop question badly: a self-join carrying a
-mandatory same-day guard, with hand-rolled recursion for anything deeper. That
-shape -- "which measurements cover the region this weather alert hit" -- is
-what a knowledge graph exists for, so it gets a store that answers it directly.
+question well. They answer a two-hop question awkwardly: a self-join per hop
+carrying a mandatory same-day guard, with hand-rolled recursion for anything
+deeper. That shape -- "which measurements cover the region this weather alert
+hit" -- is what a knowledge graph exists for, so it gets a store that answers
+it directly. The store also keeps what no table can: a triple whose object is
+a URI nothing typed, such as an alert's severity.
 
-Measured on one day's non-market subgraph: 1,395,049 triples loaded with 0
-rejected into a 194 MB store, 139 bytes a triple. Counting ``affectsRegion``
-edges took 1 ms; the two-hop ``weather -> region <- measurement`` traversal took
-11 ms.
+Measured on the published 2026-09-09 store: 1,413,546 triples in 185 MB, about
+131 bytes a triple. The two-hop ``weather -> region <- measurement`` traversal
+returned its 38,352 pairs in 10 ms; the same join over a local copy of
+``edges/`` took 0.05 s, so speed is not the argument.
 
-**One day fits; a window does not.** At that byte rate a 30-day window is
-5.8 GB and a year is 71 GB, against 194 MB for a day. So this supplements the
-tables rather than replacing them: a consumer loads one day for traversal and
-falls back to ``edges/`` for anything spanning more.
+**One day fits; a window does not.** At that size a 30-day window is about
+5.6 GB and a year about 68 GB. So this supplements the tables rather than
+replacing them: a consumer loads one day for traversal and falls back to
+``edges/`` for anything spanning more.
 
 **Market is not in it.** At the same rate its ~415M triples a day would be
-roughly 58 GB. It is a time series of numbers carrying one edge per snapshot --
+about 54 GB. It is a time series of numbers carrying one edge per snapshot --
 not a shape a triple store earns anything on.
 
 **No new dependency and no server.** requirements.txt already pins pyoxigraph
