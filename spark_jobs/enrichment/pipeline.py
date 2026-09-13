@@ -9,15 +9,14 @@ Architecture:
 - Ontology mapping runs on PySpark (optional)
 """
 from pyspark.sql import SparkSession, DataFrame
+from spark_jobs import sources
 from spark_jobs.enrichment.intra_source_linker import enrich_intra_source
 from spark_jobs.enrichment.temporal_unifier import TemporalUnifier
 from spark_jobs.enrichment.cross_source_linker import enrich_cross_source
-from spark_jobs.enrichment.intra_source.market.patterns import (
-    get_sub_industries, get_ticker_cik_map,
-)
 from spark_jobs.enrichment.ontology_mapper import OntologyMapper
 from spark_jobs.settle import settle
-from typing import Dict, Optional
+from spark_jobs.sources.spec import RunOptions, SourceSpec
+from typing import Any, Dict, Optional, Sequence
 import logging
 
 logger = logging.getLogger(__name__)
@@ -37,12 +36,17 @@ class EnrichmentPipeline:
         sector_definitions_bucket: str = "",
         sector_definitions_key: str = "",
         source_data_day: str = "",
+        specs: Optional[Sequence[SourceSpec]] = None,
     ):
         self.spark = spark
         self.triples_df = triples_df
         self._sector_definitions_bucket = sector_definitions_bucket
         self._sector_definitions_key = sector_definitions_key
         self._source_data_day = source_data_day
+        # The sources the run's paths picked. Every registered source when the
+        # caller does not say, which is what the pipeline ran before sources
+        # were picked at all.
+        self._specs = sources.REGISTERED if specs is None else tuple(specs)
         self.stats: Dict[str, any] = {
             'initial_triples': 0,
             'intra_source': {},
@@ -104,13 +108,14 @@ class EnrichmentPipeline:
         logger.info("PHASE 1: INTRA-SOURCE ENRICHMENT")
         logger.info("=" * 80)
 
-        # Run all intra-source enrichers
+        # Run the intra-source enrichers of the picked sources
         intra_result = enrich_intra_source(
             self.spark,
             self.triples_df,
             sector_definitions_bucket=self._sector_definitions_bucket,
             sector_definitions_key=self._sector_definitions_key,
             source_data_day=self._source_data_day,
+            specs=self._specs,
         )
 
         self.stats['intra_source'] = intra_result.get('stats', {})
@@ -136,7 +141,7 @@ class EnrichmentPipeline:
         logger.info("PHASE 2: TEMPORAL UNIFICATION")
         logger.info("=" * 80)
 
-        temporal_unifier = TemporalUnifier(self.spark)
+        temporal_unifier = TemporalUnifier(self.spark, specs=self._specs)
         temporal_new = temporal_unifier.enrich(self.triples_df)
 
         temporal_count = temporal_new.count()
@@ -161,25 +166,23 @@ class EnrichmentPipeline:
         logger.info("PHASE 3: CROSS-SOURCE ENRICHMENT")
         logger.info("=" * 80)
 
-        # The constituents CSV is read HERE, on the driver, once — not inside
-        # the linker. Two reasons: the linker runs against a DataFrame and
-        # should not also own an S3 client, and both tables are small enough
-        # (~500 rows) that reading them before the phase starts costs one GET
-        # and keeps the executors out of it entirely.
-        cross_new = enrich_cross_source(
-            self.spark,
-            self.triples_df,
-            ticker_cik_map=get_ticker_cik_map(
-                bucket=self._sector_definitions_bucket,
-                prefix=self._sector_definitions_key,
-                data_day=self._source_data_day,
-            ),
-            sub_industries=get_sub_industries(
-                bucket=self._sector_definitions_bucket,
-                prefix=self._sector_definitions_key,
-                data_day=self._source_data_day,
-            ),
+        # Reference tables a source brings to cross-source linking -- today,
+        # market's index-constituents CSV -- are read HERE, on the driver, once,
+        # not inside the linker. Two reasons: the linker runs against a
+        # DataFrame and should not also own an S3 client, and the tables are
+        # small enough (~500 rows) that reading them before the phase starts
+        # costs one GET and keeps the executors out of it entirely.
+        options = RunOptions(
+            sector_definitions_bucket=self._sector_definitions_bucket,
+            sector_definitions_key=self._sector_definitions_key,
+            source_data_day=self._source_data_day,
         )
+        cross_inputs: Dict[str, Any] = {}
+        for spec in self._specs:
+            if spec.cross_source_inputs is not None:
+                cross_inputs.update(spec.cross_source_inputs(options))
+
+        cross_new = enrich_cross_source(self.spark, self.triples_df, **cross_inputs)
 
         cross_count = cross_new.count()
         self.stats['cross_source_triples'] = cross_count
