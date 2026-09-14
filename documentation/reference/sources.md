@@ -269,6 +269,13 @@ feature slot, so a new source goes at the end.
 | `property_mappings`, `class_mappings` | No | The source's rows of the ontology mapper's property and class tables |
 | `relation_fragments` | No | Edge-feature category → fragments of the source's own relation names |
 | `cross_source_inputs` | No | Reference tables the source brings to cross-source linking. Market's reads the constituents CSV |
+| `entity_namespaces` | No | Namespaces whose URIs are the source's own entities. Cross-source linking counts the source as present when a subject sits under one, so without them the source takes no part in it |
+| `sector_keywords` | No | Whether the sector keyword step may classify the source's entities by the words in their URIs. Off by default, because a keyword inside a longer name makes a false claim: `Birmingham_AL` contains the food keyword `ham` |
+| `company_keys` | No | The source's side of the company hub: entities that state a CIK, entities that name a ticker, and the ticker-to-CIK pairings it knows |
+| `region_keys` | No | The source's side of the region hub: links to state regions, and its own region entities that are census regions |
+| `sector_keys` | No | Links placing the source's entities in a sector, each under the predicate it has always used. SEC's come from SIC codes, market's from the GICS crosswalk |
+| `cross_source_steps` | No | Steps that pair the source with others by name, such as BLS indicators leading equity sectors. Each runs only when every source it names is present |
+| `measurement_types` | No | Source classes that cross-source linking also types as their `class_mappings` target |
 
 The four registered sources set no `source_format`, because the e2e fixtures hold
 market, NOAA and SEC in both formats. A function field imports what it runs inside
@@ -287,8 +294,10 @@ Each path in `--source_paths` must belong to exactly one registered source:
    a bucket called `secure-data` is not SEC.
 
 A path that matches no source, or two, is rejected before Spark starts. Each
-picked source's own path check then runs on its paths. The linkers and date links
-of the picked sources run, and those of the other sources do not.
+picked source's own path check then runs on its paths. The linkers, date links
+and cross-source keys of the picked sources are used, and those of the other
+sources are not. Cross-source linking runs when at least two picked sources have
+data in the run.
 
 A pick never changes the namespace slots, the ontology mapping tables or the edge
 relation fragments. Those are built from every registered source, so a run that
