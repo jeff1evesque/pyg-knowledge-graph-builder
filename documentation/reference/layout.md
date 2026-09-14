@@ -52,7 +52,7 @@ pyg-knowledge-graph-builder/
 │   │   ├── __init__.py
 │   │   ├── pipeline.py                     # Main enrichment orchestrator
 │   │   ├── temporal_unifier.py             # Temporal entity unification
-│   │   ├── cross_source_linker.py          # Cross-source linking (BLS↔SEC↔Market↔NOAA)
+│   │   ├── cross_source_linker.py          # Cross-source linking: detection and hubs
 │   │   ├── intra_source_linker.py          # Main intra-source entry point
 │   │   ├── ontology_mapper.py              # Ontology mapping utilities
 │   │   └── intra_source/                   # Intra-source enrichment modules
@@ -67,19 +67,23 @@ pyg-knowledge-graph-builder/
 │   │       │   ├── correlations.py         # KNOWN_CORRELATIONS
 │   │       │   ├── measurements.py         # MEASUREMENT_TYPES
 │   │       │   ├── base_enricher.py        # Dataset-specific enrichers
-│   │       │   └── temporal.py             # The period URIs BLS states
+│   │       │   ├── temporal.py             # The period URIs BLS states
+│   │       │   └── cross_source.py         # BLS's state, census-region and causal links
 │   │       ├── sec/                        # SEC-specific components
 │   │       │   ├── __init__.py
 │   │       │   ├── patterns.py             # SEC_SECTOR_PATTERNS, SEC_VIOLATION_PATTERNS
-│   │       │   └── correlations.py         # SEC KNOWN_CORRELATIONS
+│   │       │   ├── correlations.py         # SEC KNOWN_CORRELATIONS
+│   │       │   └── cross_source.py         # SEC's company keys and SIC sectors
 │   │       ├── market/                     # Market-specific components (flat snapshot model)
 │   │       │   ├── __init__.py
 │   │       │   ├── patterns.py             # MARKET_SECTOR_PATTERNS, MARKET_OPTION_STRATEGY_PATTERNS
 │   │       │   ├── correlations.py         # Market KNOWN_CORRELATIONS
-│   │       │   └── measurements.py         # Market MEASUREMENT_TYPES
+│   │       │   ├── measurements.py         # Market MEASUREMENT_TYPES
+│   │       │   └── cross_source.py         # Market's company keys, GICS sectors, peers
 │   │       └── noaa/                       # NOAA-specific components
 │   │           ├── __init__.py
-│   │           └── patterns.py             # NOAA alert patterns
+│   │           ├── patterns.py             # NOAA alert patterns
+│   │           └── cross_source.py         # The states each alert affects
 │   ├── pyg_builder/                        # PyG construction modules
 │   │   ├── __init__.py
 │   │   ├── constructor.py                  # Orchestrates HeteroData construction
@@ -157,12 +161,12 @@ pyg-knowledge-graph-builder/
 |--------|------|--------------|
 | `rdf_utils.py` | URI string helpers, edge-origin classification, and the canonical `NAMESPACE_PREFIXES` and `ONTOLOGY_NAMESPACE_INDICES` registries (single source of truth for all PyG builder modules), built from the source specs in `sources/`. Re-exports every constant in `namespaces.py`, so imports from here keep working | No (pure Python) |
 | `namespaces.py` | The namespace constants: each source's vocabularies, the publisher vocabularies reused at their real URIs, and the namespaces this pipeline mints. Imports nothing from `spark_jobs`, which is what lets the source specs use them while `rdf_utils.py` builds its tables from those specs | No (pure Python) |
-| `sources/` | One `SourceSpec` per data source (`bls.py`, `sec.py`, `market.py`, `noaa.py`): its namespaces, path fragments, format, date predicates, mapping rows and edge relation fragments, and the functions the job calls for it (path check, identifier repair, linker, period collector). `__init__.py` holds the registry, matches each input path to one source, and builds the per-source tables from every spec: the namespace table and its source and enrichment subsets, the synthetic period prefixes, the ontology mapping rows and the edge relation fragments. See [Registering a source](sources.md#registering-a-source) | No (pure Python) |
+| `sources/` | One `SourceSpec` per data source (`bls.py`, `sec.py`, `market.py`, `noaa.py`): its namespaces, path fragments, format, date predicates, mapping rows and edge relation fragments, and the functions the job calls for it (path check, identifier repair, linker, period collector, cross-source keys and steps). `__init__.py` holds the registry, matches each input path to one source, and builds the per-source tables from every spec: the namespace table and its source and enrichment subsets, the synthetic period prefixes, the ontology mapping rows and the edge relation fragments. See [Registering a source](sources.md#registering-a-source) | No (pure Python) |
 | `patterns.py` / `correlations.py` / `measurements.py` | Configuration dictionaries (sector keywords, correlation definitions) | No (pure Python) |
 | `pipeline.py` | Orchestrates enrichment steps, manages triples DataFrame | Yes |
 | `temporal_unifier.py` | Produces unified month/year/quarter triples | Yes |
 | `bls_linker.py`, `sec_linker.py`, `market_linker.py`, `noaa_linker.py` | Produce intra-source enrichment triples | Yes |
-| `cross_source_linker.py` | Produces cross-source enrichment triples | Yes |
+| `cross_source_linker.py` | The generic cross-source steps: which picked sources have data in the run, the sector keyword step, the company and region hubs, the steps that pair named sources, and the measurement types. Each source's side comes from its spec and lives in `intra_source/<source>/cross_source.py` | Yes |
 | `ontology_mapper.py` | Produces equivalence mapping triples | Yes |
 | `build_graph.py` | The entry point and the orchestration only: `main()`, the four execution modes, the enrichment and PyG-construction phases, the SparkSession, the work-dir preflight and the final banner. Everything it reads, writes or is configured by now lives in `graph/` | Yes (orchestration) |
 | `graph/config.py` | `JobConfig` — the job's whole contract with its caller: resolves every path the run reads and writes, and REJECTS a configuration that cannot work (a mode without its inputs, a source path that matches no registered source or two, a staged mirror that is not there, an SEC prefix naming an unhandled feed) before Spark starts. Records the source each path belongs to and the sources the run picked. Also `parse_args()`, `staged_local_path()`, `period_partition()`, and the probe that answers whether the PyG builder is importable | No (pure Python) |
