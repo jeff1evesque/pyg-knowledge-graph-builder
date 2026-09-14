@@ -72,8 +72,8 @@ class SourceSpec:
     name: str
     # Fragments that mark an input path as this source's.
     path_fragments: Tuple[str, ...]
-    # (namespace, prefix) pairs, in NAMESPACE_PREFIXES order. A namespace's
-    # position in that table is its ontology-source feature slot.
+    # (namespace, prefix) pairs, in NAMESPACE_PREFIXES order. A namespace that
+    # extends another must come before it (tests/test_namespaces.py).
     namespaces: Tuple[Tuple[str, str], ...]
     # Where this pipeline mints the source's enrichment terms. One of the
     # namespaces above.
