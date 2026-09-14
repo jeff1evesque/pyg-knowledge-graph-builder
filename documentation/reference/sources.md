@@ -248,15 +248,25 @@ format.
 Each source is declared once, as a `SourceSpec` in its own module under
 `spark_jobs/sources/` (`bls.py`, `sec.py`, `market.py`, `noaa.py`), and listed in
 `REGISTERED` in `spark_jobs/sources/__init__.py`. Registration order is table
-order. Each source's namespaces follow the previous source's in
-`NAMESPACE_PREFIXES`, and a namespace's position there is its ontology-source
-feature slot, so a new source goes at the end.
+order: each source's namespaces follow the previous source's in
+`NAMESPACE_PREFIXES`, and its relation fragments follow the previous source's in
+the lists the edge encoding config records, so a new source goes at the end.
+
+A namespace's position does not decide its ontology-source feature slot. The
+first 26 namespaces keep the slots they had, written out in
+`ONTOLOGY_NAMESPACE_INDICES`, and a namespace registered later gets its slot
+from a seeded hash of its URI. Registering a source moves no slot and leaves
+`contract_digest` alone, unless it brings relation fragments, which change how
+edges are classified. A node type or relation from a namespace no source
+registers fails the build and names the namespace. An exploratory run can set
+`allow_unregistered_namespaces` in `pyg_config` to keep them under `unknown_`
+names instead.
 
 | Field | Required | What it declares |
 |---|---|---|
 | `name` | Yes | The short name that keys the per-source statistics and the dataset descriptor |
 | `path_fragments` | Yes | Fragments that mark an input path as this source's, such as `source=sec` |
-| `namespaces` | Yes | `(namespace, prefix)` pairs, in table order |
+| `namespaces` | Yes | `(namespace, prefix)` pairs, in table order. Every namespace the source's node types and relations use, since a build fails on one no source registers |
 | `enrichment_namespace` | Yes | Where this pipeline mints the source's enrichment terms. One of `namespaces` |
 | `label` | No | How log lines name the source. Defaults to `name` |
 | `source_format` | No | `ntriples` or `turtle_parquet` for this source's paths. Empty means `--source_format` |
