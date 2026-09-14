@@ -16,6 +16,12 @@ def _linker(spark, options):
     return NOAAIntraSourceLinker(spark)
 
 
+def _region_keys(context):
+    from spark_jobs.enrichment.intra_source.noaa.cross_source import region_keys
+
+    return region_keys(context)
+
+
 SPEC = SourceSpec(
     name="noaa",
     label="NOAA",
@@ -39,6 +45,10 @@ SPEC = SourceSpec(
     ),
     temporal_prefix=f"{IDENTIFIER_BASE}temporal/noaa/",
     linker=_linker,
+    # Alert instances sit under the publisher's own alert namespace.
+    entity_namespaces=(str(ALERT), str(CAP), str(WEATHER)),
+    sector_keywords=True,
+    region_keys=_region_keys,
     property_mappings={
         str(CAP.hasSentTime): str(UNIFIED.hasTimestamp),
         str(CAP.hasEffectiveTime): str(UNIFIED.hasTimestamp),
