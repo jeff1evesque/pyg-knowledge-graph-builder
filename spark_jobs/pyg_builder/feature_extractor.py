@@ -46,7 +46,7 @@ Why this replaces the old per-type variable-width approach:
 """
 import logging
 import gc
-from typing import Dict, Any, List, Optional, Set, Tuple
+from typing import Dict, Any, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import torch
@@ -54,9 +54,13 @@ from pyspark import StorageLevel
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 
+from spark_jobs import sources
+from spark_jobs.sources.spec import SourceSpec
 from spark_jobs.utils.rdf_utils import (
     NAMESPACE_PREFIXES,
+    ONTOLOGY_NAMESPACE_HASH_SEED,
     ONTOLOGY_NAMESPACE_INDICES,
+    hashed_ontology_namespaces,
     SEC_FILINGS,
     PROV_DERIVED_BY,
     PROV_OBSERVED_LITERAL_DATATYPE,
@@ -416,9 +420,24 @@ class FeatureExtractor:
       - gc.collect() between types to reclaim fragmented memory
     """
 
-    def __init__(self, spark: SparkSession, config: Dict[str, Any]):
+    def __init__(
+        self,
+        spark: SparkSession,
+        config: Dict[str, Any],
+        specs: Optional[Sequence[SourceSpec]] = None,
+    ):
         self.spark = spark
         self.config = config
+
+        # The namespace table node types are named with and ontology-source
+        # slots are placed for: every registered source's, unless a test
+        # passes specs with a toy source in them.
+        self._namespace_prefixes = (
+            NAMESPACE_PREFIXES if specs is None
+            else sources.namespace_prefixes(specs)
+        )
+        # Filled in the first time _namespace_slot_indices() is asked.
+        self._namespace_slots: Optional[List[Tuple[str, int]]] = None
 
         feat_config = config.get("feature_config", {})
         self._normalize = feat_config.get("normalize", True)
@@ -522,9 +541,23 @@ class FeatureExtractor:
                     "decay_function": "inverse_depth",
                     "max_depth": 10,
                 },
+                # Recorded as rules rather than as each namespace's slot, so
+                # registering a source leaves the digest alone, while moving a
+                # frozen entry or changing the seed changes it (#406).
                 "ontology_source": {
                     "dim": layout.seg1_ontology_source_dim,
-                    "method": "index_modulo",
+                    "method": "frozen_index_then_hash",
+                    "frozen_indices": [
+                        [namespace, index]
+                        for namespace, index in ONTOLOGY_NAMESPACE_INDICES
+                    ],
+                    "hash_seed": ONTOLOGY_NAMESPACE_HASH_SEED,
+                    "slot": (
+                        "index % dim for a namespace in frozen_indices, "
+                        "abs(spark_hash(namespace_uri, hash_seed)) % dim "
+                        "for any other"
+                    ),
+                    "node_uri_slot": "(slot + dim // 2) % dim",
                     "node_uri_weight": 0.5,
                 },
                 "property_presence": {
@@ -1652,7 +1685,7 @@ class FeatureExtractor:
         uri_to_pyg: Dict[str, str] = {}
         for row in type_mapping_rows:
             uri = row.type_uri
-            for ns, prefix in NAMESPACE_PREFIXES:
+            for ns, prefix in self._namespace_prefixes:
                 if uri.startswith(ns):
                     local = uri[len(ns):].strip("/#")
                     if local:
@@ -1664,7 +1697,9 @@ class FeatureExtractor:
         # this resolution and both kept the alphabetically smallest rdf:type,
         # which is not necessarily the class the node type was named after.
         # Sharing it also keeps the two artifacts from disagreeing.
-        type_uri_map = build_type_uri_mapping(triples_df, node_id_df)
+        type_uri_map = build_type_uri_mapping(
+            triples_df, node_id_df, self._namespace_prefixes
+        )
 
         # Collect class hierarchy — transitive closure.
         # Typically ~5000 rows (500 classes × avg depth ~10).
@@ -1759,7 +1794,7 @@ class FeatureExtractor:
         for pyg_name in node_counts:
             source_uri = type_uri_map.get(pyg_name, "")
             namespace = ""
-            for ns, prefix in NAMESPACE_PREFIXES:
+            for ns, prefix in self._namespace_prefixes:
                 if source_uri.startswith(ns):
                     namespace = ns
                     break
@@ -1920,7 +1955,7 @@ class FeatureExtractor:
             "node_types": node_type_schemas,
             "uri_to_pyg_name": uri_to_pyg,
             "namespace_prefixes": {
-                prefix: ns for ns, prefix in NAMESPACE_PREFIXES
+                prefix: ns for ns, prefix in self._namespace_prefixes
             },
         }
 
@@ -2017,7 +2052,7 @@ class FeatureExtractor:
             ci_start,
         ):
             pyg_name = ""
-            for ns, prefix in NAMESPACE_PREFIXES:
+            for ns, prefix in self._namespace_prefixes:
                 if uri.startswith(ns):
                     local = uri[len(ns):].strip("/#")
                     if local:
@@ -2038,15 +2073,15 @@ class FeatureExtractor:
         # (_encode_node_uri_namespace). Only the first was ever published, so
         # the second column looked unclaimed (#354).
         #
-        # These are index-based, not hashed, so they were already correct as
-        # far as they went -- the gap here is the missing column, not a wrong
-        # one.
+        # Both columns come from _namespace_slot_indices(), the list the
+        # encoder places with, so a published column is the column written,
+        # hashed namespaces included.
         os_start = layout.seg1_ontology_source_start
         os_dim = layout.seg1_ontology_source_dim
         namespace_slots = []
-        for namespace, onto_idx in ONTOLOGY_NAMESPACE_INDICES:
+        for namespace, onto_idx in self._namespace_slot_indices():
             prefix = ""
-            for ns, p in NAMESPACE_PREFIXES:
+            for ns, p in self._namespace_prefixes:
                 if ns == namespace:
                     prefix = p
                     break
@@ -2125,6 +2160,40 @@ class FeatureExtractor:
             f"{len(hierarchy_slots)} superclasses, "
             f"{len(namespace_slots)} namespaces"
         )
+
+    def _namespace_slot_indices(self) -> List[Tuple[str, int]]:
+        """Each namespace's ontology-source slot index.
+
+        Today's 26 keep their index from ONTOLOGY_NAMESPACE_INDICES. A
+        namespace registered after them hashes its URI with
+        ONTOLOGY_NAMESPACE_HASH_SEED through ``_resolve_slots``, so through the
+        same ``_slot_dim`` as every other hashed placement, and the encoder and
+        slot_mapping.json both read this one list. Spark is asked only when
+        such a namespace exists, and only once.
+
+        Where an index is used it is taken modulo the segment width, which
+        leaves a hashed index, already below the width, as it is.
+        """
+        if self._namespace_slots is None:
+            slots = list(ONTOLOGY_NAMESPACE_INDICES)
+            hashed = hashed_ontology_namespaces(self._namespace_prefixes)
+            if hashed:
+                namespaces = self.spark.createDataFrame(
+                    [(namespace,) for namespace in hashed],
+                    "namespace string",
+                )
+                slots.extend(
+                    (namespace, dims[0])
+                    for namespace, dims in self._resolve_slots(
+                        namespaces,
+                        "namespace",
+                        [ONTOLOGY_NAMESPACE_HASH_SEED],
+                        self._layout.seg1_ontology_source_dim,
+                        0,
+                    )
+                )
+            self._namespace_slots = slots
+        return self._namespace_slots
 
     def _resolve_slots(
         self,
@@ -2248,7 +2317,7 @@ class FeatureExtractor:
         os_start = layout.seg1_ontology_source_start
         os_dim = layout.seg1_ontology_source_dim
 
-        for namespace, onto_idx in ONTOLOGY_NAMESPACE_INDICES:
+        for namespace, onto_idx in self._namespace_slot_indices():
             ns_match = (
                 all_type_uris
                 .filter(F.col("type_uri").startswith(namespace))
@@ -2297,7 +2366,7 @@ class FeatureExtractor:
         Returns DataFrame(node_type, node_id, dim, value) or None.
         """
         parts = []
-        for namespace, onto_idx in ONTOLOGY_NAMESPACE_INDICES:
+        for namespace, onto_idx in self._namespace_slot_indices():
             ns_match = (
                 all_nodes
                 .filter(F.col("uri").startswith(namespace))
