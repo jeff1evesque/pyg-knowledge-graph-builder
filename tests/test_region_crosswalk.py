@@ -130,7 +130,7 @@ def test_exactly_one_state_name_contains_another():
     prefixed = {(a, b) for a in keys for b in keys if a != b and b.startswith(a)}
     assert prefixed == set(), (
         f"a state key is a prefix of another: {prefixed}. The head-anchored "
-        "match in cross_source_linker._delimited_local_name cannot separate "
+        "match in bls/cross_source.delimited_local_name cannot separate "
         "these."
     )
 
