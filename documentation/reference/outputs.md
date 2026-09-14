@@ -225,12 +225,12 @@ Every parameter needed to deterministically reproduce the hash-based encoding. I
 **Contents:**
 - Hash algorithm name (`spark_murmur3`)
 - Per-segment encoding parameters: dimension, number of hash functions, seed values
-- Class identity seeds, class hierarchy seeds and decay function, ontology membership method
+- Class identity seeds, class hierarchy seeds and decay function, and the ontology membership rule: the fixed slots of the first 26 namespaces and the seed that places any later namespace
 - Property presence seeds and encoding convention (1.0 present, -1.0 absent, 0.0 not in schema)
 - Domain/range seeds, numeric value hashing seed, categorical value hashing seeds
 - Edge feature encoding parameters: relation classification fragments, temporal normalization divisor, ratio clamp value, cross-property derivation seeds
 - Total node and edge feature dimensions (`node_features.total_dim`, `edge_features.total_dim`)
-- `checksum` — a **SHA-256 digest of the encoding contract**: everything above, hashed together. This is a *contract* hash, not a data hash, so rebuilding a different time period with the same settings yields the same digest, while changing any seed, dimension, segment boundary or namespace table changes it. A deployed model can compare the digest it was trained against with the one shipped alongside a graph and refuse to run on a mismatch — otherwise it would load cleanly and return plausible, silently wrong numbers, with every feature in a different slot than the weights expect.
+- `checksum` — a **SHA-256 digest of the encoding contract**: everything above, hashed together. This is a *contract* hash, not a data hash, so rebuilding a different time period with the same settings yields the same digest, while changing any seed, dimension, segment boundary or fixed namespace slot changes it. Registering a source that brings no new relation fragments does not, since it moves no slot. A deployed model can compare the digest it was trained against with the one shipped alongside a graph and refuse to run on a mismatch — otherwise it would load cleanly and return plausible, silently wrong numbers, with every feature in a different slot than the weights expect.
 
 > **Note:** this field previously held only `{"total_node_feature_dim": N}` — a dimension, not a checksum, which detected nothing (two builds with different seeds but the same vector width compared equal). It was also lost to a key collision when the node and edge configs were merged. The digest is now computed once over the merged config, so both halves contribute.
 
