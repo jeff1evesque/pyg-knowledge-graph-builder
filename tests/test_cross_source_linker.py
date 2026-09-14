@@ -19,6 +19,7 @@ import pytest
 
 from rdflib.namespace import OWL, RDF, RDFS
 
+from spark_jobs import sources
 from spark_jobs.enrichment.cross_source_linker import CrossSourceLinker
 from spark_jobs.enrichment.intra_source.bls_linker import BLSIntraSourceLinker
 from spark_jobs.enrichment.intra_source.market.patterns import (
@@ -27,6 +28,8 @@ from spark_jobs.enrichment.intra_source.market.patterns import (
 from spark_jobs.enrichment.sector_crosswalk import (
     EQUITY_SECTOR_TYPE, RELATED_TO_ECONOMIC_SECTOR,
 )
+from spark_jobs.sources.spec import SourceSpec
+from spark_jobs.utils.namespaces import IDENTIFIER_BASE, ONTOLOGY_BASE
 from spark_jobs.utils.rdf_utils import (
     ALERT, BLS_ENRICHMENT, CAP, CPI, ECI, JOLTS, LAUS, MARKET_ENRICHMENT,
     MARKET_QUOTES, SEC_ENRICHMENT, WEATHER, SEC_FILINGS, UNIFIED,
@@ -1175,3 +1178,104 @@ def test_an_unmapped_gics_sector_produces_no_causal_link(spark, make_triples):
     assert not [t for t in triples if t[1] == LEADS_TO], (
         "a deliberately unmapped GICS sector produced a causal link anyway"
     )
+
+
+# ======================================================================
+# Sources come from their specs (#406)
+# ======================================================================
+
+TOY = f"{ONTOLOGY_BASE}toy/"
+TOY_ID = f"{IDENTIFIER_BASE}toy/"
+
+
+def _toy_spec(**fields):
+    return SourceSpec(
+        name="toy",
+        path_fragments=("source=toy",),
+        namespaces=((TOY, "toy"),),
+        enrichment_namespace=TOY,
+        entity_namespaces=(TOY,),
+        **fields,
+    )
+
+
+def test_a_run_without_market_still_gets_sic_sector_links(spark, make_triples):
+    """The SIC step reads SEC's filings and nothing from market.
+
+    It used to sit behind a check for SEC and market together, so a run
+    without market got no SIC sector links, and the warning said both were
+    needed. The three SIC tests above each add a market snapshot the step never
+    reads, which is what let that check pass. This is the first of them with
+    the snapshot taken out and a BLS series in its place, so two sources are
+    still present.
+    """
+    _filing, rows = _filing_with_sic("0001178913-26-003947", "0000078003", "2836")
+    rows.append(
+        (LAUS_ID + "Kansas_June2026_UnemploymentRate", RDF_TYPE,
+         str(LAUS.UnemploymentRate))
+    )
+
+    linker = CrossSourceLinker(spark, make_triples(rows))
+    assert linker.available_sources == {"bls", "sec"}
+
+    triples = _triple_set(linker.enrich())
+
+    company = str(UNIFIED) + "Company_0000078003"
+    assert (
+        company, BELONGS_TO_SECTOR, str(BLS_ENRICHMENT.ManufacturingSector)
+    ) in triples, "SIC 2836 (biological products) is SIC division D"
+    assert (company, RDF_TYPE, UNIFIED_COMPANY_TYPE) in triples, (
+        "the sector landed on a company that is not a node"
+    )
+
+
+def test_noaa_and_a_new_source_count_as_two_sources(spark, make_triples):
+    """Cross-source linking counts the picked sources whose data is present,
+    not four names. NOAA and a source declared only by its spec are two, so
+    linking runs and the alert reaches its state."""
+    alert, rows = _alert_rows("020")            # Kansas
+    rows.append((TOY_ID + "thing/1", RDFS_LABEL, "a toy entity"))
+
+    linker = CrossSourceLinker(
+        spark, make_triples(rows), specs=(*sources.REGISTERED, _toy_spec())
+    )
+    assert linker.available_sources == {"noaa", "toy"}
+
+    triples = _triple_set(linker.enrich())
+
+    assert (alert, AFFECTS_REGION, str(UNIFIED) + "KansasRegion") in triples
+
+
+def test_a_new_source_gets_no_sector_from_the_keyword_table(spark, make_triples):
+    """Birmingham_AL contains "ham", a food keyword.
+
+    A keyword inside a longer name makes a false claim, so a source stays out
+    of the keyword step unless its spec opts in. BLS opts in, so its ham
+    series still matches; and the same toy source opted in is classified,
+    which shows the first assertion is the opt-out at work.
+    """
+    birmingham = TOY_ID + "Birmingham_AL"
+    ham = identifier_namespace(str(CPI)) + "Ham_Entity"
+    rows = [
+        (birmingham, RDFS_LABEL, "Birmingham, AL"),
+        (ham, RDFS_LABEL, "Ham"),
+    ]
+    food = str(BLS_ENRICHMENT.FoodSector)
+
+    left_out = _triple_set(
+        CrossSourceLinker(
+            spark, make_triples(rows), specs=(*sources.REGISTERED, _toy_spec())
+        ).enrich()
+    )
+    opted_in = _triple_set(
+        CrossSourceLinker(
+            spark, make_triples(rows),
+            specs=(*sources.REGISTERED, _toy_spec(sector_keywords=True)),
+        ).enrich()
+    )
+
+    assert not [
+        t for t in left_out if t[0] == birmingham and t[1] == BELONGS_TO_SECTOR
+    ]
+    assert (ham, BELONGS_TO_SECTOR, food) in left_out
+    assert (birmingham, BELONGS_TO_SECTOR, food) in opted_in
