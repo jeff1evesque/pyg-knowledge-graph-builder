@@ -39,6 +39,13 @@ from spark_jobs.pyg_builder.collision_report import (
     compute_collision_report,
     _min_vector_dim_for_segment_one,
 )
+from spark_jobs import sources
+from spark_jobs.sources.spec import SourceSpec
+from spark_jobs.utils.rdf_utils import (
+    ONTOLOGY_BASE,
+    ONTOLOGY_NAMESPACE_HASH_SEED,
+    ONTOLOGY_NAMESPACE_INDICES,
+)
 
 CPI_INDEX = "https://jefflevesque.com/ontology/cpi/Index"        # -> cpi_Index
 CPI_SERIES = "https://jefflevesque.com/ontology/cpi/Series"      # -> cpi_Series
@@ -1727,6 +1734,53 @@ def test_namespace_publishes_both_columns_it_occupies(spark):
         assert e["node_uri_slot"] == (e["slot"] + os_dim // 2) % os_dim
         for dim in (e["global_dim"], e["node_uri_global_dim"]):
             assert os_start <= dim < os_start + os_dim
+
+
+# What a toy namespace's URI hashes to at VDIM, computed once with Spark and
+# written down, so a change to what is hashed or with which seed fails here.
+TOY_SLOT_AT_VDIM = 3
+
+
+def test_a_namespace_registered_after_the_26_gets_a_hashed_slot(spark):
+    """A toy source's namespace has no frozen index, so its URI is hashed with
+    the recorded seed. The slot is published, written, and the same every run,
+    and today's 26 keep their frozen indices beside it."""
+    toy = f"{ONTOLOGY_BASE}toy/"
+    specs = (
+        *sources.REGISTERED,
+        SourceSpec(
+            name="toy",
+            path_fragments=("source=toy",),
+            namespaces=((toy, "toy"),),
+            enrichment_namespace=toy,
+        ),
+    )
+    triples = spark.createDataFrame(
+        [(toy + "thing/1", RDF_TYPE, toy + "Thing")],
+        schema="subject STRING, predicate STRING, object STRING",
+    )
+    node_id_df, counts = NodeMapper(
+        spark, CONFIG, specs=specs
+    ).build_node_id_table(triples)
+    fx = FeatureExtractor(spark, CONFIG, specs=specs)
+    tensors, _names = fx.build_features(triples, node_id_df, counts)
+    entries = {
+        e["namespace"]: e
+        for e in fx.get_metadata_artifacts()["slot_mapping"]["namespaces"]
+    }
+
+    L = VectorLayout(VDIM)
+    os_dim = L.seg1_ontology_source_dim
+    hashed = _hash_slot(spark, [toy, ONTOLOGY_NAMESPACE_HASH_SEED], os_dim, 0)
+    assert entries[toy]["slot"] == hashed == TOY_SLOT_AT_VDIM
+    assert entries[toy]["prefix"] == "toy"
+    for namespace, index in ONTOLOGY_NAMESPACE_INDICES:
+        assert entries[namespace]["slot"] == index % os_dim
+
+    # Typed under the namespace, and living under it.
+    x = tensors["toy_Thing"].numpy()[0]
+    assert x[entries[toy]["global_dim"]] == pytest.approx(1.0)
+    assert x[entries[toy]["node_uri_global_dim"]] == pytest.approx(0.5)
 
 
 # ======================================================================
