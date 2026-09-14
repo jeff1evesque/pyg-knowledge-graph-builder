@@ -182,7 +182,9 @@ class EnrichmentPipeline:
             if spec.cross_source_inputs is not None:
                 cross_inputs.update(spec.cross_source_inputs(options))
 
-        cross_new = enrich_cross_source(self.spark, self.triples_df, **cross_inputs)
+        cross_new = enrich_cross_source(
+            self.spark, self.triples_df, specs=self._specs, **cross_inputs
+        )
 
         cross_count = cross_new.count()
         self.stats['cross_source_triples'] = cross_count
