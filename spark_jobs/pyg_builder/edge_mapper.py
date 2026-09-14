@@ -19,6 +19,10 @@ Edge type naming:
 
     Full PyG edge type: ("cpi_Index", "bls_enrichment_precedes", "cpi_Index")
 
+    A predicate in no registered namespace would be named unknown_<local name>.
+    It fails the build instead, unless pyg_config sets
+    allow_unregistered_namespaces (naming.check_registered_names).
+
 Filtering:
 - rdf:type and structural predicates are excluded
 - Triples where subject or object is not in node_id_df are excluded
@@ -34,15 +38,19 @@ Ordering contract:
 """
 import gc
 import logging
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Optional, Sequence, Tuple
 
 import torch
 from pyspark import StorageLevel
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 
+from spark_jobs import sources
+from spark_jobs.sources.spec import SourceSpec
 from spark_jobs.pyg_builder.naming import (
+    ALLOW_UNREGISTERED_NAMESPACES,
     EXCLUDED_EDGE_PREDICATES,
+    check_registered_names,
     prefixed_local_name_expr,
     relation_to_predicate_uri,
 )
@@ -75,12 +83,25 @@ class EdgeMapper:
     executors without any driver round-trip.
     """
 
-    def __init__(self, spark: SparkSession, config: Dict[str, Any]):
+    def __init__(
+        self,
+        spark: SparkSession,
+        config: Dict[str, Any],
+        specs: Optional[Sequence[SourceSpec]] = None,
+    ):
         self.spark = spark
         self.config = config
         self._requested_edge_types = config.get("edge_types", None)
         self._collect_row_budget = config.get(
             "edge_collect_row_budget", _COLLECT_ROW_BUDGET
+        )
+        self._allow_unregistered = config.get(
+            ALLOW_UNREGISTERED_NAMESPACES, False
+        )
+        # Relations are named from every registered source's namespaces. A
+        # test passes specs to name them from a toy source's as well.
+        self._namespace_prefixes = (
+            None if specs is None else sources.namespace_prefixes(specs)
         )
 
     def build_edge_indices(
@@ -165,7 +186,8 @@ class EdgeMapper:
         # Step 3: Derive relation names (pure Spark, no UDF)
         # ============================================
         edges_resolved = edges_resolved.withColumn(
-            "relation", prefixed_local_name_expr("predicate")
+            "relation",
+            prefixed_local_name_expr("predicate", self._namespace_prefixes),
         )
 
         # ============================================
@@ -232,6 +254,27 @@ class EdgeMapper:
             (row["src_type"], row["relation"], row["dst_type"]): row["cnt"]
             for row in count_rows
         }
+
+        def predicate_uris(names):
+            rows = (
+                edges_resolved
+                .filter(F.col("relation").isin(names))
+                .select("predicate")
+                .distinct()
+                .limit(50)
+                .collect()
+            )
+            return [row.predicate for row in rows]
+
+        # Read off the counts just collected. Only relations that made an edge
+        # are checked, so a predicate that only ever points at a literal or an
+        # untyped URI cannot fail the build.
+        check_registered_names(
+            "Relations",
+            {relation for _src, relation, _dst in edge_counts},
+            self._allow_unregistered,
+            predicate_uris,
+        )
 
         # Ids follow sorted key order, so a contiguous range of ids is also a
         # contiguous block of the sorted frame.
@@ -368,6 +411,8 @@ class EdgeMapper:
         )
 
         return {
-            row.relation: relation_to_predicate_uri(row.relation)
+            row.relation: relation_to_predicate_uri(
+                row.relation, self._namespace_prefixes
+            )
             for row in relation_rows
         }
