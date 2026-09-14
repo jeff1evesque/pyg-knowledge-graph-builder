@@ -26,9 +26,11 @@ from spark_jobs.utils.namespaces import (
     identifier_namespace,
 )
 
-# Registration order is table order. Each source's namespaces follow the
-# previous source's in NAMESPACE_PREFIXES, and a namespace's position there is
-# its ontology-source feature slot, so changing this order moves slots.
+# Registration order is table order: each source's namespaces follow the
+# previous source's in NAMESPACE_PREFIXES, and its relation fragments follow the
+# previous source's in the lists the edge encoding config records, so a new
+# source goes at the end. The order places no ontology-source slot; see
+# rdf_utils.ONTOLOGY_NAMESPACE_INDICES.
 REGISTERED: Tuple[SourceSpec, ...] = (bls.SPEC, sec.SPEC, market.SPEC, noaa.SPEC)
 
 # Namespaces no single source owns, after every source's own: GeoSPARQL, which
