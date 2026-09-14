@@ -45,15 +45,21 @@ from spark_jobs.pyg_builder.edge_encoders import (
 CPI_INDEX = "https://jefflevesque.com/ontology/cpi/Index"        # -> cpi_Index
 CPI_SERIES = "https://jefflevesque.com/ontology/cpi/Series"      # -> cpi_Series
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
-from spark_jobs.utils.rdf_utils import BLS_ENRICHMENT  # noqa: E402
+from spark_jobs.utils.rdf_utils import (  # noqa: E402
+    BLS_ENRICHMENT,
+    CPI,
+    MARKET_QUOTES,
+    NOAA_ENRICHMENT,
+    UNIFIED,
+)
 
-# From the namespace table, not spelled out: a URI under a namespace nothing
-# registers falls back to its bare last segment and silently renames the
-# relation.
+# From the namespace table, not spelled out: a relation from a namespace no
+# source registers fails the build, so every predicate linking two nodes here
+# sits under a registered one.
 PRECEDES = f"{BLS_ENRICHMENT}precedes"   # temporal
 PRECEDES_REL = "bls_enrichment_precedes"
-HAS_UNDERLYING = "https://example.org/hasUnderlying"   # option_stock
-HAS_UNDERLYING_REL = "unknown_hasUnderlying"
+HAS_UNDERLYING = f"{MARKET_QUOTES}hasUnderlying"   # option_stock
+HAS_UNDERLYING_REL = "market_quotes_hasUnderlying"
 
 HAS_MONTH = "https://example.org/hasMonth"
 HAS_YEAR = "https://example.org/hasYear"
@@ -61,10 +67,10 @@ STRIKE = "https://example.org/strikePrice"
 PRICE = "https://example.org/observedPrice"
 
 RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
-CORRELATES = "https://example.org/correlatesWith"      # correlation
-CORRELATES_REL = "unknown_correlatesWith"
-ESCALATES = "https://example.org/escalatesTo"          # escalation
-ESCALATES_REL = "unknown_escalatesTo"
+CORRELATES = f"{UNIFIED}correlatesWith"      # correlation
+CORRELATES_REL = "unified_correlatesWith"
+ESCALATES = f"{NOAA_ENRICHMENT}escalatesTo"          # escalation
+ESCALATES_REL = "noaa_enrichment_escalatesTo"
 SEVERITY_SRC = "https://example.org/severityNum"       # src-only severity
 SEVERITY_DST = "https://example.org/severityLevel"     # dst-only severity
 
@@ -75,8 +81,8 @@ CORR_CONFIG = {"edge_feature_config": {"enabled_categories": ["correlation"]}}
 
 # A relation no fragment matches -> "generic". Matches the shape of the real
 # relations the linkers emit (cpi_hasArea, jolts_hasQuitsRate).
-GENERIC = "https://example.org/hasThing"
-GENERIC_REL = "unknown_hasThing"
+GENERIC = f"{CPI}hasThing"
+GENERIC_REL = "cpi_hasThing"
 
 
 def _generic_edge_rows(year=2020):
@@ -502,7 +508,7 @@ def test_skip_relation_gets_no_edge_features(spark):
     feats, edge_indices, _L = _edge_features(spark, [
         ("https://ex/a", RDF_TYPE, CPI_INDEX),
         ("https://ex/b", RDF_TYPE, CPI_SERIES),
-        ("https://ex/a", "https://example.org/belongsToSector", "https://ex/b"),
+        ("https://ex/a", f"{BLS_ENRICHMENT}belongsToSector", "https://ex/b"),
     ])
     # The edge exists in the index, but received no features.
     assert any("belongsToSector" in rel for (_s, rel, _d) in edge_indices)
