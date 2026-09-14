@@ -35,12 +35,12 @@ picked source's date predicates, or its period collector, from the same specs:
     - Severity escalation detection (escalatesTo)
 - **Temporal Unifier** (cross-source)
     - Unified days/months/years/quarters (owl:sameAs), from each picked source's date predicates or, for BLS, its period URIs
-- **Cross-Source Linker**
-    - Sector-based linking across sources
-    - Company/ticker linking (SEC ↔ Market)
-    - Geographic linking (BLS ↔ NOAA)
-    - Causal relationships (BLS → Market, NOAA → Market)
-    - Measurement type alignment
+- **Cross-Source Linker** (each source's side declared in its spec)
+    - Sector links: the keyword step for the sources that opt in (BLS, market, NOAA), SEC's SIC codes, and market's GICS crosswalk
+    - Company hub: one node per CIK, from SEC's issuers and market's tickers
+    - Region hub: one node per state and census region, from BLS's local-area and job-openings series and NOAA's alerts
+    - Links that need particular sources, run only when those are present: BLS indicators leading equity sectors (BLS and market), and sub-industry peers (market)
+    - Measurement type alignment, from BLS's measurement types
 - **Ontology Mapper (optional; --enable_ontology_mapping, default true)**
     - owl:equivalentProperty / owl:equivalentClass (one-to-one pairs only)
     - predicate folding to the unified vocabulary
@@ -216,6 +216,19 @@ cpi:November a temporal:SourceMonth ; rdfs:label "November" .
 > matter how many cross-source edges the enrichment produced. Measured on the
 > e2e fixtures, all six source-family pairs (bls/sec/market/noaa) are connected,
 > and every one of them at distance 4.
+
+> **Company, region and sector links are hubs too.** Each source gives a hub its
+> own keys through its spec (`spark_jobs/sources/`): a CIK or a ticker for the
+> company, a state or census region for the region, a SIC code, crosswalk row or
+> keyword for the sector. The hub mints the shared node. A new source joins by
+> giving keys, not by adding a join against every other source.
+>
+> A run that leaves a source out keeps every link its other sources can make.
+> Without market, filings still reach their companies and their SIC sectors;
+> without SEC, quotes still reach companies through the constituents CSV. A link
+> that really needs two particular sources, such as BLS indicators leading
+> equity sectors, names them and runs only when both are present. Cross-source
+> linking as a whole still needs at least two sources with data in the run.
 
 **Linking Strategies** (applied across 100+ ontologies):
 
