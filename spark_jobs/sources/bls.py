@@ -29,6 +29,20 @@ def _collect_periods(triples_df):
     return collect_bls_periods(triples_df)
 
 
+def _region_keys(context):
+    from spark_jobs.enrichment.intra_source.bls.cross_source import region_keys
+
+    return region_keys(context)
+
+
+def _leads_to(context):
+    from spark_jobs.enrichment.intra_source.bls.cross_source import (
+        link_indicators_to_equity_sectors,
+    )
+
+    return link_indicators_to_equity_sectors(context)
+
+
 SPEC = SourceSpec(
     name="bls",
     label="BLS",
@@ -52,6 +66,24 @@ SPEC = SourceSpec(
     # which _collect_periods reads directly.
     temporal_collector=_collect_periods,
     linker=_linker,
+    # The ten datasets' vocabularies, as source detection has always read them.
+    entity_namespaces=(
+        str(CPI), str(PPI), str(JOLTS), str(EMPSIT), str(ECI),
+        str(XIMPIM), str(LAUS), str(METRO), str(REALER), str(WKYENG),
+    ),
+    sector_keywords=True,
+    region_keys=_region_keys,
+    cross_source_steps=(
+        ("Creating causal relationships", ("bls", "market"), _leads_to),
+    ),
+    measurement_types=(
+        str(CPI.Index),
+        str(PPI.IndexValue),
+        str(JOLTS.JobOpeningsRate),
+        str(JOLTS.HiresRate),
+        str(JOLTS.QuitsRate),
+        str(LAUS.UnemploymentRate),
+    ),
     property_mappings={
         str(CPI.hasMonth): str(UNIFIED.hasMonth),
         str(PPI.hasStartMonth): str(UNIFIED.hasMonth),
