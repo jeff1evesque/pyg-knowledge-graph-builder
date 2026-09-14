@@ -44,6 +44,7 @@ The PyG builder accepts an optional configuration dict:
 | `edge_feature_config.enabled_categories` | `["temporal", "option_stock", "escalation"]` | Which edge categories receive features. Options: `temporal`, `option_stock`, `escalation`, `correlation`, `causal`, `strategy` |
 | `include_temporal_nodes` | `true` | Include Month/Year/Quarter node types |
 | `include_sector_nodes` | `true` | Include EconomicSector node types |
+| `allow_unregistered_namespaces` | `false` | Build a node type or relation from a namespace no source registers under an `unknown_` name, with a warning, instead of failing the build. For exploratory runs: two vocabularies with a class of the same name share one `unknown_` node type. The query tables read the same key, so a run that writes them needs it in that leg's `--pyg_config` too |
 
 When config is empty, sensible defaults are inferred from the data.
 
