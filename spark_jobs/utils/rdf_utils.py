@@ -4,7 +4,8 @@ Foundation for CPI data processing
 """
 
 from rdflib import Namespace, URIRef
-from typing import Dict, List, Tuple
+from rdflib.namespace import OWL, RDFS
+from typing import Dict, List, Optional, Sequence, Tuple
 import logging
 
 from spark_jobs import sources
@@ -129,9 +130,10 @@ SYNTHETIC_TEMPORAL_IDS: Dict[str, str] = sources.synthetic_temporal_ids()
 # Deliberately NOT a *_ENRICHMENT namespace: these are not claims about
 # entities, so classify_edge_origin() must never see them as inferred links.
 # Also deliberately absent from NAMESPACE_PREFIXES below: nothing in this
-# namespace is ever an rdf:type, so it can never name a node type, and adding
-# it would move ONTOLOGY_NAMESPACE_INDICES and change the encoding contract
-# digest -- invalidating every trained model to describe URIs no encoder sees.
+# namespace is ever an rdf:type, so it can never name a node type, and needs
+# neither a prefix nor an ontology-source slot. Registering it would move no
+# slot and leave the encoding contract digest alone (see
+# ONTOLOGY_NAMESPACE_INDICES); it would only place URIs no encoder sees.
 PROVENANCE = Namespace(f"{ONTOLOGY_BASE}provenance/")
 
 # Subject of the derivedBy statements: the axiom SET being described, not any
@@ -192,16 +194,73 @@ PROV_ROUTE_LABELS = {
 # and noaa.gov/ vs its /enrichment/ child), so the ordering hazard here is
 # smaller now, not larger. The invariant test stands either way.
 #
-# The index position in this list is used by feature_extractor for
-# ontology source membership encoding.
+# A namespace's position here used to be its ontology-source feature slot. It
+# no longer is; see ONTOLOGY_NAMESPACE_INDICES below.
 
 NAMESPACE_PREFIXES: List[Tuple[str, str]] = sources.namespace_prefixes()
 
-# Derived: namespace → integer index for feature_extractor ontology
-# source membership encoding. Built automatically from NAMESPACE_PREFIXES.
+# ============================================
+# ONTOLOGY-SOURCE FEATURE SLOTS
+# ============================================
+# The 26 namespaces registered before #406, each with the slot index it had
+# then: its position in NAMESPACE_PREFIXES. Written out rather than derived, so
+# registering a source, or registering sources in another order, moves none
+# of them. The encoding contract records this table, so moving an entry
+# changes contract_digest, and so does re-homing one of these namespaces.
+#
+# A namespace registered later gets its slot from a seeded hash of its URI
+# instead (feature_extractor), the way the edge vector places namespaces, so
+# its slot does not depend on what else is registered. The cost is that it can
+# land on a slot another namespace uses, and when the segment has fewer dims
+# than there are namespaces it always does. Production runs use 16.
 ONTOLOGY_NAMESPACE_INDICES: List[Tuple[str, int]] = [
-    (ns, idx) for idx, (ns, _prefix) in enumerate(NAMESPACE_PREFIXES)
+    (str(CPI), 0),
+    (str(PPI), 1),
+    (str(ECI), 2),
+    (str(EMPSIT), 3),
+    (str(JOLTS), 4),
+    (str(LAUS), 5),
+    (str(METRO), 6),
+    (str(REALER), 7),
+    (str(WKYENG), 8),
+    (str(XIMPIM), 9),
+    (str(BLS_COMMON), 10),
+    (str(BLS_ENRICHMENT), 11),
+    (str(SEC_FILINGS), 12),
+    (str(SEC_COMMON), 13),
+    (str(SEC_ENRICHMENT), 14),
+    (str(MARKET_ENRICHMENT), 15),
+    (str(MARKET_QUOTES), 16),
+    (str(CAP), 17),
+    (str(WEATHER), 18),
+    (str(ALERT), 19),
+    (str(NOAA_ENRICHMENT), 20),
+    (str(GEOSPARQL), 21),
+    (str(UNIFIED), 22),
+    (str(SOURCE_TEMPORAL), 23),
+    (str(OWL), 24),
+    (str(RDFS), 25),
 ]
+
+# The seed a namespace outside that table hashes its URI with, recorded in the
+# encoding contract beside it. 700 is next in the node vector's series: class
+# hierarchy 100, property presence 200, domain and range 300, property
+# hierarchy 400, numeric values 500, categorical values 600.
+ONTOLOGY_NAMESPACE_HASH_SEED = 700
+
+
+def hashed_ontology_namespaces(
+    namespace_prefixes: Optional[Sequence[Tuple[str, str]]] = None,
+) -> List[str]:
+    """The registered namespaces that get a hashed slot, in table order: those
+    not in ONTOLOGY_NAMESPACE_INDICES. None of today's.
+
+    ``namespace_prefixes`` defaults to NAMESPACE_PREFIXES. A test passes a table
+    with a toy source in it.
+    """
+    frozen = {namespace for namespace, _index in ONTOLOGY_NAMESPACE_INDICES}
+    table = NAMESPACE_PREFIXES if namespace_prefixes is None else namespace_prefixes
+    return [namespace for namespace, _prefix in table if namespace not in frozen]
 
 
 # ============================================
