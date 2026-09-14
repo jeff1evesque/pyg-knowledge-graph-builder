@@ -31,6 +31,31 @@ class RunOptions:
     source_data_day: str = ""
 
 
+@dataclass(frozen=True)
+class CompanyKeys:
+    """A source's side of the company hub. Any part may be None."""
+
+    # (entity, cik): entities that state their company's CIK.
+    entities: Any = None
+    # (entity, symbol): entities that name their company by its ticker.
+    symbols: Any = None
+    # (symbol, cik, priority): ticker pairings the source knows. Where two
+    # pairings disagree about a ticker, the lower priority wins.
+    symbol_ciks: Any = None
+
+
+@dataclass(frozen=True)
+class RegionKeys:
+    """A source's side of the region hub. Either part may be None."""
+
+    # (subject, predicate, object): links from the source's entities to a
+    # unified:{State}Region node, each under the predicate it has always used.
+    state_links: Any = None
+    # (entity, census_name, census_key): the source's own region entities that
+    # are one of the four census regions.
+    census_regions: Any = None
+
+
 @dataclass(frozen=True, eq=False)
 class SourceSpec:
     """One data source, declared once.
@@ -88,6 +113,29 @@ class SourceSpec:
     # cross_source_inputs(options): keyword arguments the source adds to the
     # cross-source linker, read on the driver before that phase starts.
     cross_source_inputs: Optional[Callable[..., Any]] = None
+    # Namespaces whose URIs are this source's own entities. An entity under
+    # the matching id/ namespace counts too. Cross-source linking reads them to
+    # tell whether the source's data is in a run.
+    entity_namespaces: Tuple[str, ...] = ()
+    # Whether the sector keyword step may classify this source's entities by
+    # the words in their URIs. Off unless a source opts in, because a keyword
+    # inside a longer name makes a false claim: Birmingham_AL contains "ham".
+    sector_keywords: bool = False
+    # company_keys(context): the source's side of the company hub, as
+    # CompanyKeys.
+    company_keys: Optional[Callable[..., Any]] = None
+    # region_keys(context): the source's side of the region hub, as RegionKeys.
+    region_keys: Optional[Callable[..., Any]] = None
+    # sector_keys(context): triples placing the source's entities in a sector,
+    # each under the predicate that link has always used, or None.
+    sector_keys: Optional[Callable[..., Any]] = None
+    # Cross-source steps that pair this source with others, as (title, the
+    # names of the sources the step needs, step). step(context) returns triples
+    # or None, and runs only when every source it needs is in the run.
+    cross_source_steps: Tuple[Tuple[str, Tuple[str, ...], Callable[..., Any]], ...] = ()
+    # Source classes whose entities cross-source linking also types as their
+    # class_mappings target, so measurements of one kind share a type.
+    measurement_types: Tuple[str, ...] = ()
 
     def __post_init__(self):
         for name in ("property_mappings", "class_mappings", "relation_fragments"):
@@ -116,4 +164,18 @@ class SourceSpec:
         if unknown:
             raise ValueError(
                 f"source {self.name!r}: unknown edge-feature categories {unknown}"
+            )
+        strays = sorted(
+            set(self.entity_namespaces) - {ns for ns, _ in self.namespaces}
+        )
+        if strays:
+            raise ValueError(
+                f"source {self.name!r}: entity namespaces {strays} are not "
+                "among its namespaces"
+            )
+        unmapped = sorted(set(self.measurement_types) - set(self.class_mappings))
+        if unmapped:
+            raise ValueError(
+                f"source {self.name!r}: measurement types {unmapped} have no "
+                "class_mappings row"
             )
