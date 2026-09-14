@@ -101,6 +101,18 @@ def _linker(spark, options):
     return SECIntraSourceLinker(spark)
 
 
+def _company_keys(context):
+    from spark_jobs.enrichment.intra_source.sec.cross_source import company_keys
+
+    return company_keys(context)
+
+
+def _sector_keys(context):
+    from spark_jobs.enrichment.intra_source.sec.cross_source import sector_keys
+
+    return sector_keys(context)
+
+
 SPEC = SourceSpec(
     name="sec",
     label="SEC",
@@ -119,4 +131,10 @@ SPEC = SourceSpec(
     check_paths=assert_sec_paths_name_the_handled_feed,
     canonicalize=_canonicalize,
     linker=_linker,
+    entity_namespaces=(str(SEC_FILINGS),),
+    # Left out of the sector keyword step: a filing's local name is an
+    # accession number, and its company's sector comes from its SIC code.
+    sector_keywords=False,
+    company_keys=_company_keys,
+    sector_keys=_sector_keys,
 )
