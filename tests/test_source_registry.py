@@ -50,8 +50,9 @@ from spark_jobs.utils.namespaces import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "e2e"
 
-# NAMESPACE_PREFIXES as it was, entry for entry. A namespace's position is its
-# ontology-source feature slot, so this order is part of every trained model.
+# NAMESPACE_PREFIXES as it was, entry for entry. Each position was also the
+# namespace's ontology-source feature slot, which ONTOLOGY_NAMESPACE_INDICES now
+# holds fixed.
 TODAYS_NAMESPACE_PREFIXES = [
     (str(CPI), "cpi"),
     (str(PPI), "ppi"),
@@ -210,6 +211,37 @@ def test_the_ontology_source_slots_are_todays():
         (namespace, slot)
         for slot, (namespace, _prefix) in enumerate(TODAYS_NAMESPACE_PREFIXES)
     ]
+
+
+def test_no_namespace_registered_today_is_hashed():
+    assert rdf_utils.hashed_ontology_namespaces() == []
+
+
+@pytest.mark.parametrize("where", ["first", "last"])
+def test_registering_a_source_moves_none_of_the_26_slots(where):
+    """Slots used to be positions. A source registered first would have moved
+    all 26, and one registered last the five shared namespaces, which follow
+    every source's. Registered anywhere, it now moves none, and its own
+    namespace is the only one hashed. What it hashes to takes Spark;
+    test_feature_extractor pins it."""
+    toy = _toy("toy")
+    specs = (
+        (toy, *sources.REGISTERED) if where == "first"
+        else (*sources.REGISTERED, toy)
+    )
+    table = sources.namespace_prefixes(specs)
+
+    assert rdf_utils.hashed_ontology_namespaces(table) == [f"{ONTOLOGY_BASE}toy/"]
+
+    position = {namespace: i for i, (namespace, _prefix) in enumerate(table)}
+    moved_by_position = {
+        namespace
+        for namespace, slot in rdf_utils.ONTOLOGY_NAMESPACE_INDICES
+        if position[namespace] != slot
+    }
+    frozen = {namespace for namespace, _slot in rdf_utils.ONTOLOGY_NAMESPACE_INDICES}
+    shared = {namespace for namespace, _prefix in sources.SHARED_NAMESPACES}
+    assert moved_by_position == (frozen if where == "first" else shared)
 
 
 def test_the_source_vocabularies_are_todays():
