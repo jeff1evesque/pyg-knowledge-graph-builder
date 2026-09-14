@@ -322,6 +322,45 @@ def test_the_log_labels_are_todays():
     ]
 
 
+def test_the_cross_source_declarations_are_todays():
+    """What cross-source linking reads from each spec, as the linker spelled it
+    out before: the namespaces a source is detected by, which sources the
+    sector keyword step classifies, the measurement type rows, and the steps
+    that pair named sources."""
+    assert {
+        spec.name: set(spec.entity_namespaces) for spec in sources.REGISTERED
+    } == {
+        "bls": {
+            str(namespace)
+            for namespace in (
+                CPI, PPI, JOLTS, EMPSIT, ECI, XIMPIM, LAUS, METRO, REALER, WKYENG,
+            )
+        },
+        "sec": {str(SEC_FILINGS)},
+        "market": {str(MARKET_QUOTES)},
+        "noaa": {str(ALERT), str(CAP), str(WEATHER)},
+    }
+    assert {spec.name: spec.sector_keywords for spec in sources.REGISTERED} == {
+        "bls": True, "sec": False, "market": True, "noaa": True,
+    }
+    assert _spec("bls").measurement_types == (
+        str(CPI.Index),
+        str(PPI.IndexValue),
+        str(JOLTS.JobOpeningsRate),
+        str(JOLTS.HiresRate),
+        str(JOLTS.QuitsRate),
+        str(LAUS.UnemploymentRate),
+    )
+    assert [
+        (spec.name, title, needs)
+        for spec in sources.REGISTERED
+        for title, needs, _step in spec.cross_source_steps
+    ] == [
+        ("bls", "Creating causal relationships", ("bls", "market")),
+        ("market", "Linking constituents by sub-industry", ("market",)),
+    ]
+
+
 # ======================================================================
 # Which source a path belongs to
 # ======================================================================
@@ -423,6 +462,7 @@ def test_leaving_sec_out_of_a_run_moves_no_namespace_slot():
 GENERIC_MODULES = (
     "spark_jobs/enrichment/intra_source_linker.py",
     "spark_jobs/enrichment/temporal_unifier.py",
+    "spark_jobs/enrichment/cross_source_linker.py",
     "spark_jobs/utils/canonicalization.py",
 )
 
@@ -473,6 +513,7 @@ def test_every_spec_states_only_its_own_terms():
         own = tuple(namespace for namespace, _prefix in spec.namespaces)
         terms = [
             *spec.date_predicates, *spec.property_mappings, *spec.class_mappings,
+            *spec.measurement_types,
         ]
         strays = [term for term in terms if not term.startswith(own)]
         assert not strays, (
@@ -503,6 +544,16 @@ def test_a_spec_cannot_name_an_unknown_edge_category():
 def test_a_spec_cannot_name_an_unknown_format():
     with pytest.raises(ValueError, match="unknown source format"):
         _toy("toy", source_format="csv")
+
+
+def test_entity_namespaces_are_among_the_specs_own():
+    with pytest.raises(ValueError, match="entity namespaces"):
+        _toy("toy", entity_namespaces=(f"{ONTOLOGY_BASE}other/",))
+
+
+def test_a_measurement_type_needs_a_class_mappings_row():
+    with pytest.raises(ValueError, match="no class_mappings row"):
+        _toy("toy", measurement_types=(f"{ONTOLOGY_BASE}toy/Index",))
 
 
 def test_two_sources_cannot_map_the_same_term():
