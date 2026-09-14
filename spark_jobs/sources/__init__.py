@@ -23,6 +23,7 @@ from spark_jobs.utils.namespaces import (
     SOURCE_BASE,
     SOURCE_TEMPORAL,
     UNIFIED,
+    identifier_namespace,
 )
 
 # Registration order is table order. Each source's namespaces follow the
@@ -118,6 +119,22 @@ def pick(
     """The sources a run's paths name, once each, in registration order."""
     matched = {match_path(path, specs) for path in paths}
     return tuple(spec for spec in specs if spec in matched)
+
+
+def entity_prefixes(namespaces: Sequence[str]) -> List[str]:
+    """The URI prefixes an entity under these namespaces starts with.
+
+    Each namespace, and its id/ namespace where it has one. Entities are
+    individuals, which live under id/, so the term namespace alone matches none
+    of them. A publisher's own vocabulary, such as NOAA's alert identifiers, has
+    no id/ namespace and is matched as it is.
+    """
+    prefixes: List[str] = []
+    for namespace in namespaces:
+        prefixes.append(namespace)
+        if namespace.startswith(SOURCE_BASE):
+            prefixes.append(identifier_namespace(namespace))
+    return prefixes
 
 
 # ======================================================================
