@@ -40,6 +40,26 @@ def _cross_source_inputs(options):
     }
 
 
+def _company_keys(context):
+    from spark_jobs.enrichment.intra_source.market.cross_source import company_keys
+
+    return company_keys(context)
+
+
+def _sector_keys(context):
+    from spark_jobs.enrichment.intra_source.market.cross_source import sector_keys
+
+    return sector_keys(context)
+
+
+def _sub_industry_peers(context):
+    from spark_jobs.enrichment.intra_source.market.cross_source import (
+        link_by_sub_industry,
+    )
+
+    return link_by_sub_industry(context)
+
+
 SPEC = SourceSpec(
     name="market",
     label="Market",
@@ -58,6 +78,13 @@ SPEC = SourceSpec(
     temporal_prefix=f"{IDENTIFIER_BASE}temporal/market-quotes/",
     linker=_linker,
     cross_source_inputs=_cross_source_inputs,
+    entity_namespaces=(str(MARKET_QUOTES),),
+    sector_keywords=True,
+    company_keys=_company_keys,
+    sector_keys=_sector_keys,
+    cross_source_steps=(
+        ("Linking constituents by sub-industry", ("market",), _sub_industry_peers),
+    ),
     property_mappings={
         str(MARKET_QUOTES.lastPrice): str(UNIFIED.measurementValue),
         str(MARKET_QUOTES.mark): str(UNIFIED.measurementValue),
