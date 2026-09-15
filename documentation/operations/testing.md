@@ -224,7 +224,9 @@ identifies a deployment is sourced beside it.
 it does `RUN_ID`, so one `env.sh` can build its source paths for any day. Without
 the flag the three are unset, even when the calling shell has them, so a day left
 over from an earlier run cannot choose this run's sources. A date that is not a
-real `YYYY-MM-DD` is refused before the run starts.
+real `YYYY-MM-DD` is refused before the run starts. It exports `PYG_RUN_DIR` too,
+the run directory as an absolute path, so `env.sh` can put the event log and the
+stall captures inside it without naming it.
 
 It starts a 1 Hz network trace on every node ([`bin/netsample.py`](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/blob/master/bin/netsample.py))
 and a cluster sampler locally ([`bin/cluster_sampler.sh`](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/blob/master/bin/cluster_sampler.sh)),
@@ -337,6 +339,11 @@ when the run went up and its day of tables was already published. The layout it
 writes is under
 [Published Runs](../reference/outputs.md#published-runs), and
 `tests/test_publish_run.py` runs it against a stub `aws` CLI.
+
+`bin/publish_run.py <run-dir> --published` only asks. It exits `0` when the
+destination lists the run's `index.json`, and the day's marker as well when the run
+wrote tables, and it writes nothing. A prune asks this instead of reading
+`publish.done`, because a rerun that is refused overwrites that file.
 
 ## Test tiers
 
