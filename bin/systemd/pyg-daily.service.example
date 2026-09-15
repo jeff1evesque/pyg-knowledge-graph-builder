@@ -1,0 +1,16 @@
+# Rendered by bin/schedule_run.sh from bin/systemd/pyg-daily.service.example. The words
+# between @ signs are filled in from the schedule directory's env.sh.
+[Unit]
+Description=Graph build for one scheduled day (@UNIT@)
+
+[Service]
+Type=oneshot
+ExecStart="@DAILY_RUN@" "@SCHEDULE_DIR@"
+# 3 is a skipped day: a source is not there yet, or not at all. Not a failure.
+SuccessExitStatus=3
+# A run takes hours, and a oneshot unit's start timeout would otherwise end it.
+TimeoutStartSec=infinity
+# Stopping the unit stops every process of the run, the Spark driver included. A job
+# that the launcher leaves running after a stall capture stops with the unit too,
+# which frees the cluster for the next day; the capture stays in the run directory.
+KillMode=control-group

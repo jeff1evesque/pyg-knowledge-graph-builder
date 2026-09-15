@@ -1,0 +1,14 @@
+# Rendered by bin/schedule_run.sh from bin/systemd/pyg-daily.timer.example. The words
+# between @ signs are filled in from the schedule directory's env.sh.
+[Unit]
+Description=Timer for @UNIT@
+
+[Timer]
+OnCalendar=@ONCALENDAR@
+# A run missed while the host was down starts once it is back up. Only one: the day is
+# worked out when the run starts, so days missed in between are not built.
+Persistent=true
+Unit=@UNIT@.service
+
+[Install]
+WantedBy=timers.target

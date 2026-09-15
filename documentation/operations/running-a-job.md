@@ -499,6 +499,102 @@ A finished run records its real times. The notebook prints each submission's min
 it ends, and `bin/run_cluster_notebook.sh` lists them per submission in the run
 directory's `outcome.txt`.
 
+## Scheduled runs
+
+[`bin/daily_run.sh`](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/blob/master/bin/daily_run.sh)
+runs one day end to end, and
+[`bin/schedule_run.sh`](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/blob/master/bin/schedule_run.sh)
+installs a systemd user timer that starts it. The schedule is configuration in a
+directory of its own; none of it is in the code.
+
+A day, in order: refuse a checkout with uncommitted changes, check that every source for
+the day is there, wait for an idle cluster, stage the sources, bring free memory up on
+every node, run `bin/run_cluster_notebook.sh --data-date`, publish with
+`bin/publish_run.py`, and only after that publish went through, prune. The launcher and
+the publish step are the ones in [Testing](testing.md#driving-a-real-cluster-run).
+
+### Setting one up
+
+A schedule directory holds an untracked `env.sh`, the same contract as a run
+directory's
+([`bin/profiles/run-env.example.sh`](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/blob/master/bin/profiles/run-env.example.sh)),
+written so that one file serves every day:
+
+- **Paths come from the run and the day.** The launcher exports `RUN_ID`, `PYG_RUN_DIR`,
+  `PYG_DATA_YEAR`, `PYG_DATA_MONTH` and `PYG_DATA_DAY` before it reads `env.sh`, so the
+  source paths, the work directory, the event log and the stall captures are built from
+  them instead of naming one run.
+- **Yearly files go in `PYG_YEARLY_SOURCE_PREFIXES`.** A feed with one file per year can
+  stay on last year's well into the new one, so a run reads the newest year that is not
+  after the data day's, and logs which.
+- **The schedule block.** `PYG_SCHEDULE_ONCALENDAR`, `PYG_SCHEDULE_UNIT`,
+  `PYG_SCHEDULE_DATA_LAG_DAYS` and `PYG_SCHEDULE_RETAIN_RUNS`, and `PYG_PUBLISH_ROOT` with
+  its companions: a schedule publishes, and its prune depends on that.
+- **A checkout of its own.** Each day builds from the checkout `PYG_REPO_ROOT` names, and
+  the assembly leg packages it more than an hour into the run. Give the schedule a
+  detached worktree that nothing else checks out, and move it forward on purpose. The
+  worktree has no `.venv` or `dist/`; link both to the main checkout's.
+- **A notebook runner of its own.** A day's run directory is new, so it has no
+  `runner-venv`. Point `PYG_RUNNER_PYTHON` at a venv with `nbformat` and `nbclient`, and
+  `PYG_NOTEBOOK_KERNEL` at a kernel that lives outside every run directory.
+
+```bash
+# from the main checkout
+git worktree add --detach ~/pyg-daily/repo <commit>
+ln -s "$PWD/.venv" ~/pyg-daily/repo/.venv
+ln -s "$PWD/dist" ~/pyg-daily/repo/dist
+
+python3 -m venv ~/pyg-daily/runner-venv
+~/pyg-daily/runner-venv/bin/pip install nbformat nbclient ipykernel
+~/pyg-daily/runner-venv/bin/python -m ipykernel install --user --name pyg-daily-runner
+
+cd ~/pyg-daily/repo
+bin/daily_run.sh --check --data-date <a recent day> ~/pyg-daily   # checks, runs nothing
+bin/schedule_run.sh --dry-run ~/pyg-daily                         # prints the two units
+bin/schedule_run.sh ~/pyg-daily            # turns on linger, installs, starts the timer
+```
+
+`--check` reads the settings, the checkout, the kernel and every source for the day, logs
+what the day would read, and stops.
+
+A user's systemd timer fires only while that user has a login session, unless *linger* is
+on for the user. `bin/schedule_run.sh` turns linger on (`loginctl enable-linger`) before it
+writes anything, so a new machine ends up with a timer that fires with nobody logged in.
+Where the system wants root for that, the script installs nothing and says to run
+`sudo loginctl enable-linger <user>` first. A day can also be run by hand, the same way the timer
+runs it, with `bin/daily_run.sh --data-date YYYY-MM-DD <schedule-dir>`.
+
+### What a day leaves, and what it removes
+
+- **Logs.** `<schedule-dir>/daily.log` has a line per step, and each day's run directory,
+  `runs/<RUN_ID>/`, holds its copy of `env.sh` and everything the launcher and the
+  publish step leave. Under the timer, `journalctl --user -u pyg-daily` has the same lines.
+- **Exit codes.** `0` published; `1` the staging, the run or the publish failed, and the
+  run stays; `2` refused before the run started; `3` skipped, because a source is not
+  there — upstream is late, or the market was shut. The unit counts `3` as success, so a
+  late upstream write does not read as a failed unit.
+- **Only what the schedule made is removed.** The newest `PYG_SCHEDULE_RETAIN_RUNS` runs
+  are kept whole. An older run loses its work directory and its run directory together,
+  once `bin/publish_run.py --published` finds it listed at the destination; a run that is
+  not listed stays. The staged mirror is shared with runs started by hand, so the
+  schedule keeps its own list of the copies its staging downloaded,
+  `<schedule-dir>/mirror-downloads.tsv`, and removes only those, once no day it runs reads
+  them. Runs started by hand, their work directories and whatever they staged are never
+  touched, and are cleaned up by hand.
+
+### Timing and cost
+
+- **The timer fires on this host's clock.** A run missed while the host was down starts
+  once it is back up, but only one: the day is worked out when the run starts, so run any
+  days missed in between by hand, with `--data-date`.
+- **Staging a new day downloads it once per node.** Where object-storage egress is billed,
+  that download is what a day costs; a day already staged on a node is not fetched again.
+- **The hour matters less than it did.** The constituents CSV is read from the data day's
+  dated copy first, so what time the run starts only matters when that copy is missing.
+
+To stop a schedule, `systemctl --user disable --now pyg-daily.timer`, then remove the two
+unit files from `~/.config/systemd/user/`.
+
 ## Sizing a large run
 
 Every default above is a **floor**, chosen so that a run on unfamiliar hardware fails

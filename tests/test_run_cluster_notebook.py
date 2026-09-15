@@ -118,8 +118,9 @@ class Harness:
                                'esac\n')
         _stub(self.bin / "hostname", f'echo {LOCAL}\n')
 
-    def run(self, run_id: str = RUN_ID, args=None, timeout: int = 90):
+    def run(self, run_id: str = RUN_ID, args=None, timeout: int = 90, env_extra=None):
         env = dict(os.environ)
+        env.update(env_extra or {})
         env["PATH"] = f"{self.bin}{os.pathsep}{env['PATH']}"
         env["RUN_ID"] = run_id
         env["HOME"] = str(self.tmp)
@@ -345,3 +346,73 @@ def test_a_second_supervisor_refuses_to_share_a_run_directory(harness):
         lock.close()
     assert r.returncode == 2
     assert "already using" in r.stderr
+
+
+# --------------------------------------------------------------------------- #
+# The data date
+#
+# A scheduled run cannot edit env.sh before each day, so the day comes in as
+# --data-date and env.sh builds its source paths from the three variables the
+# launcher exports, the way it already uses RUN_ID.
+# --------------------------------------------------------------------------- #
+
+def _record_data_date(h: Harness) -> None:
+    """Have env.sh write down the three variables as the launcher reads it."""
+    with open(h.rd / "env.sh", "a") as fh:
+        fh.write(f'printf "%s\\n" "${{PYG_DATA_YEAR-unset}}" "${{PYG_DATA_MONTH-unset}}" '
+                 f'"${{PYG_DATA_DAY-unset}}" > "{h.calls}/data-date.txt"\n')
+
+
+@pytest.mark.parametrize("flag_first", [True, False], ids=["flag-first", "flag-last"])
+def test_the_data_date_is_exported_before_env_sh_is_read(harness, flag_first):
+    h = harness()
+    _record_data_date(h)
+    flag = ["--data-date", "2026-09-09"]
+    args = [*flag, str(h.rd)] if flag_first else [str(h.rd), *flag]
+
+    assert h.run(args=args).returncode == 0
+    assert h.recorded("data-date").splitlines() == ["2026", "09", "09"]
+    assert "data date   : 2026-09-09" in (h.rd / "run-config.txt").read_text()
+
+
+def test_without_the_flag_env_sh_is_given_no_date(harness):
+    """Not even one left in the calling shell. Only the flag names a day, so a value
+    exported for an earlier run cannot quietly choose this run's sources."""
+    h = harness()
+    _record_data_date(h)
+    inherited = {"PYG_DATA_YEAR": "1999", "PYG_DATA_MONTH": "01", "PYG_DATA_DAY": "01"}
+
+    assert h.run(env_extra=inherited).returncode == 0
+    assert h.recorded("data-date").splitlines() == ["unset", "unset", "unset"]
+    assert "data date" not in (h.rd / "run-config.txt").read_text()
+
+
+@pytest.mark.parametrize("bad", ["2026-9-9", "2026-02-30", "09/09/2026", "yesterday", ""])
+def test_a_malformed_data_date_is_refused_before_the_run_claims_anything(harness, bad):
+    h = harness()
+
+    r = h.run(args=["--data-date", bad, str(h.rd)])
+    assert r.returncode == 2
+    assert "YYYY-MM-DD" in r.stderr
+    assert not (h.rd / ".lock").exists()
+    assert not (h.rd / "run.log").exists()
+    assert h.recorded("netsample") == ""
+
+
+def test_an_unknown_option_is_refused(harness):
+    h = harness()
+
+    r = h.run(args=["--data-day", "2026-09-09", str(h.rd)])
+    assert r.returncode == 2
+    assert "--data-day" in r.stderr
+
+
+def test_the_run_directory_is_exported_before_env_sh_is_read(harness):
+    """So env.sh can put the event log and stall captures inside it without naming
+    it, which is what lets one env.sh serve a new run directory every day."""
+    h = harness()
+    with open(h.rd / "env.sh", "a") as fh:
+        fh.write(f'printf "%s\\n" "${{PYG_RUN_DIR-unset}}" > "{h.calls}/run-dir.txt"\n')
+
+    assert h.run(args=[f"{h.rd}/"]).returncode == 0
+    assert h.recorded("run-dir").strip() == str(h.rd)

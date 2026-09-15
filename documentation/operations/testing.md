@@ -206,7 +206,7 @@ to reach the same point once.
 notebook against the cluster and leaves a report behind however it ends:
 
 ```bash
-bin/run_cluster_notebook.sh <run-dir>
+bin/run_cluster_notebook.sh [--data-date YYYY-MM-DD] <run-dir>
 ```
 
 The run directory holds everything about *this run* and nothing about the code:
@@ -218,6 +218,15 @@ meant to prove go in `<run-dir>/extra-checks.sh`, from
 [`bin/profiles/extra-checks.example.sh`](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/blob/master/bin/profiles/extra-checks.example.sh).
 The same split as the sizing profiles: what is general is tracked, what
 identifies a deployment is sourced beside it.
+
+`--data-date` names the day the sources are cut from. The launcher exports it as
+`PYG_DATA_YEAR`, `PYG_DATA_MONTH` and `PYG_DATA_DAY` before it reads `env.sh`, as
+it does `RUN_ID`, so one `env.sh` can build its source paths for any day. Without
+the flag the three are unset, even when the calling shell has them, so a day left
+over from an earlier run cannot choose this run's sources. A date that is not a
+real `YYYY-MM-DD` is refused before the run starts. It exports `PYG_RUN_DIR` too,
+the run directory as an absolute path, so `env.sh` can put the event log and the
+stall captures inside it without naming it.
 
 It starts a 1 Hz network trace on every node ([`bin/netsample.py`](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/blob/master/bin/netsample.py))
 and a cluster sampler locally ([`bin/cluster_sampler.sh`](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/blob/master/bin/cluster_sampler.sh)),
@@ -307,8 +316,9 @@ upload tree, name by name and size by size, and `index.json` is written last.
 
 A run folder without `index.json` is a publish that did not finish. Running the
 same command again resumes it, because files already there at the right size are
-skipped. Nothing can be deleted from the prefix, which is why a dry run is the
-default.
+skipped. A run folder that has `index.json` is never sent again: if its tables did
+not finish, running again sends only the tables. Nothing can be deleted from the
+prefix, which is why a dry run is the default.
 
 The [query tables](../reference/tables.md) go to a second destination in the
 same command. They are keyed by day rather than by run, so they get their own
@@ -322,10 +332,18 @@ refused before anything is written.
 `PYG_PUBLISH_DATA_DAY` names the day the sources were cut from. It is needed only
 when the day-level source paths in the manifests name more than one day. The exit
 code goes to `<run-dir>/publish.done` and the output to `<run-dir>/publish.log`:
-`0` published, `1` the upload or its check failed, `2` refused before anything
-was written. The layout it writes is under
+`0` published; `1` the upload or its check failed, including a tables root that
+cannot be listed once the run is up, and running again resumes it; `2` refused,
+and running again as it is will not change that. A refusal writes nothing, except
+when the run went up and its day of tables was already published. The layout it
+writes is under
 [Published Runs](../reference/outputs.md#published-runs), and
 `tests/test_publish_run.py` runs it against a stub `aws` CLI.
+
+`bin/publish_run.py <run-dir> --published` only asks. It exits `0` when the
+destination lists the run's `index.json`, and the day's marker as well when the run
+wrote tables, and it writes nothing. A prune asks this instead of reading
+`publish.done`, because a rerun that is refused overwrites that file.
 
 ## Test tiers
 
