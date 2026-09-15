@@ -133,7 +133,7 @@ The published layout is the work directory with four changes:
 
 Unlike `--s3_archive_bucket`, which mirrors one build's `.pt`, metadata and manifest from inside the job in the work-directory shape, this copies a whole finished run: every variant, the node index, the enriched Parquet and the manifests.
 
-**`index.json`** is written last, so a run folder without one is a publish that did not finish. It records `run_id`, `dataset`, `time_period`, `data_day` (the day the sources were cut from, which `month=` cannot show), `sources`, `source_of_run` (the run directory's name), `published`, each variant's folder and `notebook_label` (the notebook's name for the leg that built it), and the files each variant folder holds.
+**`index.json`** is written last, so a run folder without one is a publish that did not finish. It records `run_id`, `dataset`, `time_period`, `data_day` (the day the sources were cut from, which `month=` cannot show), `sources`, `source_of_run` (the run directory's name), `published`, each variant's folder and `notebook_label` (the notebook's name for the leg that built it), and the files each variant folder holds. A [schedule](../operations/running-a-job.md#scheduled-runs) publishes a run a day into the same `month=` folder, so `data_day` is what tells a month's runs apart.
 
 **The query tables go somewhere else.** They are keyed by day rather than by
 run, and they outlive it — see [Query tables](tables.md). `index.json` names
