@@ -3,15 +3,17 @@
 WHY THIS IS WORTH A TEST
 ------------------------
 A timer installed wrong does not fail where anyone sees it: it never fires, or runs
-something other than the schedule it was meant for. And the rendered units are written
-outside the repository, where a value that should have stayed in an untracked env.sh
-would be easy to miss.
+something other than the schedule it was meant for. A user timer without linger is the
+same failure, since it stops firing once its user logs out. And the rendered units are
+written outside the repository, where a value that should have stayed in an untracked
+env.sh would be easy to miss.
 
 HOW
 ---
 The script runs for real with HOME in a temporary directory, so the units land under
 it, and systemctl, loginctl and systemd-analyze are stubs that record what they were
-asked. Nothing here touches the systemd manager of the machine running the tests.
+asked. The loginctl stub keeps linger in a file, so turning it on is observable. Nothing
+here touches the systemd manager or the login settings of the machine running the tests.
 """
 
 import os
@@ -38,7 +40,7 @@ def _stub(path: Path, body: str) -> Path:
 class Scheduler:
     """A schedule directory, a fake checkout, a home directory and stub systemd tools."""
 
-    def __init__(self, tmp_path: Path, name: str = "schedule"):
+    def __init__(self, tmp_path: Path, name: str = "schedule", linger: str = "no"):
         self.tmp = tmp_path
         self.home = tmp_path / "home"
         self.home.mkdir()
@@ -48,9 +50,19 @@ class Scheduler:
         _stub(self.repo / "bin" / "daily_run.sh", "exit 0\n")
         self.calls = tmp_path / "calls"
         self.calls.mkdir()
+        self.linger = tmp_path / "linger"
+        self.linger.write_text(f"{linger}\n")
         self.bin = tmp_path / "stubbin"
         _stub(self.bin / "systemctl", f'printf "%s\\n" "$*" >> "{self.calls}/systemctl.txt"\n')
-        _stub(self.bin / "loginctl", 'echo "${FAKE_LINGER:-yes}"\n')
+        _stub(self.bin / "loginctl",
+              f'printf "%s\\n" "$*" >> "{self.calls}/loginctl.txt"\n'
+              'case "$1" in\n'
+              f'  show-user) cat "{self.linger}" ;;\n'
+              '  enable-linger)\n'
+              '    [ -z "${FAKE_LINGER_DENIED:-}" ] || { echo "Access denied" >&2; exit 1; }\n'
+              f'    echo yes > "{self.linger}" ;;\n'
+              '  *) exit 1 ;;\n'
+              'esac\n')
         _stub(self.bin / "systemd-analyze",
               f'printf "%s\\n" "$*" >> "{self.calls}/systemd-analyze.txt"\n'
               '[ -z "${FAKE_BAD_CALENDAR:-}" ] || '
@@ -89,8 +101,11 @@ def test_a_dry_run_renders_the_calendar_it_was_given_and_installs_nothing(tmp_pa
     assert "Persistent=true" in r.stdout
     assert f'ExecStart="{s.repo}/bin/daily_run.sh" "{s.sd}"' in r.stdout
     assert "SuccessExitStatus=3" in r.stdout
+    assert "would turn on linger" in r.stdout
     assert not s.units.exists()
     assert s.recorded("systemctl") == ""
+    assert "enable-linger" not in s.recorded("loginctl")
+    assert s.linger.read_text().strip() == "no"
 
 
 def test_without_a_calendar_nothing_is_scheduled(tmp_path):
@@ -105,6 +120,7 @@ def test_without_a_calendar_nothing_is_scheduled(tmp_path):
         assert "PYG_SCHEDULE_ONCALENDAR" in r.stderr
     assert not s.units.exists()
     assert s.recorded("systemctl") == ""
+    assert "enable-linger" not in s.recorded("loginctl")
 
 
 def test_the_units_hold_no_value_the_schedule_directory_did_not_give(tmp_path):
@@ -134,7 +150,39 @@ def test_installing_writes_both_units_and_enables_the_timer(tmp_path):
     assert f"OnCalendar={CALENDAR}" in (s.units / "pyg-daily.timer").read_text()
     calls = s.recorded("systemctl").splitlines()
     assert calls[:2] == ["--user daemon-reload", "--user enable --now pyg-daily.timer"]
-    assert "linger" not in r.stdout
+
+
+def test_installing_turns_linger_on(tmp_path):
+    """Without linger a user timer fires only while its user is logged in, so on a new
+    machine the schedule would look installed and never run."""
+    s = Scheduler(tmp_path, linger="no")
+
+    r = s.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "enable-linger" in s.recorded("loginctl")
+    assert s.linger.read_text().strip() == "yes"
+    assert "turned on linger" in r.stdout
+
+
+def test_linger_that_is_already_on_is_left_as_it_is(tmp_path):
+    s = Scheduler(tmp_path, linger="yes")
+
+    r = s.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "enable-linger" not in s.recorded("loginctl")
+    assert "already on" in r.stdout
+
+
+def test_where_linger_cannot_be_turned_on_nothing_is_installed(tmp_path):
+    """A timer that looks armed and never fires is worse than no timer, so the units
+    are not written, and the message names the command that is needed first."""
+    s = Scheduler(tmp_path, linger="no")
+
+    r = s.run(FAKE_LINGER_DENIED="1")
+    assert r.returncode == 2
+    assert "sudo loginctl enable-linger" in r.stderr
+    assert not s.units.exists()
+    assert s.recorded("systemctl") == ""
 
 
 def test_a_calendar_systemd_cannot_read_is_refused_before_anything_is_written(tmp_path):
@@ -145,16 +193,7 @@ def test_a_calendar_systemd_cannot_read_is_refused_before_anything_is_written(tm
     assert "does not accept" in r.stderr
     assert not s.units.exists()
     assert s.recorded("systemctl") == ""
-
-
-def test_it_says_so_when_linger_is_off(tmp_path):
-    """Without linger a user timer fires only while that user is logged in, which on a
-    machine nobody sits at means hardly ever."""
-    s = Scheduler(tmp_path)
-
-    r = s.run(FAKE_LINGER="no")
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert "loginctl enable-linger" in r.stdout
+    assert "enable-linger" not in s.recorded("loginctl")
 
 
 def test_a_unit_name_that_is_not_plain_is_refused(tmp_path):
