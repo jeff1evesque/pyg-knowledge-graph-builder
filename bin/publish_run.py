@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Publish a finished cluster run to the published-runs prefix.
 
-    bin/publish_run.py <run-dir>            dry run: lay the upload out and show it
-    bin/publish_run.py <run-dir> --upload   upload, check the listing, then index.json
+    bin/publish_run.py <run-dir>              dry run: lay the upload out and show it
+    bin/publish_run.py <run-dir> --upload     upload, check the listing, then index.json
+    bin/publish_run.py <run-dir> --published  exit 0 only if the destination lists it all
 
 The job's work directory is not the published layout. It differs in four ways:
 
@@ -548,10 +549,7 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
     graphs = find_graphs(pyg)
     dataset, sources = dataset_name(enriched, f"{year}-{month}", env)
     day = data_day(work, env)
-    root = env.get("PYG_PUBLISH_ROOT", "").strip().rstrip("/")
-    if not root.startswith("s3://") or len(root) == len("s3://"):
-        raise Refused("set PYG_PUBLISH_ROOT to s3://BUCKET/PREFIX")
-    dst = f"{root}/{dataset}/{period_dirs}/{run_id}"
+    dst = f"{publish_root(env)}/{dataset}/{period_dirs}/{run_id}"
 
     # Resolved before anything is written: a run that produced tables and has
     # nowhere to send them should say so at the prompt, not after the .pt is up.
@@ -650,17 +648,61 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
     return 0
 
 
+def publish_root(env) -> str:
+    root = env.get("PYG_PUBLISH_ROOT", "").strip().rstrip("/")
+    if not root.startswith("s3://") or len(root) == len("s3://"):
+        raise Refused("set PYG_PUBLISH_ROOT to s3://BUCKET/PREFIX")
+    return root
+
+
+def check_published(rd: Path, env) -> int:
+    """0 when the destination lists the run's index.json, and the day marker too when
+    the run wrote tables. 1 when it does not, or the listing fails. Only lists.
+
+    A prune should ask this rather than read publish.done: a publish run again on a
+    finished run is refused, and publish.done then holds that refusal.
+    """
+    run_id, work = read_run(rd)
+    year, month = find_period(work)
+    period_dirs = f"year={year}/month={month}"
+    dataset, _ = dataset_name(work / "enriched" / period_dirs, f"{year}-{month}", env)
+    day = data_day(work, env)
+    wanted = [(f"{publish_root(env)}/{dataset}/{period_dirs}/{run_id}", INDEX)]
+    if tables_plan(work, day):
+        wanted.append((tables_destination(env, dataset), f"{TABLES_MARKER}/{day}.json"))
+    for where, marker in wanted:
+        try:
+            listed = published(where)
+        except Failed as why:
+            print(f"not confirmed: {why}")
+            return 1
+        if marker not in listed:
+            print(f"not published: {where}/{marker} is not listed")
+            return 1
+    print("published: " + ", ".join(f"{where}/{marker}" for where, marker in wanted))
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Publish a finished cluster run. Without --upload nothing is written.")
     parser.add_argument("run_dir")
-    parser.add_argument("--upload", action="store_true", help="write to the destination")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--upload", action="store_true", help="write to the destination")
+    mode.add_argument("--published", action="store_true",
+                      help="only say whether the run is published; exit 0 if it is")
     args = parser.parse_args(argv)
 
     rd = Path(args.run_dir).expanduser().resolve()
     if not rd.is_dir():
         print(f"no such run directory: {rd}", file=sys.stderr)
         return 2
+    if args.published:
+        try:
+            return check_published(rd, os.environ)
+        except Refused as why:
+            print(f"cannot tell: {why}")
+            return 2
     log = Log(rd / "publish.log")
     log(f"==== {'upload' if args.upload else 'dry run'} started {utc_now()} ====")
     try:
