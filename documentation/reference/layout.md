@@ -35,7 +35,7 @@ pyg-knowledge-graph-builder/
 │   │   │                                   # and the per-source stamp/counts
 │   │   ├── graph_store.py                  # One day's non-market triples as a
 │   │   │                                   # pyoxigraph store, for the traversals
-│   │   │                                   # edges/ answers badly
+│   │   │                                   # edges/ answers awkwardly
 │   │   ├── persistence.py                  # Interim Parquet + descriptor, the
 │   │   │                                   # final .pt/metadata/node index, and
 │   │   │                                   # the job manifest
@@ -52,12 +52,11 @@ pyg-knowledge-graph-builder/
 │   │   ├── __init__.py
 │   │   ├── pipeline.py                     # Main enrichment orchestrator
 │   │   ├── temporal_unifier.py             # Temporal entity unification
-│   │   ├── cross_source_linker.py          # Cross-source linking (BLS↔SEC↔Market↔NOAA)
+│   │   ├── cross_source_linker.py          # Cross-source linking: detection and hubs
 │   │   ├── intra_source_linker.py          # Main intra-source entry point
 │   │   ├── ontology_mapper.py              # Ontology mapping utilities
 │   │   └── intra_source/                   # Intra-source enrichment modules
 │   │       ├── __init__.py
-│   │       ├── base.py                     # Base classes/interfaces
 │   │       ├── bls_linker.py               # BLS orchestrator
 │   │       ├── sec_linker.py               # SEC orchestrator
 │   │       ├── market_linker.py            # Market orchestrator
@@ -67,19 +66,24 @@ pyg-knowledge-graph-builder/
 │   │       │   ├── patterns.py             # BLS_SECTOR_PATTERNS
 │   │       │   ├── correlations.py         # KNOWN_CORRELATIONS
 │   │       │   ├── measurements.py         # MEASUREMENT_TYPES
-│   │       │   └── base_enricher.py        # Dataset-specific enrichers
+│   │       │   ├── base_enricher.py        # Dataset-specific enrichers
+│   │       │   ├── temporal.py             # The period URIs BLS states
+│   │       │   └── cross_source.py         # BLS's state, census-region and causal links
 │   │       ├── sec/                        # SEC-specific components
 │   │       │   ├── __init__.py
 │   │       │   ├── patterns.py             # SEC_SECTOR_PATTERNS, SEC_VIOLATION_PATTERNS
-│   │       │   └── correlations.py         # SEC KNOWN_CORRELATIONS
+│   │       │   ├── correlations.py         # SEC KNOWN_CORRELATIONS
+│   │       │   └── cross_source.py         # SEC's company keys and SIC sectors
 │   │       ├── market/                     # Market-specific components (flat snapshot model)
 │   │       │   ├── __init__.py
 │   │       │   ├── patterns.py             # MARKET_SECTOR_PATTERNS, MARKET_OPTION_STRATEGY_PATTERNS
 │   │       │   ├── correlations.py         # Market KNOWN_CORRELATIONS
-│   │       │   └── measurements.py         # Market MEASUREMENT_TYPES
+│   │       │   ├── measurements.py         # Market MEASUREMENT_TYPES
+│   │       │   └── cross_source.py         # Market's company keys, GICS sectors, peers
 │   │       └── noaa/                       # NOAA-specific components
 │   │           ├── __init__.py
-│   │           └── patterns.py             # NOAA alert patterns
+│   │           ├── patterns.py             # NOAA alert patterns
+│   │           └── cross_source.py         # The states each alert affects
 │   ├── pyg_builder/                        # PyG construction modules
 │   │   ├── __init__.py
 │   │   ├── constructor.py                  # Orchestrates HeteroData construction
@@ -124,10 +128,22 @@ pyg-knowledge-graph-builder/
 │   │                                       # write_checksums_to_local() / _to_s3()
 │   │                                       # (checksums.json, written last);
 │   │                                       # derive_metadata_prefix() (naming convention)
+│   ├── sources/                            # One SourceSpec per data source, and
+│   │                                       # the per-source tables built from them
+│   │   ├── __init__.py                     # The registry, path matching and the
+│   │   │                                   # table builders
+│   │   ├── spec.py                         # SourceSpec
+│   │   ├── bls.py                          # One spec per source
+│   │   ├── sec.py
+│   │   ├── market.py
+│   │   └── noaa.py
 │   └── utils/
 │       ├── __init__.py
-│       └── rdf_utils.py                    # Namespace constants, URI helpers, canonical
-│                                           # namespace registry (NAMESPACE_PREFIXES,
+│       ├── namespaces.py                   # Namespace constants; imports nothing
+│       │                                   # from spark_jobs
+│       └── rdf_utils.py                    # URI helpers and the namespace tables
+│                                           # (NAMESPACE_PREFIXES, built from
+│                                           # spark_jobs/sources/, and the fixed
 │                                           # ONTOLOGY_NAMESPACE_INDICES)
 ├── tests/                                  # Unit and integration tests
 ├── documentation/                          # These pages (MkDocs reads from here,
@@ -143,25 +159,27 @@ pyg-knowledge-graph-builder/
 
 | Module | Role | Uses PySpark? |
 |--------|------|--------------|
-| `rdf_utils.py` | Namespace constants, URI string helpers, canonical `NAMESPACE_PREFIXES` and `ONTOLOGY_NAMESPACE_INDICES` registries (single source of truth for all PyG builder modules) | No (pure Python) |
+| `rdf_utils.py` | URI string helpers, edge-origin classification, and the canonical `NAMESPACE_PREFIXES` registry (single source of truth for all PyG builder modules), built from the source specs in `sources/`, and `ONTOLOGY_NAMESPACE_INDICES`, the fixed ontology-source slots of the first 26 namespaces. Re-exports every constant in `namespaces.py`, so imports from here keep working | No (pure Python) |
+| `namespaces.py` | The namespace constants: each source's vocabularies, the publisher vocabularies reused at their real URIs, and the namespaces this pipeline mints. Imports nothing from `spark_jobs`, which is what lets the source specs use them while `rdf_utils.py` builds its tables from those specs | No (pure Python) |
+| `sources/` | One `SourceSpec` per data source (`bls.py`, `sec.py`, `market.py`, `noaa.py`): its namespaces, path fragments, format, date predicates, mapping rows and edge relation fragments, and the functions the job calls for it (path check, identifier repair, linker, period collector, cross-source keys and steps). `__init__.py` holds the registry, matches each input path to one source, and builds the per-source tables from every spec: the namespace table and its source and enrichment subsets, the synthetic period prefixes, the ontology mapping rows and the edge relation fragments. See [Registering a source](sources.md#registering-a-source) | No (pure Python) |
 | `patterns.py` / `correlations.py` / `measurements.py` | Configuration dictionaries (sector keywords, correlation definitions) | No (pure Python) |
 | `pipeline.py` | Orchestrates enrichment steps, manages triples DataFrame | Yes |
 | `temporal_unifier.py` | Produces unified month/year/quarter triples | Yes |
 | `bls_linker.py`, `sec_linker.py`, `market_linker.py`, `noaa_linker.py` | Produce intra-source enrichment triples | Yes |
-| `cross_source_linker.py` | Produces cross-source enrichment triples | Yes |
+| `cross_source_linker.py` | The generic cross-source steps: which picked sources have data in the run, the sector keyword step, the company and region hubs, the steps that pair named sources, and the measurement types. Each source's side comes from its spec and lives in `intra_source/<source>/cross_source.py` | Yes |
 | `ontology_mapper.py` | Produces equivalence mapping triples | Yes |
 | `build_graph.py` | The entry point and the orchestration only: `main()`, the four execution modes, the enrichment and PyG-construction phases, the SparkSession, the work-dir preflight and the final banner. Everything it reads, writes or is configured by now lives in `graph/` | Yes (orchestration) |
-| `graph/config.py` | `JobConfig` — the job's whole contract with its caller: resolves every path the run reads and writes, and REJECTS a configuration that cannot work (a mode without its inputs, a staged mirror that is not there, an SEC prefix naming an unhandled feed) before Spark starts. Also `parse_args()`, `staged_local_path()`, `period_partition()`, and the probe that answers whether the PyG builder is importable | No (pure Python) |
-| `graph/loading.py` | The three ways triples get in — `load_ntriples_to_dataframe()` for `.nt`, `load_turtle_parquet_to_dataframe()` for Turtle blobs, and `load_source_triples()` which dispatches per source path, stamps each row with `source_label()` and unions the result. The stamp is what makes the `s3` and `local` input modes report identical per-source counts | Yes (heavy, pure Spark expressions) |
+| `graph/config.py` | `JobConfig` — the job's whole contract with its caller: resolves every path the run reads and writes, and REJECTS a configuration that cannot work (a mode without its inputs, a source path that matches no registered source or two, a staged mirror that is not there, an SEC prefix naming an unhandled feed) before Spark starts. Records the source each path belongs to and the sources the run picked. Also `parse_args()`, `staged_local_path()`, `period_partition()`, and the probe that answers whether the PyG builder is importable | No (pure Python) |
+| `graph/loading.py` | The three ways triples get in — `load_ntriples_to_dataframe()` for `.nt`, `load_turtle_parquet_to_dataframe()` for Turtle blobs, and `load_source_triples()` which reads each path in its source's format, applies that source's identifier repair, stamps each row with the source's name and unions the result. The stamp is what makes the `s3` and `local` input modes report identical per-source counts | Yes (heavy, pure Spark expressions) |
 | `graph/persistence.py` | Everything written down and read back: the interim enriched Parquet and its `dataset.json` descriptor (how a `pyg_only` run learns what the `enrichment_only` run read), the final `.pt` / metadata / node index written locally and mirrored to S3, and the job manifest. Also the digests: `_HashingWriter` hashes the `.pt` during the write that already happens, and `_artifact_records()` names each digested file relative to its period directory for `checksums.json` | Yes (writes are distributed; the `.pt` is driver-side) |
 | `graph/tables.py` | The query tables: `nodes/`, `edges/`, `edge_types/`, `facts/`, `entities/` and the wide `snapshots/`, each written under its own `day=` partition. Built over EVERYTHING the sources carried, with a node table of its own, because a run may build its `.pt` over a subset and the tables must not inherit that. See [Query tables](tables.md) | Yes (heavy, pure Spark expressions) |
-| `graph/graph_store.py` | One day's non-market triples as a pyoxigraph store, built on the driver by streaming the frame with `toLocalIterator()`. Answers the two-hop traversals a self-join over `edges/` answers badly. Market never enters it | No (driver-side, streamed) |
+| `graph/graph_store.py` | One day's non-market triples as a pyoxigraph store, built on the driver by streaming the frame with `toLocalIterator()`. Answers the two-hop traversals a self-join over `edges/` answers awkwardly. Market never enters it | No (driver-side, streamed) |
 | `graph/turtle.py` | One Turtle blob → the four triple columns (`turtle_to_rows()`, its skip policy, the blank-node labels that make a parse reproducible), and `turtle_batches_to_arrow()` — the bounded batching that replaced the array-returning UDF of [#380](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/issues/380). **The only module executors import for themselves**: `build_graph.py` is submitted by path, so its own functions ship by value and are never imported, while these are pickled by reference and really are imported inside the executor venv. Its imports are therefore pinned to what `requirements-executor.txt` carries, by `tests/test_executor_imports.py` | Yes (the parse itself runs on executors) |
 | `constructor.py` | Orchestrates PyG HeteroData construction from triples DataFrame (5 steps: node IDs, edge indices, node features, edge features, assembly); initializes `MetadataCollector`; calls `register_*` methods after each step; returns `(HeteroData, MetadataCollector)` | Yes (orchestration) |
 | `naming.py` | How a URI becomes a name and back: `prefixed_local_name_expr()` for the executors, `prefixed_local_name()` for the driver, `relation_to_predicate_uri()` for the inverse. Node types and relations are named by the same rule, and node_mapper, edge_mapper and `graph/tables.py` all take it from here — a query table's whole promise is that its relation resolves to the predicate `graph_schema.json` names | Yes (pure Spark expressions) |
 | `node_mapper.py` | Discovers node types, assigns per-type integer IDs via Window functions. `get_type_uri_mapping()` provides a small collect for metadata. Imports the naming rule from `naming.py` | Yes (heavy, pure Spark expressions) |
 | `edge_mapper.py` | Double-joins triples with node IDs, collects edge index tensors. Returns cached resolved edges DataFrame for reuse by `edge_feature_extractor.py`. `get_predicate_uri_mapping()` provides a small collect for metadata. Imports the naming rule and its inverse from `naming.py` | Yes (heavy, pure Spark expressions) |
-| `feature_extractor.py` | Builds ontology-aware node feature vectors via `VectorLayout` (proportionally scaled segments): extracts class hierarchy, property schema, and literal values on executors; collects sparse entries (chunked for large types); scatters into dense tensors on driver. During `build_features()`, collects normalization stats, ontology schema snapshot, and slot mapping into small Python objects via `_collect_*` methods. `get_metadata_artifacts()` returns these for `MetadataCollector`. Imports `ONTOLOGY_NAMESPACE_INDICES` from `rdf_utils.py`, and the collision report and class-identity guard from `collision_report.py` | Yes (heavy, pure Spark expressions) |
+| `feature_extractor.py` | Builds ontology-aware node feature vectors via `VectorLayout` (proportionally scaled segments): extracts class hierarchy, property schema, and literal values on executors; collects sparse entries (chunked for large types); scatters into dense tensors on driver. During `build_features()`, collects normalization stats, ontology schema snapshot, and slot mapping into small Python objects via `_collect_*` methods. `get_metadata_artifacts()` returns these for `MetadataCollector`. Imports `ONTOLOGY_NAMESPACE_INDICES` and the seed that hashes any later namespace from `rdf_utils.py`, and the collision report and class-identity guard from `collision_report.py` | Yes (heavy, pure Spark expressions) |
 | `edge_feature_extractor.py` | Builds derived edge feature vectors via `EdgeVectorLayout` (proportionally scaled segments): classifies edge types by category, extracts endpoint properties, calls the three segment encoders in `edge_encoders.py` on executors; collects sparse entries per edge type; scatters into dense tensors on driver. Reuses cached resolved edges from `edge_mapper.py` — no double-join replay. `get_encoding_config()` and `get_edge_classification()` provide metadata for `MetadataCollector`. Imports `NAMESPACE_PREFIXES` from `rdf_utils.py` | Yes (heavy, pure Spark expressions) |
 | `edge_encoders.py` | The three edge-vector segments, one function each: `encode_temporal_signals()`, `encode_numeric_contrast()` (with the cross-property fallback behind it) and `encode_relational_context()`. Each takes the edges of one type and returns lazy `(edge_idx, dim, value)` entries; every dim index comes from the `EdgeVectorLayout` handed in. `PropertyRows` and the row widths beside it describe the endpoint property frames `edge_feature_extractor.py` builds for them, which is why the dependency runs extractor → encoders and never back | Yes (pure Spark expressions, nothing collected) |
 | `vector_layout.py` | `VectorLayout` — turns `vector_dim` into the start index and width of every node-vector segment and sub-segment, and holds the proportions those widths come from. The encoders ask it for a slot and `metadata_writer.py` publishes the same layout, so a vector and the metadata describing it cannot disagree | No (pure Python) |
@@ -189,6 +207,6 @@ The pipeline is designed to handle:
 - **One parse per source** — the datatype markers are derived from the cached parse rather than from a second, uncached read of the same frame, so the rdflib UDF runs once per source instead of twice (measured: load phase 1,346.3s → 727.7s on identical input)
 - **Loaded partitions track the data, not the shuffle default** — the datatype markers are coalesced to one partition and unioned once after that cached parse, not once per source, so a vocabulary-sized frame no longer adds 200 partitions per source to the cached triples that every enrichment stage reads (see [Sizing a large run](../operations/running-a-job.md#sizing-a-large-run))
 - **Efficient literal isolation** — anti-join against node_id_df filters out edge triples before numeric parsing, avoiding wasted computation on URI-valued objects
-- **Canonical namespace registry** — `NAMESPACE_PREFIXES` and `ONTOLOGY_NAMESPACE_INDICES` in `rdf_utils.py` are the single source of truth, imported by `naming.py`, `feature_extractor.py`, and `edge_feature_extractor.py` to eliminate duplication
+- **Canonical namespace registry** — `NAMESPACE_PREFIXES` in `rdf_utils.py`, built from the source specs in `spark_jobs/sources/`, and the fixed `ONTOLOGY_NAMESPACE_INDICES` beside it are the single source of truth, imported by `naming.py`, `feature_extractor.py`, and `edge_feature_extractor.py` to eliminate duplication
 - **Negligible metadata overhead** — all metadata collect calls target small aggregated DataFrames (<5000 rows each); total metadata memory is under 1 MB; seven JSON files are written after the `.pt` file with no impact on tensor collection or HeteroData assembly
 

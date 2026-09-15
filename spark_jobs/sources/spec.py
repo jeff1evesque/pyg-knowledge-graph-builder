@@ -1,0 +1,181 @@
+"""What one data source declares about itself.
+
+The registry in spark_jobs/sources/__init__.py builds the pipeline's
+per-source tables from these, and the job calls a source's functions for the
+sources a run picks. This is its own module so the source modules can import
+it without importing the registry that imports them.
+"""
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Any, Callable, Mapping, Optional, Tuple
+
+# The edge-feature categories a source may give relation fragments to, in the
+# order the edge encoding config records them. "skip" marks relations that
+# never get features.
+RELATION_CATEGORIES: Tuple[str, ...] = (
+    "temporal", "option_stock", "escalation", "correlation", "causal",
+    "strategy", "skip",
+)
+
+# The formats a source path can be read in. --source_format takes the same
+# values (graph/config.py).
+SOURCE_FORMATS: Tuple[str, ...] = ("ntriples", "turtle_parquet")
+
+
+@dataclass(frozen=True)
+class RunOptions:
+    """The run settings a source's functions may read."""
+
+    sector_definitions_bucket: str = ""
+    sector_definitions_key: str = ""
+    source_data_day: str = ""
+
+
+@dataclass(frozen=True)
+class CompanyKeys:
+    """A source's side of the company hub. Any part may be None."""
+
+    # (entity, cik): entities that state their company's CIK.
+    entities: Any = None
+    # (entity, symbol): entities that name their company by its ticker.
+    symbols: Any = None
+    # (symbol, cik, priority): ticker pairings the source knows. Where two
+    # pairings disagree about a ticker, the lower priority wins.
+    symbol_ciks: Any = None
+
+
+@dataclass(frozen=True)
+class RegionKeys:
+    """A source's side of the region hub. Either part may be None."""
+
+    # (subject, predicate, object): links from the source's entities to a
+    # unified:{State}Region node, each under the predicate it has always used.
+    state_links: Any = None
+    # (entity, census_name, census_key): the source's own region entities that
+    # are one of the four census regions.
+    census_regions: Any = None
+
+
+@dataclass(frozen=True, eq=False)
+class SourceSpec:
+    """One data source, declared once.
+
+    Compared by identity, since each source has one spec. The mapping fields
+    are stored read-only, so nothing can edit a registered table in place.
+
+    The function fields import what they run inside their own bodies. The
+    registry is imported by rdf_utils, so a Spark import at the top of a source
+    module would reach every module that imports rdf_utils.
+    """
+
+    # The source's short name, as the loader and the per-source stats key it.
+    name: str
+    # Fragments that mark an input path as this source's.
+    path_fragments: Tuple[str, ...]
+    # (namespace, prefix) pairs, in NAMESPACE_PREFIXES order. A namespace that
+    # extends another must come before it (tests/test_namespaces.py).
+    namespaces: Tuple[Tuple[str, str], ...]
+    # Where this pipeline mints the source's enrichment terms. One of the
+    # namespaces above.
+    enrichment_namespace: str
+    # How log lines name the source. Defaults to the name.
+    label: str = ""
+    # The format this source's paths are read in. Empty means the run's
+    # --source_format.
+    source_format: str = ""
+    # Parquet columns that may hold this source's Turtle, in the order they
+    # are tried. Empty means the loader's TURTLE_COLUMN_CANDIDATES.
+    turtle_columns: Tuple[str, ...] = ()
+    # Date predicates that place the source's entities in time, and where the
+    # period individuals made from them are minted. Both empty for a source
+    # whose periods arrive as URIs, as BLS's do.
+    date_predicates: Tuple[str, ...] = ()
+    temporal_prefix: str = ""
+    # The source's rows of the ontology mapper's property and class tables.
+    property_mappings: Mapping[str, str] = field(default_factory=dict)
+    class_mappings: Mapping[str, str] = field(default_factory=dict)
+    # Edge-feature category -> fragments of the source's own relation names.
+    relation_fragments: Mapping[str, Tuple[str, ...]] = field(
+        default_factory=dict
+    )
+    # check_paths(paths): raise ValueError for a path of this source the job
+    # cannot read. Runs before Spark starts.
+    check_paths: Optional[Callable[..., None]] = None
+    # canonicalize(triples_df): the source's identifier repair, applied to the
+    # rows loaded from its own paths.
+    canonicalize: Optional[Callable[..., Any]] = None
+    # linker(spark, options): the source's intra-source linker, whose
+    # enrich(triples_df) returns new triples.
+    linker: Optional[Callable[..., Any]] = None
+    # temporal_collector(triples_df): frames of (temporal_uri, normalized_name,
+    # kind) for periods the source states as URIs rather than as dates.
+    temporal_collector: Optional[Callable[..., Any]] = None
+    # cross_source_inputs(options): keyword arguments the source adds to the
+    # cross-source linker, read on the driver before that phase starts.
+    cross_source_inputs: Optional[Callable[..., Any]] = None
+    # Namespaces whose URIs are this source's own entities. An entity under
+    # the matching id/ namespace counts too. Cross-source linking reads them to
+    # tell whether the source's data is in a run.
+    entity_namespaces: Tuple[str, ...] = ()
+    # Whether the sector keyword step may classify this source's entities by
+    # the words in their URIs. Off unless a source opts in, because a keyword
+    # inside a longer name makes a false claim: Birmingham_AL contains "ham".
+    sector_keywords: bool = False
+    # company_keys(context): the source's side of the company hub, as
+    # CompanyKeys.
+    company_keys: Optional[Callable[..., Any]] = None
+    # region_keys(context): the source's side of the region hub, as RegionKeys.
+    region_keys: Optional[Callable[..., Any]] = None
+    # sector_keys(context): triples placing the source's entities in a sector,
+    # each under the predicate that link has always used, or None.
+    sector_keys: Optional[Callable[..., Any]] = None
+    # Cross-source steps that pair this source with others, as (title, the
+    # names of the sources the step needs, step). step(context) returns triples
+    # or None, and runs only when every source it needs is in the run.
+    cross_source_steps: Tuple[Tuple[str, Tuple[str, ...], Callable[..., Any]], ...] = ()
+    # Source classes whose entities cross-source linking also types as their
+    # class_mappings target, so measurements of one kind share a type.
+    measurement_types: Tuple[str, ...] = ()
+
+    def __post_init__(self):
+        for name in ("property_mappings", "class_mappings", "relation_fragments"):
+            object.__setattr__(
+                self, name, MappingProxyType(dict(getattr(self, name)))
+            )
+        if not self.label:
+            object.__setattr__(self, "label", self.name)
+
+        if self.enrichment_namespace not in {ns for ns, _ in self.namespaces}:
+            raise ValueError(
+                f"source {self.name!r}: enrichment namespace "
+                f"{self.enrichment_namespace!r} is not one of its namespaces"
+            )
+        if self.source_format and self.source_format not in SOURCE_FORMATS:
+            raise ValueError(
+                f"source {self.name!r}: unknown source format "
+                f"{self.source_format!r}, expected one of {list(SOURCE_FORMATS)}"
+            )
+        if bool(self.date_predicates) != bool(self.temporal_prefix):
+            raise ValueError(
+                f"source {self.name!r}: set date predicates and a temporal "
+                "prefix together, or neither"
+            )
+        unknown = sorted(set(self.relation_fragments) - set(RELATION_CATEGORIES))
+        if unknown:
+            raise ValueError(
+                f"source {self.name!r}: unknown edge-feature categories {unknown}"
+            )
+        strays = sorted(
+            set(self.entity_namespaces) - {ns for ns, _ in self.namespaces}
+        )
+        if strays:
+            raise ValueError(
+                f"source {self.name!r}: entity namespaces {strays} are not "
+                "among its namespaces"
+            )
+        unmapped = sorted(set(self.measurement_types) - set(self.class_mappings))
+        if unmapped:
+            raise ValueError(
+                f"source {self.name!r}: measurement types {unmapped} have no "
+                "class_mappings row"
+            )

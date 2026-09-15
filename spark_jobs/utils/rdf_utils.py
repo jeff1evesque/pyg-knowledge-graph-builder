@@ -4,122 +4,61 @@ Foundation for CPI data processing
 """
 
 from rdflib import Namespace, URIRef
-from rdflib.namespace import RDFS, OWL
-from typing import Dict, List, Tuple
+from rdflib.namespace import OWL, RDFS
+from typing import Dict, List, Optional, Sequence, Tuple
 import logging
+
+from spark_jobs import sources
+
+# The namespace constants live in spark_jobs/utils/namespaces.py, which imports
+# nothing from spark_jobs. The source specs import them from there and this
+# module builds its tables from those specs, so defining them here would be an
+# import cycle. They are re-exported so every existing import keeps working.
+from spark_jobs.utils.namespaces import (  # noqa: F401
+    ALERT,
+    ATOM,
+    BLS_COMMON,
+    BLS_ENRICHMENT,
+    CAP,
+    CPI,
+    ECI,
+    EMPSIT,
+    GEOSPARQL,
+    IDENTIFIER_BASE,
+    JOLTS,
+    LAUS,
+    MARKET_ENRICHMENT,
+    MARKET_QUOTES,
+    METRO,
+    NOAA_ENRICHMENT,
+    ONTOLOGY_BASE,
+    PPI,
+    REALER,
+    SEC_COMMON,
+    SEC_ENRICHMENT,
+    SEC_FILINGS,
+    SOURCE_BASE,
+    SOURCE_TEMPORAL,
+    UNIFIED,
+    WEATHER,
+    WKYENG,
+    XIMPIM,
+    identifier_namespace,
+)
 
 logger = logging.getLogger(__name__)
 
 # ============================================
-# SOURCE VOCABULARIES — terms the SCRAPERS mint
+# SOURCE VOCABULARIES
 # ============================================
-# These used to sit on the upstream providers' own domains. None of those
-# organizations defined these terms: the upstreams publish tabular and
-# document formats, not RDF, and every class and property below was invented
-# by the upstream scrapers.
+# Every source's own vocabulary, for the invariant tests. These are minted by
+# the upstream RML mappers rather than by this pipeline, which is why they are
+# not in ENRICHMENT_NAMESPACES -- an edge using one of them is an observed
+# source fact, not something the pipeline inferred -- but they are still ours,
+# so they are held to the same rule about which domain they may live on.
 #
-# They now resolve to a domain we control, split so that a reader can tell a
-# term from a thing by looking at the URI:
-#
-#   https://jefflevesque.com/ontology/{source}/   classes and properties
-#   https://jefflevesque.com/id/{source}/         individuals
-#
-# Node types come from rdf:type objects and edges from predicates, both of
-# which are terms, so the constants below are what the mappers need. Code that
-# asks which source an ENTITY belongs to needs the id/ side instead — see
-# SOURCE_IDENTIFIERS and identifier_namespace() further down.
-SOURCE_BASE = "https://jefflevesque.com/ontology/"
-
-CPI = Namespace(f"{SOURCE_BASE}cpi/")
-PPI = Namespace(f"{SOURCE_BASE}ppi/")
-ECI = Namespace(f"{SOURCE_BASE}eci/")
-EMPSIT = Namespace(f"{SOURCE_BASE}empsit/")
-JOLTS = Namespace(f"{SOURCE_BASE}jolts/")
-LAUS = Namespace(f"{SOURCE_BASE}laus/")
-METRO = Namespace(f"{SOURCE_BASE}metro/")
-REALER = Namespace(f"{SOURCE_BASE}realer/")
-WKYENG = Namespace(f"{SOURCE_BASE}wkyeng/")
-XIMPIM = Namespace(f"{SOURCE_BASE}ximpim/")
-
-# Shared BLS classes (Month, Year, Industry, Region, ...) that the hand-
-# authored table schemas declare once for every category. 'bls-common' rather
-# than 'bls' because BLS_ENRICHMENT below already owns .../ontology/bls/ —
-# merging the two would make observed BLS facts read as pipeline-inferred.
-BLS_COMMON = Namespace(f"{SOURCE_BASE}bls-common/")
-
-# ============================================
-# SEC data namespaces
-# ============================================
-# 'sec-*' rather than 'sec' for the same reason: SEC_ENRICHMENT owns
-# .../ontology/sec/.
-
-# Only the filings feed is collected. sec-administrative-proceedings,
-# sec-litigation and sec-trading-suspensions were removed with the linker paths
-# that keyed on them: upstream publishes no administrative-proceedings or
-# trading-suspensions feed at all, and feed=litigation was last written 787 days
-# ago. Code keyed on a source nobody collects cannot be distinguished from
-# working code by any test, because both produce nothing — which is how two of
-# the defects on this branch stayed hidden.
-SEC_COMMON = Namespace(f"{SOURCE_BASE}sec-common/")
-SEC_FILINGS = Namespace(f"{SOURCE_BASE}sec-filings/")
-
-# ============================================
-# Market data namespace
-# ============================================
-# ONE market vocabulary. Equity and option quotes arrive together in the
-# upstream intraday snapshots -- EquitySnapshot / OptionSnapshot, flat, with
-# captureTime, askPrice, strikePrice, delta -- and that is the only market RDF
-# published anywhere.
-#
-# There used to be a second, MARKET_FEEDS (PriceObservation / OptionContract,
-# observedAt / expirationDate) from an HTML feed scraper, plus a
-# MARKET_FEEDS_OPTIONS beside it. No such data exists in either bucket, so both
-# are gone along with the code that read them. Their presence was expensive:
-# one constant asked to name both models is what made market enrichment
-# silently produce nothing in the first place, and every market change since
-# had to reason about which of two vocabularies it meant.
-MARKET_QUOTES = Namespace(f"{SOURCE_BASE}market-quotes/")
-
-# ============================================
-# NOAA WEATHER DATA NAMESPACES
-# ============================================
-# Verified against 275 live alerts from api.weather.gov: NWS publishes
-# wx:Alert plus ~30 lowercase properties (affectedZones, areaDesc, geocode).
-# Not one of the ~29 terms the scraper emits is among them, and their live
-# JSON-LD context declares api.weather.gov/ontology# as @vocab — so minting
-# our terms there put our inventions inside a live publisher's vocabulary.
-#
-# Likewise CAP: OASIS registered urn:oasis:names:tc:emergency:cap:1.2 as an
-# XML namespace naming lowercase ELEMENTS. There is no OASIS CAP RDF
-# vocabulary, so cap:hasAreaDescription and cap:AlertMessage are our model OF
-# CAP rather than CAP itself.
-
-WEATHER = Namespace(f"{SOURCE_BASE}weather/")
-CAP = Namespace(f"{SOURCE_BASE}cap-model/")
-
-# Alert instances — real identifiers for real NWS alerts. Genuinely theirs,
-# unlike the vocabulary that used to sit alongside them, so left alone.
-ALERT = Namespace("https://api.weather.gov/alerts/")
-
-# GeoSPARQL namespace (used by CAP Area alignment). Really OGC's.
-GEOSPARQL = Namespace("http://www.opengis.net/ont/geosparql#")
-
-# Atom feed namespace
-ATOM = Namespace("http://www.w3.org/2005/Atom/")
-
-# Every source vocabulary above, for the invariant tests. These are minted by
-# the SCRAPERS rather than by this pipeline, which is why they are not in
-# ENRICHMENT_NAMESPACES -- an edge using one of them is an observed source
-# fact, not something the pipeline inferred -- but they are still ours, so
-# they are held to the same rule about which domain they may live on.
-SOURCE_VOCABULARIES: Tuple[str, ...] = (
-    str(CPI), str(PPI), str(ECI), str(EMPSIT), str(JOLTS),
-    str(LAUS), str(METRO), str(REALER), str(WKYENG), str(XIMPIM),
-    str(BLS_COMMON),
-    str(SEC_COMMON), str(SEC_FILINGS),
-    str(MARKET_QUOTES),
-    str(WEATHER), str(CAP),
-)
+# Built from the registered source specs in spark_jobs/sources/.
+SOURCE_VOCABULARIES: Tuple[str, ...] = sources.source_vocabularies()
 
 # Vocabularies their publishers really did define, and which we therefore
 # reuse at their real URIs. Reusing a real term is correct RDF and is what
@@ -136,110 +75,18 @@ PUBLISHER_VOCABULARIES: Tuple[str, ...] = (
     str(ATOM),
 )
 
-# ============================================
-# SOURCE IDENTIFIERS — individuals the SCRAPERS mint
-# ============================================
-# The namespaces above name classes and properties. These name the things
-# themselves: id/cpi/February is the month, ontology/cpi/Month is its class.
-#
-# The header of this module used to say only the TERM namespaces were needed
-# here, because "the id/ namespaces appear only as subjects and objects". That
-# is true of node typing and edge naming, and false of everything that asks
-# "which source is this ENTITY from" — intra-source detection, per-source
-# filtering, temporal collection. Those must match an entity URI against the
-# id/ namespace; matching the ontology/ one silently matches nothing, since no
-# individual lives there. Before the term/individual split a single namespace
-# covered both and the distinction did not exist, so every such call site was
-# written against the term namespace and kept working. They do not any more.
-#
-# Derived from the term namespace rather than written out, so the two cannot
-# drift apart: a new source vocabulary gets its identifier namespace for free.
-IDENTIFIER_BASE = "https://jefflevesque.com/id/"
-
-
-def identifier_namespace(term_namespace: str) -> str:
-    """The id/ namespace matching a term namespace.
-
-    ``https://jefflevesque.com/ontology/cpi/`` -> ``https://jefflevesque.com/id/cpi/``
-
-    Raises rather than guessing for anything outside SOURCE_BASE: a publisher
-    vocabulary (api.weather.gov/alerts/) has no id/ counterpart, and quietly
-    returning something plausible would reintroduce the silent-no-match bug
-    this function exists to prevent.
-    """
-    if not term_namespace.startswith(SOURCE_BASE):
-        raise ValueError(
-            f"{term_namespace!r} is not a source vocabulary under {SOURCE_BASE!r}; "
-            "it has no identifier namespace"
-        )
-    return f"{IDENTIFIER_BASE}{term_namespace[len(SOURCE_BASE):]}"
-
-
 # Every source vocabulary's identifier counterpart, same order as
 # SOURCE_VOCABULARIES. Pinned by test_namespaces.py.
 SOURCE_IDENTIFIERS: Tuple[str, ...] = tuple(
     identifier_namespace(ns) for ns in SOURCE_VOCABULARIES
 )
 
-# ============================================
-# MINTED NAMESPACES — terms this project invents
-# ============================================
-# Everything below is a term WE define, so every one of them lives under a
-# domain we control. The namespaces above are the publishers' own vocabularies
-# and stay exactly where they are: those really are their terms.
-#
-# They used to sit under the publishers' domains (bls.gov/enrichment/,
-# sec.gov/enrichment/, noaa.gov/enrichment/, financial-data.org/enrichment/)
-# and under example.org. Both were wrong, in different ways:
-#
-#   * a URI under bls.gov claims BLS is the authority for that term. Nobody at
-#     BLS defined bls_enrichment:RateMeasurement -- we did. Anyone consuming
-#     this graph, or federating it with real BLS-published RDF, is entitled to
-#     believe the URI and would be wrong. It would also collide outright if
-#     BLS ever published under that path.
-#   * example.org is reserved by RFC 2606 for documentation. It cannot lie
-#     about ownership, but it is nobody's, so another project using it (which
-#     is exactly what it is for) collides with us, and a reviewer cannot tell
-#     a deliberate choice from a leftover placeholder.
-#
-# ONE base, sub-pathed by concern. Changing it is a one-line edit here --
-# nothing downstream hardcodes a namespace string -- but it is not free: these
-# URIs are hashed into feature slots, so moving them moves every slot and
-# changes encoding_config.json's contract digest. That is the intended signal
-# (graphs built either side are not comparable), not a side effect.
-ONTOLOGY_BASE = "https://jefflevesque.com/ontology/"
-
-BLS_ENRICHMENT = Namespace(f"{ONTOLOGY_BASE}bls/")
-SEC_ENRICHMENT = Namespace(f"{ONTOLOGY_BASE}sec/")
-NOAA_ENRICHMENT = Namespace(f"{ONTOLOGY_BASE}noaa/")
-MARKET_ENRICHMENT = Namespace(f"{ONTOLOGY_BASE}market/")
-UNIFIED = Namespace(f"{ONTOLOGY_BASE}unified/")
-
-# Types for the SOURCE-side temporal entities (cpi:February, eci:2024, ...).
-# Those URIs are referenced by measurements but carry no rdf:type of their own,
-# so node_mapper never made them nodes and every hasMonth/hasYear/hasStart*/
-# hasEnd* triple pointing at them was dropped during edge resolution. The
-# TemporalUnifier types them (see _create_source_temporal_types).
-#
-# Deliberately NOT under a *_ENRICHMENT namespace: an enrichment prefix would
-# make classify_edge_origin() read those measurement->month edges as pipeline-
-# inferred, when they are observed source facts — only the TYPE is ours. And
-# deliberately distinct from UNIFIED: collapsing both onto UnifiedMonth would
-# make `unified:February sameAs cpi:February` a link between two nodes of the
-# same type, erasing which one is canonical.
-#
-# Under the shared base like the rest, but NOT in ENRICHMENT_NAMESPACES --
-# that list, not the base URI, is what classify_edge_origin() reads. Sharing a
-# base with the enrichment namespaces must not start classifying these edges
-# as pipeline-inferred; see the origin test that pins it.
-SOURCE_TEMPORAL = Namespace(f"{ONTOLOGY_BASE}temporal/")
-
 # Where the synthetic temporal INDIVIDUALS live.
 #
-# SOURCE_TEMPORAL above holds the TYPES (SourceMonth, SourceYear,
-# SourceQuarter). temporal_unifier mints one individual per period per source
-# -- November, 2024 -- and those are things, not terms, so they belong under
-# the identifier base rather than alongside their own types.
+# SOURCE_TEMPORAL holds the TYPES (SourceMonth, SourceYear, SourceQuarter).
+# temporal_unifier mints one individual per period per source -- November,
+# 2024 -- and those are things, not terms, so they belong under the identifier
+# base rather than alongside their own types.
 #
 # They were minted at https://www.sec.gov/temporal/ and
 # https://www.noaa.gov/temporal/, which is the same false-provenance defect as
@@ -250,18 +97,16 @@ SOURCE_TEMPORAL = Namespace(f"{ONTOLOGY_BASE}temporal/")
 # the unifier deliberately links them -- collapsing them here would pre-empt
 # the sameAs step and hide which source observed what.
 #
-# IDENTIFIER_BASE is defined with the source identifiers above -- these are
-# individuals like any other, minted by this pipeline rather than a scraper.
-# market-quotes is keyed by its vocabulary rather than plain "market" so the
-# URI keeps saying which model observed the period. There was a market-feeds
-# key here too, and it was the ONLY market key -- quote snapshots had nowhere
-# to mint a period and never reached the spine at all, while the feeds key
-# pointed at data that does not exist.
-SYNTHETIC_TEMPORAL_IDS: Dict[str, str] = {
-    "sec": f"{IDENTIFIER_BASE}temporal/sec/",
-    "noaa": f"{IDENTIFIER_BASE}temporal/noaa/",
-    "market-quotes": f"{IDENTIFIER_BASE}temporal/market-quotes/",
-}
+# IDENTIFIER_BASE is defined with the source identifiers in namespaces.py --
+# these are individuals like any other, minted by this pipeline rather than
+# upstream. market-quotes is keyed by its vocabulary rather than plain "market"
+# so the URI keeps saying which model observed the period. There was a
+# market-feeds key here too, and it was the ONLY market key -- quote snapshots
+# had nowhere to mint a period and never reached the spine at all, while the
+# feeds key pointed at data that does not exist.
+#
+# Built from each source spec's temporal_prefix.
+SYNTHETIC_TEMPORAL_IDS: Dict[str, str] = sources.synthetic_temporal_ids()
 
 # Statements ABOUT the pipeline's own derivations rather than about the data.
 #
@@ -285,9 +130,10 @@ SYNTHETIC_TEMPORAL_IDS: Dict[str, str] = {
 # Deliberately NOT a *_ENRICHMENT namespace: these are not claims about
 # entities, so classify_edge_origin() must never see them as inferred links.
 # Also deliberately absent from NAMESPACE_PREFIXES below: nothing in this
-# namespace is ever an rdf:type, so it can never name a node type, and adding
-# it would move ONTOLOGY_NAMESPACE_INDICES and change the encoding contract
-# digest -- invalidating every trained model to describe URIs no encoder sees.
+# namespace is ever an rdf:type, so it can never name a node type, and needs
+# neither a prefix nor an ontology-source slot. Registering it would move no
+# slot and leave the encoding contract digest alone (see
+# ONTOLOGY_NAMESPACE_INDICES); it would only place URIs no encoder sees.
 PROVENANCE = Namespace(f"{ONTOLOGY_BASE}provenance/")
 
 # Subject of the derivedBy statements: the axiom SET being described, not any
@@ -331,6 +177,10 @@ PROV_ROUTE_LABELS = {
 # Single source of truth for all PyG builder modules (node_mapper,
 # edge_mapper, feature_extractor). Each entry is (namespace_uri, prefix).
 #
+# Built from the registered source specs: each source's namespaces in
+# registration order, then the shared ones (see spark_jobs/sources/). The
+# result is pinned entry for entry by tests/test_source_registry.py.
+#
 # Order matters for node_mapper and edge_mapper: where one namespace is a
 # string prefix of another, the longer must appear first, or startsWith
 # matching claims the URI for the shorter one and names the node type after
@@ -344,55 +194,81 @@ PROV_ROUTE_LABELS = {
 # and noaa.gov/ vs its /enrichment/ child), so the ordering hazard here is
 # smaller now, not larger. The invariant test stands either way.
 #
-# The index position in this list is used by feature_extractor for
-# ontology source membership encoding.
+# A namespace's position here used to be its ontology-source feature slot. It
+# no longer is; see ONTOLOGY_NAMESPACE_INDICES below.
 
-NAMESPACE_PREFIXES: List[Tuple[str, str]] = [
-    (str(CPI), "cpi"),
-    (str(PPI), "ppi"),
-    (str(ECI), "eci"),
-    (str(EMPSIT), "empsit"),
-    (str(JOLTS), "jolts"),
-    (str(LAUS), "laus"),
-    (str(METRO), "metro"),
-    (str(REALER), "realer"),
-    (str(WKYENG), "wkyeng"),
-    (str(XIMPIM), "ximpim"),
-    (str(BLS_COMMON), "bls_common"),
-    (str(BLS_ENRICHMENT), "bls_enrichment"),
-    (str(SEC_FILINGS), "filings"),
-    (str(SEC_COMMON), "sec_common"),
-    (str(SEC_ENRICHMENT), "sec_enrichment"),
-    (str(MARKET_ENRICHMENT), "market_enrichment"),
-    (str(MARKET_QUOTES), "market_quotes"),
-    (str(CAP), "cap"),
-    (str(WEATHER), "weather"),
-    (str(ALERT), "alert"),
-    (str(NOAA_ENRICHMENT), "noaa_enrichment"),
-    (str(GEOSPARQL), "geosparql"),
-    (str(UNIFIED), "unified"),
-    (str(SOURCE_TEMPORAL), "temporal"),
-    (str(OWL), "owl"),
-    (str(RDFS), "rdfs"),
-]
+NAMESPACE_PREFIXES: List[Tuple[str, str]] = sources.namespace_prefixes()
 
-# Derived: namespace → integer index for feature_extractor ontology
-# source membership encoding. Built automatically from NAMESPACE_PREFIXES.
+# ============================================
+# ONTOLOGY-SOURCE FEATURE SLOTS
+# ============================================
+# The 26 namespaces registered before #406, each with the slot index it had
+# then: its position in NAMESPACE_PREFIXES. Written out rather than derived, so
+# registering a source, or registering sources in another order, moves none
+# of them. The encoding contract records this table, so moving an entry
+# changes contract_digest, and so does re-homing one of these namespaces.
+#
+# A namespace registered later gets its slot from a seeded hash of its URI
+# instead (feature_extractor), the way the edge vector places namespaces, so
+# its slot does not depend on what else is registered. The cost is that it can
+# land on a slot another namespace uses, and when the segment has fewer dims
+# than there are namespaces it always does. Production runs use 16.
 ONTOLOGY_NAMESPACE_INDICES: List[Tuple[str, int]] = [
-    (ns, idx) for idx, (ns, _prefix) in enumerate(NAMESPACE_PREFIXES)
+    (str(CPI), 0),
+    (str(PPI), 1),
+    (str(ECI), 2),
+    (str(EMPSIT), 3),
+    (str(JOLTS), 4),
+    (str(LAUS), 5),
+    (str(METRO), 6),
+    (str(REALER), 7),
+    (str(WKYENG), 8),
+    (str(XIMPIM), 9),
+    (str(BLS_COMMON), 10),
+    (str(BLS_ENRICHMENT), 11),
+    (str(SEC_FILINGS), 12),
+    (str(SEC_COMMON), 13),
+    (str(SEC_ENRICHMENT), 14),
+    (str(MARKET_ENRICHMENT), 15),
+    (str(MARKET_QUOTES), 16),
+    (str(CAP), 17),
+    (str(WEATHER), 18),
+    (str(ALERT), 19),
+    (str(NOAA_ENRICHMENT), 20),
+    (str(GEOSPARQL), 21),
+    (str(UNIFIED), 22),
+    (str(SOURCE_TEMPORAL), 23),
+    (str(OWL), 24),
+    (str(RDFS), 25),
 ]
+
+# The seed a namespace outside that table hashes its URI with, recorded in the
+# encoding contract beside it. 700 is next in the node vector's series: class
+# hierarchy 100, property presence 200, domain and range 300, property
+# hierarchy 400, numeric values 500, categorical values 600.
+ONTOLOGY_NAMESPACE_HASH_SEED = 700
+
+
+def hashed_ontology_namespaces(
+    namespace_prefixes: Optional[Sequence[Tuple[str, str]]] = None,
+) -> List[str]:
+    """The registered namespaces that get a hashed slot, in table order: those
+    not in ONTOLOGY_NAMESPACE_INDICES. None of today's.
+
+    ``namespace_prefixes`` defaults to NAMESPACE_PREFIXES. A test passes a table
+    with a toy source in it.
+    """
+    frozen = {namespace for namespace, _index in ONTOLOGY_NAMESPACE_INDICES}
+    table = NAMESPACE_PREFIXES if namespace_prefixes is None else namespace_prefixes
+    return [namespace for namespace, _prefix in table if namespace not in frozen]
 
 
 # ============================================
 # EDGE ORIGIN CLASSIFICATION
 # ============================================
 # Namespaces this pipeline mints itself, as opposed to reading from a source.
-ENRICHMENT_NAMESPACES: Tuple[str, ...] = (
-    str(BLS_ENRICHMENT),
-    str(SEC_ENRICHMENT),
-    str(NOAA_ENRICHMENT),
-    str(MARKET_ENRICHMENT),
-)
+# One per registered source spec.
+ENRICHMENT_NAMESPACES: Tuple[str, ...] = sources.enrichment_namespaces()
 
 ORIGIN_RAW = "raw"
 ORIGIN_ENRICHMENT = "enrichment"

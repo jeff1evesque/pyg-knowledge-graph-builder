@@ -173,7 +173,7 @@ rdflib Namespace objects are used as **URI string constants** in the enrichment 
 
 ### Namespaces: whose terms are whose
 
-`rdf_utils.py` holds two kinds of namespace, and the distinction is not cosmetic — a URI names the authority for the term.
+`spark_jobs/utils/namespaces.py` holds two kinds of namespace, and the distinction is not cosmetic — a URI names the authority for the term.
 
 **Publishers' vocabularies** (`cpi:`, `ppi:`, `jolts:`, `cap:`, `nws:`, `sec.gov/filings#`, …) stay on their own domains. Those really are their terms.
 

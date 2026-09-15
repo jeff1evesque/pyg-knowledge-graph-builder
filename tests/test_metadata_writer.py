@@ -20,7 +20,9 @@ from datetime import datetime
 
 import pytest
 
-from spark_jobs.pyg_builder.feature_extractor import VectorLayout
+from spark_jobs import sources
+from spark_jobs.pyg_builder import feature_extractor
+from spark_jobs.pyg_builder.feature_extractor import FeatureExtractor, VectorLayout
 from spark_jobs.pyg_builder.edge_feature_extractor import EdgeVectorLayout
 from spark_jobs.pyg_builder.metadata_writer import (
     CHECKSUMS_FILE,
@@ -36,6 +38,12 @@ from spark_jobs.pyg_builder.metadata_writer import (
     write_latest_alias,
     write_metadata_to_local,
     write_metadata_to_s3,
+)
+from spark_jobs.sources.spec import SourceSpec
+from spark_jobs.utils.rdf_utils import (
+    ONTOLOGY_BASE,
+    ONTOLOGY_NAMESPACE_HASH_SEED,
+    ONTOLOGY_NAMESPACE_INDICES,
 )
 
 
@@ -989,6 +997,49 @@ def test_encoding_digest_ignores_a_previous_checksum_field():
     stamped = _encoding_config()
     stamped["checksum"] = {"algorithm": "sha256", "contract_digest": "stale"}
     assert _digest_of(stamped) == _digest_of(_encoding_config())
+
+
+def _node_encoding_config(specs=None):
+    """The node half of the encoding config a build records. No Spark needed."""
+    return FeatureExtractor(None, {}, specs=specs).get_encoding_config()
+
+
+def test_the_encoding_config_records_the_frozen_slots_and_the_seed():
+    recorded = _node_encoding_config()["node_features"]["ontology_source"]
+    assert recorded["frozen_indices"] == [
+        [namespace, index] for namespace, index in ONTOLOGY_NAMESPACE_INDICES
+    ]
+    assert recorded["hash_seed"] == ONTOLOGY_NAMESPACE_HASH_SEED
+
+
+def test_moving_a_frozen_namespace_changes_the_digest(monkeypatch):
+    """Swapping two of the 26 moves two slots, which the digest exists to catch."""
+    before = _digest_of(_node_encoding_config())
+    (first, _), (second, _) = ONTOLOGY_NAMESPACE_INDICES[:2]
+    monkeypatch.setattr(
+        feature_extractor,
+        "ONTOLOGY_NAMESPACE_INDICES",
+        [(second, 0), (first, 1), *ONTOLOGY_NAMESPACE_INDICES[2:]],
+    )
+    assert _digest_of(_node_encoding_config()) != before
+
+
+def test_the_registered_sources_do_not_change_the_digest():
+    """A toy source adds a namespace and a registry without SEC lacks three.
+    Neither moves a slot, so neither may read as another contract. (A run's
+    pick never reaches the feature extractor at all.)"""
+    toy_namespace = f"{ONTOLOGY_BASE}toy/"
+    toy = SourceSpec(
+        name="toy",
+        path_fragments=("source=toy",),
+        namespaces=((toy_namespace, "toy"),),
+        enrichment_namespace=toy_namespace,
+    )
+    without_sec = tuple(s for s in sources.REGISTERED if s.name != "sec")
+
+    today = _digest_of(_node_encoding_config())
+    assert _digest_of(_node_encoding_config((*sources.REGISTERED, toy))) == today
+    assert _digest_of(_node_encoding_config(without_sec)) == today
 
 
 # ======================================================================

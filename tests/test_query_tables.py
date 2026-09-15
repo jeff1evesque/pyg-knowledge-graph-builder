@@ -11,9 +11,13 @@ about what must NOT reach them:
     because the links between market and everything else are the point
   * a triple pointing at a literal is a fact and a triple pointing at an
     untyped URI is neither, so neither becomes an edge
+  * a relation from a namespace no source registers stops the tables before
+    ``edges/`` is written, unless pyg_config allows it
 
 Tier 4: real Spark, small frames, no cluster.
 """
+import os
+
 import pytest
 
 from spark_jobs.graph.config import JobConfig
@@ -90,7 +94,7 @@ DAY = "2026-09-12"
 def _config(tmp_path, **overrides):
     args = {
         "mode": "enrichment_only",
-        "source_paths": "s3a://b/raw/year=2026/month=09/day=12/",
+        "source_paths": "s3a://b/raw/quotes/year=2026/month=09/day=12/",
         "source_format": "turtle_parquet",
         "local_work_dir": str(tmp_path),
         "time_period": "2026-09",
@@ -391,7 +395,7 @@ def test_a_uri_written_on_two_days_keeps_both_rows(spark, tmp_path):
         spark, triples,
         _config(
             tmp_path,
-            source_paths="s3a://b/raw/year=2026/month=09/day=13/",
+            source_paths="s3a://b/raw/quotes/year=2026/month=09/day=13/",
         ),
     )
 
@@ -547,3 +551,46 @@ def test_a_two_hop_traversal_answers_from_the_store(store):
     ))
     assert [str(row["measurement"].value) for row in answer] == [INDEX_A]
     assert isinstance(answer[0]["measurement"], pyoxigraph.NamedNode)
+
+
+# ======================================================================
+# A namespace no source registers
+# ======================================================================
+
+LINKS = "http://nonexistent.invalid/links"  # in no registered namespace
+
+
+def test_a_relation_from_an_unregistered_namespace_stops_the_tables(spark, tmp_path):
+    """Checked before edges/ is written, so no table carries an unknown_
+    relation, and the message says which namespace to register."""
+    triples = spark.createDataFrame(
+        TRIPLES + [(INDEX_A, LINKS, INDEX_B)],
+        "subject string, predicate string, object string",
+    )
+    config = _config(tmp_path)
+
+    with pytest.raises(
+        ValueError, match=r"unknown_links.*http://nonexistent\.invalid/"
+    ):
+        write_query_tables(spark, triples, config)
+
+    root = config.query_tables_path
+    assert os.path.exists(table_path(root, "nodes", DAY)), "control: nodes/ is written first"
+    assert not os.path.exists(table_path(root, "edges", DAY))
+
+
+def test_pyg_config_allows_it_in_the_tables_as_in_the_graph(spark, tmp_path):
+    triples = spark.createDataFrame(
+        TRIPLES + [(INDEX_A, LINKS, INDEX_B)],
+        "subject string, predicate string, object string",
+    )
+    config = _config(
+        tmp_path, pyg_config='{"allow_unregistered_namespaces": true}'
+    )
+    paths = write_query_tables(spark, triples, config)
+
+    relations = {
+        row["relation"]
+        for row in spark.read.parquet(paths["edge_types"]).collect()
+    }
+    assert "unknown_links" in relations

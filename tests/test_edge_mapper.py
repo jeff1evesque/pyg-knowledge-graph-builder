@@ -15,29 +15,40 @@ in-memory fixtures over the shared local SparkSession:
   * excluded predicates, literal/untyped endpoints, and duplicate edges are dropped,
   * the edge_types whitelist filters by relation,
   * get_predicate_uri_mapping inverts the relation name back to its predicate URI,
+  * a relation from a namespace no source registers fails the build and names
+    the namespace, unless pyg_config allows it, while a source declared only by
+    its spec gets its relations named under its own prefix,
   * the result is reproducible run-to-run.
 
 The node ID table is built directly (not via NodeMapper) so the resolved IDs are
 fully known and this test isolates EdgeMapper.
 """
+import re
+
+import pytest
 import torch
 
+from spark_jobs import sources
 from spark_jobs.pyg_builder.edge_mapper import EdgeMapper
 from spark_jobs.pyg_builder.naming import (
     RDF_TYPE,
     prefixed_local_name_expr,
 )
+from spark_jobs.sources.spec import SourceSpec
 
 # Built from the namespace table rather than spelled out, so re-homing the
 # minted vocabulary cannot leave this pointing at a namespace nothing matches
-# -- which silently renames the relation to its bare last segment.
-from spark_jobs.utils.rdf_utils import BLS_ENRICHMENT  # noqa: E402
+# -- which used to rename the relation to its bare last segment, and now fails
+# the build.
+from spark_jobs.utils.rdf_utils import BLS_ENRICHMENT, ONTOLOGY_BASE  # noqa: E402
 
 PRECEDES = f"{BLS_ENRICHMENT}precedes"  # -> bls_enrichment_precedes
 RELATION = "bls_enrichment_precedes"
 FOLLOWS = f"{BLS_ENRICHMENT}follows"  # a second edge type, for the chunking tests
 FOLLOWS_RELATION = "bls_enrichment_follows"
 RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"  # excluded predicate
+LINKS = "http://nonexistent.invalid/links"  # in no registered namespace
+TOY = f"{ONTOLOGY_BASE}toy/"  # a source declared only by its spec, below
 
 # Fully-known node ID table: two cpi_Index sources, two cpi_Series destinations.
 NODE_ROWS = [
@@ -75,12 +86,59 @@ def test_predicate_to_relation_maps_known_namespace(spark):
     assert rel == RELATION
 
 
-def test_predicate_to_relation_falls_back_to_last_segment(spark):
-    df = spark.createDataFrame([("http://nonexistent.invalid/links",)], ["predicate"])
-    rel = df.withColumn(
-        "r", prefixed_local_name_expr("predicate")
-    ).collect()[0]["r"]
-    assert rel == "unknown_links"
+def test_a_relation_from_an_unregistered_namespace_fails_the_build(spark):
+    """It used to be named unknown_links. So would every vocabulary's links,
+    so the build stops instead, and says which namespace to register."""
+    with pytest.raises(
+        ValueError, match=r"unknown_links.*http://nonexistent\.invalid/"
+    ):
+        _build(spark, [("https://ex/s1", LINKS, "https://ex/o1")])
+
+
+def test_pyg_config_can_allow_an_unregistered_relation(spark):
+    edge_indices, _ = _build(
+        spark,
+        [("https://ex/s1", LINKS, "https://ex/o1")],
+        {"allow_unregistered_namespaces": True},
+    )
+    assert set(edge_indices) == {("cpi_Index", "unknown_links", "cpi_Series")}
+
+
+def test_an_unregistered_predicate_that_makes_no_edge_is_not_checked(spark):
+    """Pointing at a literal or at a URI nothing typed, it is no relation."""
+    edge_indices, _ = _build(spark, [
+        ("https://ex/s1", PRECEDES, "https://ex/o1"),
+        ("https://ex/s1", LINKS, "a literal"),
+        ("https://ex/s1", LINKS, "https://ex/untyped"),
+    ])
+    assert set(edge_indices) == {EDGE_KEY}
+
+
+def test_a_source_declared_by_its_spec_names_its_relations(spark):
+    toy = SourceSpec(
+        name="toy",
+        path_fragments=("source=toy",),
+        namespaces=((TOY, "toy"),),
+        enrichment_namespace=TOY,
+    )
+    triples = spark.createDataFrame(
+        [("https://ex/s1", TOY + "linksTo", "https://ex/o1")],
+        schema="subject STRING, predicate STRING, object STRING",
+    )
+
+    with pytest.raises(ValueError, match=re.escape(TOY)):
+        EdgeMapper(spark, {}).build_edge_indices(
+            triples, _node_id_df(spark), NODE_COUNTS
+        )
+
+    mapper = EdgeMapper(spark, {}, specs=(*sources.REGISTERED, toy))
+    edge_indices, edges_final = mapper.build_edge_indices(
+        triples, _node_id_df(spark), NODE_COUNTS
+    )
+    assert set(edge_indices) == {("cpi_Index", "toy_linksTo", "cpi_Series")}
+    assert mapper.get_predicate_uri_mapping(edges_final) == {
+        "toy_linksTo": TOY + "linksTo"
+    }
 
 
 # ======================================================================

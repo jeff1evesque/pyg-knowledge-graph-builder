@@ -25,7 +25,6 @@ from typing import Any, Dict
 from pyspark.sql import SparkSession, DataFrame
 
 from spark_jobs.graph.config import JobConfig
-from spark_jobs.graph.loading import source_label
 from spark_jobs.pyg_builder.metadata_writer import (
     write_metadata_to_s3,
     write_metadata_to_local,
@@ -115,13 +114,11 @@ def save_dataset_descriptor(config: JobConfig, spark: SparkSession) -> None:
     know to go looking for. It is lost outright the moment a graph is copied
     anywhere else.
 
-    Labels, not paths. source_label() exists so a source can be named without
-    naming a bucket, and what is written here reaches the published graph schema.
+    Labels, not paths: the names of the sources the run's paths picked, so a
+    source is named without naming a bucket, and what is written here reaches
+    the published graph schema.
     """
-    labels = sorted({
-        source_label(path, index)
-        for index, path in enumerate(config.source_paths)
-    })
+    labels = sorted(spec.name for spec in config.source_specs)
     body = json.dumps({
         "dataset": config.dataset,
         "sources": labels,

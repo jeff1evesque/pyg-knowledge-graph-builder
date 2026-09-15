@@ -33,6 +33,7 @@ from pathlib import Path
 
 import pytest
 
+from spark_jobs import sources
 from spark_jobs.graph.loading import (
     SOURCE_COLUMN,
     load_source_triples,
@@ -40,10 +41,13 @@ from spark_jobs.graph.loading import (
     source_label,
 )
 from spark_jobs.graph.config import JobConfig
+from spark_jobs.sources.spec import SourceSpec
+from spark_jobs.utils.namespaces import IDENTIFIER_BASE, ONTOLOGY_BASE
 
 pytestmark = pytest.mark.usefixtures("spark")
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "e2e" / "ntriples"
+TURTLE_FIXTURES = FIXTURES.parent / "turtle_parquet"
 
 
 # --------------------------------------------------------------------------- #
@@ -257,4 +261,56 @@ def test_stamp_is_dropped_before_return(spark, tmp_path):
     )
     assert count > 0
     assert set(stats["sources"]) == {"sec", "market"}
+    assert sum(s["rows_contributed"] for s in stats["sources"].values()) == count
+
+
+# --------------------------------------------------------------------------- #
+# a source with a format of its own
+# --------------------------------------------------------------------------- #
+
+def test_a_source_with_its_own_format_loads_beside_turtle_parquet(spark, tmp_path):
+    """A source that only arrives as N-Triples runs in the same job as Turtle.
+
+    The run's --source_format is turtle_parquet and the toy source declares
+    ntriples, so its file is read as N-Triples while the NOAA fixture is read as
+    Turtle in Parquet. Each keeps its own label, and NOAA contributes the same
+    rows it does alone. The N-Triples rows carry no datatype, so the toy source
+    contributes exactly its three triples and no marker row.
+    """
+    namespace = f"{ONTOLOGY_BASE}toy/"
+    toy = SourceSpec(
+        name="toy",
+        path_fragments=("source=toy",),
+        namespaces=((namespace, "toy"),),
+        enrichment_namespace=namespace,
+        source_format="ntriples",
+    )
+    nt = tmp_path / "source=toy" / "part.nt"
+    nt.parent.mkdir()
+    nt.write_text("".join(
+        f'<{IDENTIFIER_BASE}toy/{i}> <{namespace}hasValue> "{i}" .\n'
+        for i in range(3)
+    ))
+    noaa = str(TURTLE_FIXTURES / "noaa")
+
+    def load(paths):
+        config = JobConfig(
+            {
+                "mode": "enrichment_only",
+                "source_paths": ",".join(paths),
+                "source_format": "turtle_parquet",
+                "local_work_dir": str(tmp_path / "work"),
+                "time_period": "2026-08",
+            },
+            specs=(*sources.REGISTERED, toy),
+        )
+        return load_source_triples(spark, config)
+
+    triples_df, count, stats = load([noaa, str(nt)])
+    _, _, alone = load([noaa])
+
+    assert triples_df.columns == ["subject", "predicate", "object"]
+    assert set(stats["sources"]) == {"noaa", "toy"}
+    assert stats["sources"]["toy"]["rows_contributed"] == 3
+    assert stats["sources"]["noaa"] == alone["sources"]["noaa"]
     assert sum(s["rows_contributed"] for s in stats["sources"].values()) == count

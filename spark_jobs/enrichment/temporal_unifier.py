@@ -61,17 +61,12 @@ _collect_date_based_temporals, so the routing needs no source list.
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from functools import reduce
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
+from spark_jobs import sources
 from spark_jobs.settle import settle
-from spark_jobs.utils.rdf_utils import (
-    BLS_ENRICHMENT, UNIFIED, SOURCE_TEMPORAL,
-    CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER, WKYENG,
-    SEC_FILINGS,
-    MARKET_QUOTES, CAP, WEATHER,
-    SYNTHETIC_TEMPORAL_IDS,
-    identifier_namespace,
-)
+from spark_jobs.sources.spec import SourceSpec
+from spark_jobs.utils.rdf_utils import BLS_ENRICHMENT, UNIFIED, SOURCE_TEMPORAL
 
 import logging
 
@@ -158,74 +153,6 @@ PERIOD_GRAINS_FINEST_FIRST = ("day", "month", "year")
 
 UNIFIED_BASE = str(UNIFIED)
 
-# BLS monthly dataset IDENTIFIER prefixes.
-#
-# These match period URIs -- id/cpi/February, id/jolts/2024 -- which are
-# individuals, not terms. Keying them on the term namespaces (ontology/cpi/)
-# matched nothing at all: no BLS period was ever collected, so none was typed
-# temporal:SourceMonth, so node_mapper's _CANONICAL_TYPE_PRIORITY had nothing
-# to prefer and every period sharded across cpi_Month / jolts_Month /
-# empsit_Month / eci_Month. The graph kept its per-source month nodes and lost
-# the cross-source bridge, without anything raising.
-BLS_MONTHLY_PREFIXES = [
-    identifier_namespace(str(ns))
-    for ns in (CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER)
-]
-
-# BLS quarterly dataset namespace prefix
-WKYENG_PREFIX = str(WKYENG)
-WKYENG_HAS_QUARTER = str(WKYENG.hasQuarter)
-WKYENG_HAS_YEAR = str(WKYENG.hasYear)
-
-# Market predicate.
-#
-# captureTime is the only ISO-8601 time a quote snapshot carries -- quoteTime
-# and tradeTime are epoch milliseconds, which the date parser cannot read and
-# must not be handed. This used to be an observedAt / expirationDate pair from
-# the feeds vocabulary, which quote snapshots do not emit and no longer exists
-# anywhere, so market contributed NO temporal entity of any kind: every
-# snapshot node sat off the spine, unreachable from every other source.
-MARKET_CAPTURE_TIME = str(MARKET_QUOTES.captureTime)
-
-# SEC date predicates
-#
-# These carried hasattr()/else-literal guards, which were dead code: rdflib's
-# Namespace.__getattr__ resolves any non-dunder name, so hasattr was always
-# True and no fallback could run. Worse than redundant -- every fallback still
-# spelled a pre-migration sec.gov URI, so had one ever fired it would have
-# reintroduced the exact namespace this work removed. NOAA_DATE_PREDS below
-# was always written this way.
-#
-# hasReportDate was dead -- upstream states hasFilingDate, and does so on every
-# filing (40 of 40 on the e2e fixtures, against 39 for hasPeriodOfReport), so
-# the single most common SEC date was the one missing from this list.
-# hasPeriodOfReport was live, which is why SEC still minted period nodes and the
-# gap read as "SEC is on the spine" rather than as a defect.
-SEC_DATE_PREDS = [
-    str(SEC_FILINGS.hasPeriodOfReport),
-    str(SEC_FILINGS.hasFilingDate),
-]
-
-# NOAA — aligned with updated RML mapper
-# In the new mapper, cap:hasSentTime is on the Info subject
-# (alert:{alert_id}#info), not on the Alert subject.
-# We collect all NOAA date predicates that appear on Info subjects.
-# The temporal unifier's _collect_date_based_temporals() extracts
-# month/year from the literal values regardless of which subject
-# they appear on — it only needs the predicate and object columns.
-NOAA_WEATHER_ALERT_TYPE = str(WEATHER.WeatherAlert)
-
-# All NOAA date predicates that carry temporal information.
-# hasSentTime, hasEffectiveTime, hasOnsetTime, hasExpirationTime, hasEndsTime
-# are all on the Info subject in the new mapper.
-NOAA_DATE_PREDS = [
-    str(CAP.hasSentTime),
-    str(CAP.hasEffectiveTime),
-    str(CAP.hasOnsetTime),
-    str(CAP.hasExpirationTime),
-    str(CAP.hasEndsTime),
-]
-
 # Valid month names for regex matching
 MONTH_NAMES = [
     "January", "February", "March", "April", "May", "June",
@@ -250,23 +177,31 @@ QUARTER_MONTH_MAP = {
 
 class TemporalUnifier:
     """
-    Unifies temporal entities across all data sources using PySpark.
+    Unifies temporal entities across the picked data sources using PySpark.
 
     Strategies:
-    1. Collect temporal URIs from BLS (explicit month/year/quarter entities)
-    2. Extract month/year from SEC date literals → synthetic temporal URIs
-    3. Extract month/year from Market timestamps → synthetic temporal URIs
-    4. Extract month/year from NOAA timestamps → synthetic temporal URIs
-    5. Group all temporal URIs by normalized name
-    6. Produce unified entities with owl:sameAs links
+    1. Collect the periods a source states as URIs, with its spec's
+       temporal_collector (BLS: explicit month/year/quarter entities)
+    2. Extract day/month/year from the date literals a source states under
+       its spec's date_predicates → synthetic temporal URIs under its
+       temporal_prefix (SEC, market, NOAA)
+    3. Group all temporal URIs by normalized name
+    4. Produce unified entities with owl:sameAs links
     """
 
-    def __init__(self, spark: SparkSession):
+    def __init__(
+        self,
+        spark: SparkSession,
+        specs: Optional[Sequence[SourceSpec]] = None,
+    ):
         self.spark = spark
+        # The sources the run's paths picked. Every registered source when the
+        # caller does not say; a source finds nothing in data it does not have.
+        self.specs = sources.REGISTERED if specs is None else tuple(specs)
 
     def enrich(self, triples_df: DataFrame) -> DataFrame:
         """
-        Run temporal unification across all sources.
+        Run temporal unification across the picked sources.
 
         Args:
             triples_df: DataFrame with columns (subject, predicate, object)
@@ -284,18 +219,9 @@ class TemporalUnifier:
 
         triples_df.cache()
 
-        # Collect (temporal_uri, normalized_name, kind) from all sources
-        # kind is "month", "year", or "quarter"
+        # Collect (temporal_uri, normalized_name, kind) from the picked sources.
+        # kind is "day", "month", "year", or "quarter".
         temporal_dfs: List[DataFrame] = []
-
-        logger.info("  Collecting BLS temporal entities...")
-        df = self._collect_bls_months_years(triples_df)
-        if df is not None:
-            temporal_dfs.append(df)
-
-        df = self._collect_bls_quarters(triples_df)
-        if df is not None:
-            temporal_dfs.append(df)
 
         # The date-literal sources, kept as (subject, temporal_uri, ...) frames.
         # The subject is dropped for the union below -- which only wants the
@@ -303,24 +229,18 @@ class TemporalUnifier:
         # link from each dated entity to its period.
         dated_dfs: List[DataFrame] = []
 
-        logger.info("  Collecting SEC temporal entities...")
-        df = self._collect_date_based_temporals(
-            triples_df, SEC_DATE_PREDS, SYNTHETIC_TEMPORAL_IDS["sec"]
-        )
-        if df is not None:
-            dated_dfs.append(df)
-
-        logger.info("  Collecting Market temporal entities...")
-        df = self._collect_market_quote_temporals(triples_df)
-        if df is not None:
-            dated_dfs.append(df)
-
-        logger.info("  Collecting NOAA temporal entities...")
-        df = self._collect_date_based_temporals(
-            triples_df, NOAA_DATE_PREDS, SYNTHETIC_TEMPORAL_IDS["noaa"]
-        )
-        if df is not None:
-            dated_dfs.append(df)
+        for spec in self.specs:
+            if spec.temporal_collector is None and not spec.date_predicates:
+                continue
+            logger.info(f"  Collecting {spec.label} temporal entities...")
+            if spec.temporal_collector is not None:
+                temporal_dfs.extend(spec.temporal_collector(triples_df))
+            if spec.date_predicates:
+                df = self._collect_date_based_temporals(
+                    triples_df, list(spec.date_predicates), spec.temporal_prefix
+                )
+                if df is not None:
+                    dated_dfs.append(df)
 
         # Settle the date-literal frames once. Each is a scan of triples_df and
         # each feeds BOTH the period union below and the period links further
@@ -442,119 +362,7 @@ class TemporalUnifier:
         )
 
     # ================================================================
-    # BLS: Explicit month/year URIs
-    # ================================================================
-
-    def _collect_bls_months_years(
-        self, triples_df: DataFrame
-    ) -> Optional[DataFrame]:
-        """
-        Collect month and year URIs from BLS monthly datasets.
-
-        BLS datasets use URI-based temporal entities like:
-          id/cpi/November, id/ppi/November, id/cpi/2024, id/ppi/2024
-
-        We find these by looking for URIs under BLS IDENTIFIER prefixes whose
-        local name matches a month name or 4-digit year. Identifier, not term:
-        periods are things, and nothing is ever minted under ontology/cpi/.
-        """
-        # Build filter: object URI starts with any BLS monthly prefix
-        # and is used as an object in any triple (i.e., referenced as a value)
-        bls_prefix_filter = F.lit(False)
-        for prefix in BLS_MONTHLY_PREFIXES:
-            bls_prefix_filter = bls_prefix_filter | F.col("object").startswith(prefix)
-
-        bls_objects = (
-            triples_df
-            .filter(bls_prefix_filter)
-            .select(F.col("object").alias("temporal_uri"))
-            .dropDuplicates()
-        )
-
-        if bls_objects.head(1) == []:
-            return None
-
-        # Extract local name (everything after the last "/")
-        bls_objects = bls_objects.withColumn(
-            "local_name",
-            F.regexp_extract(F.col("temporal_uri"), r"([^/]+)$", 1)
-        )
-
-        # Month URIs: local name is a valid month name
-        month_names_str = "|".join(MONTH_NAMES)
-        months = bls_objects.filter(
-            F.col("local_name").rlike(f"^({month_names_str})$")
-        ).select(
-            F.col("temporal_uri"),
-            F.col("local_name").alias("normalized_name"),
-            F.lit("month").alias("kind"),
-        )
-
-        # Year URIs: local name is a 4-digit number
-        years = bls_objects.filter(
-            F.col("local_name").rlike(r"^\d{4}$")
-        ).select(
-            F.col("temporal_uri"),
-            F.col("local_name").alias("normalized_name"),
-            F.lit("year").alias("kind"),
-        )
-
-        result = months.unionAll(years)
-        if result.head(1) == []:
-            return None
-
-        return result
-
-    def _collect_bls_quarters(
-        self, triples_df: DataFrame
-    ) -> Optional[DataFrame]:
-        """
-        Collect quarter and year URIs from WKYENG (quarterly BLS dataset).
-
-        WKYENG uses:
-          ?entity wkyeng:hasQuarter wkyeng:Q1
-          ?entity wkyeng:hasYear wkyeng:2024
-        """
-        # Quarters: objects of wkyeng:hasQuarter
-        quarters = triples_df.filter(
-            F.col("predicate") == WKYENG_HAS_QUARTER
-        ).select(
-            F.col("object").alias("temporal_uri")
-        ).dropDuplicates().withColumn(
-            "local_name",
-            F.regexp_extract(F.col("temporal_uri"), r"([^/]+)$", 1)
-        ).filter(
-            F.col("local_name").isin(["Q1", "Q2", "Q3", "Q4"])
-        ).select(
-            F.col("temporal_uri"),
-            F.col("local_name").alias("normalized_name"),
-            F.lit("quarter").alias("kind"),
-        )
-
-        # Years: objects of wkyeng:hasYear
-        years = triples_df.filter(
-            F.col("predicate") == WKYENG_HAS_YEAR
-        ).select(
-            F.col("object").alias("temporal_uri")
-        ).dropDuplicates().withColumn(
-            "local_name",
-            F.regexp_extract(F.col("temporal_uri"), r"([^/]+)$", 1)
-        ).filter(
-            F.col("local_name").rlike(r"^\d{4}$")
-        ).select(
-            F.col("temporal_uri"),
-            F.col("local_name").alias("normalized_name"),
-            F.lit("year").alias("kind"),
-        )
-
-        result = quarters.unionAll(years)
-        if result.head(1) == []:
-            return None
-
-        return result
-
-    # ================================================================
-    # SEC / NOAA: Date literals → synthetic temporal URIs
+    # Date literals → synthetic temporal URIs
     # ================================================================
 
     def _collect_date_based_temporals(
@@ -667,10 +475,10 @@ class TemporalUnifier:
         # whole routing rule -- no source list to keep in sync. The three
         # date-literal sources (SEC filings, market quotes, NOAA alerts) are
         # exactly the sub-monthly ones, because a source that publishes monthly
-        # states its period as a URI and arrives through
-        # _collect_bls_months_years instead, which emits no day at all. The BLS
-        # feeds therefore stay on the month grain by construction rather than by
-        # exclusion.
+        # states its period as a URI and arrives through its spec's
+        # temporal_collector instead (BLS's collect_bls_months_years), which
+        # emits no day at all. The BLS feeds therefore stay on the month grain
+        # by construction rather than by exclusion.
         days = parsed.filter(F.col("day_str") != "").select(
             F.col("subject"),
             F.concat(F.lit(synthetic_prefix), F.col("day_str")).alias("temporal_uri"),
@@ -679,31 +487,6 @@ class TemporalUnifier:
         ).dropDuplicates()
 
         return months.unionAll(years).unionAll(days)
-
-    # ================================================================
-    # Market: Timestamps + expiration dates → synthetic temporal URIs
-    # ================================================================
-
-    def _collect_market_quote_temporals(
-        self, triples_df: DataFrame
-    ) -> Optional[DataFrame]:
-        """
-        Extract month/year from quote-snapshot capture times.
-
-        The quotes vocabulary is a different model from the feeds one and shares
-        none of its temporal predicates, so it needs its own collector rather
-        than another entry in the feeds list -- and its own synthetic prefix, so
-        a period a quote observed stays distinguishable from the same period a
-        feed observed until the sameAs step deliberately links them.
-
-        Without this, market was the one source contributing no temporal entity
-        at all: quote snapshots reached the graph only through their ticker, and
-        a snapshot whose company matched nothing was left with no path to any
-        other source.
-        """
-        return self._collect_date_based_temporals(
-            triples_df, [MARKET_CAPTURE_TIME], SYNTHETIC_TEMPORAL_IDS["market-quotes"]
-        )
 
     # ================================================================
     # Produce unified entities

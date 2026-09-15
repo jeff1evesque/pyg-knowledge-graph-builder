@@ -43,7 +43,7 @@ shape a long table or a triple store serves well, and the links it has to
 everything else are the part that matters.
 """
 import logging
-from typing import Dict
+from typing import Dict, List
 
 from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession
@@ -52,8 +52,10 @@ from pyspark.sql import functions as F
 from spark_jobs.graph.config import JobConfig
 from spark_jobs.graph.graph_store import write_graph_store
 from spark_jobs.pyg_builder.naming import (
+    ALLOW_UNREGISTERED_NAMESPACES,
     EXCLUDED_EDGE_PREDICATES,
     RDF_TYPE,
+    check_registered_names,
     prefixed_local_name,
     prefixed_local_name_expr,
     relation_to_predicate_uri,
@@ -238,6 +240,20 @@ def resolve_edges(triples_df: DataFrame, node_id_df: DataFrame) -> DataFrame:
     )
 
 
+def _predicates_named(triples_df: DataFrame, relations: List[str]) -> List[str]:
+    """The predicate URIs the naming rule turns into these relation names, for
+    an error message."""
+    rows = (
+        triples_df
+        .filter(prefixed_local_name_expr("predicate").isin(relations))
+        .select("predicate")
+        .distinct()
+        .limit(50)
+        .collect()
+    )
+    return [row["predicate"] for row in rows]
+
+
 def write_edges(edges_df: DataFrame, root: str, day: str) -> str:
     """The graph's structure, which nothing published has ever carried.
 
@@ -254,8 +270,23 @@ def write_edges(edges_df: DataFrame, root: str, day: str) -> str:
     )
 
 
+def count_edge_types(edges_df: DataFrame) -> List:
+    """One row per edge type and its edge count, in a stable order.
+
+    Small -- one row per edge type, 837 on a production day -- so it is
+    collected. write_query_tables counts before it writes any edge, so a
+    relation from an unregistered namespace stops the tables before edges/ is
+    written, and edge_types/ is built from the same rows.
+    """
+    return collect_sorted(
+        edges_df
+        .groupBy("src_type", "relation", "dst_type")
+        .agg(F.count("*").alias("count"))
+    )
+
+
 def write_edge_types(
-    spark: SparkSession, edges_df: DataFrame, root: str, day: str
+    spark: SparkSession, rows: List, root: str, day: str
 ) -> str:
     """What each edge type MEANS, so an edge stays readable with no run present.
 
@@ -271,15 +302,9 @@ def write_edge_types(
     pipeline minted. Keyed by name those collapse to whichever was written last,
     which reports an inferred link as an observed fact.
 
-    Small -- one row per edge type, 837 on a production day -- so it is counted
-    and built on the driver.
+    ``rows`` are ``count_edge_types``' rows; the table is built from them on
+    the driver.
     """
-    rows = collect_sorted(
-        edges_df
-        .groupBy("src_type", "relation", "dst_type")
-        .agg(F.count("*").alias("count"))
-    )
-
     described = []
     for row in rows:
         predicate_uri = relation_to_predicate_uri(row["relation"])
@@ -389,9 +414,9 @@ def write_entities(facts_df: DataFrame, root: str, day: str) -> str:
     "; ". Deterministic rather than clever: the assembly is stable run to run,
     which is what lets a vector index be rebuilt and compared.
 
-    This emits the text that exists and nothing more. Five of 155 node types
-    carry any at all, so a search over it reaches those five and no further --
-    see _TEXT_PREDICATE_TERMS for which predicates count as text, and why that
+    This emits the text that exists and nothing more. On 2026-09-09 that was
+    12,607 nodes across 49 node types, mostly names and labels -- see
+    _TEXT_PREDICATE_TERMS for which predicates count as text, and why that
     is a written-down list rather than something derived.
     """
     is_text = F.lit(False)
@@ -578,12 +603,16 @@ def write_query_tables(
     logger.info(f"PHASE: WRITING QUERY TABLES (day={day})")
     logger.info("=" * 80)
 
-    # An empty config on purpose: no node_types allowlist, no temporal or
-    # sector switch. Whatever subset this run's .pt is built over, the tables
-    # cover everything the sources carried.
-    node_id_df, node_counts = NodeMapper(spark, {}).build_node_id_table(
-        triples_df
+    # No node_types allowlist and no temporal or sector switch, on purpose:
+    # whatever subset this run's .pt is built over, the tables cover everything
+    # the sources carried. The namespace allowance is the one setting carried
+    # over, so a run that allows unregistered namespaces is not stopped here.
+    allow_unregistered = bool(
+        config.pyg_config.get(ALLOW_UNREGISTERED_NAMESPACES, False)
     )
+    node_id_df, node_counts = NodeMapper(
+        spark, {ALLOW_UNREGISTERED_NAMESPACES: allow_unregistered}
+    ).build_node_id_table(triples_df)
 
     written: Dict[str, str] = {}
     try:
@@ -593,9 +622,16 @@ def write_query_tables(
             StorageLevel.DISK_ONLY
         )
         try:
+            edge_types = count_edge_types(edges_df)
+            check_registered_names(
+                "Relations",
+                (row["relation"] for row in edge_types),
+                allow_unregistered,
+                lambda names: _predicates_named(triples_df, names),
+            )
             written["edges"] = write_edges(edges_df, root, day)
             written["edge_types"] = write_edge_types(
-                spark, edges_df, root, day
+                spark, edge_types, root, day
             )
         finally:
             edges_df.unpersist()

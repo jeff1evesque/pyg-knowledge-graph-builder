@@ -16,6 +16,7 @@ Marked ``e2e``: heavy, excluded from the fast suite, run with ``-m e2e``.
 """
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,12 @@ TURTLE_PARQUET = FIXTURES / "turtle_parquet"
 
 DAY = "2099-01-02"
 TABLES = ("nodes", "edges", "edge_types", "facts", "entities", "snapshots")
+
+# The RAPIDS Parquet reader could not decompress these zstd tables on the GPU
+# ("unable to perform decompression", RAPIDS 25.02), whichever writer made the
+# file. The job never reads its tables back, so these checks read them the way a
+# reader outside the job does: with the GPU reader off. A CPU run ignores it.
+_GPU_PARQUET_READ = "spark.rapids.sql.format.parquet.read.enabled"
 
 
 def _source_paths():
@@ -60,8 +67,33 @@ def _schema(config):
     return json.loads((prefix / "graph_schema.json").read_text())
 
 
+@contextmanager
+def _gpu_parquet_reader_off(spark):
+    previous = spark.conf.get(_GPU_PARQUET_READ, None)
+    spark.conf.set(_GPU_PARQUET_READ, "false")
+    try:
+        yield
+    finally:
+        if previous is None:
+            spark.conf.unset(_GPU_PARQUET_READ)
+        else:
+            spark.conf.set(_GPU_PARQUET_READ, previous)
+
+
 def _rows(spark, config, table):
-    return spark.read.parquet(table_path(config.query_tables_path, table, DAY))
+    """One table's rows, collected here: the setting only reaches a read that
+    runs while it is set."""
+    with _gpu_parquet_reader_off(spark):
+        return spark.read.parquet(
+            table_path(config.query_tables_path, table, DAY)
+        ).collect()
+
+
+def _count(spark, config, table):
+    with _gpu_parquet_reader_off(spark):
+        return spark.read.parquet(
+            table_path(config.query_tables_path, table, DAY)
+        ).count()
 
 
 @pytest.fixture(scope="module")
@@ -91,7 +123,7 @@ def test_a_default_run_writes_every_table_and_the_store(run):
 def test_nodes_holds_the_nodes_the_graph_schema_counted(spark, run):
     config, _ = run
     assert (
-        _rows(spark, config, "nodes").count()
+        _count(spark, config, "nodes")
         == _schema(config)["summary"]["total_nodes"]
     )
 
@@ -106,7 +138,7 @@ def test_edges_holds_the_edges_the_graph_schema_counted(spark, run):
         entry["count"] for entry in schema["edge_types"].values()
     )
 
-    assert _rows(spark, config, "edges").count() == counted
+    assert _count(spark, config, "edges") == counted
     assert counted == schema["summary"]["total_edges"]
 
 
@@ -116,7 +148,7 @@ def test_edge_types_describes_every_edge_type_the_schema_names(spark, run):
 
     published = {
         (row["src_type"], row["relation"], row["dst_type"]): row
-        for row in _rows(spark, config, "edge_types").collect()
+        for row in _rows(spark, config, "edge_types")
     }
     described = {
         (entry["src_type"], entry["relation"], entry["dst_type"]): entry
@@ -154,7 +186,7 @@ def test_the_store_holds_no_market_data(spark, run):
 
     market_nodes = {
         row["uri"]
-        for row in _rows(spark, config, "nodes").collect()
+        for row in _rows(spark, config, "nodes")
         if row["node_type"].startswith("market_")
     }
     assert market_nodes, "the fixtures carry no market nodes to exclude"
@@ -190,7 +222,7 @@ def test_a_node_filter_narrows_the_graph_and_not_the_tables(spark, tmp_path):
     execute_full_pipeline(everything, spark, s3_client=None)
     weather_types = {
         row["node_type"]
-        for row in _rows(spark, everything, "nodes").collect()
+        for row in _rows(spark, everything, "nodes")
         if row["node_type"].startswith(("weather_", "alert_", "cap_"))
     }
     assert weather_types, "the fixtures carry no weather nodes to exclude"
@@ -209,7 +241,7 @@ def test_a_node_filter_narrows_the_graph_and_not_the_tables(spark, tmp_path):
     assert weather_types.isdisjoint(_schema(narrowed)["node_types"])
     published = {
         row["node_type"]
-        for row in _rows(spark, narrowed, "nodes").collect()
+        for row in _rows(spark, narrowed, "nodes")
     }
     assert weather_types <= published, (
         "a node filter reached the tables; they must cover every source the "

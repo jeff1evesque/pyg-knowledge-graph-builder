@@ -10,6 +10,9 @@ fixtures over the shared local SparkSession (`spark` / `make_triples`):
   * meta-ontology types are dropped,
   * a multi-type entity is assigned its single canonical (most specific) type,
   * config filters (whitelist / temporal / sector) select the right types,
+  * a type URI in no registered namespace fails the build and names the
+    namespace, unless pyg_config allows it, while a source declared only by its
+    spec gets its types named under its own prefix,
   * the mapping is reproducible run-to-run,
   * get_type_uri_mapping resolves a node type with several candidate type URIs
     identically regardless of the order Spark returns rows in.
@@ -17,18 +20,28 @@ fixtures over the shared local SparkSession (`spark` / `make_triples`):
 Type URIs / prefixes are taken from the code (NAMESPACE_PREFIXES, RDF_TYPE) so the
 tests track the implementation rather than hardcoding IRIs.
 """
+import re
+
+import pytest
+
+from spark_jobs import sources
 from spark_jobs.pyg_builder.naming import (
     RDF_TYPE,
     prefixed_local_name_expr,
 )
 from spark_jobs.pyg_builder.node_mapper import NodeMapper
+from spark_jobs.sources.spec import SourceSpec
+from spark_jobs.utils.rdf_utils import ONTOLOGY_BASE, UNIFIED
 
 # Concrete type URIs whose PyG names are fixed by NAMESPACE_PREFIXES.
 CPI_INDEX = "https://jefflevesque.com/ontology/cpi/Index"        # -> cpi_Index
 CPI_SERIES = "https://jefflevesque.com/ontology/cpi/Series"      # -> cpi_Series
-UNIFIED_MONTH = "https://example.org/unified/UnifiedMonth"  # -> unified_UnifiedMonth
-UNIFIED_SECTOR = "https://example.org/unified/EconomicSector"  # -> unified_EconomicSector
+UNIFIED_MONTH = f"{UNIFIED}UnifiedMonth"  # -> unified_UnifiedMonth
+UNIFIED_SECTOR = f"{UNIFIED}EconomicSector"  # -> unified_EconomicSector
 OWL_THING = "http://www.w3.org/2002/07/owl#Thing"  # excluded (meta-ontology)
+
+WIDGET = "http://nonexistent.invalid/Widget"  # in no registered namespace
+TOY = f"{ONTOLOGY_BASE}toy/"  # a source declared only by its spec, below
 
 
 def _mapping(node_id_df):
@@ -51,9 +64,59 @@ def test_uri_to_pyg_name_maps_known_namespace(spark):
 
 def test_uri_to_pyg_name_falls_back_to_last_segment(spark):
     # Unknown namespace -> fallback extracts the trailing segment as unknown_<seg>.
-    df = spark.createDataFrame([("http://nonexistent.invalid/Widget",)], ["type_uri"])
+    df = spark.createDataFrame([(WIDGET,)], ["type_uri"])
     name = df.withColumn("n", prefixed_local_name_expr("type_uri")).collect()[0]["n"]
     assert name == "unknown_Widget"
+
+
+# ======================================================================
+# Namespaces no source registers
+# ======================================================================
+
+def test_a_type_from_an_unregistered_namespace_fails_the_build(spark, make_triples):
+    """Any vocabulary's Widget class would be named unknown_Widget, so two of
+    them would share one node type. The build stops instead, and says which
+    namespace to register."""
+    triples = make_triples([
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+        ("https://ex/w", RDF_TYPE, WIDGET),
+    ])
+    with pytest.raises(
+        ValueError, match=r"unknown_Widget.*http://nonexistent\.invalid/"
+    ):
+        NodeMapper(spark, {}).build_node_id_table(triples)
+
+
+def test_pyg_config_can_allow_an_unregistered_namespace(spark, make_triples):
+    """For an exploratory run: the unknown_ name, with a warning."""
+    triples = make_triples([("https://ex/w", RDF_TYPE, WIDGET)])
+    _node_id_df, counts = NodeMapper(
+        spark, {"allow_unregistered_namespaces": True}
+    ).build_node_id_table(triples)
+
+    assert counts == {"unknown_Widget": 1}
+
+
+def test_a_source_declared_by_its_spec_names_its_node_types(spark, make_triples):
+    """A toy source's type fails the build until its spec is registered, and
+    is then named under the source's own prefix."""
+    toy = SourceSpec(
+        name="toy",
+        path_fragments=("source=toy",),
+        namespaces=((TOY, "toy"),),
+        enrichment_namespace=TOY,
+    )
+    triples = make_triples([("https://ex/t", RDF_TYPE, TOY + "Thing")])
+
+    with pytest.raises(ValueError, match=re.escape(TOY)):
+        NodeMapper(spark, {}).build_node_id_table(triples)
+
+    mapper = NodeMapper(spark, {}, specs=(*sources.REGISTERED, toy))
+    node_id_df, counts = mapper.build_node_id_table(triples)
+    assert counts == {"toy_Thing": 1}
+    assert mapper.get_type_uri_mapping(triples, node_id_df) == {
+        "toy_Thing": TOY + "Thing"
+    }
 
 
 # ======================================================================

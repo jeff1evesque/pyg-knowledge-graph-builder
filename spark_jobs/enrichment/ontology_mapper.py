@@ -18,11 +18,9 @@ from pyspark.sql import functions as F
 from functools import reduce
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
+from spark_jobs import sources
 from spark_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT, NOAA_ENRICHMENT,
-    UNIFIED, CPI, PPI, ECI, JOLTS, EMPSIT, XIMPIM, LAUS, METRO, REALER,
-    CAP, WEATHER,
-    MARKET_QUOTES,
     PROV_DERIVED_BY, PROV_OBSERVED_LITERAL_DATATYPE,
     PROV_CLASS_HIERARCHY, PROV_PROPERTY_DOMAIN, PROV_PROPERTY_RANGE,
     PROV_PROPERTY_HIERARCHY,
@@ -68,159 +66,15 @@ SKOS_CONCEPT_SCHEME = "http://www.w3.org/2004/02/skos/core#ConceptScheme"
 DCTERMS_DESCRIPTION = "http://purl.org/dc/terms/description"
 
 # ============================================
-# PROPERTY EQUIVALENCE MAPPINGS
+# PROPERTY AND CLASS EQUIVALENCE MAPPINGS
 # ============================================
+# One row per source term, from every registered source's spec
+# (spark_jobs/sources/), whether or not a run picks that source. The reason for
+# each row sits beside it in its source's spec.
 
-PROPERTY_MAPPINGS = {
-    # Temporal: all month properties → unified:hasMonth
-    str(CPI.hasMonth): str(UNIFIED.hasMonth),
-    str(PPI.hasStartMonth): str(UNIFIED.hasMonth),
-    str(PPI.hasEndMonth): str(UNIFIED.hasMonth),
-    str(ECI.hasMonth): str(UNIFIED.hasMonth),
-    str(JOLTS.hasMonth): str(UNIFIED.hasMonth),
-    str(EMPSIT.hasMonth): str(UNIFIED.hasMonth),
-    str(XIMPIM.hasMonth): str(UNIFIED.hasMonth),
-    str(LAUS.hasMonth): str(UNIFIED.hasMonth),
-    str(METRO.hasMonth): str(UNIFIED.hasMonth),
-    str(REALER.hasMonth): str(UNIFIED.hasMonth),
+PROPERTY_MAPPINGS = sources.property_mappings()
 
-    # Temporal: all year properties → unified:hasYear
-    str(CPI.hasYear): str(UNIFIED.hasYear),
-    str(PPI.hasStartYear): str(UNIFIED.hasYear),
-    str(PPI.hasEndYear): str(UNIFIED.hasYear),
-    str(ECI.hasYear): str(UNIFIED.hasYear),
-    str(JOLTS.hasYear): str(UNIFIED.hasYear),
-    str(EMPSIT.hasYear): str(UNIFIED.hasYear),
-    str(XIMPIM.hasYear): str(UNIFIED.hasYear),
-    str(LAUS.hasYear): str(UNIFIED.hasYear),
-    str(METRO.hasYear): str(UNIFIED.hasYear),
-    str(REALER.hasYear): str(UNIFIED.hasYear),
-
-    # Measurement values → unified:measurementValue
-    str(CPI.indexValue): str(UNIFIED.measurementValue),
-    str(PPI.changeValue): str(UNIFIED.measurementValue),
-    str(PPI.indexValue): str(UNIFIED.measurementValue),
-    # jolts:level / jolts:rate were never upstream terms under any name -- the
-    # value properties have always been levelValue / rateValue. The bare
-    # spellings read like the obvious names, which is why they survived: a
-    # Namespace resolves them, and the dict entry simply never matched.
-    str(JOLTS.levelValue): str(UNIFIED.measurementValue),
-    str(JOLTS.rateValue): str(UNIFIED.measurementValue),
-    str(EMPSIT.value): str(UNIFIED.measurementValue),
-    str(ECI.indexValue): str(UNIFIED.measurementValue),
-    # Both market vocabularies map onto the same unified predicate. They are
-    # separate namespaces whose local names partly overlap (lastPrice and
-    # symbol exist in both), so each must be listed explicitly -- a single
-    # entry would silently cover only one of the two sources.
-    str(MARKET_QUOTES.lastPrice): str(UNIFIED.measurementValue),
-    str(MARKET_QUOTES.mark): str(UNIFIED.measurementValue),
-
-    # Category properties → unified:hasCategory
-    str(CPI.hasCategory): str(UNIFIED.hasCategory),
-    str(PPI.hasCommodityGrouping): str(UNIFIED.hasCategory),
-    str(ECI.hasOccupationalGroup): str(UNIFIED.hasCategory),
-    str(JOLTS.hasIndustry): str(UNIFIED.hasCategory),
-    str(EMPSIT.hasIndustry): str(UNIFIED.hasCategory),
-    # empsit declares hasCategory but no mapper emits it; the dimension link it
-    # actually writes is hasLaborForceCategory.
-    str(EMPSIT.hasLaborForceCategory): str(UNIFIED.hasCategory),
-
-    # Company/ticker
-    str(MARKET_QUOTES.symbol): str(UNIFIED.ticker),
-
-    # Geographic
-    str(LAUS.hasState): str(UNIFIED.hasRegion),
-    # metro states its area through hasRegion, not hasMetropolitanArea -- the
-    # latter is declared in the ontology and reached by no mapper. This was the
-    # only METRO edge onto the unified geography, so it left metro with no
-    # region link at all.
-    str(METRO.hasRegion): str(UNIFIED.hasRegion),
-
-    # NOAA temporal properties → unified equivalents
-    # cap:hasSentTime is the primary temporal property for NOAA alerts
-    # (on Info subjects in the new mapper, but the equivalence is
-    # at the property level regardless of subject)
-    str(CAP.hasSentTime): str(UNIFIED.hasTimestamp),
-    str(CAP.hasEffectiveTime): str(UNIFIED.hasTimestamp),
-    str(CAP.hasOnsetTime): str(UNIFIED.hasTimestamp),
-    str(CAP.hasExpirationTime): str(UNIFIED.hasTimestamp),
-
-    # NOAA event → unified category
-    str(CAP.hasEvent): str(UNIFIED.hasEventName),
-
-    # NOAA severity/urgency/certainty → unified severity
-    str(CAP.hasSeverity): str(UNIFIED.hasSeverity),
-    str(CAP.hasUrgency): str(UNIFIED.hasUrgency),
-
-    # NOAA area description → unified region description
-    str(CAP.hasAreaDescription): str(UNIFIED.hasRegionDescription),
-}
-
-# ============================================
-# CLASS EQUIVALENCE MAPPINGS
-# ============================================
-
-CLASS_MAPPINGS = {
-    # Price indices
-    str(CPI.Index): str(BLS_ENRICHMENT.PriceIndex),
-    str(PPI.IndexValue): str(BLS_ENRICHMENT.PriceIndex),
-
-    # Rate measurements
-    str(JOLTS.JobOpeningsRate): str(BLS_ENRICHMENT.RateMeasurement),
-    str(JOLTS.HiresRate): str(BLS_ENRICHMENT.RateMeasurement),
-    str(JOLTS.QuitsRate): str(BLS_ENRICHMENT.RateMeasurement),
-    str(LAUS.UnemploymentRate): str(BLS_ENRICHMENT.RateMeasurement),
-    str(METRO.UnemploymentRate): str(BLS_ENRICHMENT.RateMeasurement),
-
-    # Change measurements
-    # cpi:PercentChange and eci:PercentChangeData are declared umbrella classes
-    # that no mapper emits -- upstream types each change by its own window, so
-    # the umbrella never appears and these two entries covered nothing. The
-    # windowed classes below are the ones instances actually carry.
-    str(CPI.OneMonthPercentChange): str(BLS_ENRICHMENT.ChangeMeasurement),
-    str(CPI.TwelveMonthPercentChange): str(BLS_ENRICHMENT.ChangeMeasurement),
-    str(PPI.MonthlyChange): str(BLS_ENRICHMENT.ChangeMeasurement),
-    str(PPI.TwelveMonthChange): str(BLS_ENRICHMENT.ChangeMeasurement),
-    str(ECI.ThreeMonthPercentChangeData): str(BLS_ENRICHMENT.ChangeMeasurement),
-    str(ECI.TwelveMonthPercentChangeData): str(BLS_ENRICHMENT.ChangeMeasurement),
-
-    # Level measurements
-    str(JOLTS.JobOpeningsLevel): str(BLS_ENRICHMENT.LevelMeasurement),
-    str(JOLTS.HiresLevel): str(BLS_ENRICHMENT.LevelMeasurement),
-    str(EMPSIT.EmployeeCount): str(BLS_ENRICHMENT.LevelMeasurement),
-    str(LAUS.LaborForceData): str(BLS_ENRICHMENT.LevelMeasurement),
-
-    # Economic indicators
-    str(CPI.Category): str(BLS_ENRICHMENT.EconomicIndicator),
-    # ppi types its groupings ppi:Grouping; CommodityGrouping is not a declared
-    # term at all (hasCommodityGrouping, the PROPERTY, is what exists).
-    str(PPI.Grouping): str(BLS_ENRICHMENT.EconomicIndicator),
-
-    # Industry classifications
-    str(JOLTS.Industry): str(BLS_ENRICHMENT.IndustryClassification),
-    str(EMPSIT.Industry): str(BLS_ENRICHMENT.IndustryClassification),
-    str(ECI.Industry): str(BLS_ENRICHMENT.IndustryClassification),
-
-    # Occupational classifications
-    str(ECI.OccupationalGroup): str(BLS_ENRICHMENT.OccupationalClassification),
-    # empsit:Occupation and empsit:OccupationData are both declared and neither
-    # is emitted. The two dimension classes empsit actually types are Industry
-    # (already mapped above) and LaborForceCategory, which is the closest thing
-    # this source has to an occupational grouping.
-    str(EMPSIT.LaborForceCategory): str(BLS_ENRICHMENT.OccupationalClassification),
-
-    # NOAA alert classes → unified emergency alert type
-    # nws:WeatherAlert is the ONLY type the RML mapper writes on an alert node.
-    # cap:Alert is declared in the CAP model and never emitted -- it also shares
-    # its rdfs:label "Alert" with cap:AlertMessage, the named individual that
-    # cap:hasMessageType actually points at, so the two are easy to confuse.
-    # Neither is an rdf:type of anything, so no entry belongs here for them.
-    str(WEATHER.WeatherAlert): str(NOAA_ENRICHMENT.EmergencyAlert),
-
-    # NOAA sub-structures
-    str(CAP.Info): str(NOAA_ENRICHMENT.AlertInfo),
-    str(CAP.Area): str(NOAA_ENRICHMENT.AlertArea),
-}
+CLASS_MAPPINGS = sources.class_mappings()
 
 
 # ============================================

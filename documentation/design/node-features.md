@@ -81,7 +81,7 @@ Encodes **what the node is** in the ontology hierarchy — its class, its superc
 
 - **Class Identity**: Each `rdf:type` URI is hashed into 4 deterministic slots. Nodes of the same type share identical bits.
 - **Class Hierarchy**: `rdfs:subClassOf` chains are traversed (transitive closure up to depth 10). Superclass URIs are hashed with depth-weighted values (direct superclass = 1.0, grandparent = 0.5, etc.). Nodes sharing a superclass share bits in this segment.
-- **Ontology/Source Membership**: Multi-hot encoding of which ontology namespace(s) the node belongs to, derived from both the type URI and the node URI itself. Uses the canonical namespace registry from `rdf_utils.py`.
+- **Ontology/Source Membership**: Multi-hot encoding of which ontology namespace(s) the node belongs to, derived from both the type URI and the node URI itself. The first 26 namespaces have fixed slots (`ONTOLOGY_NAMESPACE_INDICES` in `rdf_utils.py`), and a namespace registered later gets its slot from a seeded hash of its URI, so registering a source moves no slot. The node-URI column sits half the segment away from the type column.
 
 ### Segment 2: Property Schema (37.5% of vector_dim)
 
@@ -248,7 +248,7 @@ A build whose classes are **not separable** now **fails** with `ClassIdentityCap
 
 > **Changing `class_identity_dim` or `vector_dim` invalidates trained models.** Slots are `hash % dim`, so a different width re-maps every class. This is why the width is a published tuning constant in `encoding_config.json` rather than a figure recomputed on every build — one that moved whenever a class appeared would re-map every existing class for no benefit.
 >
-> Deriving the width per build was tried and removed. Widening `class_identity` means taking dims from `class_hierarchy` and `ontology_source`, and neither has a requirement to size against — `ontology_source` indexes a fixed 26-entry namespace table and is *expected* to collide, so "what it needs" is not a measurable quantity there. Any automatic split is therefore a guess about budgets nobody has established. The build fails instead, and the failure names the `vector_dim` that would fit along with what it costs in driver memory, so the arithmetic is not left to the reader.
+> Deriving the width per build was tried and removed. Widening `class_identity` means taking dims from `class_hierarchy` and `ontology_source`, and neither has a requirement to size against — `ontology_source` places 26 namespaces at fixed slots and any later one by hash, and is *expected* to collide, so "what it needs" is not a measurable quantity there. Any automatic split is therefore a guess about budgets nobody has established. The build fails instead, and the failure names the `vector_dim` that would fit along with what it costs in driver memory, so the arithmetic is not left to the reader.
 
 **Invocation example:**
 

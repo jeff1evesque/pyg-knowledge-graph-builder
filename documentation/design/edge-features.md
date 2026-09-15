@@ -61,6 +61,11 @@ Edge types are classified by relation name into categories. Only categories in t
 | **generic** | anything no fragment matched | OFF | Category indicator hash, relational context |
 | **skip** (never featurized) | `belongsToSector`, `owl:sameAs`, `hasParent` | — | Relation name alone is sufficient |
 
+The fragments come from `spark_jobs/sources/`: a category's shared fragments first,
+then each registered source's own, in registration order. The lists are built from
+every registered source whatever a run picks, because the edge encoding config
+records them.
+
 The `*Correlation` fragment matters more than it looks: the cross-source linkers emit one
 relation per sector (`energySectorCorrelation`, `employmentSizeSectorCorrelation`, …), so
 matching only the literal names `correlatesWith` / `relatedTo` classified all of them

@@ -335,9 +335,10 @@ def test_namespaces_are_unique():
 def test_every_minted_namespace_is_registered_except_provenance():
     """Provenance is deliberately absent — and that has to stay deliberate.
 
-    Nothing in it is ever an rdf:type, so it can never name a node type, and
-    registering it would shift ONTOLOGY_NAMESPACE_INDICES and change the
-    encoding contract digest to describe URIs no encoder sees.
+    Nothing in it is ever an rdf:type, so it can never name a node type and
+    needs no prefix or ontology-source slot. Registering it would move no slot
+    and leave the encoding contract digest alone; it would only place URIs no
+    encoder sees.
     """
     registered = {ns for ns, _prefix in NAMESPACE_PREFIXES}
     for name, namespace in MINTED.items():
@@ -345,6 +346,15 @@ def test_every_minted_namespace_is_registered_except_provenance():
             assert namespace not in registered
         else:
             assert namespace in registered, f"{name} is not in the table"
+
+
+def test_no_prefix_makes_the_name_an_unregistered_namespace_gets():
+    """The mappers tell a URI from an unregistered namespace by its unknown_
+    name, so no registered prefix may produce a name starting that way."""
+    from spark_jobs.pyg_builder.naming import UNREGISTERED_NAME_PREFIX
+
+    for namespace, prefix in NAMESPACE_PREFIXES:
+        assert not f"{prefix}_".startswith(UNREGISTERED_NAME_PREFIX), namespace
 
 
 # ======================================================================

@@ -17,6 +17,10 @@ Node type naming:
     Full URI: https://jefflevesque.com/ontology/market-feeds/PriceObservation
     PyG name: market_feeds_PriceObservation
 
+    A type URI in no registered namespace would be named unknown_<local name>.
+    It fails the build instead, unless pyg_config sets
+    allow_unregistered_namespaces (naming.check_registered_names).
+
 Multi-type entities:
     An entity may have multiple rdf:type triples. We assign each entity
     to exactly one canonical type using priority:
@@ -28,14 +32,21 @@ Multi-type entities:
     4. Otherwise, most specific type (fewest instances) wins
 """
 import logging
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Optional, Sequence, Tuple
 
 from pyspark import StorageLevel
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
-from spark_jobs.pyg_builder.naming import RDF_TYPE, prefixed_local_name_expr
+from spark_jobs import sources
+from spark_jobs.sources.spec import SourceSpec
+from spark_jobs.pyg_builder.naming import (
+    ALLOW_UNREGISTERED_NAMESPACES,
+    RDF_TYPE,
+    check_registered_names,
+    prefixed_local_name_expr,
+)
 from spark_jobs.utils.spark_rdf_utils import collect_sorted
 
 logger = logging.getLogger(__name__)
@@ -194,6 +205,7 @@ def _subsumed_node_types(
 def build_type_uri_mapping(
     triples_df: DataFrame,
     node_id_df: DataFrame,
+    namespace_prefixes: Optional[Sequence[Tuple[str, str]]] = None,
 ) -> Dict[str, str]:
     """
     Map each PyG node type name to the source type URI it was named after.
@@ -225,6 +237,9 @@ def build_type_uri_mapping(
     which is the previous behaviour: still deterministic, still stable across
     runs, and no worse than before for the cases the inversion cannot reach.
 
+    ``namespace_prefixes`` is the table the node types were named with: None
+    for every registered source's.
+
     Returns:
         Dict[pyg_name -> source type URI].
     """
@@ -247,7 +262,10 @@ def build_type_uri_mapping(
         .distinct()
         # The same expression NodeMapper named the node types with, so the
         # comparison below cannot drift from the naming rule.
-        .withColumn("derived_name", prefixed_local_name_expr("type_uri"))
+        .withColumn(
+            "derived_name",
+            prefixed_local_name_expr("type_uri", namespace_prefixes),
+        )
     )
     # Sorted, NOT a bare collect(): Spark returns rows in task-completion
     # order, so the fallback below would pick a different URI on different
@@ -278,13 +296,26 @@ class NodeMapper:
     of node counts is collected to the driver.
     """
 
-    def __init__(self, spark: SparkSession, config: Dict[str, Any]):
+    def __init__(
+        self,
+        spark: SparkSession,
+        config: Dict[str, Any],
+        specs: Optional[Sequence[SourceSpec]] = None,
+    ):
         self.spark = spark
         self.config = config
         self._requested_node_types = config.get("node_types", None)
         self._excluded_node_types = config.get("exclude_node_types", None)
         self._include_temporal = config.get("include_temporal_nodes", True)
         self._include_sector = config.get("include_sector_nodes", True)
+        self._allow_unregistered = config.get(
+            ALLOW_UNREGISTERED_NAMESPACES, False
+        )
+        # Node types are named from every registered source's namespaces. A
+        # test passes specs to name them from a toy source's as well.
+        self._namespace_prefixes = (
+            None if specs is None else sources.namespace_prefixes(specs)
+        )
 
     def build_node_id_table(
         self, triples_df: DataFrame
@@ -329,7 +360,8 @@ class NodeMapper:
         # Step 3: Convert type URIs to PyG names (pure Spark, no UDF)
         # ============================================
         type_triples = type_triples.withColumn(
-            "node_type", prefixed_local_name_expr("type_uri")
+            "node_type",
+            prefixed_local_name_expr("type_uri", self._namespace_prefixes),
         )
 
         # ============================================
@@ -427,6 +459,23 @@ class NodeMapper:
 
         node_counts = {row.node_type: row.cnt for row in count_rows}
 
+        def type_uris(names):
+            rows = (
+                type_triples
+                .filter(F.col("node_type").isin(names))
+                .select("type_uri")
+                .distinct()
+                .limit(50)
+                .collect()
+            )
+            return [row.type_uri for row in rows]
+
+        # Read off the counts just collected, so a build whose type URIs all
+        # sit in registered namespaces does no extra work.
+        check_registered_names(
+            "Node types", node_counts, self._allow_unregistered, type_uris
+        )
+
         total = sum(node_counts.values())
         logger.info(
             f"  Assigned IDs to {total:,} nodes "
@@ -457,7 +506,9 @@ class NodeMapper:
 
         Called by constructor.py for metadata registration.
         """
-        return build_type_uri_mapping(triples_df, node_id_df)
+        return build_type_uri_mapping(
+            triples_df, node_id_df, self._namespace_prefixes
+        )
 
     def _apply_config_filters(self, type_triples: DataFrame) -> DataFrame:
         """Apply configuration-based filters to type triples."""

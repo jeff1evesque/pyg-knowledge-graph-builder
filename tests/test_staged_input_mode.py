@@ -102,8 +102,8 @@ def test_label_comes_from_the_declared_path_not_the_root(tmp_path):
     """A root that happens to name a source must not relabel the run.
 
     read_paths is what gets opened; source_paths is what gets labelled. This is
-    the case that separates them: both sources below come back "sec" if the
-    label is taken from the resolved path, because the root says so.
+    the case that separates them: both sources below lose their labels if the
+    label is taken from the resolved path, because the root names a source too.
     """
     root = tmp_path / "source=sec-mirror"
     for key in ("my-data-lake/raw/source=bls/cpi", "my-data-lake/noaa/daily"):
@@ -120,9 +120,11 @@ def test_label_comes_from_the_declared_path_not_the_root(tmp_path):
     resolved = [source_label(p, i) for i, p in enumerate(cfg.read_paths)]
 
     assert declared == ["bls", "noaa"]
-    assert resolved == ["sec", "sec"], (
-        "the root wins when the resolved path is labelled -- which is why "
-        "load_source_triples labels from source_paths"
+    # The root's source=sec fragment makes each resolved path match two
+    # sources, and a path that matches two gets no source's label.
+    assert resolved == ["source_0", "source_1"], (
+        "the root changes the label when the resolved path is labelled -- "
+        "which is why load_source_triples labels from source_paths"
     )
 
 

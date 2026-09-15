@@ -7,23 +7,26 @@ files, ``load_turtle_parquet_to_dataframe`` for the Turtle blobs the archive
 actually holds, and ``load_source_triples`` which picks between them per source
 path, stamps each row with the source it came from, and unions the result.
 
-The per-source stamp is not bookkeeping. ``source_label`` reads the source out
-of path fragments, so the same run reports the same per-source triple counts
-whether it read the bucket directly or a staged local mirror of it -- which is
-what makes the two input modes comparable at all.
+The per-source stamp is not bookkeeping. Each row is stamped with the source
+its declared path matched (``JobConfig.path_specs``), so the same run reports
+the same per-source triple counts whether it read the bucket directly or a
+staged local mirror of it -- which is what makes the two input modes comparable
+at all.
 
 The Turtle parsing itself is NOT here: it runs on executors and lives in
 ``turtle.py``, which is constrained in what it may import. This module is
 driver-side Spark and has no such limit.
 """
 import logging
-from typing import List, Tuple
+from typing import List, Sequence, Tuple
 
 from pyspark import StorageLevel
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType, StructField, StringType
 
+from spark_jobs import sources
+from spark_jobs.sources.spec import SourceSpec
 from spark_jobs.utils.spark_rdf_utils import literal_datatype_observations
 from spark_jobs.utils.canonicalization import canonicalize_source_triples
 from spark_jobs.graph.turtle import PARSE_BATCH_ROWS, turtle_batches_to_arrow
@@ -140,16 +143,21 @@ def load_ntriples_to_dataframe(
 # Turtle Parquet parsing (source Parquet → triples DataFrame)
 # ============================================
 # Column names a Turtle Parquet source may use for its blob, in preference
-# order. Sources written by different scrapers disagree — 'triples' for most,
-# 'rdf_turtle' for others — and --source_paths takes many prefixes in a single
-# run, so the column is resolved per source rather than once for the whole job.
-# One submission can therefore span sources that do not agree on the name: each
-# is parsed into the same (subject, predicate, object) schema before the union,
-# so what the column was called on disk never reaches downstream steps.
+# order. Sources written upstream disagree — 'triples' for most, 'rdf_turtle'
+# for others — and --source_paths takes many prefixes in a single run, so the
+# column is resolved per source rather than once for the whole job. One
+# submission can therefore span sources that do not agree on the name: each is
+# parsed into the same (subject, predicate, object) schema before the union, so
+# what the column was called on disk never reaches downstream steps. A source
+# whose spec lists its own turtle_columns is tried against those instead.
 TURTLE_COLUMN_CANDIDATES = ("triples", "rdf_turtle")
 
 
-def resolve_turtle_column(columns, turtle_column: str = "") -> str:
+def resolve_turtle_column(
+    columns,
+    turtle_column: str = "",
+    candidates: Tuple[str, ...] = TURTLE_COLUMN_CANDIDATES,
+) -> str:
     """
     Pick the column holding the Turtle blob for one source.
 
@@ -160,6 +168,8 @@ def resolve_turtle_column(columns, turtle_column: str = "") -> str:
     Args:
         columns: Column names in the source Parquet schema.
         turtle_column: Explicit override; empty means auto-detect.
+        candidates: The names auto-detection tries, in order: the source's
+            own turtle_columns, or TURTLE_COLUMN_CANDIDATES.
 
     Returns:
         Name of the column to read Turtle strings from.
@@ -176,12 +186,12 @@ def resolve_turtle_column(columns, turtle_column: str = "") -> str:
             )
         return turtle_column
 
-    for candidate in TURTLE_COLUMN_CANDIDATES:
+    for candidate in candidates:
         if candidate in columns:
             return candidate
 
     raise ValueError(
-        f"No Turtle column found. Tried {list(TURTLE_COLUMN_CANDIDATES)}; "
+        f"No Turtle column found. Tried {list(candidates)}; "
         f"available columns: {list(columns)}. Set --turtle_column to the "
         f"correct column name."
     )
@@ -191,6 +201,7 @@ def load_turtle_parquet_to_dataframe(
     spark: SparkSession,
     source_path: str,
     turtle_column: str = "",
+    candidates: Tuple[str, ...] = TURTLE_COLUMN_CANDIDATES,
 ) -> DataFrame:
     """
     Load RDF Turtle strings from a Parquet file column into a PySpark
@@ -225,9 +236,9 @@ def load_turtle_parquet_to_dataframe(
         spark: Active SparkSession
         source_path: Local path or s3a:// URI to source Parquet files
         turtle_column: Name of the column containing Turtle strings. Empty
-                       (the default) auto-detects from
-                       TURTLE_COLUMN_CANDIDATES; set it via --turtle_column
-                       to force one name.
+                       (the default) auto-detects from ``candidates``; set it
+                       via --turtle_column to force one name.
+        candidates: The column names auto-detection tries, in order.
 
     Returns:
         DataFrame with columns (subject: string, predicate: string,
@@ -243,7 +254,7 @@ def load_turtle_parquet_to_dataframe(
         ValueError: If no usable Turtle column is found in the Parquet schema.
     """
     raw_df = spark.read.parquet(source_path)
-    turtle_column = resolve_turtle_column(raw_df.columns, turtle_column)
+    turtle_column = resolve_turtle_column(raw_df.columns, turtle_column, candidates)
 
     logger.info(
         f"Loading Turtle Parquet from {source_path}, "
@@ -365,25 +376,14 @@ def load_turtle_parquet_to_dataframe(
 
 SOURCE_COLUMN = "_source"
 
-# Path fragment -> short label. Keyed on fragments rather than whole paths so a
-# label survives a bucket or prefix change, which keeps counts comparable across
-# runs that read the same data from different locations.
-_SOURCE_LABEL_PATTERNS = (
-    ("source=sec", "sec"),
-    ("source=bls", "bls"),
-    ("/noaa/", "noaa"),
-    ("quotes", "market"),
-)
 
-# Recognised source names, matched against whole path SEGMENTS. Production paths
-# carry the partition fragments above; the committed fixtures are plain files
-# (ntriples/sec.nt), and without this every e2e run would label its sources
-# positionally -- correct but useless for reading a report.
-_SOURCE_NAMES = frozenset({"sec", "bls", "noaa", "market"})
-
-
-def source_label(source_path: str, index: int) -> str:
-    """A short, stable label for a source path.
+def source_label(
+    source_path: str,
+    index: int,
+    specs: Sequence[SourceSpec] = sources.REGISTERED,
+) -> str:
+    """A short, stable label for a source path: the name of the one registered
+    source it matches (see ``sources.specs_for_path``).
 
     Deliberately NOT the path itself. The manifest is copied to object storage
     and pasted into issues, and a bucket-qualified URI used as a map key spreads
@@ -391,23 +391,14 @@ def source_label(source_path: str, index: int) -> str:
     ``config.source_paths`` already records the paths once, in a field a reader
     knows to treat as sensitive.
 
-    Falls back to a positional label rather than to any part of the path, so an
-    unrecognised source cannot leak one either.
+    Falls back to a positional label rather than to any part of the path, so a
+    path that matches no source, or two, cannot leak one either. A mislabelled
+    source is worse than an unlabelled one, because it reads as authoritative.
+    JobConfig rejects such a path in every mode that reads sources.
     """
-    lowered = source_path.lower()
-    for fragment, label in _SOURCE_LABEL_PATTERNS:
-        if fragment in lowered:
-            return label
-
-    # Whole segments only, never substrings: a bucket called "secure-data" or a
-    # directory named "marketing" contains a source name but is not one, and a
-    # mislabelled source is worse than an unlabelled one because it reads as
-    # authoritative.
-    for segment in lowered.replace("\\", "/").split("/"):
-        stem = segment.split(".", 1)[0]
-        if stem in _SOURCE_NAMES:
-            return stem
-
+    found = sources.specs_for_path(source_path, specs)
+    if len(found) == 1:
+        return found[0].name
     return f"source_{index}"
 
 
@@ -472,7 +463,8 @@ def load_source_triples(
     """
     Load raw source data into a triples DataFrame.
 
-    Dispatches to the correct loader based on config.source_format:
+    Reads each path in its source's format -- the spec's source_format when it
+    sets one, otherwise config.source_format -- with the matching loader:
       - "ntriples":       load_ntriples_to_dataframe()
       - "turtle_parquet": load_turtle_parquet_to_dataframe()
 
@@ -509,42 +501,48 @@ def load_source_triples(
     """
     source_paths = list(config.source_paths)
     read_paths = list(config.read_paths)
+    # The source each DECLARED path matched, not the path just read. A staged
+    # mirror keeps the key layout so both spell the source the same way, but
+    # the staging root is chosen by whoever ran the sync -- matching on it would
+    # let a root named /srv/sec-mirror relabel every source in the run, and
+    # per-source statistics have to mean the same thing in both input modes to
+    # be comparable at all.
+    path_specs = list(config.path_specs)
+    formats = [spec.source_format or config.source_format for spec in path_specs]
+    # unionAll lines columns up by position, and only the Turtle loader returns
+    # object_datatype. When a run reads both formats, its N-Triples frames get
+    # an empty one, which builds no datatype marker.
+    mixed_formats = len(set(formats)) > 1
 
     logger.info(
         f"Source format: {config.source_format}, "
         f"input mode: {config.input_mode}, "
         f"{len(read_paths)} path(s)"
     )
-    for path in read_paths:
-        logger.info(f"  {path}")
+    for path, spec, source_format in zip(read_paths, path_specs, formats):
+        logger.info(f"  {path} ({spec.name}, {source_format})")
 
     loaded: List[DataFrame] = []
 
-    for index, source_path in enumerate(read_paths):
-        if config.source_format == "ntriples":
+    for source_path, spec, source_format in zip(
+        read_paths, path_specs, formats, strict=True
+    ):
+        if source_format == "ntriples":
             df = load_ntriples_to_dataframe(spark, source_path)
+            if mixed_formats:
+                df = df.withColumn("object_datatype", F.lit(""))
         else:
             df = load_turtle_parquet_to_dataframe(
                 spark,
                 source_path,
                 turtle_column=config.turtle_column,
+                candidates=spec.turtle_columns or TURTLE_COLUMN_CANDIDATES,
             )
-        # Canonicalize per path rather than once after the union, so the source
-        # stamp survives. canonicalize_sec_identifiers ends in an explicit
-        # three-column select, which would drop any column added before it.
-        # Applying it here is equivalent: every rule inside is a row-wise column
-        # expression, so it does not matter whether rows from different paths are
-        # in the same frame yet.
-        df = canonicalize_source_triples(df)
-        # Labelled from the DECLARED path, not the one just read. A staged
-        # mirror keeps the key layout so both spell the source the same way,
-        # but the staging root is chosen by whoever ran the sync -- keying the
-        # label off it would let a root named /srv/sec-mirror relabel every
-        # source in the run, and per-source statistics have to mean the same
-        # thing in both input modes to be comparable at all.
-        df = df.withColumn(
-            SOURCE_COLUMN, F.lit(source_label(source_paths[index], index))
-        )
+        # Canonicalize per path rather than once after the union, so each path
+        # gets only its own source's repair. A repair rewrites columns in place
+        # and carries the others through, so object_datatype survives it.
+        df = canonicalize_source_triples(df, spec)
+        df = df.withColumn(SOURCE_COLUMN, F.lit(spec.name))
         loaded.append(df)
         logger.info(f"  Parsed: {source_path}")
 
@@ -595,9 +593,10 @@ def load_source_triples(
     count = triples_df.count()
 
     # Datatype markers, built once from the cached parse instead of by reading
-    # the source again. Only the turtle loader hands `object_datatype` up here;
-    # load_ntriples_to_dataframe returns the three canonical columns and reads
-    # no datatype at all, so the column's presence is what picks the path.
+    # the source again. Only the turtle loader reads datatypes. A run with no
+    # Turtle path has no `object_datatype` column at all, so the column's
+    # presence is what picks the path; in a run that mixes formats the
+    # N-Triples rows carry an empty one, which builds no marker.
     #
     # SOURCE_COLUMN rides along so per-source accounting charges each marker to
     # the source that declared it -- which came for free while the loader built
@@ -619,13 +618,18 @@ def load_source_triples(
     # empty frame on the way to raising anyway.
     if count == 0:
         raise FileNotFoundError(
-            f"No triples parsed from {config.source_format} source(s): "
-            f"{source_paths}."
+            f"No triples parsed from {', '.join(sorted(set(formats)))} "
+            f"source(s): {source_paths}."
             + (
                 f" Check that column '{config.turtle_column}' contains "
                 f"valid Turtle strings."
-                if config.source_format == "turtle_parquet"
-                else " Check that .nt files exist at the source paths."
+                if "turtle_parquet" in formats
+                else ""
+            )
+            + (
+                " Check that .nt files exist at the source paths."
+                if "ntriples" in formats
+                else ""
             )
         )
 

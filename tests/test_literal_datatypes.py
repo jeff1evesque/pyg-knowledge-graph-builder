@@ -228,12 +228,13 @@ def test_markers_survive_the_shared_parse_and_stay_attributed(spark, tmp_path):
     from spark_jobs.graph.config import JobConfig
 
     # bls and noaa, not sec: a sec path has to name feed=filings and this test
-    # is not about that guard.
+    # is not about that guard. Each sits in a folder named after its source,
+    # which is how a path with no archive partition is matched to one.
     sources = {"bls": f"{XSD}decimal", "noaa": f"{XSD}integer"}
     paths = []
     for index, (name, datatype) in enumerate(sources.items()):
         turtle = f'<{SUBJ}{index}> <{PRED}> "{index + 1}"^^<{datatype}> .\n'
-        path = tmp_path / f"source={name}" / "src"
+        path = tmp_path / name / "src"
         spark.createDataFrame(
             [(turtle,)], schema="triples STRING"
         ).write.parquet(str(path))

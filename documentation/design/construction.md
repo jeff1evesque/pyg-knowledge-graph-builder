@@ -11,6 +11,7 @@ Starting from `triples_df` (enriched, on executors):
     - Assign canonical type per entity (pinned temporal types first, then most specific wins via type count)
     - Assign per-type 0-indexed integer IDs via Window functions
     - Cache and materialize node_id_df on executors
+    - Fail the build when a node type comes from a namespace no source registers, naming the namespace. It would be named `unknown_<local name>`, which two vocabularies' classes of the same name would share. `pyg_config`'s `allow_unregistered_namespaces` keeps the name instead, with a warning
     - Collect type URI mapping for metadata (small collect, <500 rows)
     - Output: node_id_df (uri, node_id, node_type) — cached on executors
         - node_counts Dict[str, int] — small collect to driver
@@ -22,6 +23,7 @@ Starting from `triples_df` (enriched, on executors):
     - Derive relation names via pure Spark WHEN expressions (no UDF)
     - Cache resolved edges DataFrame (reused by EdgeFeatureExtractor)
     - Discover distinct edge types (small collect)
+    - Fail the build, the same way, when a relation that made an edge comes from a namespace no source registers. A predicate that only points at literals or untyped URIs makes no edge and is not checked
     - Collect per-edge-type [2, num_edges] int64 arrays via toPandas() in deterministic order (src_id ASC, dst_id ASC)
     - Release Pandas memory after each edge type conversion
     - Collect predicate URI mapping for metadata (small collect, <100 rows)
@@ -40,7 +42,7 @@ Starting from `triples_df` (enriched, on executors):
     - Collect ontology schema snapshot for metadata (small collects: type URIs ~500 rows, class hierarchy ~5000 rows, property schema ~500 rows)
     - Compute slot mapping on driver (hash approximation, <1000 entries)
     - For each node type (largest first):
-        - Encode Segment 1: class identity + hierarchy + source (hash-based)
+        - Encode Segment 1: class identity + hierarchy (hash-based) + source (the first 26 namespaces at fixed indices, a later one at a seeded hash of its URI)
         - Encode Segment 2: property presence + domain/range + prop hierarchy
         - Encode Segment 3: numeric hashed slots + categorical multi-hot
         - Union segments, aggregate (sum at same node_id+dim) — on executors
@@ -54,7 +56,7 @@ Starting from `triples_df` (enriched, on executors):
                 - — all deposited into MetadataCollector
 - **Step 4: EdgeFeatureExtractor** (on executors → driver tensors)
     - Compute EdgeVectorLayout from configured edge_vector_dim (all boundaries scale proportionally)
-    - Classify each edge type by relation name into categories (temporal, option_stock, escalation, correlation, causal, strategy, skip, generic)
+    - Classify each edge type by relation name into categories (temporal, option_stock, escalation, correlation, causal, strategy, skip, generic). A relation from a namespace no source registers has already failed the build in Step 2, unless `pyg_config` allows it
     - Filter to eligible edge types (enabled categories only)
     - Assign deterministic edge_idx via Window functions on executors (same sort order as EdgeMapper: src_id ASC, dst_id ASC)
     - Extract endpoint numeric properties via anti-join — on executors

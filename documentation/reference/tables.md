@@ -96,8 +96,8 @@ the rest.
 It is not a copy of that file. The run's index covers whatever node types the
 run built its `.pt` over; this covers everything the sources carried. A run can
 legitimately exclude a source from its model and still have to publish it — NOAA
-is 0.076% of the nodes, shares nothing between days and reaches market through
-no edge at all, so it earns little in a graph neural network and still answers
+is 0.05% of the nodes on 2026-09-09, shares nothing between days and has no edge
+to market, so it earns little in a graph neural network and still answers
 state-by-month questions in a table.
 
 ### `edges/`
@@ -110,7 +110,7 @@ no table.
 ### `edge_types/`
 
 `(src_type, relation, dst_type, count, predicate_uri, origin, relation_group)`,
-one row per edge type — 837 on a production day.
+one row per edge type — 838 on 2026-09-09.
 
 This is what keeps `edges/` readable once its run has expired. A relation name
 alone says neither which predicate it came from nor whether the link was
@@ -142,9 +142,9 @@ its numeric segment by, so the table and the model agree on what a number is.
 `(node_type, uri, text)` — one row per node that carries text, its text-bearing
 values joined in predicate order.
 
-What comes out is the text that exists: 22,096 nodes and about 60 characters
-each, mostly bare names like `INTUIT` and `FORM 4`, because only 5 of 155 node
-types carry any text at all. Rendering a node and its neighbourhood into a real
+What comes out is the text that exists. On 2026-09-09 that is 12,607 nodes
+across 49 node types, mostly names and labels; of the 990 nodes with 300 or more
+characters, 901 are weather alert descriptions. Rendering a node and its neighbourhood into a real
 sentence is what would make a vector index over this useful, and it is separate
 work. This repository emits the table; the serving side owns the model.
 
@@ -170,10 +170,13 @@ The non-market subgraph as a [pyoxigraph](https://pyoxigraph.readthedocs.io/)
 store, one per day — a directory, not a Parquet file.
 
 `edges/` and `nodes/` answer a one-hop question well and a two-hop question
-badly: a self-join carrying a mandatory same-day guard, with hand-rolled
-recursion for anything deeper. Measured on one day: 1,395,049 triples in a
-194 MB store, counting `affectsRegion` edges in 1 ms and the two-hop
-`weather → region ← measurement` traversal in 11 ms.
+awkwardly: a self-join per hop carrying a mandatory same-day guard, with
+hand-rolled recursion for anything deeper. Speed is not the problem. On
+2026-09-09 the two-hop `weather → region ← measurement` traversal returned its
+38,352 pairs in 0.05 s from a local copy of `edges/`, and in 10 ms from the
+store, which held 1,413,546 triples in 185 MB. The store also keeps what no
+table can: a triple whose object is a URI nothing typed, such as a weather
+alert's severity, is in `graph/` and nowhere else.
 
 ```python
 import pyoxigraph
@@ -181,20 +184,20 @@ import pyoxigraph
 store = pyoxigraph.Store.read_only("graph/day=2026-09-10")
 for row in store.query("""
     SELECT ?measurement WHERE {
-      ?alert       <https://jefflevesque.com/ontology/noaa/affectsRegion> ?region .
-      ?measurement <https://jefflevesque.com/ontology/bls/hasRegion>      ?region
+      ?alert       <https://jefflevesque.com/ontology/bls/affectsRegion> ?region .
+      ?measurement <https://jefflevesque.com/ontology/bls/hasRegion>     ?region
     }
 """):
     print(row["measurement"].value)
 ```
 
-**One day fits in memory; a window does not.** At 139 bytes a triple a 30-day
-window is 5.8 GB and a year is 71 GB, against 194 MB for a day. So the store
+**One day fits in memory; a window does not.** At 185 MB a day, a 30-day window
+is about 5.6 GB and a year about 68 GB. So the store
 supplements the tables rather than replacing them: load one day for traversal,
 and fall back to `edges/` for anything spanning more.
 
-**No market data enters it.** At the same byte rate market's ~415M triples a day
-would be roughly 58 GB, and it is a time series of numbers carrying one edge per
+**No market data enters it.** At the store's rate, about 131 bytes a triple,
+market's ~415M triples a day would be about 54 GB, and it is a time series of numbers carrying one edge per
 snapshot — not a shape a triple store earns anything on.
 
 Market *terms* do appear, which is not the same thing. The statements about the
