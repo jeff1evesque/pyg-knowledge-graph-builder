@@ -15,10 +15,12 @@ extract_*.py
 ##
 ## python venv
 ##
-.venv/
+# No trailing slash, so a link to a venv is ignored as well as a directory: a schedule's
+# worktree links both of these to the main checkout's (running-a-job.md, "Scheduled runs").
+.venv
 
 # Packed virtualenv shipped to Spark executors (bin/package_venv.sh); ~GB, never commit.
-/dist/
+/dist
 
 # MkDocs build output (mkdocs.yml site_dir). The pages themselves are tracked
 # under documentation/; this is the rendered copy of them.
