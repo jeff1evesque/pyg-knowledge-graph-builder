@@ -6,13 +6,16 @@ WHY THIS IS WORTH A TEST
 Nobody watches this script run, and two of its possible mistakes would pass unseen:
 a prune that removes a run whose upload failed deletes the only copy of that run, and
 a late upstream write reported as a failure teaches everyone to ignore the failures.
+It also removes files from places runs started by hand use too, so what it may remove
+is pinned as closely as what it builds.
 
 HOW
 ---
 The script runs for real against a fake checkout. The launcher, staging, memory and
 publish scripts in it are stubs that record what they were asked, and aws, curl, ssh,
 git, ip and hostname are stub binaries. The fake S3 is a folder, as in
-tests/test_publish_run.py, so nothing here touches a cluster, a bucket or the network.
+tests/test_publish_run.py, and the mirror is a folder standing for this node's disk,
+so nothing here touches a cluster, a bucket or the network.
 """
 
 import fcntl
@@ -68,6 +71,23 @@ printf "run id      : %s\\nwork dir    : %s\\n" "$RUN_ID" "$PYG_WORK_DIR" > "$rd
 echo "${FAKE_RUN_RC:-0}" > "$rd/run.done"
 '''
 
+# Stands in for bin/stage_sources.sh on this node: each source it is given appears in
+# the mirror, as a download would leave it.
+STUB_STAGE = '''#!/usr/bin/env bash
+printf "%s\\n" "$*" >> "$FAKE_CALLS/stage.txt"
+[ "${FAKE_STAGE_RC:-0}" = 0 ] || exit "$FAKE_STAGE_RC"
+IFS=, read -ra uris <<< "$2"
+for uri in "${uris[@]}"; do
+  rest="${uri#*://}"
+  path="$PYG_LOCAL_SOURCE_ROOT/${rest%/}"
+  if [[ "$uri" == */ ]]; then
+    mkdir -p "$path" && touch "$path/snapshot-01.parquet"
+  else
+    mkdir -p "${path%/*}" && touch "$path"
+  fi
+done
+'''
+
 # A run counts as listed at the destination once an upload of it has succeeded.
 STUB_PUBLISH = '''import os, sys
 from pathlib import Path
@@ -103,7 +123,7 @@ def _stub(path: Path, body: str) -> Path:
 
 
 class Schedule:
-    """A schedule directory, a fake checkout, a work root, a fake S3 and stub binaries."""
+    """A schedule directory, a fake checkout, a work root, a mirror, a fake S3 and stubs."""
 
     def __init__(self, tmp_path: Path, lag: int = 1, retain: int = 2):
         self.tmp = tmp_path
@@ -112,6 +132,7 @@ class Schedule:
         self.repo = tmp_path / "repo"
         self.work_root = tmp_path / "work"
         self.work_root.mkdir()
+        self.mirror = tmp_path / "mirror"
         self.s3 = tmp_path / "s3"
         self.s3.mkdir()
         self.calls = tmp_path / "calls"
@@ -119,16 +140,17 @@ class Schedule:
         self.bin = tmp_path / "stubbin"
 
         _script(self.repo / "bin" / "run_cluster_notebook.sh", STUB_LAUNCHER)
-        _stub(self.repo / "bin" / "stage_sources.sh",
-              'printf "%s\\n" "$*" >> "$FAKE_CALLS/stage.txt"\nexit "${FAKE_STAGE_RC:-0}"\n')
+        _script(self.repo / "bin" / "stage_sources.sh", STUB_STAGE)
         _script(self.repo / "bin" / "publish_run.py", STUB_PUBLISH)
         _script(self.repo / "bin" / "mem_reclaim.py", STUB_MEM)
         _stub(self.repo / "runner", "exit 0\n")
 
         _script(self.bin / "aws", STUB_AWS)
         _stub(self.bin / "curl", 'printf "%s" "${FAKE_MASTER_JSON:-}"\n')
+        # The other node: what it is asked to run is recorded, and nothing is run.
         _stub(self.bin / "ssh", 'printf "%s\\n" "$*" >> "$FAKE_CALLS/ssh.txt"\n'
-                               'cat > /dev/null\nexit "${FAKE_MEM_RC:-0}"\n')
+                               '{ cat; echo "--- end of input"; } >> "$FAKE_CALLS/ssh-stdin.txt"\n'
+                               'case " $* " in *" python3 "*) exit "${FAKE_MEM_RC:-0}" ;; esac\n')
         _stub(self.bin / "git", 'case " $* " in\n'
                                 '  *" status "*) printf "%s" "${FAKE_GIT_STATUS:-}" ;;\n'
                                 '  *" rev-parse "*) echo abc1234 ;;\n'
@@ -145,7 +167,7 @@ class Schedule:
             f"export PYG_STAGE_NODES={LOCAL},{REMOTE}",
             f'export PYG_RUNNER_PYTHON="{self.repo}/runner"',
             "export PYG_INPUT_MODE=local",
-            f'export PYG_LOCAL_SOURCE_ROOT="{self.tmp}/mirror"',
+            f'export PYG_LOCAL_SOURCE_ROOT="{self.mirror}"',
             "export PYG_SOURCE_PATHS="
             f'"s3a://bucket/raw/source=a/{day}/${{PYG_DATA_DAY}}.snappy.parquet,'
             f's3a://bucket/quotes/{day}/day=${{PYG_DATA_DAY}}/"',
@@ -206,6 +228,11 @@ class Schedule:
     def recorded(self, name: str) -> str:
         path = self.calls / f"{name}.txt"
         return path.read_text() if path.exists() else ""
+
+    def sent_to_the_other_node(self) -> list:
+        """Each script the other node was sent, one entry per ssh call."""
+        return [chunk for chunk in self.recorded("ssh-stdin").split("--- end of input\n")
+                if chunk]
 
     def log(self) -> str:
         path = self.sd / "daily.log"
@@ -304,24 +331,34 @@ def test_a_yearly_prefix_with_nothing_old_enough_skips_the_day(schedule):
 
 
 # --------------------------------------------------------------------------- #
-# The prune
+# The prune: only what this schedule made
 # --------------------------------------------------------------------------- #
 
 def test_the_newest_runs_are_kept_and_only_published_older_ones_removed(schedule):
     s = schedule(retain=2)
     s.add_sources("2026-09-30")
+    runs = s.sd / "runs"
     newest_older = s.add_old_run("20260930T043000Z")
     unpublished = s.add_old_run("20260928T043000Z", published=False)
-    removed = [s.add_old_run("20260929T043000Z"), s.add_old_run("20260927T043000Z")]
+    removed = ("20260929T043000Z", "20260927T043000Z")
+    for run_id in removed:
+        s.add_old_run(run_id)
+    never_started = runs / "20260926T043000Z"
+    never_started.mkdir()
+    (never_started / "stage.log").write_text("staging failed\n")
 
     r = s.run()
     assert r.returncode == 0, r.stdout + r.stderr
     assert (s.work_root / RUN_ID).is_dir()
     assert newest_older.is_dir()
+    assert (runs / "20260930T043000Z").is_dir()
+    # Not listed as published, so kept whole, for inspection.
     assert unpublished.is_dir()
-    assert not any(work.exists() for work in removed)
-    # Only work directories go. The run directories are the record of what ran.
-    assert len(list((s.sd / "runs").iterdir())) == 5
+    assert (runs / "20260928T043000Z").is_dir()
+    for run_id in removed:
+        assert not (s.work_root / run_id).exists()
+        assert not (runs / run_id).exists()
+    assert not never_started.exists()
 
 
 def test_the_prune_never_removes_anything_outside_the_work_root(schedule, tmp_path):
@@ -342,6 +379,8 @@ def test_the_prune_never_removes_anything_outside_the_work_root(schedule, tmp_pa
     assert misnamed.is_dir()
     assert linked.is_symlink()
     assert precious.is_dir()
+    for run_id in ("20260929T043000Z", "20260928T043000Z", "20260927T043000Z"):
+        assert (s.sd / "runs" / run_id).is_dir()
 
 
 def test_a_failing_publish_blocks_the_prune(schedule):
@@ -356,6 +395,7 @@ def test_a_failing_publish_blocks_the_prune(schedule):
     assert "FAILED" in s.log()
     assert (s.work_root / RUN_ID).is_dir()
     assert older.is_dir()
+    assert (s.sd / "runs" / "20260929T043000Z").is_dir()
     assert "--published" not in s.recorded("publish")
 
 
@@ -365,6 +405,35 @@ def test_a_run_that_did_not_finish_is_not_published(schedule):
 
     assert s.run(FAKE_RUN_RC="1").returncode == 1
     assert s.recorded("publish") == ""
+
+
+def test_only_the_local_copies_this_schedule_downloaded_are_removed(schedule):
+    """The mirror is shared with runs started by hand. A copy a node already held when
+    the schedule staged is not the schedule's to remove, even once no day reads it."""
+    s = schedule()
+    s.add_sources("2026-09-30")
+    s.add_sources("2026-10-01")
+    by_hand = s.mirror / "bucket/raw/source=a/year=2026/month=09/30.snappy.parquet"
+    by_hand.parent.mkdir(parents=True)
+    by_hand.write_bytes(b"staged by a run started by hand")
+
+    first = s.run(PYG_SCHEDULE_TODAY="2026-10-01", RUN_ID="20261001T043000Z")
+    assert first.returncode == 0, first.stdout + first.stderr
+    downloaded = s.mirror / "bucket/quotes/year=2026/month=09/day=30"
+    assert downloaded.is_dir()
+    assert f"{LOCAL}\t{downloaded}" in (s.sd / "mirror-downloads.tsv").read_text()
+
+    second = s.run(PYG_SCHEDULE_TODAY="2026-10-02", RUN_ID="20261002T043000Z")
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert not downloaded.exists()
+    assert not downloaded.parent.exists()          # left empty, so removed too
+    assert by_hand.read_bytes() == b"staged by a run started by hand"
+    # Read by both days, so kept.
+    assert (s.mirror / "bucket/raw/source=b/feed=x/2025.snappy.parquet").exists()
+    # The other node is sent the same removal.
+    removals = [chunk for chunk in s.sent_to_the_other_node() if "rm -rf" in chunk]
+    assert len(removals) == 1
+    assert "day=30" in removals[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -415,7 +484,7 @@ def test_the_memory_gate_runs_on_every_node(schedule):
 
     assert s.run().returncode == 0
     assert s.recorded("mem").splitlines() == ["90"]
-    assert REMOTE in s.recorded("ssh")
+    assert f"{REMOTE} python3" in s.recorded("ssh")
 
 
 def test_memory_that_will_not_come_free_is_refused_after_three_tries(schedule):
