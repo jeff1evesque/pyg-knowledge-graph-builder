@@ -7,6 +7,9 @@ pyg-knowledge-graph-builder/
 │   │   ├── large-run.env                   # opt-in sizing for a full-day run
 │   │   ├── pyg-assembly.env                # sizing for the assembly leg (--mode pyg_only)
 │   │   └── run-env.example.sh              # the env.sh contract; PYG_DATA_* come from --data-date
+│   ├── systemd/
+│   │   ├── pyg-daily.service.example       # the unit bin/schedule_run.sh renders and installs
+│   │   └── pyg-daily.timer.example         # the timer that starts it
 │   ├── census_sec_terms.py                 # per-form census of the SEC filings vocabulary
 │   ├── check_vocabulary_drift.py           # terms we key on that upstream no longer emits
 │   ├── daily_run.sh                        # one scheduled day: check, run, publish, prune
@@ -21,6 +24,7 @@ pyg-knowledge-graph-builder/
 │   ├── run_cluster_notebook.sh             # drive one cluster run; --data-date names the day
 │   ├── run_e2e_tests.sh                    # the e2e smoke suite, local SparkSession (CPU/GPU)
 │   ├── run_tests.sh                        # the fast suite, parallel (sibling of run_e2e_tests.sh)
+│   ├── schedule_run.sh                     # install the user timer that runs daily_run.sh
 │   ├── selfloops.py                        # count nodes that are their own object
 │   ├── stage_sources.sh                    # mirror source prefixes onto each worker's disk
 │   ├── stall_watchdog.py                   # catch a stalled stage, dump the executors
