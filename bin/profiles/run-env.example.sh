@@ -137,8 +137,9 @@ export PYG_TIME_PERIOD=YYYY-MM
 # above should be built from RUN_ID, PYG_RUN_DIR and PYG_DATA_* instead of naming
 # one run. Leave this block out of a run started by hand.
 # --------------------------------------------------------------------------- #
-# bin/schedule_run.sh <schedule-dir> installs a user timer from the next two, and
-# installs nothing while the calendar is unset. The time is this host's local time.
+# bin/schedule_run.sh <schedule-dir> turns on linger and installs a user timer from the
+# next two, and installs nothing while the calendar is unset. Without a time zone in the
+# calendar, the time is this host's.
 # export PYG_SCHEDULE_ONCALENDAR="Tue..Sat *-*-* 00:30:00"
 # export PYG_SCHEDULE_UNIT=pyg-daily
 # export PYG_SCHEDULE_DATA_LAG_DAYS=1           # build the day before today
