@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run one day of a schedule: build the graph from that day's sources, publish it, and
-# only then prune older runs that are already published.
+# only then prune what earlier days of the same schedule left behind.
 #
 #   bin/daily_run.sh [--data-date YYYY-MM-DD] <schedule-dir>
 #
@@ -8,7 +8,7 @@
 # (see bin/profiles/run-env.example.sh) plus the settings below. Each day gets a run
 # directory of its own, <schedule-dir>/runs/<RUN_ID>/, holding a copy of env.sh that
 # names the sources the day resolved to. Every step is logged to
-# <schedule-dir>/daily.log.
+# <schedule-dir>/daily.log. bin/schedule_run.sh installs the timer that starts this.
 #
 # The day is --data-date when given. Otherwise it is today on this host's clock, less
 # PYG_SCHEDULE_DATA_LAG_DAYS; PYG_SCHEDULE_TODAY stands in for today, for tests.
@@ -17,18 +17,31 @@
 #   refuse a checkout with uncommitted changes, and log the commit that runs
 #   check that every source is there; a missing one skips the day
 #   wait for an idle cluster
-#   stage the sources, when the run reads a local mirror
+#   stage the sources when the run reads a local mirror, then remove the local copies
+#   this schedule downloaded that today's run does not read
 #   bring MemFree up to PYG_MEMFREE_GATE_GB on every node, when that is set
 #   bin/run_cluster_notebook.sh --data-date <day> <run-dir>
 #   bin/publish_run.py <run-dir> --upload
-#   prune, and only after that publish went through: the newest
-#   PYG_SCHEDULE_RETAIN_RUNS runs keep their work directory, and an older run loses
-#   its work directory only if bin/publish_run.py --published finds it listed
+#   prune, only after that publish went through
+#
+# WHAT IT REMOVES
+# Only what this schedule made. Runs started by hand, their work directories and
+# whatever they staged are never touched, and are cleaned up by hand.
+#   - Runs. The newest PYG_SCHEDULE_RETAIN_RUNS runs that started are kept whole. An
+#     older run loses its work directory and its run directory together, but only
+#     when bin/publish_run.py --published finds it listed at the destination and its
+#     work directory is its own, inside this schedule's work root. An older run that
+#     is not listed stays, for inspection. An older day that never started (refused
+#     or failed before the launcher) left only logs, and its run directory goes.
+#   - Local source copies. The mirror is shared with runs started by hand, so the
+#     schedule lists the copies its own staging fetched in
+#     <schedule-dir>/mirror-downloads.tsv, leaving out any a node already held, and
+#     removes only copies on that list.
 #
 # SETTINGS, from env.sh
 #   PYG_SCHEDULE_DATA_LAG_DAYS      days from the data day to today; not read with
 #                                   --data-date
-#   PYG_SCHEDULE_RETAIN_RUNS        how many of the newest runs keep a work directory
+#   PYG_SCHEDULE_RETAIN_RUNS        how many of the newest runs are kept whole
 #   PYG_YEARLY_SOURCE_PREFIXES      optional, comma separated. Each prefix holds one
 #                                   YYYY.* file per year, and a run reads the newest
 #                                   one whose year is not after the data day's.
@@ -160,6 +173,13 @@ RETRY="${PYG_SCHEDULE_RETRY_SECONDS:-60}"
 IDLE_WAIT="${PYG_SCHEDULE_IDLE_WAIT_SECONDS:-600}"
 [[ "$RETRY" =~ ^[0-9]+$ && "$IDLE_WAIT" =~ ^[0-9]+$ ]] \
   || refuse "PYG_SCHEDULE_RETRY_SECONDS and PYG_SCHEDULE_IDLE_WAIT_SECONDS must be whole seconds"
+MIRROR=""
+if [[ "${PYG_INPUT_MODE:-s3}" == "local" ]]; then
+  MIRROR="${PYG_LOCAL_SOURCE_ROOT:-}"
+  MIRROR="${MIRROR%/}"
+  [[ "$MIRROR" == /?* ]] \
+    || refuse "PYG_LOCAL_SOURCE_ROOT must be an absolute path below /, got '${PYG_LOCAL_SOURCE_ROOT:-}'"
+fi
 
 # A new run directory has no runner-venv of its own, and the kernel the notebook runs
 # in is found by name, so it can live inside an old run directory that gets tidied away.
@@ -290,6 +310,23 @@ print(sum(w.get("state") == "ALIVE" for w in m.get("workers") or []), len(m.get(
 done
 log "the cluster is idle: $WANT ALIVE workers, no running application"
 
+LOCAL_HOST="$(hostname -s)"
+is_local() {
+  local addrs
+  [[ "$1" == "$LOCAL_HOST" ]] && return 0
+  # Captured, not piped into grep -q: grep would close the pipe early, and pipefail
+  # would then report this host's address as another host's.
+  addrs="$(ip -4 -o addr show 2>/dev/null)"
+  grep -q " $1/" <<< "$addrs"
+}
+on_node() {   # run the bash script on stdin on node $1
+  if is_local "$1"; then
+    bash -s
+  else
+    ssh -o BatchMode=yes -o ConnectTimeout=10 "$1" bash -s
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # The run directory: env.sh as it stands today, then the sources the day resolved to
 # ---------------------------------------------------------------------------
@@ -305,25 +342,94 @@ joined="$(IFS=,; printf '%s' "${SOURCES[*]}")"
 } >> "$RD/env.sh"
 export PYG_SOURCE_PATHS="$joined"
 
+# ---------------------------------------------------------------------------
+# Staging, and the local copies this schedule downloaded
+# ---------------------------------------------------------------------------
+MIRROR_LIST="$SD/mirror-downloads.tsv"
+IFS= read -r -d '' HELD_SCRIPT <<'SH' || true
+for p in "$@"; do [ -e "$p" ] && printf '%s\n' "$p"; done
+true
+SH
+IFS= read -r -d '' REMOVE_SCRIPT <<'SH' || true
+for p in "$@"; do
+  [ "${p#"$root"/}" != "$p" ] || continue
+  rm -rf -- "$p" || continue
+  printf '%s\n' "$p"
+  d="${p%/*}"
+  while [ "$d" != "$root" ] && rmdir -- "$d" 2>/dev/null; do d="${d%/*}"; done
+done
+true
+SH
+
+if [[ -n "$MIRROR" ]]; then
+  COPIES=()
+  declare -A TODAY_COPY=()
+  for uri in "${SOURCES[@]}"; do
+    rest="${uri#*://}"
+    COPIES+=("$MIRROR/${rest%/}")
+    TODAY_COPY["$MIRROR/${rest%/}"]=1
+  done
+  MIRROR_NODES=("${NODES[@]}")
+  (( ${#MIRROR_NODES[@]} > 0 )) || MIRROR_NODES=("$(hostname)")
+
+  # A copy a node holds before staging is not this schedule's to remove, and neither
+  # is one on a node that cannot be asked.
+  declare -A HELD=()
+  for node in "${MIRROR_NODES[@]}"; do
+    if held="$(printf 'set -- %s\n%s\n' "$(printf '%q ' "${COPIES[@]}")" "$HELD_SCRIPT" \
+                 | on_node "$node")"; then
+      while IFS= read -r p; do
+        [[ -n "$p" ]] && HELD["$node|$p"]=1
+      done <<< "$held"
+    else
+      for p in "${COPIES[@]}"; do HELD["$node|$p"]=1; done
+    fi
+  done
+  # Listed before staging, so a staging that fails partway leaves nothing off the list.
+  touch "$MIRROR_LIST"
+  for node in "${MIRROR_NODES[@]}"; do
+    for p in "${COPIES[@]}"; do
+      [[ -n "${HELD["$node|$p"]:-}" ]] || printf '%s\t%s\n' "$node" "$p" >> "$MIRROR_LIST"
+    done
+  done
+  sort -u -o "$MIRROR_LIST" "$MIRROR_LIST"
+fi
+
 if [[ "${PYG_INPUT_MODE:-s3}" == "local" ]]; then
   log "staging the sources; see $RD/stage.log"
   "$REPO/bin/stage_sources.sh" --sources "$PYG_SOURCE_PATHS" > "$RD/stage.log" 2>&1 \
     || fail "staging failed; see $RD/stage.log"
 fi
 
+if [[ -n "$MIRROR" ]]; then
+  # Listed copies that today's run does not read. A copy leaves the list only once its
+  # node reports it removed, so a node that cannot be reached is asked again next day.
+  removed_list="$(mktemp)"
+  for node in "${MIRROR_NODES[@]}"; do
+    stale=()
+    while IFS=$'\t' read -r owner p; do
+      [[ "$owner" == "$node" && -n "$p" && -z "${TODAY_COPY["$p"]:-}" ]] || continue
+      [[ "$p" == "$MIRROR"/* && "$p" != *"/../"* ]] || continue
+      stale+=("$p")
+    done < "$MIRROR_LIST"
+    (( ${#stale[@]} > 0 )) || continue
+    gone="$(printf 'root=%q\nset -- %s\n%s\n' "$MIRROR" "$(printf '%q ' "${stale[@]}")" \
+              "$REMOVE_SCRIPT" | on_node "$node")"
+    while IFS= read -r p; do
+      [[ -n "$p" ]] || continue
+      printf '%s\t%s\n' "$node" "$p" >> "$removed_list"
+      log "  removed the local copy $p on $node"
+    done <<< "$gone"
+  done
+  grep -vxFf "$removed_list" "$MIRROR_LIST" > "$MIRROR_LIST.new"
+  mv "$MIRROR_LIST.new" "$MIRROR_LIST"
+  rm -f "$removed_list"
+fi
+
 # ---------------------------------------------------------------------------
 # Free memory, when env.sh asks for it. On a unified-memory host RAPIDS sizes its
 # pool from MemFree, which a finished run's file cache holds near zero for hours.
 # ---------------------------------------------------------------------------
-LOCAL_HOST="$(hostname -s)"
-is_local() {
-  local addrs
-  [[ "$1" == "$LOCAL_HOST" ]] && return 0
-  # Captured, not piped into grep -q: grep would close the pipe early, and pipefail
-  # would then report this host's address as another host's.
-  addrs="$(ip -4 -o addr show 2>/dev/null)"
-  grep -q " $1/" <<< "$addrs"
-}
 if [[ -n "${PYG_MEMFREE_GATE_GB:-}" ]]; then
   for node in "${NODES[@]}"; do
     passed=""
@@ -363,33 +469,41 @@ publish_rc=$?
 log "published"
 
 # ---------------------------------------------------------------------------
-# The prune. The newest runs keep their work directory whatever state they are in.
-# An older run's work directory goes only when it is that run's own directory in
-# this schedule's work root, and the destination lists the run as published. That
-# is asked of the destination rather than read from publish.done: a publish run
-# again on a finished run is refused, and publish.done then holds the refusal.
+# The prune; see WHAT IT REMOVES at the top. Whether a run is published is asked of
+# the destination rather than read from publish.done: a publish run again on a
+# finished run is refused, and publish.done then holds the refusal.
 # ---------------------------------------------------------------------------
 ROOT="${PYG_WORK_DIR%/*}"
 REAL_ROOT="$(cd "$ROOT" 2>/dev/null && pwd -P)"
-seen=0
-pruned=0
+started=0
+removed=0
 for id in $(for dir in "$SD"/runs/*/; do dir="${dir%/}"; echo "${dir##*/}"; done \
               | grep -E '^[0-9]{8}T[0-9]{6}Z$' | sort -r); do
-  [[ -f "$SD/runs/$id/run-config.txt" ]] || continue        # never started: no work dir
-  seen=$((seen + 1))
-  (( seen <= RETAIN )) && continue
-  work="$(sed -n 's/^work dir *: *//p' "$SD/runs/$id/run-config.txt" | head -1)"
+  run_dir="$SD/runs/$id"
+  if [[ ! -f "$run_dir/run-config.txt" ]]; then
+    # Refused or failed before the launcher: logs only, and no work directory.
+    if (( started >= RETAIN )) && [[ "$id" != "$RUN_ID" ]]; then
+      rm -rf -- "$run_dir" && log "  removed $id, a day that never started"
+    fi
+    continue
+  fi
+  started=$((started + 1))
+  (( started <= RETAIN )) && continue
+  work="$(sed -n 's/^work dir *: *//p' "$run_dir/run-config.txt" | head -1)"
   [[ -e "$work" ]] || continue
   if [[ "$work" != "$ROOT/$id" || -L "$work" || -z "$REAL_ROOT" \
         || "$(cd "$work/.." 2>/dev/null && pwd -P)" != "$REAL_ROOT" ]]; then
     log "  kept $id: its work dir $work is not $ROOT/$id"
     continue
   fi
-  if ! python3 "$REPO/bin/publish_run.py" "$SD/runs/$id" --published >> "$RD/prune.log" 2>&1; then
+  if ! python3 "$REPO/bin/publish_run.py" "$run_dir" --published >> "$RD/prune.log" 2>&1; then
     log "  kept $id: the destination does not list it as published"
     continue
   fi
-  rm -rf -- "$work" && pruned=$((pruned + 1)) && log "  removed the work dir of $id"
+  rm -rf -- "$work" || { log "  kept $id: its work dir could not be removed"; continue; }
+  rm -rf -- "$run_dir"
+  removed=$((removed + 1))
+  log "  removed $id: its work directory and its run directory"
 done
-log "done: $DATA_DATE is published as run $RUN_ID; removed $pruned older work dir(s)"
+log "done: $DATA_DATE is published as run $RUN_ID; removed $removed older run(s)"
 exit 0
