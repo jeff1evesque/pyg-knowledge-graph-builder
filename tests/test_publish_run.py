@@ -507,3 +507,48 @@ def test_a_tables_root_that_cannot_be_listed_in_a_dry_run_is_a_refusal(run):
     r = run.publish(FAKE_S3_DENY_LIST="tables/")
     assert r.returncode == 2
     assert "NOT PUBLISHED" in r.stdout
+
+
+# --------------------------------------------------------------------------- #
+# --published: what a prune asks before it deletes a run's work directory
+# --------------------------------------------------------------------------- #
+
+def test_published_is_true_only_once_index_json_is_listed(run):
+    assert run.publish("--published").returncode == 1
+    assert run.publish("--upload").returncode == 0
+
+    r = run.publish("--published")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "published:" in r.stdout
+
+
+def test_published_also_wants_the_day_marker_when_the_run_wrote_tables(run):
+    run.add_tables()
+    lost = f"nodes/day={DAY}/part-00000.zstd.parquet"
+    assert run.publish("--upload", FAKE_S3_DROP=lost).returncode == 1
+    assert run.publish("--published").returncode == 1
+
+    assert run.publish("--upload").returncode == 0
+    assert run.publish("--published").returncode == 0
+
+
+def test_published_still_holds_after_a_refused_rerun_overwrites_publish_done(run):
+    """A prune that read publish.done would keep this finished run forever."""
+    assert run.publish("--upload").returncode == 0
+    assert run.publish("--upload").returncode == 2
+    assert (run.rd / "publish.done").read_text().strip() == "2"
+
+    assert run.publish("--published").returncode == 0
+
+
+def test_published_writes_nothing(run):
+    run.publish("--published")
+    assert not (run.rd / "publish.done").exists()
+    assert not (run.rd / "publish.log").exists()
+    assert "s3 sync" not in run.calls_text()
+    assert "s3 cp" not in run.calls_text()
+
+
+def test_published_is_not_confirmed_when_the_listing_fails(run):
+    assert run.publish("--upload").returncode == 0
+    assert run.publish("--published", FAKE_S3_DENY_LIST="runs/").returncode == 1
