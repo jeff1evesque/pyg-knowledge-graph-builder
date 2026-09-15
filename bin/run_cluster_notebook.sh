@@ -92,6 +92,9 @@ if ! flock -n 9; then
 fi
 
 export RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
+# Absolute, so env.sh can put the event log and stall captures inside the run
+# directory without naming it. One env.sh then serves every run directory.
+export PYG_RUN_DIR="$(cd "$RD" && pwd)"
 # Set only from the flag. One left exported in the calling shell would otherwise
 # choose this run's sources from whatever day that shell last named.
 if [[ -n "$DATE_GIVEN" ]]; then
