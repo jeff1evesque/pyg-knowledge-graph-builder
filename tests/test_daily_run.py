@@ -506,3 +506,32 @@ def test_a_second_copy_refuses_to_share_the_schedule(schedule):
         lock.close()
     assert r.returncode == 2
     assert "not starting a second" in r.stderr
+
+
+# --------------------------------------------------------------------------- #
+# --check: how a new schedule directory is tried before a timer runs it
+# --------------------------------------------------------------------------- #
+
+def test_check_names_what_the_day_reads_and_does_nothing_else(schedule):
+    s = schedule(retain=1)
+    s.add_sources("2026-09-30")
+    older = s.add_old_run("20260101T043000Z")
+
+    r = s.run("--check")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "reads s3a://bucket/quotes/year=2026/month=09/day=30/" in s.log()
+    assert "reads s3a://bucket/raw/source=b/feed=x/2025.snappy.parquet" in s.log()
+    for name in ("stage", "launcher", "publish", "mem", "ssh"):
+        assert s.recorded(name) == "", name
+    assert not (s.sd / "runs" / RUN_ID).exists()
+    assert not (s.sd / "mirror-downloads.tsv").exists()
+    assert older.is_dir()
+
+
+def test_check_says_when_a_source_is_not_there(schedule):
+    s = schedule()
+    s.put("bucket/raw/source=a/year=2026/month=09/30.snappy.parquet")
+    s.put("bucket/raw/source=b/feed=x/2025.snappy.parquet")
+
+    assert s.run("--check").returncode == 3
+    assert "missing: s3a://bucket/quotes/year=2026/month=09/day=30/" in s.log()
