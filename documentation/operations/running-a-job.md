@@ -551,12 +551,17 @@ python3 -m venv ~/pyg-daily/runner-venv
 cd ~/pyg-daily/repo
 bin/daily_run.sh --check --data-date <a recent day> ~/pyg-daily   # checks, runs nothing
 bin/schedule_run.sh --dry-run ~/pyg-daily                         # prints the two units
-bin/schedule_run.sh ~/pyg-daily                                   # installs, starts the timer
-sudo loginctl enable-linger "$(id -un)"   # once, so the timer fires with nobody logged in
+bin/schedule_run.sh ~/pyg-daily            # turns on linger, installs, starts the timer
 ```
 
 `--check` reads the settings, the checkout, the kernel and every source for the day, logs
-what the day would read, and stops. A day can also be run by hand, the same way the timer
+what the day would read, and stops.
+
+A user's systemd timer fires only while that user has a login session, unless *linger* is
+on for the user. `bin/schedule_run.sh` turns linger on (`loginctl enable-linger`) before it
+writes anything, so a new machine ends up with a timer that fires with nobody logged in.
+Where the system wants root for that, the script installs nothing and says to run
+`sudo loginctl enable-linger <user>` first. A day can also be run by hand, the same way the timer
 runs it, with `bin/daily_run.sh --data-date YYYY-MM-DD <schedule-dir>`.
 
 ### What a day leaves, and what it removes
