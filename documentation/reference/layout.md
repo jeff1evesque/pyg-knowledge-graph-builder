@@ -9,6 +9,7 @@ pyg-knowledge-graph-builder/
 │   │   └── run-env.example.sh              # the env.sh contract; PYG_DATA_* come from --data-date
 │   ├── census_sec_terms.py                 # per-form census of the SEC filings vocabulary
 │   ├── check_vocabulary_drift.py           # terms we key on that upstream no longer emits
+│   ├── daily_run.sh                        # one scheduled day: check, run, publish, prune
 │   ├── generate_bls_e2e_fixtures.py        # rebuild the BLS e2e fixtures from the archive
 │   ├── generate_market_e2e_fixtures.py     # rebuild the market e2e fixtures from snapshots
 │   ├── generate_report.sh                  # run every suite -> reports/tests/report.{html,json}
