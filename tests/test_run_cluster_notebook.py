@@ -405,3 +405,14 @@ def test_an_unknown_option_is_refused(harness):
     r = h.run(args=["--data-day", "2026-09-09", str(h.rd)])
     assert r.returncode == 2
     assert "--data-day" in r.stderr
+
+
+def test_the_run_directory_is_exported_before_env_sh_is_read(harness):
+    """So env.sh can put the event log and stall captures inside it without naming
+    it, which is what lets one env.sh serve a new run directory every day."""
+    h = harness()
+    with open(h.rd / "env.sh", "a") as fh:
+        fh.write(f'printf "%s\\n" "${{PYG_RUN_DIR-unset}}" > "{h.calls}/run-dir.txt"\n')
+
+    assert h.run(args=[f"{h.rd}/"]).returncode == 0
+    assert h.recorded("run-dir").strip() == str(h.rd)
