@@ -4,25 +4,29 @@
 #   bin/schedule_run.sh [--dry-run] <schedule-dir>
 #
 # The schedule is read from <schedule-dir>/env.sh:
-#   PYG_SCHEDULE_ONCALENDAR  required. A systemd calendar expression in this host's
-#                            time zone, such as "Tue..Sat *-*-* 00:30:00". Without it
-#                            nothing is installed, so a directory is only ever
-#                            scheduled on purpose.
+#   PYG_SCHEDULE_ONCALENDAR  required. A systemd calendar expression, such as
+#                            "Tue..Sat *-*-* 01:00:00 America/New_York"; without a time
+#                            zone it is this host's time. Without the setting nothing is
+#                            installed, so a directory is only ever scheduled on purpose.
 #   PYG_SCHEDULE_UNIT        optional. The unit's name; default pyg-daily.
 #
-# The service and the timer are rendered from bin/systemd/pyg-daily.service.example and
-# bin/systemd/pyg-daily.timer.example, written to ~/.config/systemd/user/, and the timer
-# is enabled and started. --dry-run prints both instead, and changes nothing.
+# In order: turn on linger for the user running this, render the service and the timer
+# from bin/systemd/pyg-daily.service.example and bin/systemd/pyg-daily.timer.example,
+# write them to ~/.config/systemd/user/, and enable and start the timer. --dry-run prints
+# the units and what it would do about linger, and changes nothing.
+#
+# LINGER
+# A user's systemd timers run only while that user has a login session, unless linger is
+# on for the user. Without it a schedule looks installed and never fires once its user
+# logs out. So this turns linger on (loginctl enable-linger), which a user can do for
+# themselves on most systems. Where the system wants root for it, nothing is installed,
+# and the message names the one command to run first.
 #
 # WHY A SYSTEMD TIMER, NOT CRON
 # A oneshot service does not start again while its last run is still going, and a run
 # takes hours; cron would start a second driver that starves the first. Stopping the
 # unit stops the whole run, the Spark driver included. Persistent=true starts a run
 # that was missed while the host was down once it is back up.
-#
-# A user timer fires only while its user has a session, unless linger is on for that
-# user. This script does not turn linger on; it says so when it is off. Once, as root:
-#   loginctl enable-linger <user>
 #
 # Nothing in this file names a host or a path.
 set -uo pipefail
@@ -111,10 +115,31 @@ render() {   # a template -> the unit, on stdout
 service="$(render "$TEMPLATES/pyg-daily.service.example")" || refuse "cannot render the service"
 timer="$(render "$TEMPLATES/pyg-daily.timer.example")" || refuse "cannot render the timer"
 
+USER_NAME="$(id -un)"
+linger_on() {
+  [[ "$(loginctl show-user "$USER_NAME" --property=Linger --value 2>/dev/null)" == "yes" ]]
+}
+
 DEST="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 if [[ -n "$DRY_RUN" ]]; then
   printf '# %s\n%s\n\n# %s\n%s\n' "$DEST/$UNIT.service" "$service" "$DEST/$UNIT.timer" "$timer"
+  if linger_on; then
+    echo "# linger is already on for $USER_NAME"
+  else
+    echo "# would turn on linger for $USER_NAME: loginctl enable-linger $USER_NAME"
+  fi
   exit 0
+fi
+
+# Linger before anything is written, so a system that will not allow it is not left with
+# a timer that looks armed and never fires.
+if linger_on; then
+  echo "linger is already on for $USER_NAME"
+else
+  loginctl enable-linger "$USER_NAME" || true
+  linger_on \
+    || refuse "linger could not be turned on for $USER_NAME, and without it the timer fires only while $USER_NAME is logged in. Run once: sudo loginctl enable-linger $USER_NAME, then run this again"
+  echo "turned on linger for $USER_NAME"
 fi
 
 mkdir -p "$DEST" || refuse "cannot create $DEST"
@@ -124,10 +149,3 @@ systemctl --user daemon-reload || refuse "systemctl --user daemon-reload failed"
 systemctl --user enable --now "$UNIT.timer" || refuse "could not enable $UNIT.timer"
 echo "installed $DEST/$UNIT.service and $DEST/$UNIT.timer for $SD"
 systemctl --user list-timers --no-pager "$UNIT.timer" 2>/dev/null || true
-
-USER_NAME="$(id -un)"
-if [[ "$(loginctl show-user "$USER_NAME" --property=Linger --value 2>/dev/null)" != "yes" ]]; then
-  echo
-  echo "NOTE: linger is off for $USER_NAME, so this timer fires only while $USER_NAME is"
-  echo "      logged in. Turn it on once, as root: loginctl enable-linger $USER_NAME"
-fi
