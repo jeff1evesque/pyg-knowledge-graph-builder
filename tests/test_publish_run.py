@@ -47,6 +47,9 @@ with open(os.environ["FAKE_S3_CALLS"], "a") as fh:
 if args[:2] == ["s3api", "list-objects-v2"]:
     bucket = s3 / args[args.index("--bucket") + 1]
     prefix = args[args.index("--prefix") + 1]
+    deny = os.environ.get("FAKE_S3_DENY_LIST", "")
+    if deny and prefix.startswith(deny):
+        sys.exit("An error occurred (AccessDenied) when calling the ListObjectsV2 operation")
     keys = [p for p in sorted(bucket.rglob("*")) if p.is_file()] if bucket.exists() else []
     contents = [{"Key": p.relative_to(bucket).as_posix(), "Size": p.stat().st_size,
                  "ChecksumAlgorithm": ["CRC64NVME"]}
@@ -431,3 +434,76 @@ def test_a_run_with_no_tables_needs_no_tables_root(run):
     r = run.publish("--upload", PYG_TABLES_ROOT=None)
     assert r.returncode == 0, r.stdout + r.stderr
     assert json.loads((run.published / "index.json").read_text())["tables"]["published"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Running again
+#
+# A run folder with index.json is finished and is never sent again. What can be
+# left is its tables, when they failed after the run went up -- and a rerun used
+# to stop at that index.json, so the script could not finish them.
+# --------------------------------------------------------------------------- #
+
+def _calls_after(run: Run, mark: int) -> list:
+    return run.calls_text().splitlines()[mark:]
+
+
+def test_running_again_after_the_tables_failed_sends_only_the_tables(run):
+    expected = run.add_tables()
+    lost = f"nodes/day={DAY}/part-00000.zstd.parquet"
+    first = run.publish("--upload", FAKE_S3_DROP=lost)
+    assert first.returncode == 1
+    assert "the run is published at" in first.stdout
+    assert not (run.published_tables / "_days" / f"{DAY}.json").exists()
+    index_before = (run.published / "index.json").read_bytes()
+    mark = len(run.calls_text().splitlines())
+
+    dry = run.publish()
+    assert dry.returncode == 0, dry.stdout + dry.stderr
+    assert "Resuming its tables" in dry.stdout
+    assert f"plus _days/{DAY}.json" in dry.stdout
+
+    again = run.publish("--upload")
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert files(run.published_tables) == expected | {f"_days/{DAY}.json"}
+    assert (run.published / "index.json").read_bytes() == index_before
+    assert (run.rd / "publish.done").read_text().strip() == "0"
+    assert not [call for call in _calls_after(run, mark)
+                if call.startswith(("s3 sync", "s3 cp")) and "s3://bucket/runs/" in call]
+
+
+def test_running_again_after_everything_went_up_sends_nothing(run):
+    run.add_tables()
+    assert run.publish("--upload").returncode == 0
+    mark = len(run.calls_text().splitlines())
+
+    r = run.publish("--upload")
+    assert r.returncode == 2
+    assert "already published" in r.stdout
+    assert not [call for call in _calls_after(run, mark)
+                if call.startswith(("s3 sync", "s3 cp"))]
+
+
+def test_a_tables_root_that_cannot_be_listed_after_the_run_went_up_is_a_failure(run):
+    """Exit code 2 says nothing was written, and by the time the tables are listed
+    the run is up. Once the listing works, running again finishes the tables."""
+    run.add_tables()
+
+    r = run.publish("--upload", FAKE_S3_DENY_LIST="tables/")
+    assert r.returncode == 1
+    assert (run.published / "index.json").exists()
+    assert "the run is published at" in r.stdout
+    assert "NOT PUBLISHED" not in r.stdout
+    assert (run.rd / "publish.done").read_text().strip() == "1"
+
+    assert run.publish("--upload").returncode == 0
+    assert (run.published_tables / "_days" / f"{DAY}.json").exists()
+
+
+def test_a_tables_root_that_cannot_be_listed_in_a_dry_run_is_a_refusal(run):
+    """Nothing was written, which is what exit code 2 says."""
+    run.add_tables()
+
+    r = run.publish(FAKE_S3_DENY_LIST="tables/")
+    assert r.returncode == 2
+    assert "NOT PUBLISHED" in r.stdout
