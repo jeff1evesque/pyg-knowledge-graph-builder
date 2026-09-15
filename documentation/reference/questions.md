@@ -272,8 +272,6 @@ Stated plainly so nobody builds a product promise on it.
 - **Search over prose.** `entities/` holds text for 12,607 nodes across 49 node
   types, mostly names and labels. Of the 990 nodes with 300 or more characters,
   901 are weather alert descriptions.
-- **Anything over time, yet.** The tables hold one published day. Filings can be
-  rebuilt from the archive; market and weather depth have not been measured.
 
 ## How far back each question reaches
 
