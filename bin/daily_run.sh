@@ -2,7 +2,7 @@
 # Run one day of a schedule: build the graph from that day's sources, publish it, and
 # only then prune what earlier days of the same schedule left behind.
 #
-#   bin/daily_run.sh [--data-date YYYY-MM-DD] <schedule-dir>
+#   bin/daily_run.sh [--check] [--data-date YYYY-MM-DD] <schedule-dir>
 #
 # <schedule-dir> holds an untracked env.sh, the same contract as a run directory's
 # (see bin/profiles/run-env.example.sh) plus the settings below. Each day gets a run
@@ -12,6 +12,11 @@
 #
 # The day is --data-date when given. Otherwise it is today on this host's clock, less
 # PYG_SCHEDULE_DATA_LAG_DAYS; PYG_SCHEDULE_TODAY stands in for today, for tests.
+#
+# --check stops once the sources are checked. It checks the settings, the checkout, the
+# notebook kernel and every source for the day, logs what the day would read, and exits
+# 0, or 3 when a source is not there. It waits for nothing, and stages, runs, publishes
+# and removes nothing.
 #
 # IN ORDER
 #   refuse a checkout with uncommitted changes, and log the commit that runs
@@ -64,15 +69,20 @@
 set -uo pipefail
 
 usage() {
-  echo "usage: $(basename "$0") [--data-date YYYY-MM-DD] <schedule-dir>" >&2
+  echo "usage: $(basename "$0") [--check] [--data-date YYYY-MM-DD] <schedule-dir>" >&2
   exit 2
 }
 
 SD=""
+CHECK=""
 DATA_DATE=""
 DATE_GIVEN=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --check)
+      CHECK=1
+      shift
+      ;;
     --data-date)
       [[ $# -ge 2 ]] || usage
       DATA_DATE="$2"
@@ -160,7 +170,11 @@ export PYG_DATA_YEAR="${DATA_DATE:0:4}" PYG_DATA_MONTH="${DATA_DATE:5:2}" PYG_DA
 ( . "$ENV_FILE" ) >/dev/null 2>&1 || refuse "env.sh does not load for the day $DATA_DATE"
 # shellcheck source=/dev/null
 . "$ENV_FILE"
-log "day $DATA_DATE, run $RUN_ID, commit ${COMMIT:-unknown}"
+if [[ -n "$CHECK" ]]; then
+  log "checking day $DATA_DATE, commit ${COMMIT:-unknown}"
+else
+  log "day $DATA_DATE, run $RUN_ID, commit ${COMMIT:-unknown}"
+fi
 
 RETAIN="${PYG_SCHEDULE_RETAIN_RUNS:-}"
 [[ "$RETAIN" =~ ^[1-9][0-9]*$ ]] \
@@ -278,6 +292,14 @@ esac
 (( ${#SOURCES[@]} > 0 )) \
   || refuse "env.sh names no sources; set PYG_SOURCE_PATHS or PYG_YEARLY_SOURCE_PREFIXES"
 log "all ${#SOURCES[@]} sources are there"
+
+if [[ -n "$CHECK" ]]; then
+  for uri in "${SOURCES[@]}"; do
+    log "  reads $uri"
+  done
+  log "checked: nothing was staged, run, published or removed"
+  exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # An idle cluster. Two drivers on one standalone cluster starve each other.
