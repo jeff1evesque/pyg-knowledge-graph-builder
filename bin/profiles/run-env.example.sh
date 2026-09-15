@@ -12,7 +12,9 @@
 # is sourced after it.
 #
 # RUN_ID is exported by the launcher before this file is sourced, so paths below can
-# use it. Every value here is a placeholder that will fail loudly if left as is.
+# use it. So are PYG_DATA_YEAR, PYG_DATA_MONTH and PYG_DATA_DAY, when the launcher is
+# given --data-date YYYY-MM-DD. Every value here is a placeholder that will fail
+# loudly if left as is.
 
 # --------------------------------------------------------------------------- #
 # Required
@@ -37,6 +39,11 @@ export PYG_STAGE_NODES=NODE-1,NODE-2
 export PYG_SOURCE_PATHS="s3a://BUCKET/PREFIX/year=YYYY/month=MM/DD.snappy.parquet"
 export PYG_SOURCE_FORMAT=turtle_parquet
 export PYG_TIME_PERIOD=YYYY-MM
+
+# Or take the day from --data-date, so this file stays the same from one day to the
+# next. The :? stops a launch that forgot the flag here, not at a path with no year.
+# export PYG_SOURCE_PATHS="s3a://BUCKET/PREFIX/year=${PYG_DATA_YEAR:?pass --data-date}/month=${PYG_DATA_MONTH}/${PYG_DATA_DAY}.snappy.parquet"
+# export PYG_TIME_PERIOD="${PYG_DATA_YEAR}-${PYG_DATA_MONTH}"
 
 # --------------------------------------------------------------------------- #
 # Reading a staged local mirror instead of object storage
