@@ -19,7 +19,9 @@ the wrong key stays there, and nothing can be read back to check it. So a dry ru
 the default, every .pt and metadata file is checked against checksums.json before it
 goes, the upload is checked by name and size from a listing, and index.json goes up
 last. A run folder without index.json is a publish that did not finish. Running again
-resumes it, because files already there at the right size are skipped.
+resumes it, because files already there at the right size are skipped. A run folder
+that has index.json is never sent again; if its tables did not finish, running again
+sends only the tables.
 
 <run-dir> is read the way the launcher and the recorder write it: run.log for the run
 id, run-config.txt for the work directory, run.done and outcome.txt for whether the
@@ -41,8 +43,10 @@ Environment:
                         one day the day-level source paths in the manifests name.
 
 Writes <run-dir>/publish/ (symlinks plus index.json) and appends to publish.log there.
-An --upload also writes its exit code to publish.done: 0 published, 1 the upload or
-its check failed, 2 refused before anything was written.
+An --upload also writes its exit code to publish.done: 0 published; 1 the upload or
+its check failed, and running again resumes it; 2 refused, and running again as it is
+will not change that. A refusal writes nothing, except when the run went up and its
+day of tables was already published.
 """
 
 import argparse
@@ -381,7 +385,7 @@ def build_tree(tree: Path, items, index: dict, marker: str = INDEX) -> None:
     (tree / marker).write_text(json.dumps(index, indent=2) + "\n")
 
 
-def summarize(items, log: Log) -> None:
+def summarize(items, log: Log, marker: str = INDEX) -> None:
     groups = {}
     for name, source in items:
         folder = name.rsplit("/", 1)[0]
@@ -393,7 +397,7 @@ def summarize(items, log: Log) -> None:
         noun = "file " if count == 1 else "files"
         log(f"  {folder:<{width}}  {count:>4} {noun}  {size / 1e9:8.2f} GB")
     total = sum(size for _, size in groups.values())
-    log(f"  {'total':<{width}}  {len(items):>4} files  {total / 1e9:8.2f} GB, plus index.json")
+    log(f"  {'total':<{width}}  {len(items):>4} files  {total / 1e9:8.2f} GB, plus {marker}")
 
 
 # --------------------------------------------------------------------------- #
@@ -456,7 +460,7 @@ def check_upload(items, tree: Path, dst: str, log: Log, marker: str = INDEX,
             log(f"  {label}: {name}")
     if missing or wrong or extra:
         log(f"CHECK FAILED: {len(missing)} missing, {len(wrong)} wrong size, "
-            f"{len(extra)} unexpected. index.json was not written.")
+            f"{len(extra)} unexpected. {marker} was not written.")
         return False
     algorithms = sorted({have[name][1] for name in want if have[name][1]})
     carrying = sum(1 for name in want if have[name][1])
@@ -492,13 +496,12 @@ def publish_tables(rd: Path, items, dst: str, day: str, run_id: str,
     build_tree(tree, items, index, marker)
 
     log(f"tables tree {tree}:")
-    summarize(items, log)
+    summarize(items, log, marker)
     log(f"to   {dst}/")
 
-    try:
-        already = published(dst)
-    except Failed as why:
-        raise Refused(str(why))
+    # A listing that fails raises Failed, not Refused: the run may already be up by
+    # now, and only the caller knows whether it is.
+    already = published(dst)
     if marker in already:
         raise Refused(
             f"{dst}/{marker} already exists, so this day's tables are already "
@@ -561,6 +564,26 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
     if tables:
         log(f"and  {tables_dst}/ ({len(tables)} table files for day={day})")
 
+    # Listed before the checks below, so finishing a publish whose run is already up
+    # does not hash every .pt again.
+    try:
+        already = published(dst)
+    except Failed as why:
+        raise Refused(str(why))
+    if INDEX in already:
+        if not tables:
+            raise Refused(f"{dst}/{INDEX} already exists, so this run is already published")
+        # A finished run folder is never sent again. What can still be missing is its
+        # tables, when they failed after the run went up.
+        log(f"{dst}/{INDEX} already exists, so the run is published. Resuming its tables.")
+        try:
+            rc = publish_tables(rd, tables, tables_dst, day, run_id, upload, log)
+        except Failed as why:
+            raise Refused(str(why))  # nothing has been sent yet
+        if not upload:
+            log("Run again with --upload to publish.")
+        return rc
+
     log("checking the graph files against checksums.json")
     for graph in graphs:
         check_graph(pyg, graph, log)
@@ -572,13 +595,6 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
                                        tables, tables_dst))
     log(f"upload tree {tree}:")
     summarize(items, log)
-
-    try:
-        already = published(dst)
-    except Failed as why:
-        raise Refused(str(why))
-    if INDEX in already:
-        raise Refused(f"{dst}/{INDEX} already exists, so this run is already published")
     if already:
         log(f"{len(already)} files are already at the destination; "
             "those at the right size are skipped")
@@ -592,7 +608,10 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
         count = sum(1 for line in lines if line.startswith("(dryrun) upload:"))
         log(f"dry run: {count} files would be uploaded, then index.json. Nothing was written.")
         if tables:
-            publish_tables(rd, tables, tables_dst, day, run_id, False, log)
+            try:
+                publish_tables(rd, tables, tables_dst, day, run_id, False, log)
+            except Failed as why:
+                raise Refused(str(why))
         log("Run again with --upload to publish.")
         return 0
 
@@ -612,10 +631,19 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
         return 1
     log(f"published {dst}/")
 
-    # After the run, and reported separately: the run is published either way,
-    # and a table failure must not read as "the run did not go up".
+    # After the run, and reported separately: the run is published either way, and
+    # a table failure must not read as "the run did not go up". A tables root that
+    # cannot be listed is a failure that running again resumes (1); a day that is
+    # already published is still a refusal (2).
     if tables:
-        rc = publish_tables(rd, tables, tables_dst, day, run_id, True, log)
+        try:
+            rc = publish_tables(rd, tables, tables_dst, day, run_id, True, log)
+        except Refused as why:
+            log(f"the tables were refused: {why}")
+            rc = 2
+        except Failed as why:
+            log(f"the tables failed: {why}. Running again resumes them.")
+            rc = 1
         if rc != 0:
             log(f"the run is published at {dst}/, but its tables are not")
             return rc
