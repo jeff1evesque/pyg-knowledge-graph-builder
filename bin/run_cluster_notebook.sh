@@ -2,11 +2,15 @@
 # Drive one real cluster run of the experiment notebook and leave a report behind
 # whatever happens.
 #
-#   bin/run_cluster_notebook.sh <run-dir>
+#   bin/run_cluster_notebook.sh [--data-date YYYY-MM-DD] <run-dir>
 #
 # <run-dir> holds everything about this run and nothing about the code: an
 # untracked env.sh with the identity and intent (see bin/profiles/run-env.example.sh),
 # and afterwards the executed notebook, run log, traces, event log and outcome.txt.
+#
+# --data-date is the day the sources are cut from. It is exported as PYG_DATA_YEAR,
+# PYG_DATA_MONTH and PYG_DATA_DAY before env.sh is read, as RUN_ID is, so one env.sh
+# can build its source paths for any day. Without the flag those three are unset.
 #
 # WHAT THIS DOES
 #   start a network trace on every node and a cluster sampler locally
@@ -29,12 +33,45 @@
 # all when the harness gave up. Fixing those in one copy fixed them for no other run.
 set -uo pipefail
 
-if [[ $# -lt 1 ]]; then
-  echo "usage: $(basename "$0") <run-dir>" >&2
+usage() {
+  echo "usage: $(basename "$0") [--data-date YYYY-MM-DD] <run-dir>" >&2
   exit 2
+}
+
+RD=""
+DATA_DATE=""
+DATE_GIVEN=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --data-date)
+      [[ $# -ge 2 ]] || usage
+      DATA_DATE="$2"
+      DATE_GIVEN=1
+      shift 2
+      ;;
+    -*)
+      echo "unknown option: $1" >&2
+      usage
+      ;;
+    *)
+      [[ -z "$RD" ]] || usage
+      RD="${1%/}"
+      shift
+      ;;
+  esac
+done
+[[ -n "$RD" ]] || usage
+
+# Checked with both a pattern and date(1): the pattern alone takes 2026-02-30, and
+# date(1) alone takes "yesterday" or 2026-9-9.
+if [[ -n "$DATE_GIVEN" ]]; then
+  if [[ ! "$DATA_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
+     || [[ "$(date -u -d "$DATA_DATE" +%F 2>/dev/null)" != "$DATA_DATE" ]]; then
+    echo "--data-date must be a real date written YYYY-MM-DD, got '$DATA_DATE'" >&2
+    exit 2
+  fi
 fi
 
-RD="${1%/}"
 if [[ ! -d "$RD" ]]; then
   echo "no such run directory: $RD" >&2
   exit 2
@@ -55,6 +92,15 @@ if ! flock -n 9; then
 fi
 
 export RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
+# Set only from the flag. One left exported in the calling shell would otherwise
+# choose this run's sources from whatever day that shell last named.
+if [[ -n "$DATE_GIVEN" ]]; then
+  export PYG_DATA_YEAR="${DATA_DATE:0:4}"
+  export PYG_DATA_MONTH="${DATA_DATE:5:2}"
+  export PYG_DATA_DAY="${DATA_DATE:8:2}"
+else
+  unset PYG_DATA_YEAR PYG_DATA_MONTH PYG_DATA_DAY
+fi
 # shellcheck source=/dev/null
 . "$RD/env.sh"
 
@@ -126,6 +172,7 @@ if compgen -G "$STALL_DIR/stall-*" > /dev/null 2>&1; then
 fi
 
 log "RUN_ID=$RUN_ID"
+[[ -n "$DATE_GIVEN" ]] && log "data date: $DATA_DATE"
 log "work dir : $PYG_WORK_DIR"
 log "input    : ${PYG_INPUT_MODE:-remote}${PYG_LOCAL_SOURCE_ROOT:+ mirror at $PYG_LOCAL_SOURCE_ROOT}"
 [[ -n "${PYG_SEED_PROFILE:-}" ]] && log "seed     : $(grep -E '^export GPU_PER_TASK' "$PYG_SEED_PROFILE")"
@@ -165,6 +212,7 @@ log "cluster sampler started -> $RD/samples.jsonl"
 
 {
   echo "run id      : $RUN_ID"
+  [[ -n "$DATE_GIVEN" ]] && echo "data date   : $DATA_DATE"
   echo "started     : $(date -u '+%Y-%m-%d %H:%M:%SZ')"
   echo "work dir    : $PYG_WORK_DIR"
   echo "input mode  : ${PYG_INPUT_MODE:-remote}${PYG_LOCAL_SOURCE_ROOT:+ mirror at $PYG_LOCAL_SOURCE_ROOT}"
