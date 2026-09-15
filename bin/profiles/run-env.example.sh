@@ -137,8 +137,14 @@ export PYG_TIME_PERIOD=YYYY-MM
 # above should be built from RUN_ID, PYG_RUN_DIR and PYG_DATA_* instead of naming
 # one run. Leave this block out of a run started by hand.
 # --------------------------------------------------------------------------- #
+# bin/schedule_run.sh <schedule-dir> installs a user timer from the next two, and
+# installs nothing while the calendar is unset. The time is this host's local time.
+# export PYG_SCHEDULE_ONCALENDAR="Tue..Sat *-*-* 00:30:00"
+# export PYG_SCHEDULE_UNIT=pyg-daily
 # export PYG_SCHEDULE_DATA_LAG_DAYS=1           # build the day before today
-# export PYG_SCHEDULE_RETAIN_RUNS=3             # runs that keep their work directory
+# export PYG_SCHEDULE_RETAIN_RUNS=3             # the newest runs, kept whole
+# It removes only what the schedule made: its own older runs, and the local source
+# copies its own staging downloaded. Runs started by hand are cleaned up by hand.
 # Prefixes that hold one YYYY.* file per year. Each run reads the newest year that is
 # not after the data day's, and logs which: a feed can stay on last year's file well
 # into the new year.
