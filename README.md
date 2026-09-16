@@ -15,7 +15,7 @@ operator runbook, split into pages. This file is the short version.
 <!-- --8<-- [start:overview] -->
 ## Overview
 
-PyTorch Geometric Knowledge Graph Builder is an Apache Spark pipeline that transforms raw RDF data from multiple heterogeneous sources into enriched knowledge graphs and constructs PyTorch Geometric `HeteroData` objects ready for Graph Neural Network (GNN) training.
+PyTorch Geometric Knowledge Graph Builder is an Apache Spark pipeline that transforms raw RDF data from multiple heterogeneous sources into enriched knowledge graphs and constructs PyTorch Geometric `HeteroData` objects ready for Graph Neural Network (GNN) training. It also writes **query tables** from the enriched data: day-partitioned Parquet tables and a triple store that SQL, SPARQL or an LLM's retrieval step can query.
 
 The pipeline processes data from **100+ domain-specific ontologies** spanning economic indicators, financial filings, market data, and environmental alerts. All enrichment logic runs as **distributed PySpark DataFrame operations** on a Spark standalone cluster accelerated by the **RAPIDS Accelerator for Apache Spark** (GPU), enabling horizontal scaling across the cluster rather than bottlenecking on a single-threaded in-memory graph. Because the pipeline is UDF-free except for one small parsing step, the compute-heavy DataFrame operators (regex parsing, joins, hashing, window functions, aggregations) execute on GPU.
 
@@ -48,6 +48,7 @@ The pipeline supports three execution modes:
 - **Driver Memory Safety**: Large node types use chunked collection with explicit memory management to prevent OOM
 - **Seven Metadata Files Per Build**: `graph_schema.json`, `feature_spec.json`, `normalization.json`, `encoding_config.json`, `ontology_schema.json`, `slot_mapping.json`, and `checksums.json` written alongside every `.pt` file (locally, and mirrored to S3 when an archive is configured) — the first six enabling consistent training, inference, and experiment tracking, and the last letting a consumer verify the bytes it fetched before it loads a pickle
 - **Node Index Per Build**: a `node_index/` Parquet dataset mapping every `(node_type, node_id)` back to its source entity URI — the `.pt` holds only feature tensors, so this is what makes the graph joinable to training labels and lets a prediction be attributed to a real entity
+- **Query Tables**: the enriched data as day-partitioned Parquet tables and a triple store, covering every source, including the NOAA weather the `.pt` leaves out, for SQL, SPARQL and retrieval by an LLM
 - **Temporal Unification**: Unified temporal entities across all data sources
 - **Intra-Source Linking**: Automatic relationship discovery within data source families
 - **Cross-Source Linking**: Automatic relationship discovery across heterogeneous datasets
@@ -68,6 +69,8 @@ in place, and builds a PyTorch Geometric `HeteroData` object from the result.
 Parsing, enrichment and feature extraction all run on executors with the RAPIDS
 Accelerator; only compact tensors cross to the driver, where the graph is
 assembled and saved as a `.pt` file with seven metadata JSON files beside it.
+The query tables are written from the enriched DataFrame as well, and published
+apart from the run.
 
 The job runs in three modes — the full pipeline, enrichment only (which stops at
 the reusable enriched Parquet), and PyG only (which starts from it). The second
@@ -89,6 +92,9 @@ rdflib are in [Architecture](https://jeff1evesque.github.io/pyg-knowledge-graph-
 **Reference** — what a build produces
 
 - [Metadata files](https://jeff1evesque.github.io/pyg-knowledge-graph-builder/reference/outputs/) — the seven JSON files and `node_index/`
+- [Query tables](https://jeff1evesque.github.io/pyg-knowledge-graph-builder/reference/tables/) — the day-partitioned tables a run publishes for querying
+- [Questions the tables answer](https://jeff1evesque.github.io/pyg-knowledge-graph-builder/reference/questions/) — worked questions, the tables each one reads and the days it needs
+- [Using the tables with an LLM](https://jeff1evesque.github.io/pyg-knowledge-graph-builder/reference/llm/) — retrieving context from the tables for any LLM
 - [Data sources](https://jeff1evesque.github.io/pyg-knowledge-graph-builder/reference/sources/) — what is ingested
 - [Project layout](https://jeff1evesque.github.io/pyg-knowledge-graph-builder/reference/layout/) — the module map
 

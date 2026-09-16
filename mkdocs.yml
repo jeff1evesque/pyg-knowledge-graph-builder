@@ -122,7 +122,8 @@ nav:
   - Reference:
       - Metadata files: reference/outputs.md
       - Query tables: reference/tables.md
-      - What the graph answers: reference/questions.md
+      - Questions the tables answer: reference/questions.md
+      - Using the tables with an LLM: reference/llm.md
       - Data sources: reference/sources.md
       - Project layout: reference/layout.md
   - Operations:
