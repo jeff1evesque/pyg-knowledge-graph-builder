@@ -10,8 +10,8 @@
   <desc id="archDesc">Turtle from four sources is parsed into one triples
     DataFrame, enriched, and built into a PyTorch Geometric HeteroData graph.
     All three stages run on Spark executors with the RAPIDS Accelerator. The
-    outputs are enriched Parquet, a .pt graph, and seven metadata JSON
-    files.</desc>
+    outputs are enriched Parquet, query tables for SQL, SPARQL and LLM
+    retrieval, a .pt graph, and seven metadata JSON files.</desc>
 
   <style>
     .lbl   { font: 600 13px var(--md-text-font-family, system-ui, sans-serif);
@@ -81,15 +81,18 @@
 
   <!-- outputs -->
   <text class="cap" x="612" y="26">OUTPUTS</text>
-  <rect class="box" x="612" y="76" width="140" height="42" rx="5"/>
-  <text class="lbl" x="624" y="96">Enriched Parquet</text>
-  <text class="sub" x="624" y="110">reusable, skips enrichment</text>
-  <rect class="box" x="612" y="128" width="140" height="42" rx="5"/>
-  <text class="lbl" x="624" y="148">HeteroData .pt</text>
-  <text class="sub" x="624" y="162">GNN ready</text>
-  <rect class="box" x="612" y="180" width="140" height="42" rx="5"/>
-  <text class="lbl" x="624" y="200">Metadata JSON</text>
-  <text class="sub" x="624" y="214">seven files per build</text>
+  <rect class="box" x="612" y="51" width="140" height="42" rx="5"/>
+  <text class="lbl" x="624" y="71">Enriched Parquet</text>
+  <text class="sub" x="624" y="85">reusable, skips enrichment</text>
+  <rect class="box" x="612" y="103" width="140" height="42" rx="5"/>
+  <text class="lbl" x="624" y="123">Query tables</text>
+  <text class="sub" x="624" y="137">SQL, SPARQL, LLMs</text>
+  <rect class="box" x="612" y="155" width="140" height="42" rx="5"/>
+  <text class="lbl" x="624" y="175">HeteroData .pt</text>
+  <text class="sub" x="624" y="189">GNN ready</text>
+  <rect class="box" x="612" y="207" width="140" height="42" rx="5"/>
+  <text class="lbl" x="624" y="227">Metadata JSON</text>
+  <text class="sub" x="624" y="241">seven files per build</text>
 </svg>
 </div>
 
@@ -118,6 +121,15 @@ structure never pays for enrichment twice.
     them, the node index, the data sources, and the module map.
 
     [:octicons-arrow-right-24: Metadata files](reference/outputs.md)
+
+-   :material-table-search:{ .lg .middle } **Query tables**
+
+    ---
+
+    What a run publishes for looking things up: Parquet tables and a triple
+    store for each day, the questions they answer, and using them with an LLM.
+
+    [:octicons-arrow-right-24: Query tables](reference/tables.md)
 
 -   :material-console:{ .lg .middle } **Operations**
 
@@ -156,7 +168,7 @@ Schema: `(subject: string, predicate: string, object: string)`.
 
 **N-Triples Parsing**: Raw `.nt` files are read as text by `spark.read.text()` and parsed on executors using Spark regex functions (`regexp_extract`). Subject and predicate URIs are extracted from angle brackets, and object values are cleaned (URI angle brackets stripped, literal datatype suffixes and language tags removed). No data passes through the driver during parsing.
 
-Enrichment steps read from this DataFrame, produce new triples DataFrames, and union them back. The enriched DataFrame is saved as **Parquet** for reuse. PyG construction reads the enriched DataFrame, assigns integer node IDs, resolves edges, extracts node and edge features — all on Spark executors. Only compact tensors cross to the driver for final `HeteroData` assembly. After the `.pt` file is saved, seven metadata JSON files are written to a `metadata/` subdirectory alongside it.
+Enrichment steps read from this DataFrame, produce new triples DataFrames, and union them back. The enriched DataFrame is saved as **Parquet** for reuse. The [query tables](reference/tables.md) are written from it too: day-partitioned Parquet tables and a triple store for querying, published apart from the run. PyG construction reads the enriched DataFrame, assigns integer node IDs, resolves edges, extracts node and edge features — all on Spark executors. Only compact tensors cross to the driver for final `HeteroData` assembly. After the `.pt` file is saved, seven metadata JSON files are written to a `metadata/` subdirectory alongside it.
 
 ### Why PySpark Instead of rdflib/SPARQL
 
