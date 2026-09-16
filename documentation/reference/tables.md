@@ -1,11 +1,17 @@
 # Query Tables
 
-A published run is a pickle, a node index and 200 Parquet parts of triples —
-about 95 GB, none of it filterable by ticker, by date or by meaning, and the
-graph's 70.8 million edges recoverable only by unpickling a 42 GB blob.
+The query tables are the part of a run meant for looking things up: six Parquet
+tables and a triple store for each day, holding the enriched data's nodes,
+edges and values under their names and URIs. SQL, SPARQL and an LLM's retrieval
+step can all read them. [Questions the tables answer](questions.md) shows what
+they answer, and [Using the tables with an LLM](llm.md) shows retrieval.
 
-The query tables are the same data in shapes something can query: six Parquet
-tables and a triple store, about 2.4 GB a day against 94.9 GB for the run.
+They are not the `.pt`. A run's `hetero_data_<variant>.pt` is a PyTorch
+Geometric graph for training a graph neural network, built over every source
+except NOAA weather: numbers without names, in a 42 GB pickle that is deleted
+with its run after 21 days. The tables cover every source, weather included.
+[The tables and the `.pt`](#the-tables-and-the-pt) lists every difference.
+
 They are written by the enriching leg of a run
 ([`spark_jobs/graph/tables.py`](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/blob/master/spark_jobs/graph/tables.py)),
 on by default, and switched off with `--enable_query_tables false`.
@@ -20,12 +26,32 @@ on by default, and switched off with `--enable_query_tables false`.
 | `entities/` | one row per text-bearing node | ~0.01 GB |
 | `edge_types/` | one row per edge type | <0.01 GB |
 
+## A day at a time, kept for a year
+
+Every table is split into days. A run writes one `day=YYYY-MM-DD` partition of
+each table, for the day its data was cut from, and each day is kept for 365
+days. A [scheduled run](../operations/running-a-job.md#scheduled-runs) adds a
+day every day, so the tables build up to a year of days, and a query can read
+one day or all of them.
+
+Three rules on this page mention a day. None of them limits a query to one:
+
+- **Ids join within a day.** `node_id` is renumbered every day, so an `edges/`
+  row joins to `nodes/` on the same `day`. Across days, follow an entity by its
+  `uri`, which does not change. See [Day-scoped node ids](#day-scoped-node-ids).
+- **A query across days sees a node once per day.** Every day is written whole,
+  so take each URI's newest day. See
+  [Written every day, deduplicated on read](#written-every-day-deduplicated-on-read).
+- **`graph/` is one store per day.** A SPARQL query reads one day's store. A
+  question across days reads the Parquet tables, or asks each day's store in
+  turn. See [`graph/`](#graph).
+
 ## Where they are published
 
-Not inside the run folder. Runs expire at 21 days and the tables keep a year,
-and S3 applies the **shortest** expiration where two prefix rules overlap — so a
-table under the run's prefix would be deleted with the run whatever a second
-rule said.
+Not inside the run folder. Runs expire at 21 days and each day of tables is kept
+a year, and S3 applies the **shortest** expiration where two prefix rules
+overlap — so a table under the run's prefix would be deleted with the run
+whatever a second rule said.
 
 ```
 <PYG_TABLES_ROOT>/<dataset>/
@@ -51,9 +77,35 @@ finishes it, including when the run folder itself had already gone up.
 The run's own `index.json` names the tables and their root, so a consumer
 holding a run can find them.
 
+## Reading them
+
+Any engine that reads Hive-partitioned Parquet can query them: DuckDB, Spark,
+Athena or pyarrow. Each `day=` directory becomes a `day` column. The SQL on this
+page runs as written once each table is a view over all its days, as in DuckDB:
+
+```sql
+CREATE VIEW nodes AS FROM read_parquet('<root>/nodes/*/*.parquet', hive_partitioning = true);
+CREATE VIEW edges AS FROM read_parquet('<root>/edges/*/*.parquet', hive_partitioning = true);
+CREATE VIEW facts AS FROM read_parquet('<root>/facts/*/*.parquet', hive_partitioning = true);
+```
+
+`<root>` is `<PYG_TABLES_ROOT>/<dataset>`, on S3 or copied to local disk. On S3,
+DuckDB also needs its `httpfs` extension and credentials, which
+[Using the tables with an LLM](llm.md#a-worked-example) sets up.
+
+- **Read only days that have a marker.** A day without `_days/<day>.json` is
+  still being published, and its parts may be incomplete.
+- **Reading needs its own access.** The identity that publishes the tables
+  cannot read them back.
+- **`graph/` is not Parquet.** It is a store directory: copy one day of it to
+  local disk and open it with pyoxigraph, as [`graph/`](#graph) shows.
+
 ## Day-scoped node ids
 
-**Edges from day D may only be joined to `nodes/` from day D.**
+**Edges from day D may only be joined to `nodes/` from day D.** That limits a
+join, not a query: a query over many days joins each day's `edges/` to that
+day's `nodes/`, as the `day` conditions below do, and follows an entity from one
+day to the next by its `uri`.
 
 `node_id` is `row_number()` over a uri-ordered window within a node type, so a
 URI's id changes whenever the node set changes — which is every day. An edge
@@ -68,18 +120,23 @@ JOIN   nodes m ON m.day = e.day AND m.node_type = e.dst_type AND m.node_id = e.d
 WHERE  e.day = DATE '2026-09-10'
 ```
 
+Without the `WHERE` line, the same query reads every day.
+
 ## Written every day, deduplicated on read
 
 There is no upsert. Merging into a published table means reading it back, and
 the builder identity has no read on the published prefix. Every day is written
-whole, and a consumer takes the newest row per URI:
+whole, and a consumer takes each URI's rows from the newest day that has it:
 
 ```sql
 SELECT * FROM (
-  SELECT *, ROW_NUMBER() OVER (PARTITION BY uri ORDER BY day DESC) AS rn
+  SELECT *, RANK() OVER (PARTITION BY uri ORDER BY day DESC) AS rn
   FROM   facts
 ) WHERE rn = 1
 ```
+
+`RANK`, not `ROW_NUMBER`: a node has a row per value in `facts/`, and
+`ROW_NUMBER` would keep one of them and drop the rest.
 
 This is one rule rather than a "stable versus daily" split because no split is
 right for every source. Measured churn between two days: BLS repeats 99.9% of
@@ -90,16 +147,9 @@ which is nothing.
 
 ### `nodes/`
 
-`(node_type, node_id, uri)`, the same three columns as the run's own
-`node_index/`, sorted by `(node_type, node_id)` so a reader after one type skips
-the rest.
-
-It is not a copy of that file. The run's index covers whatever node types the
-run built its `.pt` over; this covers everything the sources carried. A run can
-legitimately exclude a source from its model and still have to publish it — NOAA
-is 0.05% of the nodes on 2026-09-09, shares nothing between days and has no edge
-to market, so it earns little in a graph neural network and still answers
-state-by-month questions in a table.
+`(node_type, node_id, uri)`, sorted by `(node_type, node_id)` so a reader after
+one type skips the rest. It covers every node the sources carried, NOAA weather
+included.
 
 ### `edges/`
 
@@ -116,7 +166,7 @@ one row per edge type — 838 on 2026-09-09.
 This is what keeps `edges/` readable once its run has expired. A relation name
 alone says neither which predicate it came from nor whether the link was
 observed in a source or inferred by this pipeline, and `graph_schema.json`,
-which does, is run-scoped.
+which does, is deleted with its run after 21 days.
 
 `origin` is keyed by the **full** edge type rather than by the relation name,
 because it depends on the endpoints as well as the predicate: the same relation
@@ -134,9 +184,8 @@ and 119 of 155 types hold under a thousand nodes. A new source appears in this
 table with no code change.
 
 `predicate` is the full URI, which joins to `ontology_schema.json`;
-`predicate_name` is the short name a query is written against.
-`is_numeric` is per value and uses the same test the feature extractor types
-its numeric segment by, so the table and the model agree on what a number is.
+`predicate_name` is the short name a query is written against. `is_numeric` is
+per value: whether that value parses as a finite number.
 
 ### `entities/`
 
@@ -145,9 +194,11 @@ values joined in predicate order.
 
 What comes out is the text that exists. On 2026-09-09 that is 12,607 nodes
 across 49 node types, mostly names and labels; of the 990 nodes with 300 or more
-characters, 901 are weather alert descriptions. Rendering a node and its neighbourhood into a real
-sentence is what would make a vector index over this useful, and it is separate
-work. This repository emits the table; the serving side owns the model.
+characters, 901 are weather alert descriptions. Rendering a node and its
+neighbourhood into a real sentence is what would make a vector index over this
+useful, and it is separate work. This repository writes the table and embeds
+nothing; [Using the tables with an LLM](llm.md#embedding-entities) covers
+embedding it.
 
 ### `snapshots/`
 
@@ -156,8 +207,9 @@ the underlying ticker.
 
 Wide earns its keep here and nowhere else — one type, 9.3M rows a day, 56 stable
 columns, 77.7% populated. Numeric properties are `double` columns and the rest
-are strings, decided per predicate by the same majority rule the feature
-extractor uses. A snapshot missing a property gets a null, not a dropped row.
+are strings, decided per property: a property is numeric when more than half of
+its values parse as numbers. A snapshot missing a property gets a null, not a
+dropped row.
 
 The sort is what makes a ticker query cheap. There are 525 underlying tickers
 and 19 snapshots a day, a median 13,224 rows per ticker, so a single-ticker
@@ -170,14 +222,16 @@ appears in every row group and the same query reads all 39 GB.
 The non-market subgraph as a [pyoxigraph](https://pyoxigraph.readthedocs.io/)
 store, one per day — a directory, not a Parquet file.
 
-`edges/` and `nodes/` answer a one-hop question well and a two-hop question
-awkwardly: a self-join per hop carrying a mandatory same-day guard, with
-hand-rolled recursion for anything deeper. Speed is not the problem. On
-2026-09-09 the two-hop `weather → region ← measurement` traversal returned its
-38,352 pairs in 0.05 s from a local copy of `edges/`, and in 10 ms from the
-store, which held 1,413,546 triples in 185 MB. The store also keeps what no
-table can: a triple whose object is a URI nothing typed, such as a weather
-alert's severity, is in `graph/` and nowhere else.
+`edges/` and `nodes/` answer a one-hop question well and a longer one
+awkwardly. Every extra hop is one more join of `edges/` to `nodes/` on the same
+`day`, and a path whose length is not known in advance needs a recursive query.
+SPARQL states the whole path as one pattern instead. Speed is not the problem. On
+2026-09-09 the two-hop traversal from weather alerts to the regions they affect,
+and on to the BLS measurements for those regions, returned its 38,352 pairs in
+0.05 s from a local copy of `edges/`, and in 10 ms from the store, which held
+1,413,546 triples in 185 MB. The store also keeps what no table can: a triple
+whose object is a URI nothing typed, such as a weather alert's severity, is in
+`graph/` and nowhere else.
 
 ```python
 import pyoxigraph
@@ -192,14 +246,16 @@ for row in store.query("""
     print(row["measurement"].value)
 ```
 
-**One day fits in memory; a window does not.** At 185 MB a day, a 30-day window
-is about 5.6 GB and a year about 68 GB. So the store
-supplements the tables rather than replacing them: load one day for traversal,
-and fall back to `edges/` for anything spanning more.
+**The store is one day; the Parquet tables are every day.** A day's store is
+about 185 MB, so 30 days of stores would be about 5.6 GB and a year about
+68 GB. The store therefore supplements the tables rather than replacing them:
+open one day's store for a multi-hop question about that day, and read `edges/`
+and `nodes/` for anything spanning more.
 
 **No market data enters it.** At the store's rate, about 131 bytes a triple,
-market's ~415M triples a day would be about 54 GB, and it is a time series of numbers carrying one edge per
-snapshot — not a shape a triple store earns anything on.
+market's ~415M triples a day would be about 54 GB, and it is a time series of
+numbers carrying one edge per snapshot — not a shape a triple store earns
+anything on.
 
 Market *terms* do appear, which is not the same thing. The statements about the
 vocabulary — the derived `rdfs:subClassOf` hierarchy, the observed domains and
@@ -213,13 +269,38 @@ strings the loader converted them to, with their source datatypes already folded
 in. It is the same view every other artifact in this pipeline is built from, and
 not a re-serialization of the original RDF.
 
+## The tables and the `.pt`
+
+Both are built from the same enriched triples. Everything about how they differ
+is here, so the sections above describe the tables alone.
+
+- **Why the tables exist.** The rest of a published run is no easier to query.
+  With its node index and 200 Parquet parts of triples a run comes to about
+  95 GB, none of it filterable by ticker, by date or by meaning, and the graph's
+  70.8 million edges are recoverable only by unpickling the `.pt`. The tables
+  are the same data in shapes something can query, about 2.4 GB a day against
+  94.9 GB for the run.
+- **Coverage.** A run's `.pt`, and its `node_index/`, hold only the node types
+  the run builds the `.pt` over, and runs leave NOAA weather out. The tables
+  ignore that setting and cover every source. NOAA is 0.05% of the nodes on
+  2026-09-09, shares nothing between days and has no edge to market, so it earns
+  little in a graph neural network and still answers state-by-month questions
+  in a table.
+- **`nodes/` against `node_index/`.** The same three columns, over every source
+  rather than over the node types the `.pt` holds.
+- **What counts as a number.** `is_numeric` in `facts/` uses the same test the
+  feature extractor types the `.pt`'s numeric segment by, and `snapshots/` types
+  its columns by the same majority rule, so the tables and the `.pt` agree.
+- **Feature vectors stay in the `.pt`.** The dense node feature matrix is
+  38.16 GB for the dominant type, of which 183 of 1024 dimensions vary per row.
+- **Retention.** A run, with its `.pt`, is kept 21 days; each day of tables is
+  kept a year.
+
 ## What is deliberately not here
 
 - **Market literals in `facts/`, and market subjects in `graph/`.** They are in
   `snapshots/` and in `edges/`.
 - **A triple whose object is a URI nothing typed.** It is no edge, and putting a
   dangling pointer in a `value` column would have consumers reading it as a name.
-- **Node feature vectors.** The dense matrix is 38.16 GB for the dominant type,
-  of which 183 of 1024 dimensions vary per row.
 - **Anything that answers a question the data cannot.** See
-  [What the graph answers](questions.md).
+  [Questions the tables answer](questions.md).
