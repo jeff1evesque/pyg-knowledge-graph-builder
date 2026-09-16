@@ -45,10 +45,10 @@ picked source's date predicates, or its period collector, from the same specs:
     - owl:equivalentProperty / owl:equivalentClass (one-to-one pairs only)
     - predicate folding to the unified vocabulary
     - skos:prefLabel normalization
-    - rdfs:subClassOf ← curated CLASS_MAPPINGS + class naming
-    - rdfs:subPropertyOf ← curated PROPERTY_MAPPINGS shared targets
-    - rdfs:domain/range ← observed usage + declared XSD datatypes
-    - prov:derivedBy ← how each of the above was arrived at
+    - rdfs:subClassOf, from curated CLASS_MAPPINGS + class naming
+    - rdfs:subPropertyOf, from curated PROPERTY_MAPPINGS shared targets
+    - rdfs:domain/range, from observed usage + declared XSD datatypes
+    - prov:derivedBy, recording how each of the above was arrived at
 
 The result is `triples_df` (enriched), written as Parquet locally, alongside
 the PyG `HeteroData` `.pt` and the seven metadata JSON files (local, and
@@ -190,9 +190,12 @@ cpi:November a temporal:SourceMonth ; rdfs:label "November" .
 
 > **Source temporal URIs are typed here too.** Sources reference periods as bare URIs — `cpi:February`, `eci:2024`, `jolts:August` — carrying no `rdf:type`. `node_mapper` only creates nodes for typed URIs, so those periods were not nodes and *every* triple pointing at them was dropped during edge resolution: `hasMonth`, `hasYear`, `hasStartMonth`/`hasEndMonth`, `hasStartYear`/`hasEndYear` (~1,205 on the e2e fixtures). The graph had no temporal dimension — nothing recorded *when* a measurement happened — and the `owl:sameAs` links above, pointing at the same untyped URIs, were dropped as well, leaving `UnifiedMonth`/`UnifiedYear` as isolated nodes. `TemporalUnifier` now emits `temporal:Source{Month,Year,Quarter}` for exactly the set of temporal URIs it already collects, so both hops of the bridge resolve:
 >
-> ```
-> cpi measurement → cpi:February → unified:February ← eci:February ← eci measurement
-> ```
+> | From | Edge | To |
+> |---|---|---|
+> | a CPI measurement | `cpi:hasMonth` | `cpi:February` |
+> | `unified:February` | `owl:sameAs` | `cpi:February` |
+> | `unified:February` | `owl:sameAs` | `eci:February` |
+> | an ECI measurement | `eci:hasMonth` | `eci:February` |
 >
 > The type is deliberately **not** in an `*/enrichment/` namespace: `classify_edge_origin()` reads a minted endpoint type as a pipeline-derived edge, and a measurement's link to its own period is an observed source fact — only the type is ours. It is deliberately distinct from `UnifiedMonth` as well, so `unified:February owl:sameAs cpi:February` still says which node is canonical.
 >
