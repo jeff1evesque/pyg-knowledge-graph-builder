@@ -20,15 +20,16 @@ import pytest
 from spark_jobs.utils import rdf_utils
 from spark_jobs.utils.rdf_utils import (
     ENRICHMENT_NAMESPACES,
-    MARKET_NODE_TYPE_PREFIXES,
     NAMESPACE_PREFIXES,
     ONTOLOGY_BASE,
     PIPELINE_NODE_TYPE_PREFIXES,
     PROVENANCE,
+    SNAPSHOT_NODE_TYPE_PREFIX,
     SOURCE_TEMPORAL,
     UNIFIED,
     BLS_ENRICHMENT,
     MARKET_ENRICHMENT,
+    MARKET_QUOTES,
     NOAA_ENRICHMENT,
     SEC_ENRICHMENT,
     SOURCE_VOCABULARIES,
@@ -442,15 +443,25 @@ def test_pipeline_node_type_prefixes_still_resolve():
         assert entry[:-1] in prefixes
 
 
-def test_market_node_type_prefixes_still_resolve():
+def test_snapshot_node_type_prefix_still_resolves():
     """Derived the same way, and the test the query tables ask to decide what
-    stays out of the long tables and the triple store. An empty tuple would
-    put 9.3M market rows a day into a table sized for 1.4M."""
-    assert MARKET_NODE_TYPE_PREFIXES
+    stays out of the long tables and the triple store. An empty prefix would
+    put 10.2M quote rows a day into a table sized for 318K."""
+    assert SNAPSHOT_NODE_TYPE_PREFIX
+    assert SNAPSHOT_NODE_TYPE_PREFIX.endswith("_")
     prefixes = {p for _ns, p in NAMESPACE_PREFIXES}
-    for entry in MARKET_NODE_TYPE_PREFIXES:
-        assert entry.endswith("_")
-        assert entry[:-1] in prefixes
+    assert SNAPSHOT_NODE_TYPE_PREFIX[:-1] in prefixes
+
+
+def test_the_snapshot_prefix_comes_from_the_quotes_namespace():
+    """Quotes, not market. The market-enrichment hub nodes -- the GICS sectors
+    and the moneyness classes -- belong in the long tables and the store with
+    every other node, and a prefix covering both namespaces swept them out."""
+    prefix_of = dict(NAMESPACE_PREFIXES)
+    assert SNAPSHOT_NODE_TYPE_PREFIX == f"{prefix_of[str(MARKET_QUOTES)]}_"
+    assert not f"{prefix_of[str(MARKET_ENRICHMENT)]}_".startswith(
+        SNAPSHOT_NODE_TYPE_PREFIX
+    )
 
 
 def test_classify_edge_origin_still_separates_the_three_origins():
