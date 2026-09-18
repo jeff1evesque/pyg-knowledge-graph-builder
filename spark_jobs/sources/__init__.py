@@ -12,7 +12,7 @@ This package imports neither pyspark nor rdf_utils. rdf_utils builds its
 namespace tables from it, and every module that imports rdf_utils would
 otherwise load pyspark too.
 """
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from rdflib.namespace import OWL, RDFS
 
@@ -137,6 +137,57 @@ def entity_prefixes(namespaces: Sequence[str]) -> List[str]:
         if namespace.startswith(SOURCE_BASE):
             prefixes.append(identifier_namespace(namespace))
     return prefixes
+
+
+# ======================================================================
+# Which source a term belongs to
+# ======================================================================
+
+def _owned_namespaces(
+    specs: Sequence[SourceSpec],
+) -> Tuple[Tuple[str, str], ...]:
+    """(namespace, source name) for every namespace a source owns, longest first.
+
+    Longest first so a namespace nested inside another resolves to its own
+    source rather than to the one it sits under. A spec's enrichment namespace
+    is one of its own (tests/test_source_registry.py), so it needs no entry of
+    its own. SHARED_NAMESPACES are left out: no source owns them.
+    """
+    table = [
+        (namespace, spec.name)
+        for spec in specs
+        for namespace, _prefix in spec.namespaces
+    ]
+    return tuple(sorted(table, key=lambda pair: (-len(pair[0]), pair[0])))
+
+
+def _source_of(uri: str, table: Sequence[Tuple[str, str]]) -> Optional[str]:
+    for namespace, name in table:
+        if uri.startswith(namespace):
+            return name
+    return None
+
+
+def source_of_type_uri(
+    uri: str, specs: Sequence[SourceSpec] = REGISTERED,
+) -> Optional[str]:
+    """The source whose vocabulary a term comes from, or None.
+
+    None for the shared vocabularies — temporal, unified, OWL, RDFS,
+    GeoSPARQL — which belong to no source, and for a term under no registered
+    namespace at all. Both are answers rather than failures, and neither may be
+    attributed to a source by guessing.
+    """
+    return _source_of(uri, _owned_namespaces(specs))
+
+
+def sources_in_type_uris(
+    uris: Sequence[str], specs: Sequence[SourceSpec] = REGISTERED,
+) -> Tuple[str, ...]:
+    """The sources these terms come from, once each, in registration order."""
+    table = _owned_namespaces(specs)
+    found = {name for name in (_source_of(uri, table) for uri in uris) if name}
+    return tuple(spec.name for spec in specs if spec.name in found)
 
 
 # ======================================================================
