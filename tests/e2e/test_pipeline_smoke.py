@@ -2163,16 +2163,22 @@ def _assert_cross_source_temporal_bridge(data):
     )
 
 
-# The distance between each pair of source families, as
-# documentation/design/enrichment.md reports it: (ignoring direction, a -> b
-# along stored direction, b -> a along stored direction), where None means no
-# path at any depth.
+# The distance between each pair of source families ON THESE FIXTURES:
+# (ignoring direction, a -> b along stored direction, b -> a along stored
+# direction), where None means no path at any depth.
 #
-# The hubs this pipeline mints count as hops, which is how the page counts
-# them. Exact numbers rather than bounds, deliberately: the page states them,
-# and a number nothing checks is how the previous one -- "every pair at
-# distance 4" -- stayed on the page after the period ladder grew a day rung.
-# A change here is a change to that page.
+# The hubs this pipeline mints count as hops, which is how
+# documentation/design/enrichment.md counts them. Exact numbers rather than
+# bounds, deliberately: the page states them, and a number nothing checks is
+# how the previous one -- "every pair at distance 4" -- stayed on the page
+# after the period ladder grew a day rung. A change here is a change to that
+# page.
+#
+# These run LONGER than a production day, which the page reports separately and
+# explains: the fixtures span 17 days, so two dated sources rarely share one and
+# a route between them has to climb to the month and back down. A production run
+# covers one day, so sec <-> noaa and market <-> noaa are 4 there rather than 6
+# and 8. Direction behaves the same either way, which is the part that matters.
 #
 # Along stored direction almost everything is unreachable, and that is the
 # shape rather than a defect: hub-and-spoke points both spokes INTO the hub, so
