@@ -6,9 +6,11 @@ about what must NOT reach them:
   * a run building its ``.pt`` over a subset of node types still writes every
     source's rows to the tables. That is the whole reason the tables build
     their own node table instead of reusing the run's
-  * market stays out of ``facts/`` and ``entities/`` -- it is 99.5% of the
-    graph and belongs in a wide table of its own -- while staying IN ``edges/``,
-    because the links between market and everything else are the point
+  * market SNAPSHOTS stay out of ``facts/``, ``entities/`` and ``graph/`` --
+    they are 99.5% of the graph and belong in a wide table of their own --
+    while staying IN ``edges/``, because the links between market and
+    everything else are the point. Market's hub nodes are not snapshots and go
+    where every other node goes
   * a triple pointing at a literal is a fact and a triple pointing at an
     untyped URI is neither, so neither becomes an edge
   * a relation from a namespace no source registers stops the tables before
@@ -32,11 +34,17 @@ ONT = "https://jefflevesque.com/ontology/"
 CPI_INDEX = f"{ONT}cpi/Index"
 OPTION_SNAPSHOT = f"{ONT}market-quotes/OptionSnapshot"
 WEATHER_ALERT = f"{ONT}weather/WeatherAlert"
+# Market's hub nodes. Same source as the quotes, the other side of the line the
+# tables draw: fourteen of them against 10.2M quotes on 2026-09-17.
+EQUITY_SECTOR = f"{ONT}market/EquitySector"
+ECONOMIC_SECTOR = f"{ONT}bls/EconomicSector"
 
 PRECEDES = f"{ONT}bls/precedes"
 UNDERLYING_SYMBOL = f"{ONT}market-quotes/underlyingSymbol"
 CONTRACT_SYMBOL = f"{ONT}market-quotes/symbol"
 REFERS_TO_COMPANY = f"{ONT}market/refersToCompany"
+RELATED_TO_ECONOMIC_SECTOR = f"{ONT}market/relatedToEconomicSector"
+RELATION_CONFIDENCE = f"{ONT}market/relationConfidence"
 CPI_VALUE = f"{ONT}cpi/hasValue"
 STRIKE_PRICE = f"{ONT}market-quotes/strikePrice"
 # A local name carrying a dot. F.col("a.b") reads that as a struct field, so
@@ -55,6 +63,8 @@ QUOTE_2 = "https://ex/quote/2"
 ALERT = "https://ex/alert/1"
 REGION = "https://ex/region/1"
 UNTYPED = "https://ex/untyped/1"
+SECTOR = "https://ex/sector/energy"
+ECON_SECTOR = "https://ex/economic-sector/energy"
 
 TRIPLES = [
     (INDEX_A, RDF_TYPE, CPI_INDEX),
@@ -62,10 +72,18 @@ TRIPLES = [
     (QUOTE, RDF_TYPE, OPTION_SNAPSHOT),
     (ALERT, RDF_TYPE, WEATHER_ALERT),
     (REGION, RDF_TYPE, REGION_TYPE),
+    (SECTOR, RDF_TYPE, EQUITY_SECTOR),
+    (ECON_SECTOR, RDF_TYPE, ECONOMIC_SECTOR),
 
     # Edges: one within a source, one from market into it.
     (INDEX_A, PRECEDES, INDEX_B),
     (QUOTE, REFERS_TO_COMPANY, INDEX_A),
+
+    # Market's route out to the economic sectors, and the confidence it
+    # carries. A hub node in the market-enrichment namespace: same source as
+    # the quotes, nothing like them in shape.
+    (SECTOR, RELATED_TO_ECONOMIC_SECTOR, ECON_SECTOR),
+    (SECTOR, RELATION_CONFIDENCE, "strong"),
 
     # The two hops the store exists for: an alert and a measurement meeting
     # at a region.
@@ -140,9 +158,12 @@ def store(paths):
 
 def test_nodes_carries_every_typed_entity_with_its_id(written):
     rows = {row["uri"]: row for row in written["nodes"]}
-    assert set(rows) == {INDEX_A, INDEX_B, QUOTE, QUOTE_2, ALERT, REGION}
+    assert set(rows) == {
+        INDEX_A, INDEX_B, QUOTE, QUOTE_2, ALERT, REGION, SECTOR, ECON_SECTOR
+    }
     assert rows[INDEX_A]["node_type"] == "cpi_Index"
     assert rows[QUOTE]["node_type"] == "market_quotes_OptionSnapshot"
+    assert rows[SECTOR]["node_type"] == "market_enrichment_EquitySector"
 
 
 def test_node_ids_are_zero_based_within_a_type(written):
@@ -177,7 +198,11 @@ def test_edges_resolve_both_endpoints_through_the_node_table(written):
     assert (
         *ids[QUOTE], "market_enrichment_refersToCompany", *ids[INDEX_A]
     ) in edges
-    assert len(edges) == 4
+    assert (
+        *ids[SECTOR], "market_enrichment_relatedToEconomicSector",
+        *ids[ECON_SECTOR],
+    ) in edges
+    assert len(edges) == 5
 
 
 def test_a_triple_pointing_at_an_untyped_uri_is_neither_edge_nor_fact(written):
@@ -238,7 +263,7 @@ def test_edge_types_recovers_the_predicate_and_its_origin(written):
 # facts/
 # ======================================================================
 
-def test_facts_carries_non_market_literals_and_marks_the_numbers(written):
+def test_facts_carries_non_snapshot_literals_and_marks_the_numbers(written):
     facts = {
         (row["uri"], row["predicate"]): row for row in written["facts"]
     }
@@ -248,25 +273,47 @@ def test_facts_carries_non_market_literals_and_marks_the_numbers(written):
     assert facts[(INDEX_A, CPI_VALUE)]["predicate_name"] == "cpi_hasValue"
 
 
-def test_facts_excludes_market(written):
-    """9.3M market rows a day in a long table would swamp the 1.4M rows every
-    other source contributes, and market is better served by a wide one."""
+def test_facts_excludes_snapshots(written):
+    """10.2M quote rows a day in a long table would swamp the 318K rows every
+    other source contributes, and a quote is better served by a wide one.
+
+    Snapshots, not market: the line is drawn at the shape, and market's hub
+    nodes are not that shape. See test_facts_carries_a_market_hub_nodes_value.
+    """
     assert not [
         row for row in written["facts"]
-        if row["node_type"].startswith("market_")
+        if row["node_type"].startswith("market_quotes_")
     ]
     assert not [
         row for row in written["facts"] if row["predicate"] == STRIKE_PRICE
     ]
 
 
-def test_facts_covers_every_non_market_source(written):
+def test_facts_covers_every_source_that_is_not_a_snapshot(written):
     """Long format is what lets one shape hold every source. Weather earns
     little in a model -- 0.076% of nodes, no edge into market -- and still has
     to come out in a table."""
     assert {row["node_type"] for row in written["facts"]} == {
-        "cpi_Index", "weather_WeatherAlert"
+        "cpi_Index", "weather_WeatherAlert", "market_enrichment_EquitySector"
     }
+
+
+def test_facts_carries_a_market_hub_nodes_value(written):
+    """A sector's confidence is a fact like any other.
+
+    It used to be pivoted into ``snapshots/`` instead, because the split asked
+    "is this market?" rather than "is this a snapshot?". That put a
+    ``market_enrichment_relationConfidence`` column on a table of quotes --
+    null on all 10,174,755 of them on 2026-09-17 -- and left the value out of
+    the one table a consumer looks for a value in.
+    """
+    row = next(
+        row for row in written["facts"]
+        if row["uri"] == SECTOR and row["predicate"] == RELATION_CONFIDENCE
+    )
+    assert row["value"] == "strong"
+    assert row["node_type"] == "market_enrichment_EquitySector"
+    assert row["is_numeric"] is False
 
 
 def test_facts_does_not_restate_the_type(written):
@@ -288,7 +335,13 @@ def test_entities_assembles_the_text_a_node_carries(written):
 
 def test_entities_leaves_out_nodes_carrying_no_text(written):
     """A number is not something to embed. INDEX_B carries nothing at all and
-    the quote carries only a strike price."""
+    the quote carries only a strike price.
+
+    Nor is every word text: the sector's ``relationConfidence`` is "strong",
+    which is a category rather than something to embed, and it is not one of
+    _TEXT_PREDICATE_TERMS. So a market hub node reaches ``facts/`` without
+    reaching ``entities/``.
+    """
     assert set(row["uri"] for row in written["entities"]) == {INDEX_A, ALERT}
 
 
@@ -455,11 +508,29 @@ def test_a_stated_day_supplies_the_partition_the_paths_lack(spark, tmp_path):
 # snapshots/
 # ======================================================================
 
-def test_snapshots_pivots_market_wide(written):
+def test_snapshots_pivots_quotes_wide(written):
     rows = {row["uri"]: row for row in written["snapshots"]}
     assert set(rows) == {QUOTE, QUOTE_2}
     assert rows[QUOTE]["market_quotes_underlyingSymbol"] == "MSFT"
     assert rows[QUOTE]["market_quotes_strikePrice"] == 100.5
+
+
+def test_every_snapshot_row_is_a_quote(written):
+    """The table is one shape -- a quote, 45 columns wide, sorted by ticker.
+    A market hub node pivoted in here adds a column null on every quote: on
+    2026-09-17 eight EquitySector rows put a relationConfidence column on
+    10,174,755 of them.
+    """
+    assert written["snapshots"]
+    assert all(
+        row["node_type"].startswith("market_quotes_")
+        for row in written["snapshots"]
+    )
+    assert not [
+        column
+        for row in written["snapshots"] for column in row
+        if column.startswith("market_enrichment_")
+    ]
 
 
 def test_a_snapshot_missing_a_property_gets_a_null_not_a_dropped_row(written):
@@ -518,22 +589,37 @@ def test_a_run_with_no_market_writes_no_snapshots(spark, tmp_path):
 # graph/
 # ======================================================================
 
-def test_the_store_holds_the_non_market_triples(store):
+def test_the_store_holds_the_non_snapshot_triples(store):
     rows = list(store.quads_for_pattern(None, None, None))
     subjects = {str(quad.subject.value) for quad in rows}
     assert INDEX_A in subjects
     assert ALERT in subjects
 
 
-def test_market_never_enters_the_store(store):
-    """At the measured byte rate market would be roughly 58 GB a day against
-    194 MB for everything else, and it is numbers, not a graph."""
+def test_a_snapshot_never_enters_the_store(store):
+    """At the measured byte rate quotes would be roughly 58 GB a day against
+    194 MB for everything else, and they are numbers, not a graph."""
     subjects = {
         str(quad.subject.value)
         for quad in store.quads_for_pattern(None, None, None)
     }
     assert QUOTE not in subjects
     assert QUOTE_2 not in subjects
+
+
+def test_the_store_holds_markets_route_to_the_economic_sectors(store):
+    """``EquitySector relatedToEconomicSector EconomicSector`` is how market
+    reaches the economic sectors, and a multi-hop question about that route is
+    what the store is for. It was in ``edges/`` and not in the store, because
+    the filter excluded every market subject rather than every snapshot.
+    """
+    route = list(store.quads_for_pattern(None, None, None))
+    triples = {
+        (str(q.subject.value), str(q.predicate.value), str(q.object.value))
+        for q in route
+    }
+    assert (SECTOR, RELATED_TO_ECONOMIC_SECTOR, ECON_SECTOR) in triples
+    assert (SECTOR, RELATION_CONFIDENCE, "strong") in triples
 
 
 def test_a_two_hop_traversal_answers_from_the_store(store):
