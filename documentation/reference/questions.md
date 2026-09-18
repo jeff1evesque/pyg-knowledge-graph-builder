@@ -23,14 +23,17 @@ A run publishes two different things. This page uses only the first.
 | Names, text and dates | Yes. Every row carries a URI, and `facts/`, `entities/` and `snapshots/` carry the values | No. A row is a position, and `node_index/` says which entity it is |
 | Where | `<PYG_TABLES_ROOT>/<dataset>/<table>/day=YYYY-MM-DD/` | In the run's folder, as `<variant>/hetero_data_<variant>.pt` |
 | Kept for | 365 days | 21 days, with its run |
-| Covers | Every source the run read: BLS, SEC, market and NOAA weather | Every source except NOAA weather |
+| Covers | Every source the run read: BLS, SEC, market and NOAA weather | Every source except NOAA weather — each build names the sources it holds in `graph_schema.json`'s `sources_in_graph` |
 
 Weather is left out of the `.pt` on purpose and kept in the tables. NOAA is
 0.05% of the nodes on 2026-09-09, shares nothing between days and has no edge to
 market, so it earns little in a graph neural network, and it still answers
 weather questions from a table. Which node types a `.pt` leaves out is set per
 run (`exclude_node_types` in its PyG config), and the tables ignore that
-setting. [Query tables](tables.md) describes the tables, and
+setting. A build says which sources it ended up with in
+[`graph_schema.json`](outputs.md#what-the-graph-is-made-of)'s `sources_in_graph`
+— read that rather than `sources` beside it, which is what the run read, weather
+included. [Query tables](tables.md) describes the tables, and
 [Metadata files](outputs.md) describes the `.pt`.
 
 ### How far back you can ask
