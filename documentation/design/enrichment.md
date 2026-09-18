@@ -201,40 +201,40 @@ cpi:November a temporal:SourceMonth ; rdfs:label "November" .
 >
 > **These types are pinned as canonical.** Many source periods already carry a source type — `cpi:2024` is both `cpi:Year` and `temporal:SourceYear`. `node_mapper`'s default rule (fewest instances wins) picks the *source* type, because it is per-namespace and therefore rarer, which shards one concept across every namespace that names it: measured on the e2e fixtures, 37 months split over `cpi_Month`/`jolts_Month`/`empsit_Month`/`eci_Month`/`temporal_SourceMonth` and 14 years likewise, leaving `temporal_SourceYear` holding a single node. The `owl:sameAs` edges then land on whichever shard a period fell into, and a heterogeneous GNN sees unrelated node types with no path between them. `node_mapper._CANONICAL_TYPE_PRIORITY` pins `temporal_Source*` ahead of the count heuristic so every period lands in one node type per granularity. The source type is not lost — it remains an `rdf:type` triple and appears in `ontology_schema.json`; only the canonical type used for graph *structure* is overridden. Predicates stay per-source (`cpi_hasYear`, `jolts_hasYear`, …), so the sources agree on what a year *is* without being forced to share measurement semantics.
 
-> **Cross-source paths go through a hub, and how long they are depends on
-> which hub and on which direction you count.** Every route between two sources
-> goes through a node this pipeline mints rather than a direct edge. Measured on
-> the graph the e2e suite builds, counting those hubs as hops:
+> **Cross-source paths go through a hub, and how far apart two sources are
+> depends on which hub and on which direction you count.** Every route between
+> two sources goes through a node this pipeline mints rather than a direct edge.
+> Measured on the 2026-09-17 run — 10,290,568 nodes, 77,174,823 edges —
+> counting those hubs as hops:
 >
 > | pair | ignoring direction | through | along stored direction |
 > |---|---|---|---|
 > | bls ↔ sec | **3** | `EconomicSector`, `UnifiedCompany` | unreachable both ways |
-> | bls ↔ market | **3** | `EconomicSector`, `UnifiedCompany` | unreachable both ways |
+> | bls ↔ market | **2** | `EquitySector` | unreachable both ways |
 > | sec ↔ market | **2** | `UnifiedCompany` | unreachable both ways |
-> | bls ↔ noaa | **3** | `CensusRegion`, `GeographicRegion` | `noaa → bls` **3**, `bls → noaa` unreachable |
-> | sec ↔ noaa | **6** | the period ladder | unreachable both ways |
-> | market ↔ noaa | **8** | company, sector, then the period ladder | unreachable both ways |
+> | bls ↔ noaa | **2** | `GeographicRegion` | `noaa → bls` **3**, `bls → noaa` unreachable |
+> | sec ↔ noaa | **4** | `UnifiedDay`, each source's own day either side | unreachable both ways |
+> | market ↔ noaa | **4** | `UnifiedDay`, each source's own day either side | unreachable both ways |
 >
 > **A production `.pt` holds the first three rows.** Runs leave NOAA weather
-> out, so a trained model sees three source families and three pairs, all at
-> distance 2 or 3.
+> out, so a trained model sees three source families and three pairs, at 3, 2
+> and 2.
 >
 > **How deep a model has to be, and which column that comes from.** The
-> guidance below follows the middle column. Ignoring direction, **a
-> message-passing depth of fewer than 3 layers cannot propagate a signal between
-> bls and either other source**, and fewer than 2 between sec and market. Along
-> stored direction the number does not exist: 11 of the 12 ordered pairs are
-> unreachable at *any* depth, because hub-and-spoke points both spokes **into**
-> the hub —
+> guidance follows the middle column. Ignoring direction, **a message-passing
+> depth of fewer than 3 layers cannot propagate a signal between bls and sec**,
+> and fewer than 2 for the other two pairs a `.pt` holds. Along stored direction
+> no depth does: 11 of the 12 ordered pairs are unreachable at *any* depth,
+> because hub-and-spoke points both spokes **into** the hub —
 > `filings_Issuer → UnifiedCompany ← market_quotes_EquitySnapshot`. A model that
 > adds reverse edge types (PyG's `ToUndirected`, say) gets the middle column; one
 > that does not gets the right-hand one, and no depth rescues it. Which of those
 > a training run does is a modelling choice this repository does not make.
 >
-> The period ladder is the longest route, not the shortest, and it is five
-> edges rather than four since a dated entity attaches to its day rather than to
-> its month. Drawn in stored direction, which is what makes the backwards steps
-> visible — three of the five:
+> **The period ladder is the longest route, not the shortest.** It is also five
+> edges rather than four, since a dated entity attaches to its day rather than
+> to its month. Drawn in stored direction, which is what makes the backwards
+> steps visible — three of the five:
 >
 > | From | Edge | To |
 > |---|---|---|
@@ -244,13 +244,22 @@ cpi:November a temporal:SourceMonth ; rdfs:label "November" .
 > | `unified:<Month>` | `owl:sameAs` | `cpi:<Month>` |
 > | a CPI measurement | `cpi:hasMonth` | `cpi:<Month>` |
 >
+> Only a monthly source needs that month rung. Two sources that both carry a
+> day meet sooner, which is why sec ↔ noaa and market ↔ noaa are 4: a run covers
+> one day, so both land on the same `unified:Day` and neither climbs to the
+> month.
+>
+> **The e2e fixtures are longer, and that is the fixtures rather than the
+> design.** The same six pairs come out 3, 3, 2, 3, 6 and 8 there, because those
+> fixtures span 17 days, so two dated sources rarely share one and the ladder
+> routes have to climb. Direction behaves identically on both.
+> `tests/e2e/test_pipeline_smoke.py::test_the_distance_between_sources_is_what_the_design_says`
+> asserts the fixture numbers, so a new rung on the ladder fails a test rather
+> than quietly making this table wrong.
+>
 > Hub-and-spoke is the design — it lets *N* sources agree on a period without
 > *N²* joins. The consequence for training is that depth alone is not what
 > connects two sources; direction is.
->
-> `tests/e2e/test_pipeline_smoke.py::test_the_distance_between_sources_is_what_the_design_says`
-> asserts these numbers, so a new rung on the ladder fails a test rather than
-> quietly making this table wrong.
 
 > **Company, region and sector links are hubs too.** Each source gives a hub its
 > own keys through its spec (`spark_jobs/sources/`): a CIK or a ticker for the
