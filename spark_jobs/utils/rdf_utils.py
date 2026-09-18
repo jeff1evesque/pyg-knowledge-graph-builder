@@ -287,19 +287,23 @@ PIPELINE_NODE_TYPE_PREFIXES: Tuple[str, ...] = tuple(
 # Identity linking uses the standard OWL vocabulary, not a pipeline namespace.
 OWL_SAME_AS = "http://www.w3.org/2002/07/owl#sameAs"
 
-# Node-type prefixes belonging to market data. Derived the same way, and for
-# the same reason: a new market namespace is picked up here rather than in a
-# second list nobody remembers to update.
+# The node-type prefix a market snapshot carries. Derived from the namespace
+# rather than spelled out, so a re-homed namespace moves it.
 #
-# Market is the one source that is not graph-shaped -- a time series of numbers
-# carrying one edge per snapshot, and 99.5% of the graph by volume. It gets a
-# wide table of its own and is kept out of the long tables and the triple
+# A snapshot is the one thing here that is not graph-shaped -- a time series of
+# numbers carrying one edge per snapshot, 99.5% of the graph by volume. It gets
+# a wide table of its own and is kept out of the long tables and the triple
 # store, so this is the test those writers ask.
-_MARKET_NAMESPACES = (str(MARKET_QUOTES), str(MARKET_ENRICHMENT))
-MARKET_NODE_TYPE_PREFIXES: Tuple[str, ...] = tuple(
+#
+# It asks about snapshots rather than about market because the two are not the
+# same set. Market enrichment mints a handful of hub nodes -- the GICS sector
+# nodes and the moneyness classes -- and a rule reading "market" swept those in
+# with the quotes. They are hubs linking market to the rest of the graph, which
+# is what the long tables and the store are for.
+SNAPSHOT_NODE_TYPE_PREFIX: str = next(
     f"{prefix}_"
     for ns, prefix in NAMESPACE_PREFIXES
-    if ns in _MARKET_NAMESPACES
+    if ns == str(MARKET_QUOTES)
 )
 
 
