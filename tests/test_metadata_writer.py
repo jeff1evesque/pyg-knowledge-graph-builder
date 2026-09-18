@@ -40,6 +40,12 @@ from spark_jobs.pyg_builder.metadata_writer import (
     write_metadata_to_s3,
 )
 from spark_jobs.sources.spec import SourceSpec
+from spark_jobs.utils.namespaces import (
+    CPI,
+    MARKET_QUOTES,
+    SEC_FILINGS,
+    SOURCE_TEMPORAL,
+)
 from spark_jobs.utils.rdf_utils import (
     ONTOLOGY_BASE,
     ONTOLOGY_NAMESPACE_HASH_SEED,
@@ -262,6 +268,82 @@ def test_graph_schema_sources_absent_is_empty_not_guessed():
     assert meta["sources"] == []
 
 
+def _collector_reading_four_sources(config=None, node_type_uris=None):
+    """A collector told it read all four sources, whatever its node types say."""
+    collector = MetadataCollector(
+        "2099-01", 1024, 64, True, config or {},
+        dataset="all-sources", sources=["bls", "market", "noaa", "sec"],
+    )
+    if node_type_uris is not None:
+        collector.register_node_types(
+            node_counts={name: 1 for name in node_type_uris},
+            node_type_uris=node_type_uris,
+        )
+    return collector
+
+
+def test_graph_schema_sources_in_graph_leaves_out_a_source_with_no_node_types():
+    """The daily run's case: NOAA is read, and none of it reaches the .pt.
+
+    `sources` is what the job opened; `sources_in_graph` is what the node types
+    say landed. A consumer asking "is there weather in this graph" wants the
+    second, and before 1.4 could only get it by joining `sources` against the
+    exclusion list and knowing NOAA has exactly four node types.
+    """
+    meta = _collector_reading_four_sources(
+        config={"exclude_node_types": ["weather_WeatherAlert", "cap_Area"]},
+        node_type_uris={
+            "cpi_ConsumerPriceIndex": f"{CPI}ConsumerPriceIndex",
+            "market_quotes_OptionSnapshot": f"{MARKET_QUOTES}OptionSnapshot",
+            "filings_Issuer": f"{SEC_FILINGS}Issuer",
+        },
+    )._build_graph_schema()["build_metadata"]
+
+    assert meta["sources"] == ["bls", "market", "noaa", "sec"]
+    assert meta["sources_in_graph"] == ["bls", "market", "sec"]
+
+
+def test_graph_schema_sources_in_graph_ignores_the_shared_vocabularies():
+    """Temporal, unified and OWL belong to no source, so they name none.
+
+    A graph of nothing but shared types reports no sources rather than
+    attributing them to whichever source happened to be read.
+    """
+    meta = _collector_reading_four_sources(
+        node_type_uris={"temporal_SourceDay": f"{SOURCE_TEMPORAL}SourceDay"},
+    )._build_graph_schema()["build_metadata"]
+
+    assert meta["sources"] == ["bls", "market", "noaa", "sec"]
+    assert meta["sources_in_graph"] == []
+
+
+def test_graph_schema_sources_in_graph_is_empty_before_node_types_are_registered():
+    """No node types is no evidence, and no evidence is an empty list."""
+    meta = _collector_reading_four_sources()._build_graph_schema()["build_metadata"]
+    assert meta["sources_in_graph"] == []
+
+
+def test_graph_schema_excluded_node_types_is_empty_rather_than_absent():
+    """Absent meant two things: nothing excluded, or a build predating the key.
+
+    pipeline_config still omits it, because that field echoes the config the job
+    was handed. This one is the report, so it is always there.
+    """
+    schema = _collector_reading_four_sources()._build_graph_schema()
+    assert schema["build_metadata"]["excluded_node_types"] == []
+    assert "exclude_node_types" not in schema["build_metadata"]["pipeline_config"]
+
+
+def test_graph_schema_excluded_node_types_is_sorted():
+    """Two runs excluding the same types compare equal whatever order they came in."""
+    meta = _collector_reading_four_sources(
+        config={"exclude_node_types": ["weather_WeatherAlert", "cap_Area", "cap_Info"]},
+    )._build_graph_schema()["build_metadata"]
+    assert meta["excluded_node_types"] == [
+        "cap_Area", "cap_Info", "weather_WeatherAlert",
+    ]
+
+
 def test_graph_schema_unregistered_literal_features_defaults_to_false():
     """A collector that never reached feature building reports False, not True.
 
@@ -326,8 +408,13 @@ def test_graph_schema_version_is_bumped_for_the_new_semantics():
     and also load-bearing for a consumer: at 1.2 and below a graph cannot say
     what it was built from, so an empty sources list means "this build did not
     record it", not "no sources".
+
+    1.4 adds build_metadata.sources_in_graph and .excluded_node_types. Additive
+    again, and again load-bearing: at 1.3 `sources` is the read set, and a
+    consumer taking it for what the .pt holds is wrong whenever a node type was
+    filtered. The version is what tells it whether the honest answer is there.
     """
-    assert _fully_registered_collector()._build_graph_schema()["version"] == "1.3"
+    assert _fully_registered_collector()._build_graph_schema()["version"] == "1.4"
 
 
 # ======================================================================
