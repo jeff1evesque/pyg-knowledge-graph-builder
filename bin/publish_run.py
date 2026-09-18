@@ -205,6 +205,27 @@ def check_graph(pyg: Path, graph: str, log: Log) -> None:
             raise Refused(f"{name} does not match its sha256 in checksums.json")
 
 
+def graph_sources(pyg: Path, graphs) -> dict:
+    """{graph: sources_in_graph} for the variants whose graph_schema.json records it.
+
+    The run-level ``sources`` is what the job read. A variant may hold fewer,
+    because ``exclude_node_types`` drops node types after the enriched output is
+    written and because a source whose day arrives empty leaves no node types
+    either. Only graph_schema.json knows which, and only from schema 1.4 on --
+    an earlier variant is left without the key rather than given a guess.
+    """
+    found = {}
+    for graph in graphs:
+        schema = pyg / f"hetero_data_{graph}_metadata" / "graph_schema.json"
+        try:
+            recorded = json.loads(schema.read_text()).get("build_metadata") or {}
+        except (OSError, ValueError):
+            continue  # index.json is a pointer; it does not fail a publish
+        if "sources_in_graph" in recorded:
+            found[graph] = recorded["sources_in_graph"]
+    return found
+
+
 def dataset_name(enriched: Path, period: str, env):
     """The dataset folder name, and the sources the job recorded."""
     descriptor = enriched / "dataset.json"
@@ -333,8 +354,15 @@ def tables_destination(env, dataset: str) -> str:
     return f"{root}/{dataset}"
 
 
+def variant_entry(graph: str, labels: dict, in_graph: dict) -> dict:
+    entry = {"path": f"{graph}/", "notebook_label": labels.get(graph)}
+    if graph in in_graph:
+        entry["sources_in_graph"] = in_graph[graph]
+    return entry
+
+
 def make_index(run_id, dataset, period, day, sources, rd, graphs, labels, items,
-               tables=(), tables_root="") -> dict:
+               tables=(), tables_root="", in_graph=None) -> dict:
     metadata = sorted({name.split("/", 1)[1] for name, _ in items
                        if name.count("/") == 1 and name.split("/", 1)[0] in graphs
                        and name.endswith(".json")})
@@ -351,8 +379,10 @@ def make_index(run_id, dataset, period, day, sources, rd, graphs, labels, items,
         "source_of_run": rd.name,
         "published": utc_now(),
         "note": "Graph folders are named for the artifact files. notebook_label is the "
-                "notebook's name for the leg that built each one; no artifact records it.",
-        "variants": {g: {"path": f"{g}/", "notebook_label": labels.get(g)} for g in graphs},
+                "notebook's name for the leg that built each one; no artifact records it. "
+                "sources is what the run read; a variant's sources_in_graph is what "
+                "reached that .pt.",
+        "variants": {g: variant_entry(g, labels, in_graph or {}) for g in graphs},
         "run_level": run_level,
         "per_variant_files": metadata + ["hetero_data_<variant>.pt", "node_index/"],
         # Named here, published elsewhere. A consumer holding this index would
@@ -590,7 +620,7 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
     tree = rd / TREE
     build_tree(tree, items, make_index(run_id, dataset, f"{year}-{month}", day, sources,
                                        rd, graphs, notebook_labels(rd), items,
-                                       tables, tables_dst))
+                                       tables, tables_dst, graph_sources(pyg, graphs)))
     log(f"upload tree {tree}:")
     summarize(items, log)
     if already:

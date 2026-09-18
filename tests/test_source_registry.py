@@ -488,6 +488,92 @@ def test_leaving_sec_out_of_a_run_moves_no_namespace_slot():
 
 
 # ======================================================================
+# Which source a term belongs to
+#
+# graph_schema.json asks this of every node type it built, to say which sources
+# are in the .pt rather than which ones the run read (#419).
+# ======================================================================
+
+@pytest.mark.parametrize("source, term, minted", [
+    ("bls", str(CPI.Index), str(BLS_ENRICHMENT.PriceIndex)),
+    ("sec", str(SEC_FILINGS.Form), str(SEC_ENRICHMENT.UnifiedCompany)),
+    ("market", str(MARKET_QUOTES.OptionSnapshot), str(MARKET_ENRICHMENT.Moneyness)),
+    ("noaa", str(WEATHER.WeatherAlert), str(NOAA_ENRICHMENT.EmergencyAlert)),
+])
+def test_a_source_term_and_one_minted_from_it_name_the_same_source(source, term, minted):
+    """A type this pipeline built belongs to the source it was built from.
+
+    Many node types are the pipeline's own -- unified companies, moneyness
+    classes, emergency alerts -- and a graph holding only those still holds that
+    source. A spec's enrichment namespace is one of its own namespaces, so both
+    terms answer with the same name and neither needs a rule of its own.
+    """
+    assert sources.source_of_type_uri(term) == source
+    assert sources.source_of_type_uri(minted) == source
+
+
+@pytest.mark.parametrize("namespace", [ns for ns, _prefix in sources.SHARED_NAMESPACES])
+def test_a_term_from_a_shared_vocabulary_belongs_to_no_source(namespace):
+    """Temporal, unified, GeoSPARQL, OWL and RDFS are nobody's.
+
+    temporal_SourceDay is in every graph whatever was read, so attributing it to
+    a source would report a source that contributed nothing. None is the answer,
+    not a failure to find one.
+    """
+    assert sources.source_of_type_uri(f"{namespace}Thing") is None
+
+
+def test_a_term_under_no_registered_namespace_belongs_to_no_source():
+    """An unregistered vocabulary is not an error here.
+
+    The graph carries whatever the upstream Turtle names, which is not limited
+    to what this registry knows.
+    """
+    assert sources.source_of_type_uri("https://example.org/ontology/toy/Thing") is None
+
+
+@pytest.mark.parametrize("order", ["outer first", "inner first"])
+def test_the_longer_namespace_wins_where_two_sources_nest(order):
+    """Longest prefix, so the answer does not depend on registration order.
+
+    NAMESPACE_PREFIXES matches in list order, which is why a namespace extending
+    another has to be declared before it (tests/test_namespaces.py). This asks
+    the question of a type after the fact, and a term under the inner namespace
+    belongs to the inner source however the two were registered.
+    """
+    outer = _toy("toy")
+    inner = SourceSpec(
+        name="inner",
+        path_fragments=("toy/inner",),
+        namespaces=((f"{ONTOLOGY_BASE}toy/inner/", "toy_inner"),),
+        enrichment_namespace=f"{ONTOLOGY_BASE}toy/inner/",
+    )
+    specs = (outer, inner) if order == "outer first" else (inner, outer)
+
+    assert sources.source_of_type_uri(f"{ONTOLOGY_BASE}toy/inner/Thing", specs) == "inner"
+    assert sources.source_of_type_uri(f"{ONTOLOGY_BASE}toy/Thing", specs) == "toy"
+
+
+def test_a_set_of_terms_names_each_source_once_in_registration_order():
+    """Registration order, not the order the terms arrived in.
+
+    Node types reach this in whatever order the graph holds them, and two runs
+    over the same sources have to report the same list.
+    """
+    assert sources.sources_in_type_uris([
+        str(WEATHER.WeatherAlert),
+        str(MARKET_QUOTES.OptionSnapshot),
+        str(CPI.Index),
+        str(CPI.Category),
+        str(SOURCE_TEMPORAL.SourceDay),
+    ]) == ("bls", "market", "noaa")
+
+
+def test_no_terms_names_no_sources():
+    assert sources.sources_in_type_uris([]) == ()
+
+
+# ======================================================================
 # Modules that run every source through its spec
 # ======================================================================
 

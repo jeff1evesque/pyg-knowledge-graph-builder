@@ -199,6 +199,29 @@ class Run:
         _write(self.enriched / "dataset.json", json.dumps(
             {"dataset": name, "sources": ["a", "b"], "time_period": f"{YEAR}-{MONTH}"}))
 
+    def set_graph_schema(self, graph: str, body) -> None:
+        """Rewrite one variant's graph_schema.json, or remove it when body is None.
+
+        Its checksums.json row is rewritten with it. Every metadata file is
+        hashed before anything is sent, and the list is compared with the files
+        on disk, so a test that edits or removes one is otherwise refused before
+        it reaches what it came to test.
+        """
+        meta = self.pyg / f"hetero_data_{graph}_metadata"
+        schema, checksums = meta / "graph_schema.json", meta / "checksums.json"
+        listed = json.loads(checksums.read_text())
+        key = f"{meta.name}/graph_schema.json"
+        if body is None:
+            schema.unlink()
+            listed["artifacts"].pop(key)
+        else:
+            _write(schema, body if isinstance(body, str) else json.dumps(body))
+            listed["artifacts"][key] = {
+                "bytes": schema.stat().st_size,
+                "sha256": hashlib.sha256(schema.read_bytes()).hexdigest(),
+            }
+        _write(checksums, json.dumps(listed))
+
     def add_source_path(self, path: str) -> None:
         self.source_paths.append(path)
         self._write_manifests()
@@ -276,6 +299,67 @@ def test_index_json_names_the_day_the_dataset_and_the_notebook_labels(run):
     assert index["sources"] == ["a", "b"]
     assert {g: v["notebook_label"] for g, v in index["variants"].items()} == LABELS
     assert "checksums.json" in index["per_variant_files"]
+
+
+# --------------------------------------------------------------------------- #
+# What reached each variant
+#
+# The run-level `sources` is what the job read. A variant can hold fewer, and
+# two variants of the same run can hold different sets, so the answer belongs to
+# the variant. Only its graph_schema.json has it (#419).
+# --------------------------------------------------------------------------- #
+
+def _schema(sources_in_graph=None, version="1.4") -> dict:
+    build = {"sources": ["a", "b"]}
+    if sources_in_graph is not None:
+        build["sources_in_graph"] = sources_in_graph
+    return {"version": version, "build_metadata": build}
+
+
+def test_each_variant_carries_the_sources_that_reached_it(run):
+    run.set_graph_schema("1024d", _schema(["a"]))
+    run.set_graph_schema("no_edge_features", _schema(["a", "b"]))
+
+    assert run.publish("--upload").returncode == 0
+    index = json.loads((run.published / "index.json").read_text())
+    assert index["sources"] == ["a", "b"]
+    assert index["variants"]["1024d"]["sources_in_graph"] == ["a"]
+    assert index["variants"]["no_edge_features"]["sources_in_graph"] == ["a", "b"]
+
+
+def test_a_variant_written_before_the_key_existed_is_left_without_it(run):
+    """Absent, not guessed.
+
+    The only thing to guess from is the exclusion list, and the guess is wrong
+    exactly when it matters -- a source can also leave by arriving empty. The
+    rest of the entry is unchanged, so a reader loses one key, not the variant.
+    """
+    run.set_graph_schema("1024d", _schema(version="1.3"))
+    run.set_graph_schema("no_edge_features", _schema(["a"]))
+
+    assert run.publish("--upload").returncode == 0
+    variants = json.loads((run.published / "index.json").read_text())["variants"]
+    assert "sources_in_graph" not in variants["1024d"]
+    assert variants["1024d"]["path"] == "1024d/"
+    assert variants["no_edge_features"]["sources_in_graph"] == ["a"]
+
+
+@pytest.mark.parametrize("damage", ["unparseable", "missing"])
+def test_a_graph_schema_json_the_index_cannot_read_still_publishes(run, damage):
+    """Building index.json adds no new way for a publish to fail.
+
+    index.json points at the files it lists and they go up either way. A missing
+    schema is normally caught earlier by the checksums check, so this drops it
+    from checksums.json too -- otherwise the run is refused before reaching the
+    line under test.
+    """
+    run.set_graph_schema("1024d", None if damage == "missing" else "{not json")
+
+    r = run.publish("--upload")
+    assert r.returncode == 0, r.stdout + r.stderr
+    variants = json.loads((run.published / "index.json").read_text())["variants"]
+    assert "sources_in_graph" not in variants["1024d"]
+    assert (run.published / "1024d" / "hetero_data_1024d.pt").exists()
 
 
 # --------------------------------------------------------------------------- #

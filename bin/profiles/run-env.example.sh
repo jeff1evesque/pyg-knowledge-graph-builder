@@ -160,4 +160,8 @@ export PYG_TIME_PERIOD=YYYY-MM
 # older run is pruned only once the destination lists it.
 # export PYG_PUBLISH_ROOT=s3://BUCKET/PREFIX
 # export PYG_TABLES_ROOT=s3://BUCKET/PREFIX
+#
+# PYG_PUBLISH_DATASET is read at run time as well: the notebook passes it as
+# --dataset, so the enriched descriptor and every graph_schema.json record the name
+# index.json publishes. Set it before the run, not just before the publish.
 # export PYG_PUBLISH_DATASET=all-sources

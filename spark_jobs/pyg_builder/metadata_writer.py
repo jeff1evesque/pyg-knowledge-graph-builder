@@ -30,6 +30,11 @@ import math
 from datetime import datetime, timezone
 from typing import Dict, Any, Iterable, List, Optional, Tuple
 
+# Imported under another name because `sources` is a constructor argument here,
+# and the two mean different things: the argument is what the run read, the
+# registry answers what a term belongs to.
+from spark_jobs import sources as source_registry
+
 logger = logging.getLogger(__name__)
 
 # Significant digits retained for serialized normalization statistics.
@@ -373,6 +378,24 @@ class MetadataCollector:
     # File builders
     # ================================================================
 
+    def _sources_in_graph(self) -> List[str]:
+        """The sources the built node types come from.
+
+        ``sources`` is what the run read; this is what reached the graph. They
+        differ whenever a node type is filtered out: the daily run of
+        2026-09-18 read NOAA and excluded all four of its node types, so its
+        .pt held no weather at all while ``sources`` still named it.
+
+        Read off the node types rather than off ``exclude_node_types``, because
+        a source also leaves when its day arrives empty and nothing configured
+        says so. Shared vocabularies belong to no source and are left out.
+        """
+        return sorted(
+            source_registry.sources_in_type_uris(
+                list(self._node_type_uris.values())
+            )
+        )
+
     def _build_graph_schema(self) -> Dict[str, Any]:
         """Build graph_schema.json content.
 
@@ -452,6 +475,13 @@ class MetadataCollector:
         edge_types_with_features = len(self._edge_types_with_features)
 
         return {
+            # 1.4: adds `build_metadata.sources_in_graph` and
+            # `build_metadata.excluded_node_types`. Additive only. 1.3 left "is
+            # NOAA in this graph?" answerable only by joining `sources` against
+            # `pipeline_config.exclude_node_types` and knowing how many node
+            # types NOAA has -- and four excluded types out of 155 read as a
+            # trim when they are the whole source.
+            #
             # 1.3: adds `build_metadata.dataset` and `build_metadata.sources`.
             # Additive only; both are empty strings/lists when the enriched
             # output carries no dataset descriptor, which is every graph built
@@ -465,7 +495,7 @@ class MetadataCollector:
             # features". Through 1.0 it was `count > 0` -- the node count --
             # which made it, and summary.node_types_with_literal_features,
             # true/total for every build. See _build_graph_schema's docstring.
-            "version": "1.3",
+            "version": "1.4",
             "build_metadata": {
                 "time_period": self._time_period,
                 # What the graph was built from. Until 1.3 this file recorded the
@@ -480,7 +510,24 @@ class MetadataCollector:
                 # config.source_paths already records in a field readers know to
                 # treat as sensitive.
                 "dataset": self._dataset,
+                # `sources` is the read set; `sources_in_graph` is what the
+                # node types say actually landed. A reader wanting to know
+                # what this .pt holds wants the second.
                 "sources": self._sources,
+                "sources_in_graph": self._sources_in_graph(),
+                # Always present, [] when nothing was excluded. The same list
+                # reaches pipeline_config below, but only when the job was
+                # given one -- and there an absent key means either "nothing
+                # was excluded" or "this build predates the setting". Here it
+                # means one thing. pipeline_config stays an echo of the config
+                # the job was handed; this is the report.
+                #
+                # What was REQUESTED. A named type that matched nothing in the
+                # data is indistinguishable from one that did, which would need
+                # a distinct over the type frame before NodeMapper's filter.
+                "excluded_node_types": sorted(
+                    self._config.get("exclude_node_types") or []
+                ),
                 "build_timestamp": self._build_timestamp,
                 "pipeline_config": _sanitize_config(self._config),
             },

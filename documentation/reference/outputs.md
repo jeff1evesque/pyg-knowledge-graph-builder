@@ -133,7 +133,7 @@ The published layout is the work directory with four changes:
 
 Unlike `--s3_archive_bucket`, which mirrors one build's `.pt`, metadata and manifest from inside the job in the work-directory shape, this copies a whole finished run: every variant, the node index, the enriched Parquet and the manifests.
 
-**`index.json`** is written last, so a run folder without one is a publish that did not finish. It records `run_id`, `dataset`, `time_period`, `data_day` (the day the sources were cut from, which `month=` cannot show), `sources`, `source_of_run` (the run directory's name), `published`, each variant's folder and `notebook_label` (the notebook's name for the leg that built it), and the files each variant folder holds. A [schedule](../operations/running-a-job.md#scheduled-runs) publishes a run a day into the same `month=` folder, so `data_day` is what tells a month's runs apart.
+**`index.json`** is written last, so a run folder without one is a publish that did not finish. It records `run_id`, `dataset`, `time_period`, `data_day` (the day the sources were cut from, which `month=` cannot show), `sources`, `source_of_run` (the run directory's name), `published`, each variant's folder, its `notebook_label` (the notebook's name for the leg that built it) and its `sources_in_graph`, and the files each variant folder holds. The run's `sources` is what it read; a variant's `sources_in_graph` is what reached that `.pt`, copied from its [`graph_schema.json`](#what-the-graph-is-made-of) — two variants of one run can differ, and a variant built before schema 1.4 has no key rather than a guessed one. A [schedule](../operations/running-a-job.md#scheduled-runs) publishes a run a day into the same `month=` folder, so `data_day` is what tells a month's runs apart.
 
 **The query tables go somewhere else.** They are keyed by day rather than by
 run, and they outlive it — see [Query tables](tables.md). `index.json` names
@@ -158,7 +158,16 @@ for name, entry in record["artifacts"].items():
 
 Complete inventory of every node type and edge type in the graph. The entry point for any consumer of the graph.
 
-**Schema version: `1.2`.** 1.2 adds `relation_groups` and the `index` / `relation_group` / `src_type_index` / `dst_type_index` fields — additive, every 1.1 field keeps its name and meaning. Node-type `has_features` changed meaning in 1.1 — see below. Check the `version` field before relying on it.
+**Schema version: `1.4`.** Every step since 1.1 has been additive: each field keeps the name and meaning it had, so the version says what is *there*.
+
+| Version | What it changed |
+|---|---|
+| `1.4` | adds `build_metadata.sources_in_graph` and `build_metadata.excluded_node_types` — what this graph holds, as against what the run read |
+| `1.3` | adds `build_metadata.dataset` and `build_metadata.sources` — what the graph was built from. Below 1.3 the file cannot say, so an empty `sources` there means "this build did not record it", not "no sources" |
+| `1.2` | adds `relation_groups` and the `index` / `relation_group` / `src_type_index` / `dst_type_index` fields |
+| `1.1` | node-type `has_features` changed meaning — see below |
+
+Check the `version` field before relying on any of them. At 1.3 and below the only account of what the graph is made of is `sources`, which is the set the run **read** — see [What the graph is made of](#what-the-graph-is-made-of).
 
 **Contents:**
 - Every node type with its count, source ontology URI, category tag, and `has_features`
@@ -176,11 +185,35 @@ Complete inventory of every node type and edge type in the graph. The entry poin
   - `origin` is the one group field whose edge types can genuinely disagree, since origin reads the endpoints and a group spans endpoint pairs by definition: `jolts:hasIndustry` is `raw` across 21 of its edge types and `enrichment` on the one leaving a pipeline-minted node. Such a group reports **`mixed`**, meaning *ask the edge types* — deliberately not a fourth origin value, so a consumer switching on `origin` cannot read it as a trust level. Naming one member's origin instead is how the field was wrong before: `origin` was keyed by relation name, so all of a relation's edge types collapsed to whichever the builder wrote last, and 3 edge types (90 edges) published `raw` for links the pipeline had inferred.
   - Nothing is lost by tying: each edge type also carries `src_type_index` / `dst_type_index` into the node-type table (whose entries now carry a stable `index`, assigned by sorted name), so a shared relation weight can still condition on endpoint type through a node-type embedding — one table of *N* types rather than *N×M* matrices.
 - Summary statistics: total node types, total edge types, total relation groups, total nodes, total edges, edge types with features
-- Build metadata: time period, build timestamp, pipeline config
+- Build metadata: time period, build timestamp, dataset name, pipeline config, and three fields saying [what the graph is made of](#what-the-graph-is-made-of)
 
 **Generated by:** `constructor.py` after HeteroData assembly, from `node_mapper.node_counts`, `node_mapper.get_type_uri_mapping()`, `edge_mapper.build_edge_indices()`, and `edge_feature_extractor.get_edge_classification()`. The per-type `has_features` flag is read off the assembled feature tensors themselves (`MetadataCollector.register_node_literal_features`), so it cannot drift from the `.pt` it describes.
 
 **Changes between builds:** Yes — counts change every time period; new types may appear when new data sources are added.
+
+#### What the graph is made of
+
+Three `build_metadata` fields answer three different questions, and a consumer asking "what is in this `.pt`" wants the second:
+
+- **`sources`** (1.3) — the sources the run **read**, carried over from the enriched output's `dataset.json`. A `pyg_only` leg reads it back to learn what the Parquet it is assembling was built from, so it stays the read set and is never narrowed.
+- **`sources_in_graph`** (1.4) — the sources that **reached this `.pt`**. Derived from the node types actually built: each type's `source_type_uri` is matched against the registered vocabularies, longest prefix first.
+- **`excluded_node_types`** (1.4) — the node types the run was **told to leave out**. Always present, `[]` when there were none. `pipeline_config.exclude_node_types` is the same list echoed from the job's config, but only when the job was given one, so an absent key there means either "nothing was excluded" or "this build predates the setting".
+
+The shared vocabularies — `temporal`, `unified`, GeoSPARQL, OWL, RDFS — belong to no source, so the four `temporal_Source*` types name none. A graph holding nothing else reports `[]` rather than crediting whichever source was read.
+
+**The case they exist for.** The daily run reads NOAA and excludes every node type NOAA has, so a 1.4 build of it records two fields that disagree by a whole source:
+
+```json
+"sources": ["bls", "market", "noaa", "sec"],
+"sources_in_graph": ["bls", "market", "sec"],
+"excluded_node_types": ["cap_Area", "cap_Geocode", "cap_Info", "weather_WeatherAlert"]
+```
+
+The run published on 2026-09-18 is that graph: 149 node types and 822 edge types, and not one of them is NOAA's. Before 1.4 a reader had `sources` and the exclusion list and had to combine them, which takes knowing that NOAA has exactly four node types — against the 155 the last unfiltered build held, four excluded types read as a trim rather than as the whole source.
+
+`sources_in_graph` is read off the node types that were built rather than off the exclusion list, so it is still right when a source leaves for a reason nobody configured. A source whose data never arrived upstream, or one filtered out some other way, contributes no node types and no exclusion entry: the exclusion list says nothing, and this field says it is gone.
+
+**Why weather is excluded.** A `.pt` covers one day and alerts share no nodes between days, so in a one-day graph every alert is an island. On 2026-09-09, the last build that kept them, NOAA's four types were 4,711 nodes of 9,447,814 (0.05%) across 9 edge types, only two of which leave NOAA: 454 `affectsRegion` edges into BLS regions and 1,596 `observedInPeriod` edges into the day. What an alert is actually about is free text, and the `.pt` carries none. The [query tables](tables.md) keep all of it and [Questions](questions.md#weather-against-regional-economics) answers the weather questions from there. **This depends on the one-day window**: a graph accumulating days would give alerts recurrence through region and event type, and the decision would be worth measuring again. Which types a run drops is set per run — see [`PYG_EXCLUDE_NODE_TYPES`](../operations/running-a-job.md#node-types-kept-out-of-the-pt).
 
 ---
 

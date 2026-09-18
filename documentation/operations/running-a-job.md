@@ -32,6 +32,7 @@ The PyG builder accepts an optional configuration dict:
 |-----------|---------|-------------|
 | `node_types` | All rdf:type classes | Whitelist of PyG node type names to include |
 | `edge_types` | All entity-to-entity predicates | Whitelist of relation names to include |
+| `exclude_node_types` | `[]` | PyG node type names to leave out of the graph, with every edge that touches them. The query tables are written before this applies and are unaffected — see [Node types kept out of the `.pt`](#node-types-kept-out-of-the-pt) |
 | `feature_config.normalize` | `true` | Z-score normalize numeric features (single-pass per-predicate) |
 | `feature_config.vector_dim` | `1024` | Node feature vector dimension — all segments scale proportionally. Minimum 32. |
 | `feature_config.chunk_node_threshold` | `500000` | Node count above which chunked collection is used |
@@ -64,6 +65,7 @@ When config is empty, sensible defaults are inferred from the data.
 | `--enable_query_tables` | No | `true` | Write the day-partitioned [query tables](../reference/tables.md) beside the enriched triples. `false` skips every table write and leaves the existing artifact set untouched. Applies to modes `full` and `enrichment_only`; `pyg_only` never reaches the phase that writes them |
 | `--source_data_day` | No | *(from the paths)* | `YYYY-MM-DD` the run's data describes: which constituents CSV it reads, and the day partition its query tables are written under. Defaults to the day `--source_paths` are partitioned under; state it when they name none, or name more than one |
 | `--time_period` | No | Current `YYYY-MM` | Time period label for output paths |
+| `--dataset` | No | `""` | Names the combination of sources this run is built from, e.g. `all-sources`. Recorded in the enriched output's `dataset.json`, and from there in every `graph_schema.json`; it is also the folder a published run lands in — see [Naming the dataset](#naming-the-dataset) |
 | `--pyg_config` | No | `{}` | JSON string with PyG construction config |
 | `--parquet_partitions` | No | `200` | Number of Parquet output partitions |
 | `--source_format` | No | `ntriples` | Source RDF format: `ntriples` (one triple per line in `.nt` files) or `turtle_parquet` (self-contained Turtle blobs in a Parquet column). Applies to modes `full` and `enrichment_only` only — `pyg_only` always reads enriched Parquet written by this pipeline. A source whose spec sets its own `source_format` is read in that format instead, so a source that only arrives as N-Triples can share a run with Turtle-in-Parquet sources. The four registered sources set none |
@@ -232,6 +234,55 @@ SPARK_MASTER_URL=spark://<host>:7077 \
     --parquet_partitions 200 \
     --pyg_config '{"feature_config": {"normalize": true, "vector_dim": 1024}}'
 ```
+
+### Node types kept out of the `.pt`
+
+`exclude_node_types` names node types to leave out of the graph. Every node of a
+named type is dropped before the graph is built, and so is every edge that
+touches one. `notebook/multi_experiment.ipynb` reads the list from the run's
+`env.sh`, comma-separated, and puts it on every assembly leg:
+
+```bash
+export PYG_EXCLUDE_NODE_TYPES=cap_Area,cap_Geocode,cap_Info,weather_WeatherAlert
+```
+
+It narrows the `.pt` and nothing else. The
+[query tables](../reference/tables.md) are written by the seed leg, before any of
+this applies, so they cover every source the run read whatever the setting says.
+Naming the types to *drop*, rather than the ones to keep with `node_types`, is
+what lets a type first seen today still reach the graph; an allowlist would
+freeze the set and drop it without a word.
+
+A build records what it was asked to drop as
+`build_metadata.excluded_node_types`, and which sources actually landed as
+[`build_metadata.sources_in_graph`](../reference/outputs.md#what-the-graph-is-made-of).
+A named type that matched nothing in the data looks the same as one that matched.
+
+**The daily run excludes NOAA's four node types** — every node type NOAA has — so
+the published `.pt` holds no weather while `sources` still names it. The reason
+is the one-day window: a `.pt` covers one day, alerts share no nodes between
+days, and on 2026-09-09 those four types were 4,711 nodes (0.05% of the graph)
+across 9 edge types, only two of which leave NOAA. What an alert is about is free
+text, which the `.pt` does not carry; the query tables keep all of it and answer
+the [weather questions](../reference/questions.md#weather-against-regional-economics)
+there. A graph accumulating days would give alerts recurrence through region and
+event type, so the decision is worth measuring again if that window changes.
+
+### Naming the dataset
+
+`--dataset` names the combination of sources a run is built from. The notebook
+passes it on every leg from the run's `env.sh`:
+
+```bash
+export PYG_PUBLISH_DATASET=all-sources
+```
+
+[`bin/publish_run.py`](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/blob/master/bin/publish_run.py)
+reads the same variable at publish time and refuses a run whose recorded dataset
+disagrees with it, so one name set once serves both. Set before the run, the job
+records it and the publish agrees. Set only before the publish, `index.json`
+names the dataset while every `graph_schema.json` beside it records `""`, and two
+files from one run disagree about what the run is.
 
 ## Reading sources from local disk
 
