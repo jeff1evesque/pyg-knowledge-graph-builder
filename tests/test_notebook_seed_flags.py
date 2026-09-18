@@ -1,4 +1,5 @@
-"""Pin the two seed flags in notebook/multi_experiment.ipynb.
+"""Pin the two seed flags in notebook/multi_experiment.ipynb, and the name it
+puts on every leg.
 
 `PYG_SEED_ONLY` stops after the seed; `PYG_SKIP_SEED` starts after it. They decide
 which half of a multi-hour run happens, and a notebook is not covered by anything
@@ -175,3 +176,57 @@ def test_seed_only_reads_through_the_shared_helper():
     src = _cell("cell-10")
     assert 'flag_set("PYG_SEED_ONLY")' in src
     assert "os.environ.get(\"PYG_SEED_ONLY\"" not in src
+
+
+# --------------------------------------------------------------------------- #
+# The dataset name (#419)
+#
+# submit() is where a leg's command line is decided, and with dry_run it hands
+# the command back without starting anything.
+# --------------------------------------------------------------------------- #
+
+def _submit(**overrides):
+    """The notebook's submit(), lifted out of the function cell with stubs."""
+    src = _cell("cell-06")
+    start, end = src.index("def submit("), src.index("def flag_set(")
+    ns = {
+        "json": json,
+        "Path": Path,
+        "show": lambda *a, **k: None,
+        "profile_env": lambda profile: {},
+        "EXPERIMENT_TIMEOUT_S": 1,          # a default argument, read at def time
+        "LAUNCHER": "bin/submit_spark_job.sh",
+        "LOCAL_WORK_DIR": "/work",
+        "TIME_PERIOD": "2026-09",
+        "SOURCE_PATHS": "s3a://bucket/raw/source=bls/",
+        "SOURCE_FORMAT": "ntriples",
+        "PARQUET_PARTITIONS": 200,
+        "TURTLE_COLUMN": "",
+        "SECTOR_DEFINITIONS_BUCKET": "",
+        "SECTOR_DEFINITIONS_KEY": "",
+        "S3_ARCHIVE_BUCKET": "",
+        "DATASET": "",
+    }
+    ns.update(overrides)
+    exec(src[start:end], ns)
+    return ns["submit"]
+
+
+@pytest.mark.parametrize("mode", ["full", "enrichment_only", "pyg_only"])
+def test_every_leg_carries_the_dataset_name(mode):
+    """The seed alone is not enough.
+
+    The seed writes the name into the dataset descriptor, but an assembly leg
+    reading a descriptor written before that existed has nothing else to name
+    its graph by, and its graph_schema.json records "" while the published
+    index.json names the dataset anyway -- two files from one run disagreeing
+    about what the run is.
+    """
+    cmd = _submit(DATASET="all-sources")(mode=mode, dry_run=True)["cmd"]
+    assert cmd[cmd.index("--dataset") + 1] == "all-sources"
+
+
+def test_an_unnamed_dataset_passes_no_flag():
+    """Unset, the run behaves as it did: the job records "" rather than a
+    flag with an empty value."""
+    assert "--dataset" not in _submit()(mode="pyg_only", dry_run=True)["cmd"]
