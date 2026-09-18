@@ -2163,6 +2163,150 @@ def _assert_cross_source_temporal_bridge(data):
     )
 
 
+# The distance between each pair of source families, as
+# documentation/design/enrichment.md reports it: (ignoring direction, a -> b
+# along stored direction, b -> a along stored direction), where None means no
+# path at any depth.
+#
+# The hubs this pipeline mints count as hops, which is how the page counts
+# them. Exact numbers rather than bounds, deliberately: the page states them,
+# and a number nothing checks is how the previous one -- "every pair at
+# distance 4" -- stayed on the page after the period ladder grew a day rung.
+# A change here is a change to that page.
+#
+# Along stored direction almost everything is unreachable, and that is the
+# shape rather than a defect: hub-and-spoke points both spokes INTO the hub, so
+# filings_Issuer -> UnifiedCompany <- market_quotes_EquitySnapshot carries no
+# message from SEC to market at any depth. noaa -> bls is the one ordered pair
+# that works, because affectsRegion and withinCensusRegion happen to chain the
+# same way.
+SOURCE_DISTANCES = {
+    ("bls", "sec"): (3, None, None),
+    ("bls", "market"): (3, None, None),
+    ("bls", "noaa"): (3, None, 3),
+    ("sec", "market"): (2, None, None),
+    ("sec", "noaa"): (6, None, None),
+    ("market", "noaa"): (8, None, None),
+}
+
+# What a production run leaves out of its .pt, through PYG_EXCLUDE_NODE_TYPES
+# in the run's own env.sh. Neither that variable nor these types are in any
+# tracked file yet; recording them is its own issue. Named here only to check
+# that leaving them out does not reroute the pairs that remain.
+WEATHER_NODE_TYPES = (
+    "cap_Area", "cap_Geocode", "cap_Info", "weather_WeatherAlert",
+)
+
+
+def _neighbours(data, excluded=()):
+    """(node_type, id) -> [(neighbour, forward?)], both ways along every edge.
+
+    ``forward`` says whether the edge is stored pointing at the neighbour, so
+    one adjacency serves both the directed and the undirected walk.
+    """
+    excluded = set(excluded)
+    out = {}
+    for edge_type in data.edge_types:
+        src_type, _relation, dst_type = (str(x) for x in edge_type)
+        if src_type in excluded or dst_type in excluded:
+            continue
+        edge_index = data[edge_type].edge_index
+        for src, dst in zip(edge_index[0].tolist(), edge_index[1].tolist()):
+            out.setdefault((src_type, src), []).append(((dst_type, dst), True))
+            out.setdefault((dst_type, dst), []).append(((src_type, src), False))
+    return out
+
+
+def _family_nodes(data, family, by_prefix, excluded=()):
+    excluded = set(excluded)
+    return {
+        (str(node_type), i)
+        for node_type in data.node_types
+        if str(node_type) not in excluded
+        and _family_of(node_type, by_prefix) == family
+        for i in range(data[node_type].num_nodes)
+    }
+
+
+def _distance(neighbours, starts, targets, directed):
+    """Hops from the nearest node of one family to the nearest of another.
+
+    Breadth-first from every start at once, which is what makes this the
+    distance between the two FAMILIES rather than between two chosen nodes.
+    None when no path exists at any depth.
+    """
+    if starts & targets:
+        return 0
+    seen = set(starts)
+    frontier = collections.deque((node, 0) for node in starts)
+    while frontier:
+        node, depth = frontier.popleft()
+        for neighbour, forward in neighbours.get(node, ()):
+            if (directed and not forward) or neighbour in seen:
+                continue
+            if neighbour in targets:
+                return depth + 1
+            seen.add(neighbour)
+            frontier.append((neighbour, depth + 1))
+    return None
+
+
+def test_the_distance_between_sources_is_what_the_design_says(twin_runs):
+    """Each pair of sources is exactly as far apart as the design page says.
+
+    The page this guards used to report every pair at distance 4, drawn from
+    the temporal spine, and three things were wrong with that at once: the
+    spine is the LONGEST route rather than the shortest, it grew to five edges
+    when a dated entity started attaching to its day rather than its month, and
+    the number said nothing about direction -- which is the part that decides
+    whether a message can cross at all.
+    """
+    _assert_source_distances(twin_runs.d1)
+
+
+def _assert_source_distances(data):
+    by_prefix, _hubs = _source_families()
+    neighbours = _neighbours(data)
+    nodes = {
+        family: _family_nodes(data, family, by_prefix)
+        for family in ("bls", "sec", "market", "noaa")
+    }
+    for family, found in nodes.items():
+        assert found, f"{family} contributed no node to the graph"
+
+    measured = {}
+    for (a, b), expected in SOURCE_DISTANCES.items():
+        measured[(a, b)] = (
+            _distance(neighbours, nodes[a], nodes[b], directed=False),
+            _distance(neighbours, nodes[a], nodes[b], directed=True),
+            _distance(neighbours, nodes[b], nodes[a], directed=True),
+        )
+        assert measured[(a, b)] == expected, (
+            f"{a} <-> {b} is at {measured[(a, b)]} "
+            f"(ignoring direction, {a}->{b}, {b}->{a}), and "
+            f"documentation/design/enrichment.md says {expected}. Update the "
+            "page's table and this constant together, or the page is wrong "
+            "again."
+        )
+
+    # And the three pairs a production .pt holds are unchanged by the weather
+    # exclusion -- no route between them runs through a weather node.
+    excluded = [
+        node_type for node_type in map(str, data.node_types)
+        if node_type in WEATHER_NODE_TYPES
+    ]
+    without_weather = _neighbours(data, excluded)
+    for a, b in (("bls", "sec"), ("bls", "market"), ("sec", "market")):
+        starts = _family_nodes(data, a, by_prefix, excluded)
+        targets = _family_nodes(data, b, by_prefix, excluded)
+        assert _distance(without_weather, starts, targets, False) == (
+            SOURCE_DISTANCES[(a, b)][0]
+        ), (
+            f"leaving weather out moves {a} <-> {b}, so a production .pt is "
+            "not at the distance the page reports for it"
+        )
+
+
 def _assert_sameas_links_only_unified_vocabularies(config):
     """Every owl:sameAs must point at a PERIOD or a REGION, never a measurement.
 
