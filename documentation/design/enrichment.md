@@ -229,7 +229,9 @@ cpi:November a temporal:SourceMonth ; rdfs:label "November" .
 > `filings_Issuer → UnifiedCompany ← market_quotes_EquitySnapshot`. A model that
 > adds reverse edge types (PyG's `ToUndirected`, say) gets the middle column; one
 > that does not gets the right-hand one, and no depth rescues it. Which of those
-> a training run does is a modelling choice this repository does not make.
+> a training run does is a modelling choice this repository does not make —
+> [Reverse edges belong to training](edge-features.md#reverse-edges-belong-to-training-not-to-the-pt)
+> covers how to add them and what it does to the edge features.
 >
 > **The period ladder is the longest route, not the shortest.** It is also five
 > edges rather than four, since a dated entity attaches to its day rather than
