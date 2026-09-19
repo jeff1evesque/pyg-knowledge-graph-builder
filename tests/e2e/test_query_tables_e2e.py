@@ -162,14 +162,20 @@ def test_edge_types_describes_every_edge_type_the_schema_names(spark, run):
         assert published[key]["predicate_uri"] == entry["predicate_uri"], key
 
 
-def test_the_store_holds_no_market_data(spark, run):
-    """No market NODE, which is what "market never enters the store" means.
+def test_the_store_holds_no_snapshot(spark, run):
+    """No market SNAPSHOT, which is what "market never enters the store" means.
 
     Market terms do appear, and that is not the same thing: the vocabulary
     statements -- the derived subClassOf hierarchy, the observed domains and
     ranges, the provenance markers -- have predicate and class URIs as their
     subjects rather than entities, so they are in no node table and belong to
     no source's data. They are the store's schema, and they stay.
+
+    Market's hub NODES appear too, and that is deliberate as well. The sector
+    and moneyness nodes are a handful of hubs linking market to the rest of the
+    graph -- 14 of them against 10.2M quotes on 2026-09-17 -- and a route
+    through a hub is the kind of question the store exists to answer. Only the
+    quotes are excluded, on their volume and their shape.
     """
     import pyoxigraph
 
@@ -184,13 +190,23 @@ def test_the_store_holds_no_market_data(spark, run):
     }
     assert subjects, "the store is empty"
 
-    market_nodes = {
-        row["uri"]
-        for row in _rows(spark, config, "nodes")
-        if row["node_type"].startswith("market_")
+    nodes = _rows(spark, config, "nodes")
+    snapshots = {
+        row["uri"] for row in nodes
+        if row["node_type"].startswith("market_quotes_")
     }
-    assert market_nodes, "the fixtures carry no market nodes to exclude"
-    assert market_nodes.isdisjoint(subjects)
+    assert snapshots, "the fixtures carry no snapshot to exclude"
+    assert snapshots.isdisjoint(subjects)
+
+    hubs = {
+        row["uri"] for row in nodes
+        if row["node_type"].startswith("market_enrichment_")
+    }
+    assert hubs, "the fixtures carry no market hub node to keep"
+    assert hubs & subjects, (
+        "every market hub node was excluded from the store -- the filter is "
+        "reading 'market' again rather than 'snapshot'"
+    )
 
 
 def test_the_flag_off_leaves_the_existing_artifact_set_unchanged(

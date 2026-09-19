@@ -18,11 +18,11 @@ on by default, and switched off with `--enable_query_tables false`.
 
 | Artifact | Shape | Measured size/day |
 |---|---|---|
-| `snapshots/` | market, pivoted wide — one row per snapshot | 1.31 GB |
+| `snapshots/` | market quotes, pivoted wide — one row per snapshot | 1.31 GB |
 | `edges/` | `(src_type, src_id, relation, dst_type, dst_id)` | 0.67 GB |
-| `graph/` | the non-market subgraph as a triple store | 0.19 GB |
+| `graph/` | the non-snapshot subgraph as a triple store | 0.19 GB |
 | `nodes/` | `(node_type, node_id, uri)` | 0.13 GB |
-| `facts/` | every non-market literal, long format | 0.04 GB |
+| `facts/` | every literal a snapshot does not carry, long format | 0.04 GB |
 | `entities/` | one row per text-bearing node | ~0.01 GB |
 | `edge_types/` | one row per edge type | <0.01 GB |
 
@@ -176,10 +176,10 @@ minted. Its three values are `raw`, `enrichment` and `unification`.
 ### `facts/`
 
 `(node_type, uri, predicate, predicate_name, value, is_numeric)` — every literal
-a non-market node carries, one row per value.
+a node other than a market snapshot carries, one row per value.
 
-Long, not wide, because wide would mean about 150 tables: the median non-market
-type holds two literal predicates, the widest (`filings_SECFiling`) holds 21,
+Long, not wide, because wide would mean about 150 tables: the median type here
+holds two literal predicates, the widest (`filings_SECFiling`) holds 21,
 and 119 of 155 types hold under a thousand nodes. A new source appears in this
 table with no code change.
 
@@ -202,14 +202,23 @@ embedding it.
 
 ### `snapshots/`
 
-Market, pivoted wide: `(node_type, uri, <one column per property>)`, sorted by
-the underlying ticker.
+Market quotes, pivoted wide: `(node_type, uri, <one column per property>)`,
+sorted by the underlying ticker.
 
-Wide earns its keep here and nowhere else — one type, 9.3M rows a day, 56 stable
-columns, 77.7% populated. Numeric properties are `double` columns and the rest
-are strings, decided per property: a property is numeric when more than half of
-its values parse as numbers. A snapshot missing a property gets a null, not a
-dropped row.
+Wide earns its keep here and nowhere else — two node types, 10.2M rows a day, 45
+stable columns, 77.8% populated (measured 2026-09-17). Numeric properties are
+`double` columns and the rest are strings, decided per property: a property is
+numeric when more than half of its values parse as numbers. A snapshot missing a
+property gets a null, not a dropped row.
+
+**Quotes only, not everything in a market namespace.** Market enrichment mints
+a handful of hub nodes — the GICS sector nodes, which carry a
+`relationConfidence`, and the moneyness classes. They are neither big nor a
+time series: eight sector nodes against 10,174,755 quotes on 2026-09-17. They
+go where every other node goes, so their values are in `facts/` and their
+triples in `graph/`. Pivoting them in here put a
+`market_enrichment_relationConfidence` column on the table that was null on
+every quote row.
 
 The sort is what makes a ticker query cheap. There are 525 underlying tickers
 and 19 snapshots a day, a median 13,224 rows per ticker, so a single-ticker
@@ -219,7 +228,7 @@ appears in every row group and the same query reads all 39 GB.
 
 ### `graph/`
 
-The non-market subgraph as a [pyoxigraph](https://pyoxigraph.readthedocs.io/)
+The non-snapshot subgraph as a [pyoxigraph](https://pyoxigraph.readthedocs.io/)
 store, one per day — a directory, not a Parquet file.
 
 `edges/` and `nodes/` answer a one-hop question well and a longer one
@@ -252,12 +261,17 @@ about 185 MB, so 30 days of stores would be about 5.6 GB and a year about
 open one day's store for a multi-hop question about that day, and read `edges/`
 and `nodes/` for anything spanning more.
 
-**No market data enters it.** At the store's rate, about 131 bytes a triple,
-market's ~415M triples a day would be about 54 GB, and it is a time series of
+**No snapshot enters it.** At the store's rate, about 131 bytes a triple, the
+quotes' ~415M triples a day would be about 54 GB, and they are a time series of
 numbers carrying one edge per snapshot — not a shape a triple store earns
 anything on.
 
-Market *terms* do appear, which is not the same thing. The statements about the
+Market's *hub* nodes do, and that is the point of them: `EquitySector`
+`relatedToEconomicSector` `EconomicSector` is how market reaches the economic
+sectors, and a multi-hop question about that route is the kind of question the
+store exists for. A handful of hubs costs the store nothing.
+
+Market *terms* appear as well, which is different again. The statements about the
 vocabulary — the derived `rdfs:subClassOf` hierarchy, the observed domains and
 ranges, the provenance markers — have predicate and class URIs as their subjects
 rather than entities, so they describe no source's data and belong to none of
@@ -298,8 +312,9 @@ is here, so the sections above describe the tables alone.
 
 ## What is deliberately not here
 
-- **Market literals in `facts/`, and market subjects in `graph/`.** They are in
-  `snapshots/` and in `edges/`.
+- **A snapshot's literals in `facts/`, and snapshot subjects in `graph/`.**
+  They are in `snapshots/` and in `edges/`. Market's sector and moneyness hub
+  nodes are not snapshots and are in `facts/` and `graph/` like anything else.
 - **A triple whose object is a URI nothing typed.** It is no edge, and putting a
   dangling pointer in a `value` column would have consumers reading it as a name.
 - **Anything that answers a question the data cannot.** See

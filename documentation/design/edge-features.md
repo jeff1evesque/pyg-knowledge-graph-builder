@@ -321,3 +321,168 @@ All `dim` and `offset` values are read from `EdgeVectorLayout` at runtime — th
     | `belongsToSector` | none, by design | structural edges use simpler message-passing layers |
     | `owl:sameAs` | none, by design | |
 
+
+## Reverse Edges Belong to Training, Not to the `.pt`
+
+The graph is stored **directed**: an edge appears once, pointing the way the
+triple stated it, and PyG passes messages along `edge_index` from source to
+target. Nothing in this repository adds the reverse.
+
+That matters more than it sounds. Every route between two sources goes through
+a hub, and **both spokes point into the hub**:
+
+```
+filings_Issuer  ───►  sec_enrichment_UnifiedCompany  ◄───  market_quotes_EquitySnapshot
+```
+
+Measured on a production day, **11 of the 12 ordered source pairs cannot be
+reached at any depth** — not "far apart", unreachable. Only `noaa → bls` works,
+because `affectsRegion` and `withinCensusRegion` happen to chain the same way.
+See [Enrichment](enrichment.md) for the full table of distances, measured both
+ignoring direction and along it.
+
+So a model trained on the stored graph, however deep, learns within-source
+structure only. **Adding the reverse edges is a training step:**
+
+```python
+import torch
+import torch_geometric.transforms as T
+
+# weights_only=False: a HeteroData is a pickled object graph, which
+# torch>=2.6 refuses to load under the default.
+data = torch.load("hetero_data_1024d.pt", weights_only=False)
+
+# merge=False, deliberately -- see the warning below.
+data = T.ToUndirected(merge=False)(data)
+```
+
+!!! warning "Pass `merge=False`. The default is wrong for this graph."
+
+    `ToUndirected()` only creates a `rev_<relation>` type when an edge type is
+    *bipartite* — when its source and destination node types differ. When they
+    are the same it **merges the reversed edges into the forward type instead**,
+    and creates no `rev_` type at all.
+
+    Almost every featured edge type here is same-node-type: on a production day
+    **56 of the 60**, because the relations that earn features are things like
+    `precedes` between two `PriceIndex` nodes. Under the default, each of those
+    doubles in place — `market_quotes_OptionSnapshot -precedes->
+    market_quotes_OptionSnapshot` goes from 9,630,252 edges to 19,260,504 — and
+    the reversed half is then indistinguishable from the forward half: same
+    type, same weights, carrying `direction` and `difference` values that
+    describe the *forward* orientation. The feature contradicts itself within a
+    single edge type.
+
+    The default also coalesces with `reduce="add"`, so where a reciprocal pair
+    already exists its two feature vectors are **summed**.
+
+    With `merge=False` every relation gets its own `rev_` type, the forward
+    types are untouched, and the orientation problem stays separable — which is
+    what makes the two fixes below possible.
+
+### Why not build them into the `.pt`
+
+| | stored directed | reverse edges baked in |
+|---|---|---|
+| edge types | 822 | **1,644** — every one its own tensor and its own `HeteroConv` branch |
+| `graph_schema.json`, the encoding contract, the reproducibility assertions | unchanged | all move |
+| `relation_identity` sub-segment | 822 relations hashed into it | 1,644, so more collisions |
+| consumer choice | keeps it | gone |
+
+Size is the *smallest* of these: reverse edges would add roughly 3 GB to a
+42.7 GB file, because node features dominate. The reason to leave it to the
+consumer is that it doubles the edge-type count of every artifact describing
+the graph, and a consumer may want something else entirely — inverses on only
+some relations, self-loops, a symmetric normalization.
+
+### What `ToUndirected()` does to `edge_attr`
+
+With `merge=False` it creates `(dst, "rev_<relation>", src)`, flips
+`edge_index`, and **assigns every other key onto the reverse store — including
+`edge_attr`, as the same tensor object**.
+
+!!! warning "The reverse type shares its `edge_attr` tensor with the forward type"
+
+    It is not a copy — `data[rev_type].edge_attr.data_ptr()` equals the
+    forward type's. Mutating it in place also changes the forward edge's
+    features. Always `.clone()` before modifying.
+
+Only **60 of the 822 edge types carry features at all**, so for 762 of them
+there is nothing to copy and nothing to get wrong. For the 60 that do, part of
+the vector is computed *from* the edge's direction and is therefore wrong once
+the edge is reversed:
+
+| dims (at `edge_vector_dim=32`) | sub-segment | under reversal |
+|---|---|---|
+| 0–4 | `time_delta` — a signed slot and an absolute slot | the signed slot is **negated** |
+| 5–8 | `period_flags` — same month, quarter, year | correct, symmetric |
+| 9–11 | `direction` — `+1` dst later, `−1` earlier | **sign inverted** |
+| 12–16 | `difference` — `dst_val − src_val` | **sign inverted** |
+| 17–20 | `ratio` — `dst_val / src_val`, clamped to `[-10, 10]` | should be the **reciprocal** |
+| 21–23 | `magnitude` — `(|src_val| + |dst_val|) / 2` | correct, symmetric |
+| 24–31 | namespace, label similarity, relation identity | correct, symmetric |
+
+Boundaries come from `EdgeVectorLayout` and scale with `edge_vector_dim`; read
+them from the layout rather than hard-coding the numbers above.
+
+This is a consistent mislabelling rather than noise. `rev_precedes` is a
+separate edge type with its own weights, so within it `direction = +1`
+reliably means "my source is the later one" and a model can learn that
+convention. What is lost is comparability between a relation and its inverse,
+and the capacity spent learning the flip.
+
+### Two ways to handle it
+
+**Drop the features on the reverse types.** The reverse edge then carries
+structure and makes no claims. Simplest, and the right default:
+
+```python
+for edge_type in list(data.edge_types):
+    if edge_type[1].startswith("rev_") and "edge_attr" in data[edge_type]:
+        del data[edge_type].edge_attr
+```
+
+**Or reorient them**, if edge features prove to matter for the reverse
+direction:
+
+```python
+from spark_jobs.pyg_builder.edge_vector_layout import EdgeVectorLayout
+
+for edge_type in list(data.edge_types):
+    if not edge_type[1].startswith("rev_"):
+        continue
+    store = data[edge_type]
+    if "edge_attr" not in store:
+        continue
+
+    layout = EdgeVectorLayout(store.edge_attr.size(1))
+    # clone: the tensor is shared with the forward edge type
+    attr = store.edge_attr.clone()
+
+    for start, dim in (
+        (layout.seg1_direction_start, layout.seg1_direction_dim),
+        (layout.seg2_difference_start, layout.seg2_difference_dim),
+    ):
+        attr[:, start:start + dim] *= -1
+
+    ratio = attr[:, layout.seg2_ratio_start:
+                 layout.seg2_ratio_start + layout.seg2_ratio_dim]
+    defined = ratio.abs() > 1e-8          # 0.0 means "undefined", leave it
+    ratio[defined] = 1.0 / ratio[defined]
+
+    store.edge_attr = attr
+```
+
+Two things that cannot be repaired from outside the pipeline, and are the
+reason to prefer dropping:
+
+- **The ratio was clamped to `[-10, 10]` before it was stored**, so the
+  reciprocal of a clamped value is not the true inverse.
+- **The signed `time_delta` slot sits at a hashed offset** inside dims 0–4
+  (`F.hash("time_delta", 7) % dim`), alongside the absolute slot. Negating the
+  whole sub-segment would wrongly negate the absolute one, and locating the
+  signed slot means reproducing Spark's murmur3 hash.
+
+If the reverse direction's features turn out to matter, the honest fix is to
+emit inverse edges in the pipeline, where the encoder has both endpoints and
+computes each direction correctly — not to patch the vector afterwards.

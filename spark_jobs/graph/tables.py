@@ -11,10 +11,10 @@ Six tables and a triple store:
     nodes/        (node_type, node_id, uri)
     edges/        (src_type, src_id, relation, dst_type, dst_id)
     edge_types/   one row per edge type: origin, predicate_uri, count
-    facts/        every non-market literal, long format
+    facts/        every literal a snapshot does not carry, long format
     entities/     the text each node carries, assembled
-    snapshots/    market, pivoted wide -- one row per snapshot
-    graph/        the non-market subgraph as a triple store (graph_store.py)
+    snapshots/    market quotes, pivoted wide -- one row per snapshot
+    graph/        the non-snapshot subgraph as a triple store (graph_store.py)
 
 Three things about them are deliberate and easy to get wrong:
 
@@ -34,13 +34,24 @@ order puts ``node_type`` beside its id to make the pairing visible.
 **Every table is written every day, and deduplicated on read.** Measured churn
 between two days: BLS repeats 99.9% of its nodes, NOAA repeats none. No
 stable-versus-daily split is right for both, so there is no split -- a consumer
-takes the newest row per URI with
-``ROW_NUMBER() OVER (PARTITION BY uri ORDER BY day DESC)``.
+takes each URI's rows from the newest day that has it, with
+``RANK() OVER (PARTITION BY uri ORDER BY day DESC)``.
 
-Market is in ``edges/`` and in ``snapshots/`` and nowhere else. It is 99.5% of
-the graph, a time series of numbers carrying one edge per snapshot -- not a
-shape a long table or a triple store serves well, and the links it has to
+``RANK``, not ``ROW_NUMBER``: a node has a row per value in ``facts/``, and
+``ROW_NUMBER`` keeps one of them and drops the rest.
+
+A market SNAPSHOT is in ``edges/`` and in ``snapshots/`` and nowhere else. It is
+99.5% of the graph, a time series of numbers carrying one edge per snapshot --
+not a shape a long table or a triple store serves well, and the links it has to
 everything else are the part that matters.
+
+The line is drawn at snapshots rather than at market, because the two are not
+the same set. Market enrichment mints a handful of hub nodes -- the GICS sector
+nodes and the moneyness classes -- and they are neither big nor a time series:
+fourteen of them against 10.2 million quotes on 2026-09-17, eight carrying a
+value. They go where every other node goes, so a sector's
+``relationConfidence`` is a fact and its route to the economic sectors is in
+the store.
 """
 import logging
 from typing import Dict, List
@@ -62,8 +73,8 @@ from spark_jobs.pyg_builder.naming import (
 )
 from spark_jobs.pyg_builder.node_mapper import NodeMapper
 from spark_jobs.utils.rdf_utils import (
-    MARKET_NODE_TYPE_PREFIXES,
     MARKET_QUOTES,
+    SNAPSHOT_NODE_TYPE_PREFIX,
     classify_edge_origin,
 )
 from spark_jobs.utils.spark_rdf_utils import (
@@ -159,12 +170,13 @@ def _quoted(name: str) -> str:
     return f"`{name}`"
 
 
-def _is_market(column: str = "node_type") -> F.Column:
-    """Whether a node type belongs to market data."""
-    expr = F.lit(False)
-    for prefix in MARKET_NODE_TYPE_PREFIXES:
-        expr = expr | F.col(column).startswith(prefix)
-    return expr
+def _is_snapshot(column: str = "node_type") -> F.Column:
+    """Whether a node type is a market snapshot.
+
+    Snapshots, not market: the market-enrichment hub nodes are in the same
+    source and belong on the other side of this line. See the module docstring.
+    """
+    return F.col(column).startswith(SNAPSHOT_NODE_TYPE_PREFIX)
 
 
 # ============================================
@@ -443,15 +455,20 @@ def write_entities(facts_df: DataFrame, root: str, day: str) -> str:
 # ============================================
 # graph/
 # ============================================
-def non_market_triples(
+def non_snapshot_triples(
     triples_df: DataFrame, node_id_df: DataFrame
 ) -> DataFrame:
-    """Every triple describing something other than a market node.
+    """Every triple describing something other than a market snapshot.
 
-    Non-market by SUBJECT: a triple belongs to the node it describes. So an
-    edge FROM a market node into a company is a market row and stays out, while
-    the company's own triples stay in -- the same line ``facts/`` and
+    By SUBJECT: a triple belongs to the node it describes. So an edge FROM a
+    snapshot into a company is a snapshot row and stays out, while the
+    company's own triples stay in -- the same line ``facts/`` and
     ``snapshots/`` draw, applied to whole triples rather than to literals.
+
+    The market hub nodes are on the other side of that line: an
+    ``EquitySector`` and its route to the economic sectors are in the store,
+    because a handful of hubs linking market to the rest of the graph is what
+    the store is for. Only the 10.2 million quotes a day stay out.
 
     A triple whose subject is no node at all stays in, whatever vocabulary it
     names. Those are the statements ABOUT the terms -- the derived
@@ -459,19 +476,19 @@ def non_market_triples(
     provenance markers -- whose subjects are predicate and class URIs rather
     than entities. They are the store's schema, which is most of what makes a
     SPARQL query over it worth writing, and a few hundred triples carry them.
-    So the store holds market TERMS while holding no market data.
+    So the store holds the market VOCABULARY while holding no quote.
     """
-    market_uris = (
+    snapshot_uris = (
         node_id_df
-        .filter(_is_market("node_type"))
-        .select(F.col("uri").alias("_market_uri"))
+        .filter(_is_snapshot("node_type"))
+        .select(F.col("uri").alias("_snapshot_uri"))
     )
 
     return (
         triples_df
         .join(
-            market_uris,
-            triples_df["subject"] == market_uris["_market_uri"],
+            snapshot_uris,
+            triples_df["subject"] == snapshot_uris["_snapshot_uri"],
             "left_anti",
         )
         .select("subject", "predicate", "object")
@@ -481,7 +498,7 @@ def non_market_triples(
 # ============================================
 # snapshots/
 # ============================================
-def _numeric_columns(market_df: DataFrame) -> set:
+def _numeric_columns(snapshot_df: DataFrame) -> set:
     """Which pivoted columns should hold numbers rather than strings.
 
     The same majority rule the feature extractor classifies literal predicates
@@ -490,11 +507,11 @@ def _numeric_columns(market_df: DataFrame) -> set:
     happen to look numeric. A column typed off a per-value test would make
     ``strikePrice > 100`` answerable for some rows and not others.
 
-    One aggregation over the market literals, collected at one row per
-    predicate -- 56 on a production day.
+    One aggregation over the snapshot literals, collected at one row per
+    predicate -- 45 on a production day.
     """
     shares = (
-        market_df
+        snapshot_df
         .groupBy("predicate_name")
         .agg(
             F.count("*").alias("total"),
@@ -511,13 +528,19 @@ def _numeric_columns(market_df: DataFrame) -> set:
     }
 
 
-def write_snapshots(market_df: DataFrame, root: str, day: str) -> str:
-    """Market, pivoted wide: one row per snapshot, one column per property.
+def write_snapshots(snapshot_df: DataFrame, root: str, day: str) -> str:
+    """Market quotes, pivoted wide: one row per snapshot, one column per property.
 
-    Wide earns its keep here and nowhere else. Market is a single type with
-    9.3M rows a day and 56 stable columns, 77.7% of them populated -- a shape
-    a long table serves badly and a pivot serves well. Every other source has
-    a median of two literal predicates per type, which is why they stay long.
+    Wide earns its keep here and nowhere else. Quotes are two node types with
+    10.2M rows a day and 45 stable columns, 77.8% of them populated (measured
+    2026-09-17) -- a shape a long table serves badly and a pivot serves well.
+    Every other source has a median of two literal predicates per type, which
+    is why they stay long.
+
+    Quotes only. The market hub nodes -- eight GICS sector nodes carrying a
+    relationConfidence, and the moneyness classes -- are not snapshots, and
+    pivoting them in put a column on 10.2M quote rows that was null on every
+    one of them.
 
     Sorted by the underlying ticker. Measured: 525 underlying tickers, 19
     snapshots a day, a median 13,224 rows per ticker -- so a single-ticker
@@ -528,24 +551,24 @@ def write_snapshots(market_df: DataFrame, root: str, day: str) -> str:
 
     A snapshot missing a property gets a null, not a dropped row.
 
-    Returns "" when the run carried no market data at all, which is a legitimate
+    Returns "" when the run carried no quotes at all, which is a legitimate
     configuration (a no-market dataset) rather than a failure.
     """
     columns = sorted(
         row["predicate_name"]
-        for row in market_df.select("predicate_name").distinct().collect()
+        for row in snapshot_df.select("predicate_name").distinct().collect()
     )
     if not columns:
-        logger.info("  No market literals in this run -- no snapshots table")
+        logger.info("  No snapshot literals in this run -- no snapshots table")
         return ""
 
-    numeric = _numeric_columns(market_df)
+    numeric = _numeric_columns(snapshot_df)
 
     # max() rather than first(): a subject carrying two values for one
     # predicate has to resolve the same way on every run, and first() over a
     # shuffled frame does not.
     pivoted = (
-        market_df
+        snapshot_df
         .groupBy("node_type", "uri")
         .pivot("predicate_name", columns)
         .agg(F.max("value"))
@@ -642,12 +665,12 @@ def write_query_tables(
             StorageLevel.DISK_ONLY
         )
         try:
-            facts_df = literals_df.filter(~_is_market("node_type"))
+            facts_df = literals_df.filter(~_is_snapshot("node_type"))
             written["facts"] = write_facts(facts_df, root, day)
             written["entities"] = write_entities(facts_df, root, day)
 
             snapshots = write_snapshots(
-                literals_df.filter(_is_market("node_type")), root, day
+                literals_df.filter(_is_snapshot("node_type")), root, day
             )
             if snapshots:
                 written["snapshots"] = snapshots
@@ -655,7 +678,7 @@ def write_query_tables(
             literals_df.unpersist()
 
         store = write_graph_store(
-            non_market_triples(triples_df, node_id_df),
+            non_snapshot_triples(triples_df, node_id_df),
             table_path(root, "graph", day),
         )
         if store:
