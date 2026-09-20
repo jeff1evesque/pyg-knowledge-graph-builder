@@ -27,6 +27,7 @@ from spark_jobs.utils.namespaces import (  # noqa: F401
     IDENTIFIER_BASE,
     JOLTS,
     LAUS,
+    LEGACY_IDENTIFIER_OVERRIDES,
     LEGACY_VOCABULARIES,
     MARKET_ENRICHMENT,
     MARKET_QUOTES,
@@ -44,7 +45,9 @@ from spark_jobs.utils.namespaces import (  # noqa: F401
     WEATHER,
     WKYENG,
     XIMPIM,
+    canonical_uri,
     identifier_namespace,
+    legacy_rewrites,
 )
 
 logger = logging.getLogger(__name__)

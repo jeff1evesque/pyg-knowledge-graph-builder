@@ -27,6 +27,7 @@ from spark_jobs.utils.sec_identifiers import (
 from spark_jobs.utils.rdf_utils import (
     BLS_COMMON,
     CPI,
+    METRO,
     SEC_FILINGS,
     identifier_namespace,
 )
@@ -355,6 +356,10 @@ _FLAT_CPI_INDEX = "https://jefflevesque.com/id/cpi/All_items_July2026_Index"
 _FLAT_CPI_MONTH_TERM = "https://jefflevesque.com/ontology/cpi/hasMonth"
 _FLAT_BLS_MONTH = "https://jefflevesque.com/id/bls/June"
 _NESTED_BLS_CPI_INDEX = "https://jefflevesque.com/id/bls/cpi/All_items_July2026_Index"
+# The shared BLS space is not flat: months sit directly under id/bls/ and states
+# a segment deeper. Two segments, exactly like a nested dataset identifier.
+_FLAT_BLS_STATE = "https://jefflevesque.com/id/bls/state/Alabama"
+_NESTED_BLS_STATE = "https://jefflevesque.com/id/bls/common/state/Alabama"
 
 
 def test_a_flat_identifier_and_term_become_the_nested_spelling(spark, make_triples):
@@ -381,6 +386,47 @@ def test_the_bare_bls_identifier_rewrite_does_not_reach_a_nested_one(
         canonicalize_source_triples(rows, bls.SPEC)
     )}
     assert subjects == {_NESTED_BLS_CPI_INDEX}
+
+
+def test_a_legacy_state_is_rewritten_though_it_is_two_segments_deep(
+    spark, make_triples,
+):
+    """The case the anchor alone cannot reach.
+
+    id/bls/state/Alabama and id/bls/cpi/February are structurally identical --
+    two segments under id/bls/ -- and only the vocabulary knows that 'state' is
+    not one of the ten dataset names. The anchor refuses both, correctly for the
+    second and wrongly for the first, so the state prefix is declared as its own
+    unanchored rewrite and sorts ahead of id/bls/ by being longer.
+
+    Load bearing: metro states hasParentRegion against these 19,392 times in the
+    2026 feed, over 2,572 individuals. Left unrewritten, legacy metro rows point
+    at one Alabama and post-deploy rows at another, and the join halves at the
+    deploy boundary without anything failing.
+    """
+    rows = make_triples([
+        ("https://jefflevesque.com/id/bls/metro/Birmingham",
+         str(METRO.hasParentRegion), _FLAT_BLS_STATE),
+    ])
+    assert _triples(canonicalize_source_triples(rows, bls.SPEC)) == {(
+        "https://jefflevesque.com/id/bls/metro/Birmingham",
+        str(METRO.hasParentRegion),
+        _NESTED_BLS_STATE,
+    )}
+
+
+def test_both_spellings_of_a_state_converge_on_one_node(spark, make_triples):
+    """A legacy metro row and a restated one have to reach one Alabama."""
+    rows = make_triples([
+        ("https://jefflevesque.com/id/bls/metro/A",
+         str(METRO.hasParentRegion), _FLAT_BLS_STATE),
+        ("https://jefflevesque.com/id/bls/metro/B",
+         str(METRO.hasParentRegion), _NESTED_BLS_STATE),
+    ])
+    states = {o for _s, _p, o in _triples(
+        canonicalize_source_triples(rows, bls.SPEC)
+    )}
+    assert states == {_NESTED_BLS_STATE}
 
 
 def test_nested_input_passes_through_untouched(spark, make_triples):

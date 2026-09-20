@@ -219,37 +219,75 @@ def identifier_namespace(term_namespace: str) -> str:
 #
 # BLS is the only case, and it is an inconsistency in the flat layout rather
 # than an oversight here: the shared terms were at ontology/bls-common/ while
-# the individuals they type went to a bare id/bls/ -- <id/bls/June> a
+# the individuals they type went under a bare id/bls/ -- <id/bls/June> a
 # laus:Month. identifier_namespace() derives id/bls-common/, which nothing has
 # ever minted into.
 #
-# id/bls/ is a string prefix of all ten id/bls/<dataset>/, so rewriting it has
-# to match one trailing segment and nothing deeper, or it corrupts every nested
-# BLS identifier. canonicalization._legacy_rewrite anchors it.
+# TWO prefixes, because that shared space is not flat. Months and years sit
+# directly under id/bls/, and the states sit a segment deeper at
+# id/bls/state/ -- 2,572 individuals in the 2026 metro feed, including the
+# subjects of its own measurements, with hasParentRegion alone pointing at them
+# 19,392 times. Both moved under id/bls/common/ when the shared space did, the
+# state segment riding along as a suffix.
+#
+# Ordered narrowest first, and the pair is what the ordering is FOR:
+#
+#   id/bls/state/  must be tried before id/bls/, or a bare id/bls/ rewrite
+#                  would claim it and produce id/bls/common/state/... only by
+#                  accident of the anchor refusing it -- see below.
+#   id/bls/        is a string prefix of all ten id/bls/<dataset>/, so it is
+#                  ANCHORED to one trailing segment. Unanchored it would turn
+#                  id/bls/cpi/Index into id/bls/common/cpi/Index.
+#
+# id/bls/state/ needs no anchor: no BLS dataset is named 'state' (cpi, ppi,
+# eci, empsit, jolts, laus, metro, realer, wkyeng, ximpim), so a plain prefix
+# match cannot reach an already-nested URI. That is also why the anchor alone
+# could never have covered it -- id/bls/state/AL and id/bls/cpi/February are
+# both two segments, and only the vocabulary knows which one is a dataset.
 LEGACY_IDENTIFIER_OVERRIDES = {
-    f"{SOURCE_BASE}bls-common/": f"{IDENTIFIER_BASE}bls/",
+    f"{SOURCE_BASE}bls-common/": (
+        (f"{IDENTIFIER_BASE}bls/state/", f"{IDENTIFIER_BASE}bls/common/state/"),
+        (f"{IDENTIFIER_BASE}bls/", f"{IDENTIFIER_BASE}bls/common/"),
+    ),
 }
 
 
-def legacy_identifier_namespace(legacy_term_namespace: str) -> str:
-    """The id/ namespace a legacy vocabulary's individuals were minted into."""
-    return LEGACY_IDENTIFIER_OVERRIDES.get(
-        legacy_term_namespace
-    ) or identifier_namespace(legacy_term_namespace)
+def legacy_identifier_pairs(legacy_term_namespace, current_term_namespace):
+    """(legacy id prefix, current id prefix) for one vocabulary's individuals.
+
+    One pair for a vocabulary whose individuals sit where identifier_namespace()
+    says they do, and whatever LEGACY_IDENTIFIER_OVERRIDES declares for one that
+    does not.
+    """
+    override = LEGACY_IDENTIFIER_OVERRIDES.get(legacy_term_namespace)
+    if override:
+        return override
+    return (
+        (
+            identifier_namespace(legacy_term_namespace),
+            identifier_namespace(current_term_namespace),
+        ),
+    )
 
 
 def legacy_rewrites(namespaces=None):
     """(legacy prefix, current prefix, anchored) for these vocabularies.
 
-    Two per vocabulary -- the terms and the individuals -- because the mappers
-    moved both. ``namespaces`` defaults to every vocabulary with a legacy form;
-    the loader passes one source's, since it canonicalises per path.
+    The terms, then the individuals, because the mappers moved both.
+    ``namespaces`` defaults to every vocabulary with a legacy form; the loader
+    passes one source's, since it canonicalises per path.
 
     ``anchored`` marks a rewrite whose target sits INSIDE its source, where a
-    plain prefix match would also claim URIs that are already correct.
-    id/bls/ -> id/bls/common/ is the case: unanchored it would turn
-    id/bls/cpi/Index into id/bls/common/cpi/Index. Anchored rewrites sort first,
-    because matching one segment is the narrower claim.
+    plain prefix match would also claim URIs that are already correct --
+    id/bls/ -> id/bls/common/ is the one. It is derived rather than declared,
+    so a prefix that grows to contain its own target cannot quietly stop being
+    anchored.
+
+    Longest prefix first, the same rule _owned_namespaces uses. The anchor and
+    the ordering are independent guards and both are load bearing:
+    id/bls/state/ is refused by the anchor and so needs the ordering, and
+    id/bls/cpi/ is refused by the ordering being longest-first and would still
+    need the anchor if a shorter legacy prefix were ever added above it.
     """
     selected = LEGACY_VOCABULARIES if namespaces is None else namespaces
     rewrites = []
@@ -257,12 +295,12 @@ def legacy_rewrites(namespaces=None):
         legacy = LEGACY_VOCABULARIES.get(namespace)
         if not legacy:
             continue
-        for old, new in (
-            (legacy, namespace),
-            (legacy_identifier_namespace(legacy), identifier_namespace(namespace)),
-        ):
+        pairs = ((legacy, namespace),) + tuple(
+            legacy_identifier_pairs(legacy, namespace)
+        )
+        for old, new in pairs:
             rewrites.append((old, new, new.startswith(old)))
-    return sorted(rewrites, key=lambda rewrite: not rewrite[2])
+    return sorted(rewrites, key=lambda rewrite: -len(rewrite[0]))
 
 
 def canonical_uri(uri: str) -> str:

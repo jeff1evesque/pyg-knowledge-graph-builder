@@ -25,6 +25,7 @@ from spark_jobs.utils.rdf_utils import (
     ONTOLOGY_BASE,
     ONTOLOGY_NAMESPACE_INDICES,
     SOURCE_BASE,
+    canonical_uri,
     classify_edge_origin,
     PIPELINE_NODE_TYPE_PREFIXES,
     PROVENANCE,
@@ -447,6 +448,56 @@ def test_a_legacy_vocabulary_shares_its_current_prefix_and_slot():
             f"{legacy!r} encodes at slot {slots[legacy]} but {current!r} at "
             f"{slots[current]}; one vocabulary, two features"
         )
+
+
+@pytest.mark.parametrize("uri,expected", [
+    # Months and years sit directly under the shared space.
+    (f"{IDENTIFIER_BASE}bls/June", f"{IDENTIFIER_BASE}bls/common/June"),
+    # States sit a segment deeper in it, which makes them the same SHAPE as a
+    # nested dataset identifier. The anchor refuses both; only the vocabulary
+    # knows 'state' is not one of the ten dataset names.
+    (f"{IDENTIFIER_BASE}bls/state/Alabama",
+     f"{IDENTIFIER_BASE}bls/common/state/Alabama"),
+    # Already nested. Must survive untouched -- an unanchored id/bls/ rule would
+    # turn this into id/bls/common/cpi/February.
+    (f"{IDENTIFIER_BASE}bls/cpi/February", f"{IDENTIFIER_BASE}bls/cpi/February"),
+    (f"{IDENTIFIER_BASE}bls/common/state/Alabama",
+     f"{IDENTIFIER_BASE}bls/common/state/Alabama"),
+    # A flat dataset identifier, including one with its own deeper segments.
+    (f"{IDENTIFIER_BASE}cpi/February", f"{IDENTIFIER_BASE}bls/cpi/February"),
+    (f"{IDENTIFIER_BASE}ppi/commodity/0721",
+     f"{IDENTIFIER_BASE}bls/ppi/commodity/0721"),
+    # A term, not an individual.
+    (f"{SOURCE_BASE}cpi/hasMonth", f"{SOURCE_BASE}bls/cpi/hasMonth"),
+    # Nothing to do with us.
+    ("https://api.weather.gov/alerts/abc", "https://api.weather.gov/alerts/abc"),
+])
+def test_canonical_uri_moves_the_legacy_spellings_and_only_those(uri, expected):
+    assert canonical_uri(uri) == expected
+
+
+def test_every_declared_rewrite_actually_fires():
+    """A prefix declared but never reachable is the failure this guards.
+
+    id/bls/state/ was missing entirely: the anchored id/bls/ rule refused it for
+    being two segments deep, so 2,572 metro individuals passed through still
+    spelled the pre-deploy way while post-deploy rows spelled them the new way.
+    Nothing failed -- the states just split in two.
+    """
+    for old, new, _anchored in rdf_utils.legacy_rewrites():
+        assert canonical_uri(f"{old}Thing") == f"{new}Thing", (
+            f"{old!r} is declared but does not rewrite; a URI under it would "
+            f"keep its pre-deploy spelling"
+        )
+
+
+def test_canonicalising_a_canonical_uri_changes_nothing():
+    """Idempotence. A run reading post-deploy data must not rewrite it again,
+    and a mixed object must land in the same place from either spelling."""
+    for old, new, _anchored in rdf_utils.legacy_rewrites():
+        once = canonical_uri(f"{old}Thing")
+        assert canonical_uri(once) == once
+        assert canonical_uri(f"{new}Thing") == f"{new}Thing"
 
 
 def test_no_legacy_vocabulary_is_still_the_current_form():
