@@ -20,8 +20,12 @@ import pytest
 from spark_jobs.utils import rdf_utils
 from spark_jobs.utils.rdf_utils import (
     ENRICHMENT_NAMESPACES,
+    LEGACY_VOCABULARIES,
     NAMESPACE_PREFIXES,
     ONTOLOGY_BASE,
+    ONTOLOGY_NAMESPACE_INDICES,
+    SOURCE_BASE,
+    classify_edge_origin,
     PIPELINE_NODE_TYPE_PREFIXES,
     PROVENANCE,
     SNAPSHOT_NODE_TYPE_PREFIX,
@@ -59,8 +63,12 @@ MINTED = {
     "UNIFIED": str(UNIFIED),
     "SOURCE_TEMPORAL": str(SOURCE_TEMPORAL),
     "PROVENANCE": str(PROVENANCE),
+    # Keyed on the whole path under the base, not the last segment: a
+    # vocabulary and its legacy form share a last segment (bls/cpi/ and cpi/
+    # both end in cpi), so keying on that collapsed the two and quietly dropped
+    # the legacy entries out of this dict.
     **{
-        f"SOURCE[{namespace.rsplit('/', 2)[-2]}]": namespace
+        f"SOURCE[{namespace[len(SOURCE_BASE):].strip('/')}]": namespace
         for namespace in SOURCE_VOCABULARIES
     },
 }
@@ -317,20 +325,138 @@ def test_longer_namespaces_precede_the_shorter_ones_they_extend():
     )
 
 
-def test_prefixes_are_unique():
-    """Two namespaces sharing a prefix silently merge unrelated node types."""
+def test_prefixes_are_unique_except_across_a_legacy_pair():
+    """Two namespaces sharing a prefix silently merge UNRELATED node types.
+
+    A vocabulary and its legacy form are not unrelated -- they are one
+    vocabulary at two URIs, and merging them is the point: an archive object
+    written before the mapper deploy has to produce the same node type as one
+    written after it. Everything else sharing a prefix is still the defect this
+    has always caught.
+    """
     seen = {}
     for namespace, prefix in NAMESPACE_PREFIXES:
-        assert prefix not in seen, (
-            f"prefix {prefix!r} is claimed by both {seen.get(prefix)!r} and "
-            f"{namespace!r}; their node types would collapse into one name"
-        )
+        other = seen.get(prefix)
+        if other is not None:
+            pair = {namespace, other}
+            allowed = any(
+                pair == {current, legacy}
+                for current, legacy in LEGACY_VOCABULARIES.items()
+            )
+            assert allowed, (
+                f"prefix {prefix!r} is claimed by both {other!r} and "
+                f"{namespace!r}, which are not a legacy pair; their node types "
+                f"would collapse into one name"
+            )
         seen[prefix] = namespace
 
 
 def test_namespaces_are_unique():
     namespaces = [ns for ns, _prefix in NAMESPACE_PREFIXES]
     assert len(namespaces) == len(set(namespaces))
+
+
+# ======================================================================
+# Enrichment must not contain a source vocabulary
+# ======================================================================
+
+def test_no_enrichment_namespace_is_a_prefix_of_a_source_vocabulary():
+    """The rule the ordering test only made survivable.
+
+    classify_edge_origin() decides observed-vs-inferred with startswith against
+    ENRICHMENT_NAMESPACES. If an enrichment namespace contains a source
+    vocabulary, every fact that source reported is reported as something this
+    pipeline invented -- and nothing raises. The graph builds, the unrelated
+    tests stay green, and graph_schema.json lies about the origin of every edge.
+
+    Ordering cannot fix that: the prefix test does not consult the table. Only
+    the absence of the relationship fixes it, which is why this is asserted over
+    every pair rather than left to where a spec happens to list its namespaces.
+
+    It held by accident before. Enrichment sat at ontology/bls/, the source
+    vocabularies were flat at ontology/cpi/, and the two were unrelated strings.
+    Nesting the source vocabularies under ontology/bls/ put fourteen of them
+    inside four enrichment namespaces at once (#422).
+    """
+    violations = [
+        (enrichment, vocabulary)
+        for enrichment in ENRICHMENT_NAMESPACES
+        for vocabulary in SOURCE_VOCABULARIES
+        if vocabulary.startswith(enrichment) or enrichment.startswith(vocabulary)
+    ]
+    assert not violations, (
+        "enrichment namespace(s) in a prefix relationship with a source "
+        "vocabulary; every fact from that vocabulary would classify as "
+        "pipeline-inferred:\n"
+        + "\n".join(f"  {e!r} <-> {v!r}" for e, v in violations)
+    )
+
+
+def test_every_current_source_vocabulary_is_nested_under_its_source():
+    """Two segments under the base -- ontology/<source>/<group>/ -- not one.
+
+    The mirror of the upstream side's own shape test. Both repos asserting it
+    is what keeps the two from drifting apart again.
+
+    Legacy forms are exempt by definition: they are the one-segment layout, kept
+    readable because the archive still holds them.
+    """
+    legacy = set(LEGACY_VOCABULARIES.values())
+    for namespace in SOURCE_VOCABULARIES:
+        if namespace in legacy:
+            continue
+        rest = namespace[len(SOURCE_BASE):].strip("/")
+        assert len(rest.split("/")) == 2, (
+            f"{namespace!r} is {len(rest.split('/'))} segment(s) under "
+            f"{SOURCE_BASE!r}; a source vocabulary is "
+            f"ontology/<source>/<group>/"
+        )
+
+
+# ======================================================================
+# Legacy vocabularies: one vocabulary, two spellings
+# ======================================================================
+
+def test_every_legacy_vocabulary_is_registered():
+    """A legacy form nobody registers is a namespace the naming rule cannot
+    resolve, so every pre-deploy object would build unknown_* node types."""
+    registered = {ns for ns, _prefix in NAMESPACE_PREFIXES}
+    missing = sorted(set(LEGACY_VOCABULARIES.values()) - registered)
+    assert not missing, f"legacy vocabularies not in NAMESPACE_PREFIXES: {missing}"
+
+
+def test_a_legacy_vocabulary_shares_its_current_prefix_and_slot():
+    """Both spellings have to name one node type and encode one feature.
+
+    Without the shared slot a BLS measurement gets a different ontology-source
+    feature depending on whether its row happened to be restated after the
+    deploy -- and BLS interleaves both forms inside a single object, so that
+    split falls within one run.
+    """
+    prefixes = dict(NAMESPACE_PREFIXES)
+    slots = {}
+    for namespace, index in ONTOLOGY_NAMESPACE_INDICES:
+        slots.setdefault(namespace, index)
+
+    for current, legacy in LEGACY_VOCABULARIES.items():
+        assert prefixes[legacy] == prefixes[current], (
+            f"{legacy!r} is named {prefixes[legacy]!r} but {current!r} is "
+            f"named {prefixes[current]!r}; one vocabulary, two node types"
+        )
+        assert slots[legacy] == slots[current], (
+            f"{legacy!r} encodes at slot {slots[legacy]} but {current!r} at "
+            f"{slots[current]}; one vocabulary, two features"
+        )
+
+
+def test_no_legacy_vocabulary_is_still_the_current_form():
+    """A stale entry mapping a namespace to itself would look like coverage
+    while asserting nothing."""
+    same = sorted(
+        current for current, legacy in LEGACY_VOCABULARIES.items()
+        if current == legacy
+    )
+    assert not same, f"legacy form identical to the current one: {same}"
 
 
 def test_every_minted_namespace_is_registered_except_provenance():
@@ -420,6 +546,23 @@ def test_sector_fragments_match_a_real_node_type_name():
 # ======================================================================
 # Edge-origin classification must not be widened by the shared base
 # ======================================================================
+
+def test_classify_edge_origin_is_raw_for_every_source_vocabulary():
+    """Every one of them, not a spot check on CPI.
+
+    The old assertion covered a single predicate, so it would have caught the
+    BLS half of the collision and said nothing about SEC, market or NOAA. A
+    predicate from any vocabulary a source reported is an observed fact.
+    """
+    misread = sorted(
+        vocabulary for vocabulary in SOURCE_VOCABULARIES
+        if classify_edge_origin(f"{vocabulary}someProperty") != "raw"
+    )
+    assert not misread, (
+        "source vocabularies whose predicates classify as pipeline-inferred: "
+        f"{misread}"
+    )
+
 
 def test_source_temporal_is_not_an_enrichment_namespace():
     """Sharing a base must not reclassify observed facts as inferred.

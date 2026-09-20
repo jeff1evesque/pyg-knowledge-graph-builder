@@ -13,7 +13,7 @@ from spark_jobs.pyg_builder.naming import (
     prefixed_local_name_expr,
     relation_to_predicate_uri,
 )
-from spark_jobs.utils.rdf_utils import NAMESPACE_PREFIXES
+from spark_jobs.utils.rdf_utils import LEGACY_VOCABULARIES, NAMESPACE_PREFIXES
 
 
 def test_the_driver_and_spark_naming_rules_agree(spark):
@@ -49,7 +49,18 @@ def test_a_uri_with_no_local_name_is_refused_rather_than_guessed():
 def test_a_relation_name_inverts_back_to_its_predicate():
     """The other direction, which only the driver ever needs: a resolved edge
     carries the relation name and not the predicate it came from, and
-    edge_types/ has to publish the predicate."""
+    edge_types/ has to publish the predicate.
+
+    A legacy vocabulary inverts to the CURRENT spelling rather than to itself,
+    and that is the wanted answer, not a rounding error. Both spellings name one
+    term, the relation name cannot say which object a row came from, and
+    edge_types/ should publish one predicate per relation rather than two. So
+    the inverse canonicalises.
+    """
+    legacy_to_current = {
+        legacy: current for current, legacy in LEGACY_VOCABULARIES.items()
+    }
     for namespace, _prefix in NAMESPACE_PREFIXES:
         uri = f"{namespace}Thing"
-        assert relation_to_predicate_uri(prefixed_local_name(uri)) == uri
+        expected = f"{legacy_to_current.get(namespace, namespace)}Thing"
+        assert relation_to_predicate_uri(prefixed_local_name(uri)) == expected
