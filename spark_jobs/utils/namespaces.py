@@ -16,41 +16,50 @@ from rdflib import Namespace
 # document formats, not RDF, and every class and property below was invented
 # by the upstream RML mappers.
 #
-# They now resolve to a domain we control, split so that a reader can tell a
-# term from a thing by looking at the URI:
+# They now resolve to a domain we control, split two ways. A reader can tell a
+# term from a thing, and a term from which source, by looking at the URI:
 #
-#   https://jefflevesque.com/ontology/{source}/   classes and properties
-#   https://jefflevesque.com/id/{source}/         individuals
+#   https://jefflevesque.com/ontology/{source}/{group}/   classes and properties
+#   https://jefflevesque.com/id/{source}/{group}/         individuals
+#
+# Two segments under the base, not one. Flat, the ten BLS dataset vocabularies
+# sat at ontology/cpi/ … ontology/ximpim/ and claimed generic names in a space
+# meant to hold every source -- plenty of agencies publish a CPI -- while
+# nothing in the URI recorded which source a term came from.
 #
 # Node types come from rdf:type objects and edges from predicates, both of
 # which are terms, so the constants below are what node_mapper and edge_mapper
 # need. Code that asks which source an ENTITY belongs to needs the id/ side
 # instead — see identifier_namespace() further down, and SOURCE_IDENTIFIERS in
 # rdf_utils.
+#
+# The archive still holds the flat forms; see LEGACY_VOCABULARIES below.
 SOURCE_BASE = "https://jefflevesque.com/ontology/"
 
-CPI = Namespace(f"{SOURCE_BASE}cpi/")
-PPI = Namespace(f"{SOURCE_BASE}ppi/")
-ECI = Namespace(f"{SOURCE_BASE}eci/")
-EMPSIT = Namespace(f"{SOURCE_BASE}empsit/")
-JOLTS = Namespace(f"{SOURCE_BASE}jolts/")
-LAUS = Namespace(f"{SOURCE_BASE}laus/")
-METRO = Namespace(f"{SOURCE_BASE}metro/")
-REALER = Namespace(f"{SOURCE_BASE}realer/")
-WKYENG = Namespace(f"{SOURCE_BASE}wkyeng/")
-XIMPIM = Namespace(f"{SOURCE_BASE}ximpim/")
+CPI = Namespace(f"{SOURCE_BASE}bls/cpi/")
+PPI = Namespace(f"{SOURCE_BASE}bls/ppi/")
+ECI = Namespace(f"{SOURCE_BASE}bls/eci/")
+EMPSIT = Namespace(f"{SOURCE_BASE}bls/empsit/")
+JOLTS = Namespace(f"{SOURCE_BASE}bls/jolts/")
+LAUS = Namespace(f"{SOURCE_BASE}bls/laus/")
+METRO = Namespace(f"{SOURCE_BASE}bls/metro/")
+REALER = Namespace(f"{SOURCE_BASE}bls/realer/")
+WKYENG = Namespace(f"{SOURCE_BASE}bls/wkyeng/")
+XIMPIM = Namespace(f"{SOURCE_BASE}bls/ximpim/")
 
 # Shared BLS classes (Month, Year, Industry, Region, ...) that the hand-
-# authored table schemas declare once for every category. 'bls-common' rather
-# than 'bls' because BLS_ENRICHMENT below already owns .../ontology/bls/ —
-# merging the two would make observed BLS facts read as pipeline-inferred.
-BLS_COMMON = Namespace(f"{SOURCE_BASE}bls-common/")
+# authored table schemas declare once for every category.
+#
+# It was 'bls-common', hyphenated to stay clear of ontology/bls/, which
+# BLS_ENRICHMENT held. Enrichment has moved to ontology/bls/enrichment/, so the
+# slash is free and the hyphen no longer buys anything.
+BLS_COMMON = Namespace(f"{SOURCE_BASE}bls/common/")
 
 # ============================================
 # SEC data namespaces
 # ============================================
-# 'sec-*' rather than 'sec' for the same reason: SEC_ENRICHMENT owns
-# .../ontology/sec/.
+# Were 'sec-common' and 'sec-filings', hyphenated for the same reason BLS_COMMON
+# was, and nested now for the same reason it is.
 
 # Only the filings feed is collected. sec-administrative-proceedings,
 # sec-litigation and sec-trading-suspensions were removed with the linker paths
@@ -59,8 +68,8 @@ BLS_COMMON = Namespace(f"{SOURCE_BASE}bls-common/")
 # ago. Code keyed on a source nobody collects cannot be distinguished from
 # working code by any test, because both produce nothing — which is how two of
 # the defects on this branch stayed hidden.
-SEC_COMMON = Namespace(f"{SOURCE_BASE}sec-common/")
-SEC_FILINGS = Namespace(f"{SOURCE_BASE}sec-filings/")
+SEC_COMMON = Namespace(f"{SOURCE_BASE}sec/common/")
+SEC_FILINGS = Namespace(f"{SOURCE_BASE}sec/filings/")
 
 # ============================================
 # Market data namespace
@@ -77,7 +86,7 @@ SEC_FILINGS = Namespace(f"{SOURCE_BASE}sec-filings/")
 # name both models is what made market enrichment silently produce nothing in
 # the first place, and every market change since had to reason about which of
 # two vocabularies it meant.
-MARKET_QUOTES = Namespace(f"{SOURCE_BASE}market-quotes/")
+MARKET_QUOTES = Namespace(f"{SOURCE_BASE}market/quotes/")
 
 # ============================================
 # NOAA WEATHER DATA NAMESPACES
@@ -93,8 +102,8 @@ MARKET_QUOTES = Namespace(f"{SOURCE_BASE}market-quotes/")
 # vocabulary, so cap:hasAreaDescription and cap:AlertMessage are our model OF
 # CAP rather than CAP itself.
 
-WEATHER = Namespace(f"{SOURCE_BASE}weather/")
-CAP = Namespace(f"{SOURCE_BASE}cap-model/")
+WEATHER = Namespace(f"{SOURCE_BASE}noaa/weather/")
+CAP = Namespace(f"{SOURCE_BASE}noaa/cap-model/")
 
 # Alert instances — real identifiers for real NWS alerts. Genuinely theirs,
 # unlike the vocabulary that used to sit alongside them, so left alone.
@@ -105,6 +114,66 @@ GEOSPARQL = Namespace("http://www.opengis.net/ont/geosparql#")
 
 # Atom feed namespace
 ATOM = Namespace("http://www.w3.org/2005/Atom/")
+
+# ============================================
+# LEGACY VOCABULARIES — the flat forms still in the archive
+# ============================================
+# What the mappers emitted before they nested each vocabulary under its source.
+# Nothing rewrites the archive, so every object written before that deploy still
+# carries these, and they have to stay readable for as long as those objects do
+# -- which is forever: published runs cannot be backfilled, so a past run is
+# only reproducible while its inputs still parse.
+#
+# BLS is why this is a table rather than a cutover date. Its feeds write one
+# object per observation year and append by streaming stored row groups through
+# untouched, so a deploy does not rewrite the rows already in the file. A single
+# 2026 object ends up holding flat rows and nested rows interleaved, split
+# unevenly by which series happened to be restated. No date separates them.
+#
+# Each legacy namespace registers beside its current form at the SAME prefix and
+# the SAME ontology-source slot, so a node reads identically whichever form it
+# arrived in -- cpi:Index is cpi_Index either way. That is what lets one run
+# read flat, nested and mixed input without knowing which it has.
+#
+# Read-only history, not a second live vocabulary: after the deploy nothing
+# mints these again. They can be dropped if the archive is ever migrated, and
+# doing so costs one contract digest.
+LEGACY_VOCABULARIES = {
+    str(CPI): f"{SOURCE_BASE}cpi/",
+    str(PPI): f"{SOURCE_BASE}ppi/",
+    str(ECI): f"{SOURCE_BASE}eci/",
+    str(EMPSIT): f"{SOURCE_BASE}empsit/",
+    str(JOLTS): f"{SOURCE_BASE}jolts/",
+    str(LAUS): f"{SOURCE_BASE}laus/",
+    str(METRO): f"{SOURCE_BASE}metro/",
+    str(REALER): f"{SOURCE_BASE}realer/",
+    str(WKYENG): f"{SOURCE_BASE}wkyeng/",
+    str(XIMPIM): f"{SOURCE_BASE}ximpim/",
+    str(BLS_COMMON): f"{SOURCE_BASE}bls-common/",
+    str(SEC_COMMON): f"{SOURCE_BASE}sec-common/",
+    str(SEC_FILINGS): f"{SOURCE_BASE}sec-filings/",
+    str(MARKET_QUOTES): f"{SOURCE_BASE}market-quotes/",
+    str(WEATHER): f"{SOURCE_BASE}weather/",
+    str(CAP): f"{SOURCE_BASE}cap-model/",
+}
+
+
+def with_legacy(
+    pairs: "tuple[tuple[str, str], ...]",
+) -> "tuple[tuple[str, str], ...]":
+    """Each (namespace, prefix), followed by the legacy form where there is one.
+
+    The legacy entry takes the SAME prefix, which is the point: both forms name
+    one vocabulary, so both must produce one node type name. Neither form is a
+    string prefix of the other, so their relative order does not matter.
+    """
+    expanded = []
+    for namespace, prefix in pairs:
+        expanded.append((namespace, prefix))
+        legacy = LEGACY_VOCABULARIES.get(namespace)
+        if legacy:
+            expanded.append((legacy, prefix))
+    return tuple(expanded)
 
 # ============================================
 # SOURCE IDENTIFIERS — individuals the upstream mappers mint
@@ -145,6 +214,75 @@ def identifier_namespace(term_namespace: str) -> str:
     return f"{IDENTIFIER_BASE}{term_namespace[len(SOURCE_BASE):]}"
 
 
+# Where a legacy vocabulary's INDIVIDUALS sat, where that is not
+# identifier_namespace() of its legacy term namespace.
+#
+# BLS is the only case, and it is an inconsistency in the flat layout rather
+# than an oversight here: the shared terms were at ontology/bls-common/ while
+# the individuals they type went to a bare id/bls/ -- <id/bls/June> a
+# laus:Month. identifier_namespace() derives id/bls-common/, which nothing has
+# ever minted into.
+#
+# id/bls/ is a string prefix of all ten id/bls/<dataset>/, so rewriting it has
+# to match one trailing segment and nothing deeper, or it corrupts every nested
+# BLS identifier. canonicalization._legacy_rewrite anchors it.
+LEGACY_IDENTIFIER_OVERRIDES = {
+    f"{SOURCE_BASE}bls-common/": f"{IDENTIFIER_BASE}bls/",
+}
+
+
+def legacy_identifier_namespace(legacy_term_namespace: str) -> str:
+    """The id/ namespace a legacy vocabulary's individuals were minted into."""
+    return LEGACY_IDENTIFIER_OVERRIDES.get(
+        legacy_term_namespace
+    ) or identifier_namespace(legacy_term_namespace)
+
+
+def legacy_rewrites(namespaces=None):
+    """(legacy prefix, current prefix, anchored) for these vocabularies.
+
+    Two per vocabulary -- the terms and the individuals -- because the mappers
+    moved both. ``namespaces`` defaults to every vocabulary with a legacy form;
+    the loader passes one source's, since it canonicalises per path.
+
+    ``anchored`` marks a rewrite whose target sits INSIDE its source, where a
+    plain prefix match would also claim URIs that are already correct.
+    id/bls/ -> id/bls/common/ is the case: unanchored it would turn
+    id/bls/cpi/Index into id/bls/common/cpi/Index. Anchored rewrites sort first,
+    because matching one segment is the narrower claim.
+    """
+    selected = LEGACY_VOCABULARIES if namespaces is None else namespaces
+    rewrites = []
+    for namespace in selected:
+        legacy = LEGACY_VOCABULARIES.get(namespace)
+        if not legacy:
+            continue
+        for old, new in (
+            (legacy, namespace),
+            (legacy_identifier_namespace(legacy), identifier_namespace(namespace)),
+        ):
+            rewrites.append((old, new, new.startswith(old)))
+    return sorted(rewrites, key=lambda rewrite: not rewrite[2])
+
+
+def canonical_uri(uri: str) -> str:
+    """A URI under a legacy vocabulary, in the spelling the mappers emit now.
+
+    The driver-side twin of canonicalization._legacy_rewrite, for the tools that
+    read source RDF without going through the loader.
+    bin/check_vocabulary_drift.py is the one that needs it: it parses the
+    fixtures directly, and comparing their flat URIs against nested constants
+    would report every vocabulary as uncovered and quietly switch the guard off.
+    """
+    for old, new, anchored in legacy_rewrites():
+        if not uri.startswith(old):
+            continue
+        if anchored and "/" in uri[len(old):]:
+            continue
+        return f"{new}{uri[len(old):]}"
+    return uri
+
+
 # ============================================
 # MINTED NAMESPACES — terms this project invents
 # ============================================
@@ -173,10 +311,27 @@ def identifier_namespace(term_namespace: str) -> str:
 # (graphs built either side are not comparable), not a side effect.
 ONTOLOGY_BASE = "https://jefflevesque.com/ontology/"
 
-BLS_ENRICHMENT = Namespace(f"{ONTOLOGY_BASE}bls/")
-SEC_ENRICHMENT = Namespace(f"{ONTOLOGY_BASE}sec/")
-NOAA_ENRICHMENT = Namespace(f"{ONTOLOGY_BASE}noaa/")
-MARKET_ENRICHMENT = Namespace(f"{ONTOLOGY_BASE}market/")
+# One level down, at <source>/enrichment/, rather than at <source>/.
+#
+# The upstream mappers nest each source vocabulary under its source, so the
+# terms they emit are ontology/bls/cpi/, ontology/sec/filings/ and so on. Held
+# at ontology/bls/, an enrichment namespace is a string prefix of every one of
+# its source's vocabularies, and classify_edge_origin() decides observed vs
+# inferred with startswith -- so every fact a source reported would be labelled
+# something this pipeline made up. The graph still builds and the tests that do
+# not touch namespaces stay green; graph_schema.json just lies about the origin
+# of every edge.
+#
+# Moving enrichment down leaves ontology/<source>/ holding nothing but its own
+# children, which removes the prefix relationship rather than ordering around
+# it. test_no_enrichment_namespace_is_a_prefix_of_a_source_vocabulary pins it.
+#
+# Nothing reads these from storage -- enrichment terms are minted fresh each
+# run -- so unlike the source vocabularies they need no legacy form.
+BLS_ENRICHMENT = Namespace(f"{ONTOLOGY_BASE}bls/enrichment/")
+SEC_ENRICHMENT = Namespace(f"{ONTOLOGY_BASE}sec/enrichment/")
+NOAA_ENRICHMENT = Namespace(f"{ONTOLOGY_BASE}noaa/enrichment/")
+MARKET_ENRICHMENT = Namespace(f"{ONTOLOGY_BASE}market/enrichment/")
 UNIFIED = Namespace(f"{ONTOLOGY_BASE}unified/")
 
 # Types for the SOURCE-side temporal entities (cpi:February, eci:2024, ...).

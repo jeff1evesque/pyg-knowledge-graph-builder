@@ -5,6 +5,7 @@ from spark_jobs.utils.namespaces import (
     MARKET_ENRICHMENT,
     MARKET_QUOTES,
     UNIFIED,
+    with_legacy,
 )
 
 
@@ -64,11 +65,15 @@ SPEC = SourceSpec(
     name="market",
     label="Market",
     path_fragments=("quotes",),
-    # Enrichment first, which is where it sits in the namespace table.
-    namespaces=(
+    # Order carries nothing here: market/enrichment/ and market/quotes/ are
+    # siblings, so neither can shadow the other. It used to matter. Enrichment
+    # sat at ontology/market/ and would have claimed every ontology/market/
+    # quotes/ URI listed after it, naming EquitySnapshot
+    # market_enrichment_EquitySnapshot.
+    namespaces=with_legacy((
         (str(MARKET_ENRICHMENT), "market_enrichment"),
         (str(MARKET_QUOTES), "market_quotes"),
-    ),
+    )),
     enrichment_namespace=str(MARKET_ENRICHMENT),
     # captureTime is the only ISO-8601 time a snapshot carries. quoteTime and
     # tradeTime are epoch milliseconds, which the date parser cannot read.

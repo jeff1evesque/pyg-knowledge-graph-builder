@@ -27,6 +27,7 @@ from spark_jobs.utils.namespaces import (  # noqa: F401
     IDENTIFIER_BASE,
     JOLTS,
     LAUS,
+    LEGACY_VOCABULARIES,
     MARKET_ENRICHMENT,
     MARKET_QUOTES,
     METRO,
@@ -213,7 +214,7 @@ NAMESPACE_PREFIXES: List[Tuple[str, str]] = sources.namespace_prefixes()
 # its slot does not depend on what else is registered. The cost is that it can
 # land on a slot another namespace uses, and when the segment has fewer dims
 # than there are namespaces it always does. Production runs use 16.
-ONTOLOGY_NAMESPACE_INDICES: List[Tuple[str, int]] = [
+_CURRENT_NAMESPACE_INDICES: List[Tuple[str, int]] = [
     (str(CPI), 0),
     (str(PPI), 1),
     (str(ECI), 2),
@@ -240,6 +241,17 @@ ONTOLOGY_NAMESPACE_INDICES: List[Tuple[str, int]] = [
     (str(SOURCE_TEMPORAL), 23),
     (str(OWL), 24),
     (str(RDFS), 25),
+]
+
+# Each legacy vocabulary takes its current form's slot, so a node encodes the
+# same whichever spelling it arrived in. Derived rather than written out: a
+# legacy entry that drifted onto a slot of its own would give the same BLS
+# measurement two different ontology-source features depending on whether its
+# row happened to be restated after the mapper deploy.
+ONTOLOGY_NAMESPACE_INDICES: List[Tuple[str, int]] = _CURRENT_NAMESPACE_INDICES + [
+    (LEGACY_VOCABULARIES[namespace], index)
+    for namespace, index in _CURRENT_NAMESPACE_INDICES
+    if namespace in LEGACY_VOCABULARIES
 ]
 
 # The seed a namespace outside that table hashes its URI with, recorded in the
