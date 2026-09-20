@@ -314,6 +314,14 @@ def emitted_from_s3(archive_bucket: str, market_bucket: str, rows: int) -> set[s
 def analyze(emitted: set[str]) -> tuple[dict, list[str]]:
     """(drift by namespace, namespaces with no evidence either way)."""
     from spark_jobs.utils import rdf_utils
+    from spark_jobs.utils.namespaces import canonical_uri
+
+    # Both sources of evidence are read as raw RDF, never through the loader, so
+    # neither has been canonicalized. Objects written before the mapper deploy
+    # carry the flat spellings, and comparing those against nested constants
+    # matches nothing -- every namespace would report as uncovered and the guard
+    # would silently stop guarding.
+    emitted = {canonical_uri(term) for term in emitted}
 
     referenced = referenced_terms()
     drift: dict[str, list[str]] = {}
