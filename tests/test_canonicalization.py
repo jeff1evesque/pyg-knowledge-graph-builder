@@ -18,13 +18,19 @@ from decimal import Decimal
 
 from rdflib import Graph
 
-from spark_jobs.sources import market, sec
+from spark_jobs.sources import bls, market, sec
 from spark_jobs.utils.canonicalization import canonicalize_source_triples
 from spark_jobs.utils.sec_identifiers import (
     CIK_DIGITS,
     canonicalize_sec_identifiers,
 )
-from spark_jobs.utils.rdf_utils import SEC_FILINGS, identifier_namespace
+from spark_jobs.utils.rdf_utils import (
+    BLS_COMMON,
+    CPI,
+    METRO,
+    SEC_FILINGS,
+    identifier_namespace,
+)
 
 _ID = identifier_namespace(str(SEC_FILINGS))
 _TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
@@ -330,10 +336,131 @@ def test_entry_point_applies_the_sec_rule_to_sec_rows(spark, make_triples):
 
 
 def test_entry_point_leaves_a_source_without_a_repair_alone(spark, make_triples):
-    """Only SEC declares a repair. Rows read from another source's paths come
-    back untouched."""
+    """Only SEC declares a repair of its own, so SEC's is the only one these
+    rows can change.
+
+    Not an identity check any more. Every source now also gets the legacy
+    namespace rewrite, which rebuilds the frame -- so the assertion is that the
+    VALUES come back untouched, which is the thing that mattered. These rows
+    carry no legacy URI, so no branch of the rewrite fires.
+    """
     rows = make_triples(_SPLIT_ROWS)
-    assert canonicalize_source_triples(rows, market.SPEC) is rows
+    assert _triples(canonicalize_source_triples(rows, market.SPEC)) == _triples(rows)
+
+
+# ======================================================================
+# The legacy namespace rewrite — every source gets this one
+# ======================================================================
+
+_FLAT_CPI_INDEX = "https://jefflevesque.com/id/cpi/All_items_July2026_Index"
+_FLAT_CPI_MONTH_TERM = "https://jefflevesque.com/ontology/cpi/hasMonth"
+_FLAT_BLS_MONTH = "https://jefflevesque.com/id/bls/June"
+_NESTED_BLS_CPI_INDEX = "https://jefflevesque.com/id/bls/cpi/All_items_July2026_Index"
+# The shared BLS space is not flat: months sit directly under id/bls/ and states
+# a segment deeper. Two segments, exactly like a nested dataset identifier.
+_FLAT_BLS_STATE = "https://jefflevesque.com/id/bls/state/Alabama"
+_NESTED_BLS_STATE = "https://jefflevesque.com/id/bls/common/state/Alabama"
+
+
+def test_a_flat_identifier_and_term_become_the_nested_spelling(spark, make_triples):
+    """The whole point: one node rather than two once the mappers deploy."""
+    rows = make_triples([(_FLAT_CPI_INDEX, _FLAT_CPI_MONTH_TERM, _FLAT_BLS_MONTH)])
+    assert _triples(canonicalize_source_triples(rows, bls.SPEC)) == {(
+        _NESTED_BLS_CPI_INDEX,
+        str(CPI.hasMonth),
+        f"{identifier_namespace(str(BLS_COMMON))}June",
+    )}
+
+
+def test_the_bare_bls_identifier_rewrite_does_not_reach_a_nested_one(
+    spark, make_triples,
+):
+    """id/bls/ is a string prefix of all ten id/bls/<dataset>/.
+
+    Unanchored, rewriting it to id/bls/common/ would turn every already-correct
+    nested BLS identifier into id/bls/common/cpi/... -- silently, on rows that
+    needed no repair at all. This is the assertion that keeps the anchor.
+    """
+    rows = make_triples([(_NESTED_BLS_CPI_INDEX, str(CPI.hasMonth), "1")])
+    subjects = {s for s, _p, _o in _triples(
+        canonicalize_source_triples(rows, bls.SPEC)
+    )}
+    assert subjects == {_NESTED_BLS_CPI_INDEX}
+
+
+def test_a_legacy_state_is_rewritten_though_it_is_two_segments_deep(
+    spark, make_triples,
+):
+    """The case the anchor alone cannot reach.
+
+    id/bls/state/Alabama and id/bls/cpi/February are structurally identical --
+    two segments under id/bls/ -- and only the vocabulary knows that 'state' is
+    not one of the ten dataset names. The anchor refuses both, correctly for the
+    second and wrongly for the first, so the state prefix is declared as its own
+    unanchored rewrite and sorts ahead of id/bls/ by being longer.
+
+    Load bearing: metro states hasParentRegion against these 19,392 times in the
+    2026 feed, over 2,572 individuals. Left unrewritten, legacy metro rows point
+    at one Alabama and post-deploy rows at another, and the join halves at the
+    deploy boundary without anything failing.
+    """
+    rows = make_triples([
+        ("https://jefflevesque.com/id/bls/metro/Birmingham",
+         str(METRO.hasParentRegion), _FLAT_BLS_STATE),
+    ])
+    assert _triples(canonicalize_source_triples(rows, bls.SPEC)) == {(
+        "https://jefflevesque.com/id/bls/metro/Birmingham",
+        str(METRO.hasParentRegion),
+        _NESTED_BLS_STATE,
+    )}
+
+
+def test_both_spellings_of_a_state_converge_on_one_node(spark, make_triples):
+    """A legacy metro row and a restated one have to reach one Alabama."""
+    rows = make_triples([
+        ("https://jefflevesque.com/id/bls/metro/A",
+         str(METRO.hasParentRegion), _FLAT_BLS_STATE),
+        ("https://jefflevesque.com/id/bls/metro/B",
+         str(METRO.hasParentRegion), _NESTED_BLS_STATE),
+    ])
+    states = {o for _s, _p, o in _triples(
+        canonicalize_source_triples(rows, bls.SPEC)
+    )}
+    assert states == {_NESTED_BLS_STATE}
+
+
+def test_nested_input_passes_through_untouched(spark, make_triples):
+    """A run reading post-deploy data pays the branches and changes nothing."""
+    nested = [(_NESTED_BLS_CPI_INDEX, str(CPI.hasMonth), str(CPI.February))]
+    rows = make_triples(nested)
+    assert _triples(canonicalize_source_triples(rows, bls.SPEC)) == set(nested)
+
+
+def test_a_source_rewrites_only_its_own_vocabularies(spark, make_triples):
+    """The loader canonicalizes per path, so a frame read from market's paths
+    carries market's rewrites and not BLS's eleven. Market is 99.5% of rows."""
+    rows = make_triples([(_FLAT_CPI_INDEX, _FLAT_CPI_MONTH_TERM, "1")])
+    assert _triples(canonicalize_source_triples(rows, market.SPEC)) == {
+        (_FLAT_CPI_INDEX, _FLAT_CPI_MONTH_TERM, "1")
+    }
+
+
+def test_both_spellings_of_one_hub_converge_on_one_node(spark, make_triples):
+    """The measured failure: 11,382 of 101,342 BLS individuals are declared by
+    more than one row, so a restated row and an un-restated one would otherwise
+    leave two Junes."""
+    rows = make_triples([
+        ("https://jefflevesque.com/id/bls/cpi/A", str(CPI.hasMonth), _FLAT_BLS_MONTH),
+        (
+            "https://jefflevesque.com/id/bls/cpi/B",
+            str(CPI.hasMonth),
+            f"{identifier_namespace(str(BLS_COMMON))}June",
+        ),
+    ])
+    months = {o for _s, _p, o in _triples(
+        canonicalize_source_triples(rows, bls.SPEC)
+    )}
+    assert len(months) == 1
 
 
 def test_padding_width_is_the_canonical_cik_width():

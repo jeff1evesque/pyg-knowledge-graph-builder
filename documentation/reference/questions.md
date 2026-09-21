@@ -272,7 +272,7 @@ import pyoxigraph
 
 store = pyoxigraph.Store.read_only("graph/day=2026-09-09")
 for row in store.query("""
-    PREFIX cap: <https://jefflevesque.com/ontology/cap-model/>
+    PREFIX cap: <https://jefflevesque.com/ontology/noaa/cap-model/>
     PREFIX bls: <https://jefflevesque.com/ontology/bls/>
     SELECT DISTINCT ?measurement WHERE {
       ?alert cap:hasInfo ?info .

@@ -53,26 +53,47 @@ FIXTURES = REPO_ROOT / "tests" / "fixtures" / "e2e"
 # NAMESPACE_PREFIXES as it was, entry for entry. Each position was also the
 # namespace's ontology-source feature slot, which ONTOLOGY_NAMESPACE_INDICES now
 # holds fixed.
+# Each vocabulary, then its pre-deploy flat form at the same prefix. The legacy
+# URIs are written out rather than read from LEGACY_VOCABULARIES: a pin built
+# from the table it pins asserts nothing.
+_ONTOLOGY = "https://jefflevesque.com/ontology/"
+
 TODAYS_NAMESPACE_PREFIXES = [
     (str(CPI), "cpi"),
+    (f"{_ONTOLOGY}cpi/", "cpi"),
     (str(PPI), "ppi"),
+    (f"{_ONTOLOGY}ppi/", "ppi"),
     (str(ECI), "eci"),
+    (f"{_ONTOLOGY}eci/", "eci"),
     (str(EMPSIT), "empsit"),
+    (f"{_ONTOLOGY}empsit/", "empsit"),
     (str(JOLTS), "jolts"),
+    (f"{_ONTOLOGY}jolts/", "jolts"),
     (str(LAUS), "laus"),
+    (f"{_ONTOLOGY}laus/", "laus"),
     (str(METRO), "metro"),
+    (f"{_ONTOLOGY}metro/", "metro"),
     (str(REALER), "realer"),
+    (f"{_ONTOLOGY}realer/", "realer"),
     (str(WKYENG), "wkyeng"),
+    (f"{_ONTOLOGY}wkyeng/", "wkyeng"),
     (str(XIMPIM), "ximpim"),
+    (f"{_ONTOLOGY}ximpim/", "ximpim"),
     (str(BLS_COMMON), "bls_common"),
+    (f"{_ONTOLOGY}bls-common/", "bls_common"),
     (str(BLS_ENRICHMENT), "bls_enrichment"),
     (str(SEC_FILINGS), "filings"),
+    (f"{_ONTOLOGY}sec-filings/", "filings"),
     (str(SEC_COMMON), "sec_common"),
+    (f"{_ONTOLOGY}sec-common/", "sec_common"),
     (str(SEC_ENRICHMENT), "sec_enrichment"),
     (str(MARKET_ENRICHMENT), "market_enrichment"),
     (str(MARKET_QUOTES), "market_quotes"),
+    (f"{_ONTOLOGY}market-quotes/", "market_quotes"),
     (str(CAP), "cap"),
+    (f"{_ONTOLOGY}cap-model/", "cap"),
     (str(WEATHER), "weather"),
+    (f"{_ONTOLOGY}weather/", "weather"),
     (str(ALERT), "alert"),
     (str(NOAA_ENRICHMENT), "noaa_enrichment"),
     (str(GEOSPARQL), "geosparql"),
@@ -80,6 +101,34 @@ TODAYS_NAMESPACE_PREFIXES = [
     (str(SOURCE_TEMPORAL), "temporal"),
     (str(OWL), "owl"),
     (str(RDFS), "rdfs"),
+]
+
+# The pre-deploy flat forms, written out for the same reason.
+TODAYS_LEGACY_VOCABULARIES = {
+    str(CPI): f"{_ONTOLOGY}cpi/",
+    str(PPI): f"{_ONTOLOGY}ppi/",
+    str(ECI): f"{_ONTOLOGY}eci/",
+    str(EMPSIT): f"{_ONTOLOGY}empsit/",
+    str(JOLTS): f"{_ONTOLOGY}jolts/",
+    str(LAUS): f"{_ONTOLOGY}laus/",
+    str(METRO): f"{_ONTOLOGY}metro/",
+    str(REALER): f"{_ONTOLOGY}realer/",
+    str(WKYENG): f"{_ONTOLOGY}wkyeng/",
+    str(XIMPIM): f"{_ONTOLOGY}ximpim/",
+    str(BLS_COMMON): f"{_ONTOLOGY}bls-common/",
+    str(SEC_FILINGS): f"{_ONTOLOGY}sec-filings/",
+    str(SEC_COMMON): f"{_ONTOLOGY}sec-common/",
+    str(MARKET_QUOTES): f"{_ONTOLOGY}market-quotes/",
+    str(CAP): f"{_ONTOLOGY}cap-model/",
+    str(WEATHER): f"{_ONTOLOGY}weather/",
+}
+
+# The 26 vocabularies that hold a frozen ontology-source slot, in the order
+# those slots were assigned: today's table with the legacy forms dropped.
+TODAYS_SLOTTED_NAMESPACES = [
+    (namespace, prefix)
+    for namespace, prefix in TODAYS_NAMESPACE_PREFIXES
+    if namespace not in set(TODAYS_LEGACY_VOCABULARIES.values())
 ]
 
 # PROPERTY_MAPPINGS and CLASS_MAPPINGS as ontology_mapper.py wrote them out.
@@ -207,10 +256,23 @@ def test_the_namespace_table_is_todays_entry_for_entry():
 
 
 def test_the_ontology_source_slots_are_todays():
-    assert rdf_utils.ONTOLOGY_NAMESPACE_INDICES == [
+    """The 26 slotted vocabularies in their frozen order, then each legacy form
+    on the slot its current spelling holds.
+
+    Slots stopped being positions in NAMESPACE_PREFIXES when the legacy forms
+    were interleaved into it: a legacy entry occupies a position of its own and
+    deliberately does not take a slot of its own.
+    """
+    frozen = [
         (namespace, slot)
-        for slot, (namespace, _prefix) in enumerate(TODAYS_NAMESPACE_PREFIXES)
+        for slot, (namespace, _prefix) in enumerate(TODAYS_SLOTTED_NAMESPACES)
     ]
+    slots = dict(frozen)
+    shared = [
+        (legacy, slots[current])
+        for current, legacy in TODAYS_LEGACY_VOCABULARIES.items()
+    ]
+    assert rdf_utils.ONTOLOGY_NAMESPACE_INDICES == frozen + shared
 
 
 def test_no_namespace_registered_today_is_hashed():
@@ -233,15 +295,26 @@ def test_registering_a_source_moves_none_of_the_26_slots(where):
 
     assert rdf_utils.hashed_ontology_namespaces(table) == [f"{ONTOLOGY_BASE}toy/"]
 
+    # Registering the toy moves positions in the table. It moves no slot,
+    # because the slot map is a frozen constant that the table is not consulted
+    # to build.
+    assert dict(rdf_utils.ONTOLOGY_NAMESPACE_INDICES) == dict(
+        [
+            (namespace, slot)
+            for slot, (namespace, _prefix) in enumerate(TODAYS_SLOTTED_NAMESPACES)
+        ]
+        + [
+            (legacy, slot)
+            for current, legacy in TODAYS_LEGACY_VOCABULARIES.items()
+            for slot, (namespace, _prefix) in enumerate(TODAYS_SLOTTED_NAMESPACES)
+            if namespace == current
+        ]
+    )
+
     position = {namespace: i for i, (namespace, _prefix) in enumerate(table)}
-    moved_by_position = {
-        namespace
-        for namespace, slot in rdf_utils.ONTOLOGY_NAMESPACE_INDICES
-        if position[namespace] != slot
-    }
-    frozen = {namespace for namespace, _slot in rdf_utils.ONTOLOGY_NAMESPACE_INDICES}
-    shared = {namespace for namespace, _prefix in sources.SHARED_NAMESPACES}
-    assert moved_by_position == (frozen if where == "first" else shared)
+    assert position[f"{ONTOLOGY_BASE}toy/"] == (
+        0 if where == "first" else len(table) - len(sources.SHARED_NAMESPACES) - 1
+    )
 
 
 def test_the_source_vocabularies_are_todays():
@@ -254,7 +327,7 @@ def test_the_source_vocabularies_are_todays():
             CPI, PPI, ECI, EMPSIT, JOLTS, LAUS, METRO, REALER, WKYENG, XIMPIM,
             BLS_COMMON, SEC_COMMON, SEC_FILINGS, MARKET_QUOTES, WEATHER, CAP,
         )
-    }
+    } | set(TODAYS_LEGACY_VOCABULARIES.values())
     assert rdf_utils.SOURCE_VOCABULARIES == built
 
 
@@ -477,14 +550,20 @@ def test_leaving_sec_out_of_a_run_moves_no_namespace_slot():
     ])
     assert [spec.name for spec in picked] == ["bls", "market", "noaa"]
 
+    # A legacy form repeats its current spelling's slot, which is why
+    # market_quotes appears twice and cap/weather twice each.
     slots = dict(rdf_utils.ONTOLOGY_NAMESPACE_INDICES)
-    assert [slots[ns] for ns, _prefix in _spec("market").namespaces] == [15, 16]
-    assert [slots[ns] for ns, _prefix in _spec("noaa").namespaces] == [17, 18, 19, 20]
+    assert [slots[ns] for ns, _prefix in _spec("market").namespaces] == [15, 16, 16]
+    assert [slots[ns] for ns, _prefix in _spec("noaa").namespaces] == [
+        17, 17, 18, 18, 19, 20
+    ]
 
     from_the_pick = {
         ns: slot for slot, (ns, _prefix) in enumerate(sources.namespace_prefixes(picked))
     }
-    assert [from_the_pick[ns] for ns, _prefix in _spec("market").namespaces] == [12, 13]
+    assert [from_the_pick[ns] for ns, _prefix in _spec("market").namespaces] == [
+        23, 24, 25
+    ]
 
 
 # ======================================================================

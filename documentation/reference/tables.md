@@ -248,8 +248,8 @@ import pyoxigraph
 store = pyoxigraph.Store.read_only("graph/day=2026-09-10")
 for row in store.query("""
     SELECT ?measurement WHERE {
-      ?alert       <https://jefflevesque.com/ontology/bls/affectsRegion> ?region .
-      ?measurement <https://jefflevesque.com/ontology/bls/hasRegion>     ?region
+      ?alert       <https://jefflevesque.com/ontology/bls/enrichment/affectsRegion> ?region .
+      ?measurement <https://jefflevesque.com/ontology/bls/enrichment/hasRegion>     ?region
     }
 """):
     print(row["measurement"].value)

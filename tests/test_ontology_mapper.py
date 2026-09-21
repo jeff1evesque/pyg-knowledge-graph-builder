@@ -31,6 +31,10 @@ import pytest
 
 from spark_jobs.utils.rdf_utils import (
     CAP,
+    CPI,
+    JOLTS,
+    MARKET_QUOTES,
+    SEC_FILINGS,
     PROV_DERIVED_BY,
     PROV_OBSERVED_LITERAL_DATATYPE,
     PROV_PROPERTY_DOMAIN,
@@ -249,8 +253,8 @@ def test_enrich_is_deterministic(spark, make_triples):
 # Predicate folding — the step that makes the equivalences mean something
 # ======================================================================
 
-CPI_HAS_MONTH = "https://jefflevesque.com/ontology/cpi/hasMonth"
-JOLTS_HAS_MONTH = "https://jefflevesque.com/ontology/jolts/hasMonth"
+CPI_HAS_MONTH = str(CPI.hasMonth)
+JOLTS_HAS_MONTH = str(JOLTS.hasMonth)
 UNIFIED_HAS_MONTH = PROPERTY_MAPPINGS[CPI_HAS_MONTH]
 
 
@@ -355,8 +359,8 @@ def test_every_unified_target_is_a_fold_fixed_point(spark):
 # the 64-dim class_hierarchy sub-segment, which the GNN cannot distinguish
 # from a declared one.
 
-JOLTS_NS = "https://jefflevesque.com/ontology/jolts/"
-CPI_NS = "https://jefflevesque.com/ontology/cpi/"
+JOLTS_NS = str(JOLTS)
+CPI_NS = str(CPI)
 
 
 def _names(edges):
@@ -437,7 +441,7 @@ REAL_CLASSES = [
         "PercentChange", "UnadjustedPercentChange", "EffectOnAllItems",
         "UnadjustedEffectOnAllItems", "StandardError", "ExpenditureCategory",
     )
-] + ["https://jefflevesque.com/ontology/sec-filings/SECFiling"]
+] + [str(SEC_FILINGS.SECFiling)]
 
 
 def test_every_derived_parent_is_an_existing_class():
@@ -712,19 +716,15 @@ def test_the_nine_measurement_properties_become_sub_properties(spark,
     # jolts:rateValue, not jolts:rate -- the bare spelling was never an upstream
     # term, so the mapping keyed on it covered nothing and this test pinned the
     # dead name in place.
-    unified_value = PROPERTY_MAPPINGS[
-        "https://jefflevesque.com/ontology/jolts/rateValue"
-    ]
+    unified_value = PROPERTY_MAPPINGS[str(JOLTS.rateValue)]
     triples = make_triples([("https://ex/n", RDF_TYPE, "https://ex/Nothing")])
     rows = OntologyMapper(spark).enrich(triples).collect()
 
     subsumed = {(r["subject"], r["object"]) for r in rows
                 if r["predicate"] == RDFS_SUB_PROPERTY_OF}
+    assert (str(JOLTS.rateValue), unified_value) in subsumed
     assert (
-        "https://jefflevesque.com/ontology/jolts/rateValue", unified_value
-    ) in subsumed
-    assert (
-        "https://jefflevesque.com/ontology/market-quotes/lastPrice", unified_value
+        str(MARKET_QUOTES.lastPrice), unified_value
     ) in subsumed
 
 
@@ -936,7 +936,7 @@ def test_a_name_inferred_edge_is_marked_as_such(spark, make_triples):
     HiresRate -> HiresData is rule 1 (measurement specialises its dataset),
     and nothing curated mentions it.
     """
-    ns = "https://jefflevesque.com/ontology/jolts/"
+    ns = str(JOLTS)
     triples = make_triples([
         ("https://ex/a", RDF_TYPE, f"{ns}HiresRate"),
         ("https://ex/b", RDF_TYPE, f"{ns}HiresData"),

@@ -25,35 +25,47 @@ import pytest
 from spark_jobs.graph.config import JobConfig
 from spark_jobs.graph.tables import table_path, write_query_tables
 from spark_jobs.pyg_builder.naming import RDF_TYPE
-
-ONT = "https://jefflevesque.com/ontology/"
+from spark_jobs.utils.rdf_utils import (
+    BLS_ENRICHMENT,
+    CPI,
+    MARKET_ENRICHMENT,
+    MARKET_QUOTES,
+    NOAA_ENRICHMENT,
+    WEATHER,
+)
 
 # Types and predicates taken from the namespace table's own vocabularies, so a
 # re-homed namespace shows up here as a failure rather than as a silently
 # renamed column value.
-CPI_INDEX = f"{ONT}cpi/Index"
-OPTION_SNAPSHOT = f"{ONT}market-quotes/OptionSnapshot"
-WEATHER_ALERT = f"{ONT}weather/WeatherAlert"
+# Built from the namespace constants, not by pasting paths onto the base. These
+# were f"{ONT}market/EquitySector" and the like, which is what the paragraph
+# above asks for only as long as no namespace moves. When enrichment moved to
+# ontology/<source>/enrichment/ (#422) those strings kept pointing at
+# ontology/market/, which nothing registers any more, and the tables failed on
+# unknown_EquitySector rather than on the line that was actually wrong.
+CPI_INDEX = str(CPI.Index)
+OPTION_SNAPSHOT = str(MARKET_QUOTES.OptionSnapshot)
+WEATHER_ALERT = str(WEATHER.WeatherAlert)
 # Market's hub nodes. Same source as the quotes, the other side of the line the
 # tables draw: fourteen of them against 10.2M quotes on 2026-09-17.
-EQUITY_SECTOR = f"{ONT}market/EquitySector"
-ECONOMIC_SECTOR = f"{ONT}bls/EconomicSector"
+EQUITY_SECTOR = str(MARKET_ENRICHMENT.EquitySector)
+ECONOMIC_SECTOR = str(BLS_ENRICHMENT.EconomicSector)
 
-PRECEDES = f"{ONT}bls/precedes"
-UNDERLYING_SYMBOL = f"{ONT}market-quotes/underlyingSymbol"
-CONTRACT_SYMBOL = f"{ONT}market-quotes/symbol"
-REFERS_TO_COMPANY = f"{ONT}market/refersToCompany"
-RELATED_TO_ECONOMIC_SECTOR = f"{ONT}market/relatedToEconomicSector"
-RELATION_CONFIDENCE = f"{ONT}market/relationConfidence"
-CPI_VALUE = f"{ONT}cpi/hasValue"
-STRIKE_PRICE = f"{ONT}market-quotes/strikePrice"
+PRECEDES = str(BLS_ENRICHMENT.precedes)
+UNDERLYING_SYMBOL = str(MARKET_QUOTES.underlyingSymbol)
+CONTRACT_SYMBOL = str(MARKET_QUOTES.symbol)
+REFERS_TO_COMPANY = str(MARKET_ENRICHMENT.refersToCompany)
+RELATED_TO_ECONOMIC_SECTOR = str(MARKET_ENRICHMENT.relatedToEconomicSector)
+RELATION_CONFIDENCE = str(MARKET_ENRICHMENT.relationConfidence)
+CPI_VALUE = str(CPI.hasValue)
+STRIKE_PRICE = str(MARKET_QUOTES.strikePrice)
 # A local name carrying a dot. F.col("a.b") reads that as a struct field, so
 # every reference to a column named from the data has to be quoted.
-DOTTED_GREEK = f"{ONT}market-quotes/greeks.delta"
-ALERT_HEADLINE = f"{ONT}weather/hasHeadline"
-AFFECTS_REGION = f"{ONT}noaa/affectsRegion"
-HAS_REGION = f"{ONT}bls/hasRegion"
-REGION_TYPE = f"{ONT}noaa/Region"
+DOTTED_GREEK = f"{MARKET_QUOTES}greeks.delta"
+ALERT_HEADLINE = str(WEATHER.hasHeadline)
+AFFECTS_REGION = str(NOAA_ENRICHMENT.affectsRegion)
+HAS_REGION = str(BLS_ENRICHMENT.hasRegion)
+REGION_TYPE = str(NOAA_ENRICHMENT.Region)
 RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
 
 INDEX_A = "https://ex/index/a"
