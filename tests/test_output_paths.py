@@ -15,6 +15,7 @@ import pytest
 from spark_jobs.graph.config import (
     JobConfig,
     period_partition,
+    resolve_pyg_only_day,
     source_data_day,
 )
 
@@ -322,6 +323,36 @@ def test_a_stated_day_the_paths_contradict_is_refused():
 def test_a_stated_day_that_is_not_a_date_is_refused(given):
     with pytest.raises(ValueError, match="not YYYY-MM-DD"):
         _config(source_data_day=given)
+
+
+# ======================================================================
+# The day a pyg_only leg stamps on its graph
+# ======================================================================
+#
+# A pyg_only leg reads no source paths. Its day comes from the dataset.json the
+# enriching leg wrote beside the Parquet, so the day travels with the triples it
+# describes. Every published .pt comes from a leg like this.
+
+def test_a_pyg_only_leg_takes_the_day_its_descriptor_records():
+    assert resolve_pyg_only_day("2026-09-24") == "2026-09-24"
+    assert resolve_pyg_only_day("2026-09-24", "2026-09-24") == "2026-09-24"
+
+
+def test_a_stated_day_the_descriptor_contradicts_is_refused():
+    """Accepting it would stamp the .pt with a day its Parquet was not cut from."""
+    with pytest.raises(ValueError, match="dataset.json records 2026-09-24"):
+        resolve_pyg_only_day("2026-09-24", "2026-09-23")
+
+
+def test_a_stated_day_supplies_one_the_descriptor_does_not_carry():
+    """A descriptor written before the day was recorded has none to disagree with."""
+    assert resolve_pyg_only_day("", "2026-09-24") == "2026-09-24"
+
+
+def test_with_no_day_anywhere_a_pyg_only_leg_stamps_none():
+    """Not the day the leg happens to run on, which is not the data's day."""
+    assert resolve_pyg_only_day("") == ""
+    assert resolve_pyg_only_day("", "") == ""
 
 
 # ======================================================================
