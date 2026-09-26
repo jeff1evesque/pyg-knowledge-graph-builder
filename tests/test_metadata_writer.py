@@ -69,7 +69,7 @@ EXPECTED_FILES = {
 }
 
 
-def _fully_registered_collector():
+def _fully_registered_collector(day=""):
     """
     A collector fed a known, self-consistent set of node/edge types, layouts,
     normalization stats, and the three registered sub-builder payloads.
@@ -83,6 +83,7 @@ def _fully_registered_collector():
         edge_vector_dim=64,
         edge_features_enabled=True,
         config={"source": "test", "api_key": "SECRET", "opt": None},
+        day=day,
     )
 
     collector.register_node_types(
@@ -268,6 +269,30 @@ def test_graph_schema_sources_absent_is_empty_not_guessed():
     assert meta["sources"] == []
 
 
+def test_graph_schema_records_the_day_the_data_was_cut_from():
+    """The day a .pt joins its day's query tables on, by plain equality."""
+    meta = MetadataCollector(
+        "2026-09", 1024, 64, True, {}, day="2026-09-24"
+    )._build_graph_schema()["build_metadata"]
+    assert meta["day"] == "2026-09-24"
+    # The month is a different date, and stays what it was.
+    assert meta["time_period"] == "2026-09"
+
+
+def test_graph_schema_day_absent_is_empty_not_guessed():
+    """A build given no day records "", present rather than absent.
+
+    Absent would read as "a build before 1.5". Nothing fills it in from the
+    clock either: a run takes today less a lag, or any day it is given, so when
+    a build ran does not say which day it holds.
+    """
+    meta = MetadataCollector(
+        "2099-01", 1024, 64, True, {}
+    )._build_graph_schema()["build_metadata"]
+    assert "day" in meta
+    assert meta["day"] == ""
+
+
 def _collector_reading_four_sources(config=None, node_type_uris=None):
     """A collector told it read all four sources, whatever its node types say."""
     collector = MetadataCollector(
@@ -413,8 +438,12 @@ def test_graph_schema_version_is_bumped_for_the_new_semantics():
     again, and again load-bearing: at 1.3 `sources` is the read set, and a
     consumer taking it for what the .pt holds is wrong whenever a node type was
     filtered. The version is what tells it whether the honest answer is there.
+
+    1.5 adds build_metadata.day. Additive: at 1.4 a consumer matching a .pt to
+    its day's tables has only the month and the build time, and neither is the
+    day the data was cut from. The version tells it whether to look for one.
     """
-    assert _fully_registered_collector()._build_graph_schema()["version"] == "1.4"
+    assert _fully_registered_collector()._build_graph_schema()["version"] == "1.5"
 
 
 # ======================================================================
@@ -798,6 +827,18 @@ def test_latest_alias_carries_only_the_consumer_facing_schema(tmp_path):
     write_latest_alias(files, str(latest))
 
     assert {p.name for p in latest.iterdir()} == set(LATEST_ALIAS_FILES)
+
+
+def test_latest_alias_carries_the_day(tmp_path):
+    """The alias is the one schema a consumer can fetch without listing, so a
+    consumer picking builds by day reads the day there."""
+    files = _fully_registered_collector(day="2026-09-24").to_metadata_files()
+    latest = tmp_path / "latest" / "metadata"
+
+    write_latest_alias(files, str(latest))
+
+    written = json.loads((latest / "graph_schema.json").read_text())
+    assert written["build_metadata"]["day"] == "2026-09-24"
 
 
 def test_latest_alias_overwrites_so_the_pointer_tracks_the_newest_build(
