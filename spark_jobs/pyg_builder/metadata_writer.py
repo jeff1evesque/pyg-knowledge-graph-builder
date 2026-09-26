@@ -95,6 +95,7 @@ class MetadataCollector:
         config: Dict[str, Any],
         dataset: str = "",
         sources: Optional[List[str]] = None,
+        day: str = "",
     ):
         self._time_period = time_period
         self._vector_dim = vector_dim
@@ -107,6 +108,9 @@ class MetadataCollector:
         # and "unknown" must stay distinguishable from "none".
         self._dataset = dataset
         self._sources = sorted(sources) if sources else []
+        # The day the data was cut from, YYYY-MM-DD. Empty for the same reason,
+        # and when the run had no single day.
+        self._day = day or ""
         self._build_timestamp = datetime.now(timezone.utc).isoformat()
 
         # Populated by register_* methods during construction
@@ -475,6 +479,13 @@ class MetadataCollector:
         edge_types_with_features = len(self._edge_types_with_features)
 
         return {
+            # 1.5: adds `build_metadata.day`, the day the graph's data was cut
+            # from. Additive only. `time_period` is the month and
+            # `build_timestamp` is when the build started, so before 1.5 a
+            # consumer matching a .pt to its day's query tables had to guess the
+            # day from when the run happened -- and a run takes today less a
+            # lag, or any day it is given.
+            #
             # 1.4: adds `build_metadata.sources_in_graph` and
             # `build_metadata.excluded_node_types`. Additive only. 1.3 left "is
             # NOAA in this graph?" answerable only by joining `sources` against
@@ -495,9 +506,13 @@ class MetadataCollector:
             # features". Through 1.0 it was `count > 0` -- the node count --
             # which made it, and summary.node_types_with_literal_features,
             # true/total for every build. See _build_graph_schema's docstring.
-            "version": "1.4",
+            "version": "1.5",
             "build_metadata": {
                 "time_period": self._time_period,
+                # The same value as the query tables' day= partition and
+                # index.json's data_day, so a .pt joins to its day's tables by
+                # equality. "" when the run had no single day; never guessed.
+                "day": self._day,
                 # What the graph was built from. Until 1.3 this file recorded the
                 # period and the feature config but nothing about its inputs, so
                 # "does this graph include market data?" could only be answered by
