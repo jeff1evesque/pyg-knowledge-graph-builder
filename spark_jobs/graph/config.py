@@ -168,6 +168,28 @@ def resolve_source_data_day(source_paths: List[str], given: str = "") -> str:
     return given
 
 
+def resolve_pyg_only_day(recorded: str, given: str = "") -> str:
+    """The day a pyg_only leg stamps on its graph.
+
+    A pyg_only leg reads no source paths, so the day comes from the enriched
+    input's dataset.json: ``recorded``, written by the leg that cut that Parquet.
+    ``given`` is this leg's ``source_data_day``, already checked to be a date.
+    It must agree with ``recorded``, as it must agree with the paths in the leg
+    that wrote the Parquet, so a graph cannot be stamped with a day other than
+    its data's. It supplies the day only when ``recorded`` is empty, which it is
+    in a descriptor written before the day was recorded. With neither, the day
+    is ``""``.
+    """
+    recorded = (recorded or "").strip()
+    given = (given or "").strip()
+    if recorded and given and given != recorded:
+        raise ValueError(
+            f"source_data_day is {given}, but the enriched input's "
+            f"dataset.json records {recorded}"
+        )
+    return recorded or given
+
+
 # ============================================
 # Accepted values
 # ============================================
@@ -290,10 +312,12 @@ class JobConfig:
         self.source_specs: Tuple[SourceSpec, ...] = ()
 
         # The day the sources are partitioned under, for reference data that
-        # has to describe the same day the quotes do, and for the day partition
-        # the query tables are written under. Empty when the paths name no day
-        # and none was given, which resolves to the prefix's latest.csv
-        # instead, and writes no tables.
+        # has to describe the same day the quotes do, for the day partition
+        # the query tables are written under, and for the day the dataset
+        # descriptor and graph_schema.json record. Empty when the paths name no
+        # day and none was given, which resolves to the prefix's latest.csv
+        # instead, and writes no tables. pyg_only reads no paths, so there it
+        # is only the flag; see resolve_pyg_only_day.
         self.source_data_day = resolve_source_data_day(
             self.source_paths, args.get("source_data_day", "")
         )
@@ -666,9 +690,11 @@ def parse_args() -> JobConfig:
         "--source_data_day",
         default="",
         help="YYYY-MM-DD this run's data describes: which constituents CSV it "
-             "reads, and the day partition its query tables are written "
-             "under. Defaults to the day source_paths are partitioned under; "
-             "state it when they name none, or name more than one",
+             "reads, the day partition its query tables are written under, "
+             "and the day graph_schema.json records. Defaults to the day "
+             "source_paths are partitioned under; state it when they name "
+             "none, or name more than one. In pyg_only the day comes from the "
+             "enriched input's dataset.json, and this must agree with it",
     )
     parser.add_argument("--allow_overwrite", default="false")
     parser.add_argument("--time_period", default="")
