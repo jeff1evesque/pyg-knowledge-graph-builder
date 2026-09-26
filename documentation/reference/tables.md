@@ -300,6 +300,13 @@ is here, so the sections above describe the tables alone.
   2026-09-09, shares nothing between days and has no edge to market, so it earns
   little in a graph neural network and still answers state-by-month questions
   in a table.
+- **Which day.** From schema 1.5, a `.pt`'s `build_metadata.day` names the
+  tables partition it was built beside; see
+  [Which date is which](outputs.md#which-date-is-which). Their counts agree per
+  node type, and their totals differ by the build's `excluded_node_types`,
+  which the tables keep. For 2026-09-24, each of the 151 node types in that
+  day's `.pt` held the same count as that day's `nodes/`, and `nodes/` held
+  4,456 more nodes, all in the four NOAA types the build excluded.
 - **`nodes/` against `node_index/`.** The same three columns, over every source
   rather than over the node types the `.pt` holds.
 - **What counts as a number.** `is_numeric` in `facts/` uses the same test the
