@@ -309,10 +309,13 @@ def test_index_json_names_the_day_the_dataset_and_the_notebook_labels(run):
 # the variant. Only its graph_schema.json has it (#419).
 # --------------------------------------------------------------------------- #
 
-def _schema(sources_in_graph=None, version="1.4") -> dict:
+def _schema(sources_in_graph=None, version="1.5", day=DAY) -> dict:
+    """A graph_schema.json. None leaves a key out, as an older version does."""
     build = {"sources": ["a", "b"]}
     if sources_in_graph is not None:
         build["sources_in_graph"] = sources_in_graph
+    if day is not None:
+        build["day"] = day
     return {"version": version, "build_metadata": build}
 
 
@@ -334,7 +337,7 @@ def test_a_variant_written_before_the_key_existed_is_left_without_it(run):
     exactly when it matters -- a source can also leave by arriving empty. The
     rest of the entry is unchanged, so a reader loses one key, not the variant.
     """
-    run.set_graph_schema("1024d", _schema(version="1.3"))
+    run.set_graph_schema("1024d", _schema(version="1.3", day=None))
     run.set_graph_schema("no_edge_features", _schema(["a"]))
 
     assert run.publish("--upload").returncode == 0
@@ -360,6 +363,43 @@ def test_a_graph_schema_json_the_index_cannot_read_still_publishes(run, damage):
     variants = json.loads((run.published / "index.json").read_text())["variants"]
     assert "sources_in_graph" not in variants["1024d"]
     assert (run.published / "1024d" / "hetero_data_1024d.pt").exists()
+
+
+# --------------------------------------------------------------------------- #
+# The day each variant was cut from
+#
+# From schema 1.5 a variant's graph_schema.json records the day its data was
+# cut from, and everything downstream labels the build by it. It has to be the
+# day index.json names for the run (#424).
+# --------------------------------------------------------------------------- #
+
+def test_a_variant_whose_day_is_the_runs_day_publishes(run):
+    run.set_graph_schema("1024d", _schema(["a"], day=DAY))
+    run.set_graph_schema("no_edge_features", _schema(["a", "b"], day=DAY))
+
+    r = run.publish("--upload")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert json.loads((run.published / "index.json").read_text())["data_day"] == DAY
+
+
+def test_a_variant_whose_day_is_another_day_is_refused(run):
+    """Published, it would be labelled with a day its data was not cut from,
+    and nothing downstream has anything to check that label against."""
+    run.set_graph_schema("1024d", _schema(["a"], day="2026-01-01"))
+
+    r = run.publish("--upload")
+    assert r.returncode == 2
+    assert "says day 2026-01-01" in r.stdout
+    assert "s3 sync" not in run.calls_text()
+
+
+@pytest.mark.parametrize("version,day", [("1.4", None), ("1.5", "")])
+def test_a_variant_with_no_day_publishes_as_it_does_today(run, version, day):
+    """1.4 has no day at all, and "" says the job had none. Neither disagrees."""
+    run.set_graph_schema("1024d", _schema(["a"], version=version, day=day))
+
+    r = run.publish("--upload")
+    assert r.returncode == 0, r.stdout + r.stderr
 
 
 # --------------------------------------------------------------------------- #
