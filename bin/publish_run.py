@@ -41,7 +41,8 @@ Environment:
   PYG_PUBLISH_DATASET   the source set's name, e.g. all-sources. Defaults to the name
                         the job wrote into dataset.json. One of the two must be set.
   PYG_PUBLISH_DATA_DAY  YYYY-MM-DD, the day the sources were cut from. Defaults to the
-                        one day the day-level source paths in the manifests name.
+                        one day the day-level source paths in the manifests name. A
+                        variant whose graph_schema.json names another day is refused.
 
 Writes <run-dir>/publish/ (symlinks plus index.json) and appends to publish.log there.
 An --upload also writes its exit code to publish.done: 0 published; 1 the upload or
@@ -224,6 +225,24 @@ def graph_sources(pyg: Path, graphs) -> dict:
         if "sources_in_graph" in recorded:
             found[graph] = recorded["sources_in_graph"]
     return found
+
+
+def check_graph_day(pyg: Path, graph: str, day: str) -> None:
+    """Refuse a variant whose graph_schema.json names a day other than the run's.
+
+    From schema 1.5 a .pt records the day its data was cut from, and everything
+    downstream labels the build by it, with nothing else to check it against. A
+    variant with no day is not refused: 1.4 has no such field, "" says the job
+    had none, and a schema that cannot be read has none to disagree with.
+    """
+    schema = pyg / f"hetero_data_{graph}_metadata" / "graph_schema.json"
+    try:
+        recorded = json.loads(schema.read_text()).get("build_metadata") or {}
+    except (OSError, ValueError):
+        return
+    if recorded.get("day") and recorded["day"] != day:
+        raise Refused(f"{graph}'s graph_schema.json says day {recorded['day']}, "
+                      f"but the run's data_day is {day}")
 
 
 def dataset_name(enriched: Path, period: str, env):
@@ -612,6 +631,9 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
             log("Run again with --upload to publish.")
         return rc
 
+    # Before the checksums, which read every .pt in full.
+    for graph in graphs:
+        check_graph_day(pyg, graph, day)
     log("checking the graph files against checksums.json")
     for graph in graphs:
         check_graph(pyg, graph, log)
