@@ -56,7 +56,7 @@ whatever a second rule said.
 ```
 <PYG_TABLES_ROOT>/<dataset>/
 ├── _days/
-│   └── 2026-09-10.json        the day's completion marker, written last
+│   └── 2026-09-10.json        the day's completion marker, written last; see "The day marker"
 ├── nodes/day=2026-09-10/
 ├── edges/day=2026-09-10/
 ├── edge_types/day=2026-09-10/
@@ -76,6 +76,22 @@ finishes it, including when the run folder itself had already gone up.
 
 The run's own `index.json` names the tables and their root, so a consumer
 holding a run can find them.
+
+## The day marker
+
+A day's marker says the day is complete, and which run published it and when.
+The public knowledge graph api on jefflevesque.com reads `run_id` and
+`published` from every marker, so treat the following as the contract:
+
+| field | guarantee |
+|---|---|
+| `day` | the day, `YYYY-MM-DD`, the same as the marker's file name |
+| `run_id` | the run that published the day, as its id: the UTC time it started, `YYYYMMDDTHHMMSSZ`. It is the same id the run's builds are [published](outputs.md#published-runs) under |
+| `published` | when the upload that finished the day started, in UTC, as `YYYY-MM-DDTHH:MM:SSZ`. The day became readable later, once that upload was checked and the marker went up |
+| written | once and last, after every table of the day; never rewritten |
+
+The marker also lists the day's `tables` and counts its `files`. They describe
+the upload and carry no guarantee.
 
 ## Reading them
 

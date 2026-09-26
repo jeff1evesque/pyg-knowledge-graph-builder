@@ -17,6 +17,7 @@ touches the network.
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -500,6 +501,20 @@ def test_the_day_marker_goes_up_last(run):
     table_sync = next(i for i, call in enumerate(calls)
                       if call.startswith("s3 sync") and "tables" in call)
     assert table_sync < marker
+
+
+def test_the_day_marker_names_the_day_the_run_and_when_it_was_published(run):
+    """Another service reads run_id and published from every marker, so a
+    renamed or reshaped field has to fail here rather than there."""
+    run.add_tables()
+    assert run.publish("--upload").returncode == 0
+
+    marker = json.loads((run.published_tables / "_days" / f"{DAY}.json").read_text())
+    assert marker["day"] == DAY
+    assert marker["run_id"] == RUN_ID
+    assert re.fullmatch(r"[0-9]{8}T[0-9]{6}Z", marker["run_id"])
+    assert re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+                        marker["published"])
 
 
 def test_index_json_names_the_tables_and_where_they_went(run):

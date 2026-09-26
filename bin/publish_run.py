@@ -536,6 +536,8 @@ def publish_tables(rd: Path, items, dst: str, day: str, run_id: str,
     """
     marker = f"{TABLES_MARKER}/{day}.json"
     tree = rd / TABLES_TREE
+    # day, run_id and published are a contract another service reads; see
+    # documentation/reference/tables.md.
     index = {
         "day": day,
         "run_id": run_id,
