@@ -330,7 +330,9 @@ run did not go up". A run that wrote tables and has no `PYG_TABLES_ROOT` is
 refused before anything is written.
 
 `PYG_PUBLISH_DATA_DAY` names the day the sources were cut from. It is needed only
-when the day-level source paths in the manifests name more than one day. The exit
+when the day-level source paths in the manifests name more than one day. A
+variant whose `graph_schema.json` records a different
+[`day`](../reference/outputs.md#which-date-is-which) is refused. The exit
 code goes to `<run-dir>/publish.done` and the output to `<run-dir>/publish.log`:
 `0` published; `1` the upload or its check failed, including a tables root that
 cannot be listed once the run is up, and running again resumes it; `2` refused,

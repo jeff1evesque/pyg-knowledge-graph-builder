@@ -100,6 +100,7 @@ def build_hetero_data(
     time_period: str = "",
     dataset: str = "",
     sources: Optional[List[str]] = None,
+    day: str = "",
 ) -> Tuple[Any, MetadataCollector, DataFrame]:
     """
     Build a PyTorch Geometric HeteroData object from an enriched triples
@@ -178,6 +179,7 @@ def build_hetero_data(
         config=config,
         dataset=dataset,
         sources=sources,
+        day=day,
     )
 
     # Ensure triples_df is persisted — if already persisted, this is a no-op.

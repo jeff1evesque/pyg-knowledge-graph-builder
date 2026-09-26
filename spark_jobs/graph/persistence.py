@@ -117,12 +117,17 @@ def save_dataset_descriptor(config: JobConfig, spark: SparkSession) -> None:
     Labels, not paths: the names of the sources the run's paths picked, so a
     source is named without naming a bucket, and what is written here reaches
     the published graph schema.
+
+    The day the sources were cut from goes here too, beside the Parquet cut
+    from it, so a pyg_only graph built from this output is stamped with this
+    day and no other.
     """
     labels = sorted(spec.name for spec in config.source_specs)
     body = json.dumps({
         "dataset": config.dataset,
         "sources": labels,
         "time_period": config.time_period,
+        "day": config.source_data_day,
         "written": utcnow().isoformat(),
     }, indent=2).encode("utf-8")
 
@@ -132,6 +137,7 @@ def save_dataset_descriptor(config: JobConfig, spark: SparkSession) -> None:
         logger.info(f"Saved dataset descriptor to {path}")
         logger.info(f"  dataset: {config.dataset or '(unnamed)'}")
         logger.info(f"  sources: {', '.join(labels) or '(none)'}")
+        logger.info(f"  day:     {config.source_data_day or '(none)'}")
     except Exception as e:
         # Not fatal: the enriched output is already written and correct, and a
         # graph built without this simply records no sources.
@@ -145,7 +151,8 @@ def load_dataset_descriptor(
 
     Absent is normal rather than an error: every enriched directory written
     before this existed has none, and a graph schema that records nothing is
-    honest where one that guessed would not be.
+    honest where one that guessed would not be. For the same reason a
+    descriptor written before the day was recorded reads its ``day`` as ``""``.
     """
     path = dataset_descriptor_path(enriched_parquet_path)
     try:
@@ -156,11 +163,14 @@ def load_dataset_descriptor(
         # preserves order within one.
         rows = spark.read.text(path).collect()
         if rows:
-            return json.loads("\n".join(row[0] for row in rows))
+            descriptor = json.loads("\n".join(row[0] for row in rows))
+            descriptor.setdefault("day", "")
+            return descriptor
     except Exception as e:
         logger.info(
             f"No readable dataset descriptor at {path} ({type(e).__name__}: "
-            f"{e}); the graph schema will not name its sources."
+            f"{e}); the graph schema will not name its sources, nor its day "
+            f"unless --source_data_day gives one."
         )
     return {}
 

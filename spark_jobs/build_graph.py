@@ -46,7 +46,8 @@ Launch with spark-submit (see bin/submit_spark_job.sh). Parameters:
         writes no query tables and its other artifacts are unchanged.
     --source_data_day:         YYYY-MM-DD the data describes. Defaults to the
         day source_paths are partitioned under; state it when they name none,
-        or name more than one
+        or name more than one. graph_schema.json records it; in pyg_only the
+        day comes from dataset.json, and this must agree with it
     --allow_overwrite: true | false (default: false). Off, the job refuses to
         start when the artifacts it would write are already present.
     --time_period:             label (e.g. "2024-12") for output naming
@@ -133,6 +134,7 @@ from spark_jobs.graph.config import (
     PYG_BUILDER_AVAILABLE,
     JobConfig,
     parse_args,
+    resolve_pyg_only_day,
 )
 from spark_jobs.sources.spec import SourceSpec
 
@@ -219,6 +221,7 @@ def run_pyg_construction(
     time_period: str = "",
     dataset: str = "",
     sources: Optional[List[str]] = None,
+    day: str = "",
 ) -> Tuple:
     """
     Run PyG HeteroData construction from enriched triples DataFrame.
@@ -258,7 +261,7 @@ def run_pyg_construction(
     config = pyg_config or {}
     hetero_data, metadata, node_index_df = build_hetero_data(
         spark, triples_df, config, time_period=time_period,
-        dataset=dataset, sources=sources,
+        dataset=dataset, sources=sources, day=day,
     )
 
     elapsed = time.time() - start_time
@@ -405,6 +408,7 @@ def execute_full_pipeline(
         time_period=config.time_period,
         dataset=config.dataset,
         sources=sorted(spec.name for spec in config.source_specs),
+        day=config.source_data_day,
     )
 
     # Step 5: Save final artifacts (local + optional S3)
@@ -578,6 +582,14 @@ def execute_pyg_only(
     logger.info("Executing PyG ONLY mode")
     logger.info("")
 
+    # What this enriched output was built from, and the day it was cut from.
+    # pyg_only never sees source_paths -- it reads Parquet a previous run wrote
+    # -- so the descriptor beside that Parquet is the only way the graph can
+    # name its own sources and day. Read before the triples, so a
+    # --source_data_day that disagrees with it fails before the load.
+    descriptor = load_dataset_descriptor(spark, config.enriched_input_path)
+    day = resolve_pyg_only_day(descriptor.get("day", ""), config.source_data_day)
+
     # Step 1: Load enriched Parquet → distributed DataFrame
     logger.info("=" * 80)
     logger.info("PHASE: LOADING ENRICHED TRIPLES (Parquet, local)")
@@ -609,16 +621,12 @@ def execute_pyg_only(
     logger.info("")
 
     # Step 2: Build PyG (executors → compact tensors → driver)
-    # What this enriched output was built from. pyg_only never sees
-    # source_paths -- it reads Parquet a previous run wrote -- so the descriptor
-    # beside that Parquet is the only way the graph can name its own sources.
-    descriptor = load_dataset_descriptor(spark, config.enriched_input_path)
-
     hetero_data, metadata, node_index_df = run_pyg_construction(
         spark, triples_df, config.pyg_config,
         time_period=config.time_period,
         dataset=config.dataset or descriptor.get("dataset", ""),
         sources=descriptor.get("sources"),
+        day=day,
     )
 
     # Step 3: Save final artifacts (local + optional S3)

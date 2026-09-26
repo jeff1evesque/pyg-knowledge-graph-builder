@@ -277,3 +277,21 @@ def test_every_edge_type_records_the_origin_its_endpoints_imply(spark):
     assert origins[
         "(bls_enrichment_RateMeasurement, cpi_hasCategory, cpi_Category)"
     ] == "enrichment"
+
+
+# ======================================================================
+# The day the data was cut from reaches graph_schema.json
+# ======================================================================
+
+def test_the_day_reaches_the_graph_schema(spark):
+    """Dropped here, every .pt would record "" while the leg that built it
+    knew the day, and nothing but the e2e suite would notice."""
+    triples = spark.createDataFrame([
+        ("https://ex/a", RDF_TYPE, CPI_INDEX),
+    ], schema="subject STRING, predicate STRING, object STRING")
+
+    _data, metadata, _node_index = build_hetero_data(
+        spark, triples, config=NO_EDGE_FEATURES, day="2026-09-24"
+    )
+
+    assert metadata._build_graph_schema()["build_metadata"]["day"] == "2026-09-24"

@@ -48,7 +48,7 @@ The pipeline supports three execution modes:
 - **Driver Memory Safety**: Large node types use chunked collection with explicit memory management to prevent OOM
 - **Seven Metadata Files Per Build**: `graph_schema.json`, `feature_spec.json`, `normalization.json`, `encoding_config.json`, `ontology_schema.json`, `slot_mapping.json`, and `checksums.json` written alongside every `.pt` file (locally, and mirrored to S3 when an archive is configured) — the first six enabling consistent training, inference, and experiment tracking, and the last letting a consumer verify the bytes it fetched before it loads a pickle
 - **Node Index Per Build**: a `node_index/` Parquet dataset mapping every `(node_type, node_id)` back to its source entity URI — the `.pt` holds only feature tensors, so this is what makes the graph joinable to training labels and lets a prediction be attributed to a real entity
-- **Query Tables**: the enriched data as day-partitioned Parquet tables and a triple store, covering every source, including the NOAA weather the `.pt` leaves out, for SQL, SPARQL and retrieval by an LLM
+- **Query Tables**: the enriched data as day-partitioned Parquet tables and a triple store, covering every source, including the NOAA weather the `.pt` leaves out, for SQL, SPARQL and retrieval by an LLM. Each `.pt`'s `graph_schema.json` names the day of tables it was built beside, so a `.pt` and its day's tables join on `build_metadata.day`
 - **Temporal Unification**: Unified temporal entities across all data sources
 - **Intra-Source Linking**: Automatic relationship discovery within data source families
 - **Cross-Source Linking**: Automatic relationship discovery across heterogeneous datasets

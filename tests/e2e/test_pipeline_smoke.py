@@ -374,9 +374,13 @@ def test_split_enrichment_then_pyg(spark, tmp_path):
     work = str(tmp_path)
     source_paths = ",".join(_turtle_parquet_source_paths())
 
+    # The fixture paths name no day, so one is stated. A day would also write
+    # query tables, which this test never wrote and does not need, so they are
+    # switched off.
     enrich = _make_config(
         local_work_dir=work, mode="enrichment_only",
         source_format="turtle_parquet", source_paths=source_paths,
+        source_data_day="2099-01-02", enable_query_tables="false",
     )
     execute_enrichment_only(enrich, spark, s3_client=None)
     assert os.path.exists(enrich.enriched_parquet_path), (
@@ -387,6 +391,14 @@ def test_split_enrichment_then_pyg(spark, tmp_path):
     pyg = _make_config(local_work_dir=work, mode="pyg_only")
     execute_pyg_only(pyg, spark, s3_client=None)
     _assert_valid_graph_and_metadata(pyg, tmp_path)
+
+    # Every published .pt comes from a leg like this one, which is given no
+    # day. It reaches the graph through the descriptor beside the Parquet.
+    schema = json.loads(
+        (Path(derive_metadata_prefix(pyg.pyg_output_path))
+         / "graph_schema.json").read_text()
+    )
+    assert schema["build_metadata"]["day"] == "2099-01-02"
 
 
 # --------------------------------------------------------------------------- #

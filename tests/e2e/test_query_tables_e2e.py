@@ -120,6 +120,12 @@ def test_a_default_run_writes_every_table_and_the_store(run):
     assert set(result["query_tables"]) >= set(TABLES) | {"graph"}
 
 
+def test_the_graph_schema_names_the_day_its_tables_are_under(run):
+    """A .pt and its day's tables join on this, by plain equality."""
+    config, _ = run
+    assert _schema(config)["build_metadata"]["day"] == DAY
+
+
 def test_nodes_holds_the_nodes_the_graph_schema_counted(spark, run):
     config, _ = run
     assert (
