@@ -63,7 +63,7 @@ When config is empty, sensible defaults are inferred from the data.
 | `--pyg_filename` | No | `hetero_data.pt` | Local `.pt` filename (override for experiment variants, e.g. `hetero_data_512d.pt`); determines the metadata directory name |
 | `--enable_ontology_mapping` | No | `true` | Run the ontology-mapping phase: equivalences, predicate folding, and the derived `rdfs:subClassOf` hierarchy that fills the `class_hierarchy` sub-segment. Applies to modes `full` and `enrichment_only`; `pyg_only` never reaches this phase, so the flag is inert there (and meaningless in that mode's manifest — see [`ontology_schema.json`](../reference/outputs.md#ontology_schemajson)) |
 | `--enable_query_tables` | No | `true` | Write the day-partitioned [query tables](../reference/tables.md) beside the enriched triples. `false` skips every table write and leaves the existing artifact set untouched. Applies to modes `full` and `enrichment_only`; `pyg_only` never reaches the phase that writes them |
-| `--source_data_day` | No | *(from the paths)* | `YYYY-MM-DD` the run's data describes: which constituents CSV it reads, and the day partition its query tables are written under. Defaults to the day `--source_paths` are partitioned under; state it when they name none, or name more than one |
+| `--source_data_day` | No | *(from the paths)* | `YYYY-MM-DD` the run's data describes: which constituents CSV it reads, and the day partition its query tables are written under. Defaults to the day `--source_paths` are partitioned under; state it when they name none, or name more than one. The day also reaches `graph_schema.json`, as [`build_metadata.day`](../reference/outputs.md#which-date-is-which). In `pyg_only` the day comes from the enriched input's `dataset.json`; a flag given there must agree with it, and supplies the day only when `dataset.json` records none |
 | `--time_period` | No | Current `YYYY-MM` | Time period label for output paths |
 | `--dataset` | No | `""` | Names the combination of sources this run is built from, e.g. `all-sources`. Recorded in the enriched output's `dataset.json`, and from there in every `graph_schema.json`; it is also the folder a published run lands in — see [Naming the dataset](#naming-the-dataset) |
 | `--pyg_config` | No | `{}` | JSON string with PyG construction config |
@@ -283,6 +283,11 @@ disagrees with it, so one name set once serves both. Set before the run, the job
 records it and the publish agrees. Set only before the publish, `index.json`
 names the dataset while every `graph_schema.json` beside it records `""`, and two
 files from one run disagree about what the run is.
+
+A run with no day records `""` the same way. When its source paths name no
+single day and it is given no `--source_data_day`, `dataset.json` and every
+`graph_schema.json` it builds record `day` as `""`. Nothing fills in the day the
+run happened to execute on.
 
 ## Reading sources from local disk
 
