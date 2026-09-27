@@ -46,6 +46,8 @@ def _config(work_dir: str, mode: str = "enrichment_only") -> SimpleNamespace:
         enable_ontology_mapping=False,
         enable_query_tables=True,
         source_data_day="2099-01-15",
+        stock_splits_bucket="",
+        stock_splits_prefix="",
         pyg_config={},
         parquet_partitions=2,
         archive_to_s3=False,
@@ -149,6 +151,20 @@ def test_manifest_records_the_query_tables_flag_and_the_day(spark, tmp_path):
     payload = json.loads(open(_find_manifest(work), "rb").read())
     assert payload["config"]["enable_query_tables"] is True
     assert payload["config"]["source_data_day"] == "2099-01-15"
+
+
+def test_manifest_records_where_the_splits_were_read_from(spark, tmp_path):
+    """The location only. Whether the feed was read for the day is the result's
+    query_tables, which names splits only when it was."""
+    work = tmp_path / "splits"
+    config = _config(str(work), mode="full")
+    config.stock_splits_bucket = "b"
+    config.stock_splits_prefix = "feed"
+    save_job_manifest(spark, None, config, {"mode": "full"}, 0.5)
+
+    payload = json.loads(open(_find_manifest(work), "rb").read())
+    assert payload["config"]["stock_splits_bucket"] == "b"
+    assert payload["config"]["stock_splits_prefix"] == "feed"
 
 
 @pytest.mark.parametrize("mode", ["pyg_only", "parse_only"])

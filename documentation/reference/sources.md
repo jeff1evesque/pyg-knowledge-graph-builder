@@ -240,6 +240,10 @@ full options chains (~500K+ symbols per snapshot) at ~39 snapshots a day on
 20-minute intervals during market hours. **NOAA** is US weather alerts in CAP
 format.
 
+Stock splits are read as well, but not as a source. The split feed is plain
+Parquet, read directly into the [`splits/`](tables.md#splits) query table the way
+the constituents list is read, so it never enters the triples or the `.pt`.
+
 > **Measured volume:** one four-source day loads **322.7M triples** and enriches
 > to **421.4M**. Market is 99.5% of that; BLS 1.3M, SEC 198K, NOAA 143K.
 

@@ -18,7 +18,7 @@ A run publishes two different things. This page uses only the first.
 
 | | Query tables | PyG graph (`.pt`) |
 |---|---|---|
-| What it is | Six Parquet tables and a triple store, `graph/`: the nodes, the edges between them, and their values | One PyTorch Geometric `HeteroData` file: a matrix of numbers per node type, and each edge as a pair of row numbers |
+| What it is | Seven Parquet tables and a triple store, `graph/`: the nodes, the edges between them, their values, and the day's stock splits | One PyTorch Geometric `HeteroData` file: a matrix of numbers per node type, and each edge as a pair of row numbers |
 | What it is for | Looking things up and answering questions: SQL, SPARQL, or retrieval for an LLM | Training and running a graph neural network |
 | Names, text and dates | Yes. Every row carries a URI, and `facts/`, `entities/` and `snapshots/` carry the values | No. A row is a position, and `node_index/` says which entity it is |
 | Where | `<PYG_TABLES_ROOT>/<dataset>/<table>/day=YYYY-MM-DD/` | In the run's folder, as `<variant>/hetero_data_<variant>.pt` |
@@ -408,6 +408,72 @@ of claim.
 
 **Days needed:** one, for one month. BLS is monthly, so a three-source question
 resolves at the month, and a year of days gives about twelve points.
+
+### A split in the price series
+
+*Did a quoted company split its stock in the window, and what is its price
+series adjusted for the split?*
+
+Reads `splits/` and `snapshots/`.
+
+`snapshots/` keeps prices as quoted, so a split shows up as the price changing
+scale overnight. `splits/` says when, and by how much. `split_date` is the last
+trading day at the old price, and a price on or before it is adjusted by
+multiplying it by `shares_before / shares_after`. A price takes every split on
+or after its own day:
+
+```sql
+CREATE VIEW splits    AS FROM read_parquet('<root>/splits/*/*.parquet',    hive_partitioning = true);
+CREATE VIEW snapshots AS FROM read_parquet('<root>/snapshots/*/*.parquet', hive_partitioning = true);
+
+SELECT q.day, q.market_quotes_captureTime AS captured, q.market_quotes_lastPrice AS price,
+       q.market_quotes_lastPrice * coalesce((
+         SELECT product(s.shares_before / s.shares_after)
+         FROM   splits s
+         WHERE  s.ticker = q.market_quotes_symbol AND s.split_date >= q.day
+       ), 1) AS adjusted
+FROM   snapshots q
+WHERE  q.node_type = 'market_quotes_EquitySnapshot' AND q.market_quotes_symbol = 'APH'
+ORDER  BY captured;
+```
+
+The feed can be wrong, so a split is worth checking against the price. The
+day's last price on `split_date` and on the next trading day should differ by
+the ratio. `unexplained` is what is left of the move once the ratio is taken
+out, near 1 when the split accounts for it:
+
+```sql
+WITH last AS (
+  SELECT market_quotes_symbol AS ticker, day,
+         arg_max(market_quotes_lastPrice, market_quotes_captureTime) AS price
+  FROM   snapshots
+  WHERE  node_type = 'market_quotes_EquitySnapshot'
+  GROUP  BY ALL
+)
+SELECT s.ticker, s.ratio, s.split_date,
+       d0.price AS on_split_date, d1.price AS next_day,
+       round(d1.price / d0.price * s.shares_after / s.shares_before, 2) AS unexplained
+FROM   splits s
+JOIN   last d0 ON d0.ticker = s.ticker AND d0.day = s.split_date
+JOIN   last d1 ON d1.ticker = s.ticker
+             AND d1.day = (SELECT min(day) FROM last l
+                           WHERE l.ticker = s.ticker AND l.day > s.split_date);
+```
+
+No published day holds a quoted company's split yet, so these numbers come from
+the quote files upstream, one midday snapshot a day. APH's 2:1 dated 2026-09-02
+went from 158.50 to 80.76, an `unexplained` of 1.02. HON's 1:2 dated 2026-06-26
+went from 228.13 to 236.60, an `unexplained` of 0.52: the feed lists a split the
+price never made.
+
+Most rows are not about quoted companies. The feed covers the whole market, 19
+to 49 splits a month in 2026, and about one a month is on a company in the
+index. A split on a ticker `snapshots/` does not carry joins to nothing.
+
+**Days needed:** every day in the window. A split is published only on its own
+day, so adjusting a price takes every `splits/` partition from the price's day
+to the end of the window. A day with no partition was not read, so an adjusted
+series cannot vouch for it.
 
 ## What the tables do not answer
 

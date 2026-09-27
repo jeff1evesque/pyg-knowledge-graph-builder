@@ -46,6 +46,12 @@ export PYG_TIME_PERIOD=YYYY-MM
 # export PYG_SOURCE_PATHS="s3a://BUCKET/PREFIX/year=${PYG_DATA_YEAR:?pass --data-date}/month=${PYG_DATA_MONTH}/${PYG_DATA_DAY}.snappy.parquet"
 # export PYG_TIME_PERIOD="${PYG_DATA_YEAR}-${PYG_DATA_MONTH}"
 
+# The stock split feed, for the splits/ query table. Not a source path: a day with no
+# file is logged and the run goes on without the table. Leave the prefix out when the
+# feed's year= folders sit at the bucket's root.
+# export PYG_SPLITS_BUCKET=BUCKET
+# export PYG_SPLITS_PREFIX=PREFIX
+
 # --------------------------------------------------------------------------- #
 # Reading a staged local mirror instead of object storage
 # --------------------------------------------------------------------------- #
