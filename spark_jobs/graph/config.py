@@ -287,6 +287,11 @@ class JobConfig:
             "market_sector_definitions_key", ""
         )
 
+        # The stock split feed, read on the driver into the splits/ query
+        # table. No bucket, no table. An empty prefix is the bucket's root.
+        self.stock_splits_bucket = args.get("stock_splits_bucket", "") or ""
+        self.stock_splits_prefix = args.get("stock_splits_prefix", "") or ""
+
         # Source path(s)/URI(s): a single value or a comma-separated list.
         # Each entry is a local directory or an s3a:// URI, and belongs to one
         # registered source. Whitespace around each entry is stripped.
@@ -726,6 +731,19 @@ def parse_args() -> JobConfig:
              "source_paths are partitioned under (or the day CSV named here), "
              "and <prefix>/latest.csv when that file is absent or no day is "
              "known. <prefix>/latest.csv works the same as <prefix>",
+    )
+    parser.add_argument(
+        "--stock_splits_bucket",
+        default="",
+        help="Bucket holding the stock split feed, one Parquet object per "
+             "month at <prefix>/year=YYYY/MM.snappy.parquet. The day's splits "
+             "become the splits/ query table. Unset, there is no splits table",
+    )
+    parser.add_argument(
+        "--stock_splits_prefix",
+        default="",
+        help="Where the split feed's year= folders sit in "
+             "--stock_splits_bucket. Empty is the bucket's root",
     )
 
     parsed = parser.parse_args()
