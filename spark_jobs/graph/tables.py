@@ -6,7 +6,7 @@ about 95 GB, none of it filterable by ticker, by date or by meaning, and the
 graph's structure only recoverable by unpickling a 42 GB blob. These tables are
 the same data in shapes something can query, at roughly 2.5% of the size.
 
-Six tables and a triple store:
+Seven tables and a triple store:
 
     nodes/        (node_type, node_id, uri)
     edges/        (src_type, src_id, relation, dst_type, dst_id)
@@ -14,6 +14,7 @@ Six tables and a triple store:
     facts/        every literal a snapshot does not carry, long format
     entities/     the text each node carries, assembled
     snapshots/    market quotes, pivoted wide -- one row per snapshot
+    splits/       the day's stock splits, read from the split feed (splits.py)
     graph/        the non-snapshot subgraph as a triple store (graph_store.py)
 
 Three things about them are deliberate and easy to get wrong:
@@ -54,7 +55,7 @@ value. They go where every other node goes, so a sector's
 the store.
 """
 import logging
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession
@@ -62,6 +63,7 @@ from pyspark.sql import functions as F
 
 from spark_jobs.graph.config import JobConfig
 from spark_jobs.graph.graph_store import write_graph_store
+from spark_jobs.graph.splits import read_splits
 from spark_jobs.pyg_builder.naming import (
     ALLOW_UNREGISTERED_NAMESPACES,
     EXCLUDED_EDGE_PREDICATES,
@@ -595,17 +597,49 @@ def write_snapshots(snapshot_df: DataFrame, root: str, day: str) -> str:
     return _write(typed.orderBy(*sort_keys), root, "snapshots", day)
 
 
+SPLITS_SCHEMA = (
+    "ticker string, ratio string, shares_after double, shares_before double, "
+    "split_date date"
+)
+
+
+def write_splits(
+    spark: SparkSession, splits: List[Dict[str, Any]], root: str, day: str
+) -> str:
+    """The day's stock splits, as ``read_splits`` returned them.
+
+    Written even when there are none. An empty partition is how a reader tells a
+    day with no splits from a day the feed was not read for, which has no
+    partition at all.
+    """
+    rows = [
+        (
+            split["ticker"], split["ratio"], split["shares_after"],
+            split["shares_before"], split["split_date"],
+        )
+        for split in splits
+    ]
+    # One file: a few rows a day, already sorted by read_splits.
+    frame = spark.createDataFrame(rows, SPLITS_SCHEMA).coalesce(1)
+    return _write(frame, root, "splits", day)
+
+
 # ============================================
 # The whole set
 # ============================================
 def write_query_tables(
-    spark: SparkSession, triples_df: DataFrame, config: JobConfig
+    spark: SparkSession,
+    triples_df: DataFrame,
+    config: JobConfig,
+    s3_client=None,
 ) -> Dict[str, str]:
     """Write every query table for this run's day. Returns table -> path.
 
     Returns an empty dict, and writes nothing, when the run asked for no tables
     or cannot say which day its data describes. Neither is a failure: the graph
     the run builds is unaffected either way.
+
+    ``s3_client`` is for the split feed's read, and tests pass a stub.
     """
     if not config.enable_query_tables:
         logger.info("Query tables disabled (--enable_query_tables false)")
@@ -685,6 +719,14 @@ def write_query_tables(
             written["graph"] = store
     finally:
         node_id_df.unpersist()
+
+    # Not from the triples: the split feed is read on its own. None means it was
+    # not read for this day, which read_splits has already logged.
+    splits = read_splits(
+        config.stock_splits_bucket, config.stock_splits_prefix, day, s3_client
+    )
+    if splits is not None:
+        written["splits"] = write_splits(spark, splits, root, day)
 
     logger.info(
         f"Wrote {len(written)} query tables for {day} "
