@@ -15,15 +15,20 @@ about what must NOT reach them:
     untyped URI is neither, so neither becomes an edge
   * a relation from a namespace no source registers stops the tables before
     ``edges/`` is written, unless pyg_config allows it
+  * ``splits/`` comes from the split feed, not the triples. A day the feed
+    listed no splits gets an empty partition, and a day it was not read for
+    gets none, so the two can be told apart
 
 Tier 4: real Spark, small frames, no cluster.
 """
 import os
+from datetime import date, datetime, timezone
 
 import pytest
 
 from spark_jobs.graph.config import JobConfig
 from spark_jobs.graph.tables import table_path, write_query_tables
+from split_feed import feed_client, month_object
 from spark_jobs.pyg_builder.naming import RDF_TYPE
 from spark_jobs.utils.rdf_utils import (
     BLS_ENRICHMENT,
@@ -595,6 +600,100 @@ def test_a_run_with_no_market_writes_no_snapshots(spark, tmp_path):
     paths = write_query_tables(spark, triples, _config(tmp_path))
     assert "snapshots" not in paths
     assert paths["facts"]
+
+
+# ======================================================================
+# splits/
+# ======================================================================
+
+SPLITS_KEY = "year=2026/09.snappy.parquet"
+# 00:02 and 23:59 Eastern either side of DAY beginning, in UTC.
+FED = datetime(2026, 9, 12, 4, 2, tzinfo=timezone.utc)
+STALE = datetime(2026, 9, 12, 3, 59, tzinfo=timezone.utc)
+SPLITS_COLUMNS = [
+    "ticker", "ratio", "shares_after", "shares_before", "split_date",
+]
+
+
+def _splits_paths(spark, tmp_path, rows, written=FED, bucket="b"):
+    triples = spark.createDataFrame(
+        TRIPLES, "subject string, predicate string, object string"
+    )
+    client = feed_client({SPLITS_KEY: (month_object(rows), written)})
+    config = _config(tmp_path, stock_splits_bucket=bucket)
+    return write_query_tables(spark, triples, config, s3_client=client), config
+
+
+def test_a_days_splits_are_written_sorted_by_ticker(spark, tmp_path):
+    paths, config = _splits_paths(spark, tmp_path, [
+        ("msft", "2:1", "09/12/2026"),
+        ("aapl", "4:1", "09/12/2026"),
+        ("amdd", "1:10", "09/11/2026"),
+    ])
+
+    assert paths["splits"] == table_path(config.query_tables_path, "splits", DAY)
+    table = spark.read.parquet(paths["splits"])
+    assert table.columns == SPLITS_COLUMNS
+    assert [row.asDict() for row in table.collect()] == [
+        {"ticker": "AAPL", "ratio": "4:1", "shares_after": 4.0,
+         "shares_before": 1.0, "split_date": date(2026, 9, 12)},
+        {"ticker": "MSFT", "ratio": "2:1", "shares_after": 2.0,
+         "shares_before": 1.0, "split_date": date(2026, 9, 12)},
+    ]
+
+
+def test_a_day_with_no_splits_writes_an_empty_partition(spark, tmp_path):
+    """The feed ran and listed nothing for the day. The partition is written
+    anyway: it is what says the feed was read."""
+    paths, _ = _splits_paths(
+        spark, tmp_path, [("amdd", "1:10", "09/11/2026")]
+    )
+
+    table = spark.read.parquet(paths["splits"])
+    assert table.columns == SPLITS_COLUMNS
+    assert table.count() == 0
+
+
+@pytest.mark.parametrize("case", ["missing", "stale", "no bucket"])
+def test_no_partition_when_the_feed_was_not_read(spark, tmp_path, case):
+    triples = spark.createDataFrame(
+        TRIPLES, "subject string, predicate string, object string"
+    )
+    objects = {
+        "missing": {},
+        "stale": {SPLITS_KEY: (month_object([("aph", "2:1", "09/12/2026")]), STALE)},
+        "no bucket": {SPLITS_KEY: (month_object([("aph", "2:1", "09/12/2026")]), FED)},
+    }[case]
+    config = _config(
+        tmp_path, stock_splits_bucket="" if case == "no bucket" else "b"
+    )
+
+    paths = write_query_tables(
+        spark, triples, config, s3_client=feed_client(objects)
+    )
+
+    assert "splits" not in paths
+    assert not os.path.exists(
+        table_path(config.query_tables_path, "splits", DAY)
+    )
+    assert paths["nodes"], "the other tables are written all the same"
+
+
+def test_reading_splits_changes_no_other_table(spark, tmp_path):
+    with_splits, _ = _splits_paths(
+        spark, tmp_path / "with", [("aph", "2:1", "09/12/2026")]
+    )
+    without, _ = _splits_paths(
+        spark, tmp_path / "without", [("aph", "2:1", "09/12/2026")], bucket=""
+    )
+
+    assert set(with_splits) - set(without) == {"splits"}
+    for table in ("nodes", "edges", "edge_types", "facts", "entities", "snapshots"):
+        rows = [
+            sorted(map(str, spark.read.parquet(paths[table]).collect()))
+            for paths in (with_splits, without)
+        ]
+        assert rows[0] == rows[1], table
 
 
 # ======================================================================
