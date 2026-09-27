@@ -72,6 +72,8 @@ When config is empty, sensible defaults are inferred from the data.
 | `--turtle_column` | No | *(auto)* | Column name containing Turtle strings when `--source_format=turtle_parquet`. Ignored for `ntriples` format. Left unset, the column is resolved **per source path**, against the source's own `turtle_columns` when its spec lists them and `TURTLE_COLUMN_CANDIDATES` (`triples`, then `rdf_turtle`) otherwise, so one run can span sources whose schemas disagree; set it to force a single name everywhere |
 | `--market_sector_definitions_bucket` | No | `""` | S3 bucket holding the S&P 500 constituents CSVs. **Set this for real runs** — three cross-source links are empty or degraded without it; see the note under Cross-Source Linking |
 | `--market_sector_definitions_key` | No | `""` | S3 **prefix** holding those CSVs, or that prefix's `latest.csv` — both work the same. Supplies three things: the ticker to company-ID map that keys the company bridge, the GICS sector classification, and the sub-industry peer links. Without it the first and third are empty and sector classification falls back to a small built-in list. Which CSV a run reads is [Picking the constituents CSV](#picking-the-constituents-csv) |
+| `--stock_splits_bucket` | No | `""` | S3 bucket holding the stock split feed. The day's splits become the [`splits/`](../reference/tables.md#splits) query table. Unset, there is no `splits/` table and nothing else changes; see [The stock split feed](#the-stock-split-feed) |
+| `--stock_splits_prefix` | No | `""` | Where the feed's `year=` folders sit in `--stock_splits_bucket`. Empty is the bucket's root |
 
 Metadata files are always written when mode is `full` or `pyg_only`. Mode `enrichment_only` does not produce metadata files (no PyG graph is built in that mode).
 
@@ -107,6 +109,36 @@ so it cannot quietly relabel one day's data as another's. It is the same day the
 [query tables](../reference/tables.md) are partitioned under, which is why a run
 whose paths name no day writes none: there is no partition to write them to, and
 the day the job happens to execute on is not the day its data describes.
+
+### The stock split feed
+
+The split feed is not a source path. It is one Parquet file per month, and a run
+reads the file for its day's month on the driver:
+
+```
+<prefix>/year=YYYY/MM.snappy.parquet
+```
+
+The feed rewrites that file just after midnight Eastern on each weekday it runs,
+with the month so far, so by the time a nightly run reads it the file can hold
+the next day's splits too. The run keeps only the rows dated its own day, and
+writes them to [`splits/`](../reference/tables.md#splits) even when there are
+none: an empty `splits/` partition means the feed listed no splits that day.
+
+Missing split data never stops a run. In each of these cases the run logs why,
+writes no `splits/` partition for the day, and builds every other table and the
+`.pt` as usual:
+
+| Case | Logged as |
+|---|---|
+| no `--stock_splits_bucket` | INFO |
+| no file for the day's month | WARNING, naming the file |
+| a file last written before the day began, in Eastern time: the feed did not run that day | WARNING, with the file's write time |
+| a file that cannot be read | WARNING, with the error |
+
+The notebook passes the two flags to the seed leg from `PYG_SPLITS_BUCKET` and
+`PYG_SPLITS_PREFIX`. `bin/daily_run.sh` does not list the feed with the sources,
+so a day is never skipped for want of it.
 
 Jobs are launched with `bin/submit_spark_job.sh`, which packages the code
 and submits to the Spark standalone master with the RAPIDS Accelerator
