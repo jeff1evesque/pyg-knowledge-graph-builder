@@ -204,6 +204,8 @@ def _submit(**overrides):
         "TURTLE_COLUMN": "",
         "SECTOR_DEFINITIONS_BUCKET": "",
         "SECTOR_DEFINITIONS_KEY": "",
+        "SPLITS_BUCKET": "",
+        "SPLITS_PREFIX": "",
         "S3_ARCHIVE_BUCKET": "",
         "DATASET": "",
     }
@@ -230,3 +232,35 @@ def test_an_unnamed_dataset_passes_no_flag():
     """Unset, the run behaves as it did: the job records "" rather than a
     flag with an empty value."""
     assert "--dataset" not in _submit()(mode="pyg_only", dry_run=True)["cmd"]
+
+
+# --------------------------------------------------------------------------- #
+# The stock split feed (#429)
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("mode", ["full", "enrichment_only"])
+def test_the_seed_leg_carries_the_split_feed(mode):
+    cmd = _submit(SPLITS_BUCKET="b", SPLITS_PREFIX="feed")(
+        mode=mode, dry_run=True
+    )["cmd"]
+    assert cmd[cmd.index("--stock_splits_bucket") + 1] == "b"
+    assert cmd[cmd.index("--stock_splits_prefix") + 1] == "feed"
+
+
+def test_a_feed_at_the_buckets_root_passes_no_prefix():
+    cmd = _submit(SPLITS_BUCKET="b")(mode="full", dry_run=True)["cmd"]
+    assert "--stock_splits_bucket" in cmd
+    assert "--stock_splits_prefix" not in cmd
+
+
+@pytest.mark.parametrize("mode", ["pyg_only", "parse_only"])
+def test_legs_that_write_no_tables_pass_no_split_feed(mode):
+    cmd = _submit(SPLITS_BUCKET="b", SPLITS_PREFIX="feed")(
+        mode=mode, dry_run=True
+    )["cmd"]
+    assert "--stock_splits_bucket" not in cmd
+
+
+def test_an_unset_split_feed_passes_no_flag():
+    cmd = _submit()(mode="full", dry_run=True)["cmd"]
+    assert "--stock_splits_bucket" not in cmd
