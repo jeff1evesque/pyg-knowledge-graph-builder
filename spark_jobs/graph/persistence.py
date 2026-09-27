@@ -628,6 +628,10 @@ def save_job_manifest(
             # sources on either side of the rewrite produce different graphs;
             # without this recorded there is nothing to tell them apart.
             "source_data_day": config.source_data_day,
+            # Where the splits/ table was read from. Whether it was read for
+            # the day is the result's query_tables, which names splits only then.
+            "stock_splits_bucket": config.stock_splits_bucket,
+            "stock_splits_prefix": config.stock_splits_prefix,
             "pyg_config": config.pyg_config,
             "parquet_partitions": config.parquet_partitions,
         },
