@@ -1,8 +1,8 @@
 # Query Tables
 
-The query tables are the part of a run meant for looking things up: six Parquet
+The query tables are the part of a run meant for looking things up: seven Parquet
 tables and a triple store for each day, holding the enriched data's nodes,
-edges and values under their names and URIs. SQL, SPARQL and an LLM's retrieval
+edges and values under their names and URIs, and the day's stock splits. SQL, SPARQL and an LLM's retrieval
 step can all read them. [Questions the tables answer](questions.md) shows what
 they answer, and [Using the tables with an LLM](llm.md) shows retrieval.
 
@@ -25,6 +25,7 @@ on by default, and switched off with `--enable_query_tables false`.
 | `facts/` | every literal a snapshot does not carry, long format | 0.04 GB |
 | `entities/` | one row per text-bearing node | ~0.01 GB |
 | `edge_types/` | one row per edge type | <0.01 GB |
+| `splits/` | the day's stock splits, one row per split | <0.01 GB |
 
 ## A day at a time, kept for a year
 
@@ -63,6 +64,7 @@ whatever a second rule said.
 ├── facts/day=2026-09-10/
 ├── entities/day=2026-09-10/
 ├── snapshots/day=2026-09-10/
+├── splits/day=2026-09-10/
 └── graph/day=2026-09-10/
 ```
 
@@ -242,6 +244,39 @@ filter wants 0.14% of a day. Parquet prunes row groups on min/max statistics:
 sorted, a 30-day ticker query reads a few hundred MB; unsorted, every ticker
 appears in every row group and the same query reads all 39 GB.
 
+**Prices are as quoted, and never adjusted.** A day is published once and never
+rewritten, so a stock split shows up as the price changing scale overnight.
+[`splits/`](#splits) says when, and by how much.
+
+### `splits/`
+
+`(ticker, ratio, shares_after, shares_before, split_date)`, one row per stock
+split the upstream split feed lists for the day, sorted by ticker. It is not
+built from the triples. The feed is read directly, as the constituents list is,
+so no split is in `nodes/`, `edges/`, `graph/` or the `.pt`.
+
+- **`split_date` is the last trading day at the old price.** The new price
+  starts on the next trading day. Measured against the quotes for KLAC, DD,
+  CRWD, MNST and APH in 2026: each changed scale on the next trading day.
+- **The ratio is new shares to old.** `4:1` is `shares_after` 4 and
+  `shares_before` 1, and an earlier price is adjusted by multiplying it by
+  `shares_before / shares_after`. `ratio` keeps the feed's text, and both
+  numbers are null when it does not parse, as with a bare `:`.
+- **Every split in the market, not only quoted companies'.** In 2026 the feed
+  listed 19 to 49 splits a month, about one a month on a company in the index.
+  `ticker` is upper case, as `snapshots/` spells a symbol, so the two join on
+  it.
+- **An empty partition means no splits that day.** The partition is written
+  whenever the feed was read, rows or not. A day with no `splits/` partition was
+  not read: no location was set, the month's file was missing, or the file was
+  last written before the day began, which means the feed did not run for that
+  day. The run's log says which.
+- **The feed can be wrong.** HON's 1:2 dated 2026-06-26 matches no price change:
+  HON's last price stayed between 222 and 237 from 06-24 to 07-06. The table
+  publishes what the feed says, and
+  [a query](questions.md#a-split-in-the-price-series) can check a split against
+  the price.
+
 ### `graph/`
 
 The non-snapshot subgraph as a [pyoxigraph](https://pyoxigraph.readthedocs.io/)
@@ -328,6 +363,9 @@ is here, so the sections above describe the tables alone.
 - **What counts as a number.** `is_numeric` in `facts/` uses the same test the
   feature extractor types the `.pt`'s numeric segment by, and `snapshots/` types
   its columns by the same majority rule, so the tables and the `.pt` agree.
+- **Splits.** `splits/` is in no `.pt`, and not in `graph/`. It is read from
+  the split feed rather than built from the triples, so a run's graph is the
+  same whether or not it read the feed.
 - **Feature vectors stay in the `.pt`.** The dense node feature matrix is
   38.16 GB for the dominant type, of which 183 of 1024 dimensions vary per row.
 - **Retention.** A run, with its `.pt`, is kept 21 days; each day of tables is
