@@ -282,6 +282,14 @@ def test_source_data_day_is_exposed_on_the_config():
     assert _config().source_data_day == ""
 
 
+def test_the_split_feeds_location_reaches_the_config():
+    c = _config(stock_splits_bucket="b", stock_splits_prefix="feed")
+    assert (c.stock_splits_bucket, c.stock_splits_prefix) == ("b", "feed")
+
+    # Unset is no splits table, not a failure: the feed is optional.
+    assert (_config().stock_splits_bucket, _config().stock_splits_prefix) == ("", "")
+
+
 # ======================================================================
 # --source_data_day — stating the day the paths cannot
 # ======================================================================
