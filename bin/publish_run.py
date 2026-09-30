@@ -62,6 +62,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+# This script runs on the system python, so splits.py must import with the
+# standard library alone. tests/test_publish_run.py runs it with no packages.
+from spark_jobs.graph.splits import FEED_NAME  # noqa: E402
+
 CHECKSUMS = "checksums.json"
 INDEX = "index.json"
 TREE = "publish"
@@ -71,6 +78,9 @@ TABLES_TREE = "publish-tables"
 # own name is a day rather than a run, because that is what the tables are
 # keyed by -- two runs over the same day publish the same day.
 TABLES_MARKER = "_days"
+# Tables read from a feed rather than built from the triples, and the feed's
+# name. A day's marker lists the feed among its sources when the day has the table.
+FEED_TABLES = {"splits": FEED_NAME}
 
 # A day-level source path: .../year=2026/month=09/09.snappy.parquet or .../day=09/
 DAY_IN_PATH = re.compile(r"year=(\d{4})/month=(\d{2})/(?:day=)?(\d{2})(?:\.[\w.]+)?/?$")
@@ -373,6 +383,12 @@ def tables_destination(env, dataset: str) -> str:
     return f"{root}/{dataset}"
 
 
+def day_sources(run_sources, tables) -> list:
+    """Every source the run read, and each feed whose table the day has."""
+    feeds = {FEED_TABLES[table] for table in tables if table in FEED_TABLES}
+    return sorted(set(run_sources) | feeds)
+
+
 def variant_entry(graph: str, labels: dict, in_graph: dict) -> dict:
     entry = {"path": f"{graph}/", "notebook_label": labels.get(graph)}
     if graph in in_graph:
@@ -519,7 +535,7 @@ def check_upload(items, tree: Path, dst: str, log: Log, marker: str = INDEX,
     return True
 
 
-def publish_tables(rd: Path, items, dst: str, day: str, run_id: str,
+def publish_tables(rd: Path, items, dst: str, day: str, run_id: str, sources,
                    upload: bool, log: Log) -> int:
     """Send one day of tables to the tables root. Returns an exit code.
 
@@ -536,19 +552,22 @@ def publish_tables(rd: Path, items, dst: str, day: str, run_id: str,
     """
     marker = f"{TABLES_MARKER}/{day}.json"
     tree = rd / TABLES_TREE
-    # day, run_id and published are a contract another service reads; see
-    # documentation/reference/tables.md.
+    tables = sorted({name.split("/", 1)[0] for name, _ in items})
+    # day, run_id, published and sources are a contract another service reads;
+    # see documentation/reference/tables.md.
     index = {
         "day": day,
         "run_id": run_id,
         "published": utc_now(),
-        "tables": sorted({name.split("/", 1)[0] for name, _ in items}),
+        "sources": day_sources(sources, tables),
+        "tables": tables,
         "files": len(items),
     }
     build_tree(tree, items, index, marker)
 
     log(f"tables tree {tree}:")
     summarize(items, log, marker)
+    log(f"sources: {', '.join(index['sources'])}")
     log(f"to   {dst}/")
 
     # A listing that fails raises Failed, not Refused: the run may already be up by
@@ -606,6 +625,9 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
     # nowhere to send them should say so at the prompt, not after the .pt is up.
     tables = tables_plan(work, day)
     tables_dst = tables_destination(env, dataset) if tables else ""
+    if tables and not sources:
+        raise Refused(f"the run recorded no sources in {enriched / 'dataset.json'}, "
+                      "so the day's marker could not say what its tables hold")
 
     log(f"run {run_id}, sources from {day}, dataset {dataset}, graphs: {', '.join(graphs)}")
     log(f"from {work}")
@@ -626,7 +648,7 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
         # tables, when they failed after the run went up.
         log(f"{dst}/{INDEX} already exists, so the run is published. Resuming its tables.")
         try:
-            rc = publish_tables(rd, tables, tables_dst, day, run_id, upload, log)
+            rc = publish_tables(rd, tables, tables_dst, day, run_id, sources, upload, log)
         except Failed as why:
             raise Refused(str(why))  # nothing has been sent yet
         if not upload:
@@ -661,7 +683,7 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
         log(f"dry run: {count} files would be uploaded, then index.json. Nothing was written.")
         if tables:
             try:
-                publish_tables(rd, tables, tables_dst, day, run_id, False, log)
+                publish_tables(rd, tables, tables_dst, day, run_id, sources, False, log)
             except Failed as why:
                 raise Refused(str(why))
         log("Run again with --upload to publish.")
@@ -689,7 +711,7 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
     # already published is still a refusal (2).
     if tables:
         try:
-            rc = publish_tables(rd, tables, tables_dst, day, run_id, True, log)
+            rc = publish_tables(rd, tables, tables_dst, day, run_id, sources, True, log)
         except Refused as why:
             log(f"the tables were refused: {why}")
             rc = 2
