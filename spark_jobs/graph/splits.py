@@ -25,13 +25,12 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-import boto3
-import pyarrow as pa
-import pyarrow.parquet as pq
-from botocore.exceptions import BotoCoreError, ClientError
-
 # The job's logger, not this module's -- see the note in graph/config.py.
 logger = logging.getLogger("build_graph")
+
+# The feed's name. A day's marker lists it among the day's sources when the day
+# has a splits/ partition (bin/publish_run.py).
+FEED_NAME = "stock-split"
 
 # The feed runs just after midnight Eastern, so a day begins at Eastern midnight.
 FEED_TIMEZONE = ZoneInfo("America/New_York")
@@ -85,6 +84,13 @@ def read_splits(
     not read for the day: no location set, no object, an object last written
     before the day began, or one that could not be read. Each None is logged.
     """
+    # Imported here, not at the top, so bin/publish_run.py can import this
+    # module on the system python with the standard library alone.
+    import boto3
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from botocore.exceptions import BotoCoreError, ClientError
+
     if not bucket:
         logger.info(
             "No stock splits location (--stock_splits_bucket), so no splits "
