@@ -196,9 +196,21 @@ class Run:
         names |= {f"graph/day={day}/CURRENT", f"graph/day={day}/MANIFEST-000001"}
         return names
 
-    def set_recorded_dataset(self, name: str) -> None:
+    def add_splits(self, part: bytes = b"splits rows", day: str = DAY) -> set:
+        """A splits/ partition, as the job writes it when it read the split feed.
+
+        A day with no splits still gets one, with a part file holding only the
+        schema.
+        """
+        partition = self.work / "tables" / "splits" / f"day={day}"
+        _write(partition / "part-00000.zstd.parquet", part)
+        _write(partition / ".part-00000.zstd.parquet.crc", b"c")
+        _write(partition / "_SUCCESS", b"")
+        return {f"splits/day={day}/part-00000.zstd.parquet", f"splits/day={day}/_SUCCESS"}
+
+    def set_recorded_dataset(self, name: str, sources=("a", "b")) -> None:
         _write(self.enriched / "dataset.json", json.dumps(
-            {"dataset": name, "sources": ["a", "b"], "time_period": f"{YEAR}-{MONTH}"}))
+            {"dataset": name, "sources": list(sources), "time_period": f"{YEAR}-{MONTH}"}))
 
     def set_graph_schema(self, graph: str, body) -> None:
         """Rewrite one variant's graph_schema.json, or remove it when body is None.
@@ -232,7 +244,7 @@ class Run:
                json.dumps({"config": {"source_paths": self.source_paths}}))
         _write(self.manifests / "pyg_only_1.json", json.dumps({"config": {"source_paths": []}}))
 
-    def publish(self, *args: str, **env_changes):
+    def publish(self, *args: str, python_flags=(), **env_changes):
         env = dict(os.environ)
         env.update({
             "PATH": f"{self.bin}{os.pathsep}{env['PATH']}",
@@ -248,7 +260,7 @@ class Run:
                 env.pop(key, None)
             else:
                 env[key] = value
-        return subprocess.run([sys.executable, str(PUBLISHER), str(self.rd), *args],
+        return subprocess.run([sys.executable, *python_flags, str(PUBLISHER), str(self.rd), *args],
                               env=env, capture_output=True, text=True, timeout=120)
 
     def calls_text(self) -> str:
@@ -517,6 +529,62 @@ def test_the_day_marker_names_the_day_the_run_and_when_it_was_published(run):
                         marker["published"])
 
 
+# --------------------------------------------------------------------------- #
+# The day marker's sources
+#
+# Every source the run read, and the split feed when the day has a splits/
+# partition. The feed never becomes a node, so a reader that works a day's
+# sources out from its node types never sees it (#432).
+# --------------------------------------------------------------------------- #
+
+def _marker(run: Run) -> dict:
+    return json.loads((run.published_tables / "_days" / f"{DAY}.json").read_text())
+
+
+def test_the_day_marker_lists_the_runs_sources_sorted(run):
+    run.set_recorded_dataset("", ["z", "a"])
+    run.add_tables()
+    run.add_splits()
+    assert run.publish("--upload").returncode == 0
+    assert _marker(run)["sources"] == ["a", "stock-split", "z"]
+
+
+@pytest.mark.parametrize("part,listed", [
+    (None, False),
+    (b"the schema", True),
+    (b"the schema and rows", True),
+], ids=["no partition", "empty partition", "partition with rows"])
+def test_the_split_feed_is_listed_when_the_day_has_a_splits_partition(run, part, listed):
+    """An empty partition says the feed was read and listed no splits. No
+    partition says it was not read."""
+    run.add_tables()
+    if part is not None:
+        run.add_splits(part)
+    assert run.publish("--upload").returncode == 0
+    assert _marker(run)["sources"] == (["a", "b", "stock-split"] if listed else ["a", "b"])
+
+
+def test_the_day_marker_keeps_its_other_fields(run):
+    expected = run.add_tables() | run.add_splits()
+    assert run.publish("--upload").returncode == 0
+    marker = _marker(run)
+    assert set(marker) == {"day", "run_id", "published", "sources", "tables", "files"}
+    assert (marker["day"], marker["run_id"]) == (DAY, RUN_ID)
+    assert marker["tables"] == ["edges", "facts", "graph", "nodes", "splits"]
+    assert marker["files"] == len(expected)
+
+
+def test_the_publisher_runs_on_a_python_with_no_packages(run):
+    """The nightly runs it on the system python, which has no pyarrow. It
+    imports the split feed's name from spark_jobs/graph/splits.py, so that
+    module has to load with the standard library alone."""
+    run.add_tables()
+    run.add_splits()
+    r = run.publish("--upload", python_flags=["-S"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _marker(run)["sources"] == ["a", "b", "stock-split"]
+
+
 def test_index_json_names_the_tables_and_where_they_went(run):
     """A consumer holding the run index has no other way to learn they exist,
     and the tables are the part still there a year later."""
@@ -573,6 +641,22 @@ def test_a_run_with_no_tables_needs_no_tables_root(run):
     r = run.publish("--upload", PYG_TABLES_ROOT=None)
     assert r.returncode == 0, r.stdout + r.stderr
     assert json.loads((run.published / "index.json").read_text())["tables"]["published"] == []
+
+
+def test_tables_whose_run_recorded_no_sources_are_refused_before_anything_is_written(run):
+    """The day's marker would have to list the sources without knowing them."""
+    run.add_tables()
+    (run.enriched / "dataset.json").unlink()
+    r = run.publish("--upload")
+    assert r.returncode == 2
+    assert "recorded no sources" in r.stdout
+    assert "s3 sync" not in run.calls_text()
+
+
+def test_a_run_with_no_tables_needs_no_recorded_sources(run):
+    (run.enriched / "dataset.json").unlink()
+    r = run.publish("--upload")
+    assert r.returncode == 0, r.stdout + r.stderr
 
 
 # --------------------------------------------------------------------------- #
