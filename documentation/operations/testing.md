@@ -326,8 +326,8 @@ root, their own sync and their own per-day marker under `_days/`; a day that
 already has its marker is refused, because the destination cannot delete and a
 rewritten day would leave its old part files behind. They are published after
 the run's `index.json`, and a table failure says so rather than reading as "the
-run did not go up". A run that wrote tables and has no `PYG_TABLES_ROOT` is
-refused before anything is written.
+run did not go up". A run that wrote tables and has no `PYG_TABLES_ROOT`, or no
+sources in its `dataset.json`, is refused before anything is written.
 
 `PYG_PUBLISH_DATA_DAY` names the day the sources were cut from. It is needed only
 when the day-level source paths in the manifests name more than one day. A
