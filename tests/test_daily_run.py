@@ -330,6 +330,69 @@ def test_a_yearly_prefix_with_nothing_old_enough_skips_the_day(schedule):
     assert s.recorded("launcher") == ""
 
 
+SNAPSHOT = "bucket/raw/source=c/feed=snap/"
+
+
+def _reading_the_latest_snapshot(s, *days, lookback=None):
+    """env.sh names the snapshot prefix, and the bucket holds these days' files."""
+    lines = [f'export PYG_LATEST_SOURCE_PREFIXES="s3a://{SNAPSHOT}"']
+    if lookback is not None:
+        lines.append(f"export PYG_LATEST_SOURCE_LOOKBACK_DAYS={lookback}")
+    with (s.sd / "env.sh").open("a") as fh:
+        fh.write("\n".join(lines) + "\n")
+    for day in days:
+        y, m, d = day.split("-")
+        s.put(f"{SNAPSHOT}year={y}/month={m}/{d}.snappy.parquet")
+
+
+@pytest.mark.parametrize("days, data_day, read", [
+    (("2026-09-27", "2026-09-29", "2026-10-02"), "2026-09-30", "year=2026/month=09/29"),
+    (("2026-09-30",), "2026-09-30", "year=2026/month=09/30"),
+    (("2026-09-28",), "2026-10-02", "year=2026/month=09/28"),
+], ids=["the newest before", "the day's own", "across a month"])
+def test_a_latest_prefix_reads_the_newest_day_not_after_the_data_day(
+    schedule, days, data_day, read,
+):
+    """A snapshot carries every company's latest numbers forward, so a day whose
+    scraper run failed builds from the day before rather than skipping."""
+    s = schedule()
+    s.add_sources(data_day)
+    _reading_the_latest_snapshot(s, *days)
+
+    r = s.run("--data-date", data_day)
+    assert r.returncode == 0, r.stdout + r.stderr
+    sources = s.recorded("launcher-sources")
+    assert f"s3a://{SNAPSHOT}{read}.snappy.parquet" in sources
+    assert sources.count(SNAPSHOT) == 1
+    assert f"-> {read}.snappy.parquet" in s.log()
+
+
+@pytest.mark.parametrize("days, lookback", [
+    ((), None),
+    (("2026-09-22",), None),
+    (("2026-09-28",), 1),
+], ids=["none", "older than a week", "older than the look-back"])
+def test_a_latest_prefix_with_nothing_in_the_look_back_skips_the_day(
+    schedule, days, lookback,
+):
+    s = schedule()
+    s.add_sources("2026-09-30")
+    _reading_the_latest_snapshot(s, *days, lookback=lookback)
+
+    assert s.run().returncode == 3
+    assert f"missing: s3a://{SNAPSHOT} has no day file" in s.log()
+    assert s.recorded("launcher") == ""
+
+
+def test_a_look_back_that_is_not_a_number_is_refused(schedule):
+    s = schedule()
+    s.add_sources("2026-09-30")
+    _reading_the_latest_snapshot(s, "2026-09-30", lookback="week")
+
+    assert s.run().returncode == 2
+    assert "PYG_LATEST_SOURCE_LOOKBACK_DAYS" in s.log()
+
+
 # --------------------------------------------------------------------------- #
 # The prune: only what this schedule made
 # --------------------------------------------------------------------------- #
