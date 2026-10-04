@@ -32,6 +32,19 @@ class RunOptions:
 
 
 @dataclass(frozen=True)
+class Feed:
+    """A feed a source reads beside its own, named wherever a run reports it."""
+
+    # How a run's sources and sources_in_graph name the feed.
+    name: str
+    # The path segment that marks an input path as the feed's.
+    path_fragment: str
+    # The source namespaces holding the feed's terms. A node type under one
+    # names the feed in sources_in_graph.
+    namespaces: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class CompanyKeys:
     """A source's side of the company hub. Any part may be None."""
 
@@ -136,6 +149,8 @@ class SourceSpec:
     # Source classes whose entities cross-source linking also types as their
     # class_mappings target, so measurements of one kind share a type.
     measurement_types: Tuple[str, ...] = ()
+    # Feeds named on their own when a run reads them, as Feed.
+    feeds: Tuple[Feed, ...] = ()
 
     def __post_init__(self):
         for name in ("property_mappings", "class_mappings", "relation_fragments"):
@@ -172,6 +187,16 @@ class SourceSpec:
             raise ValueError(
                 f"source {self.name!r}: entity namespaces {strays} are not "
                 "among its namespaces"
+            )
+        stray_feeds = sorted(
+            feed.name
+            for feed in self.feeds
+            if set(feed.namespaces) - {ns for ns, _ in self.namespaces}
+        )
+        if stray_feeds:
+            raise ValueError(
+                f"source {self.name!r}: feeds {stray_feeds} name namespaces "
+                "that are not among its own"
             )
         unmapped = sorted(set(self.measurement_types) - set(self.class_mappings))
         if unmapped:
