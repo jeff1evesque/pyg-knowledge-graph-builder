@@ -43,6 +43,7 @@ from spark_jobs.sources.spec import SourceSpec
 from spark_jobs.utils.namespaces import (
     CPI,
     MARKET_QUOTES,
+    SEC_COMPANYFACTS,
     SEC_FILINGS,
     SOURCE_TEMPORAL,
 )
@@ -342,6 +343,23 @@ def test_graph_schema_sources_in_graph_ignores_the_shared_vocabularies():
     assert meta["sources_in_graph"] == []
 
 
+@pytest.mark.parametrize("with_facts", [True, False], ids=["facts", "no facts"])
+def test_graph_schema_sources_in_graph_names_companyfacts_when_its_nodes_landed(
+    with_facts,
+):
+    """An issuer alone is SEC's. A CompanyFact node also names the feed."""
+    node_type_uris = {"filings_Issuer": f"{SEC_FILINGS}Issuer"}
+    if with_facts:
+        node_type_uris["companyfacts_CompanyFact"] = f"{SEC_COMPANYFACTS}CompanyFact"
+    meta = _collector_reading_four_sources(
+        node_type_uris=node_type_uris,
+    )._build_graph_schema()["build_metadata"]
+
+    assert meta["sources_in_graph"] == (
+        ["sec", "sec-companyfacts"] if with_facts else ["sec"]
+    )
+
+
 def test_graph_schema_sources_in_graph_is_empty_before_node_types_are_registered():
     """No node types is no evidence, and no evidence is an empty list."""
     meta = _collector_reading_four_sources()._build_graph_schema()["build_metadata"]
@@ -442,8 +460,12 @@ def test_graph_schema_version_is_bumped_for_the_new_semantics():
     1.5 adds build_metadata.day. Additive: at 1.4 a consumer matching a .pt to
     its day's tables has only the month and the build time, and neither is the
     day the data was cut from. The version tells it whether to look for one.
+
+    1.6 lets sources and sources_in_graph name a feed beside its source. No
+    field changes, but a consumer matching names against the registered
+    sources has to know a name may be a feed's.
     """
-    assert _fully_registered_collector()._build_graph_schema()["version"] == "1.5"
+    assert _fully_registered_collector()._build_graph_schema()["version"] == "1.6"
 
 
 # ======================================================================
