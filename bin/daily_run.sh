@@ -394,9 +394,13 @@ if [[ -f "$SD/extra-checks.sh" ]]; then
   cp "$SD/extra-checks.sh" "$RD/extra-checks.sh" || fail "cannot copy extra-checks.sh into $RD"
 fi
 joined="$(IFS=,; printf '%s' "${SOURCES[*]}")"
+# The day too, which the notebook passes to the job: a snapshot from an earlier day puts
+# a second day in the paths. Not exported here, so the prune's questions about older
+# runs never carry this day.
 {
   printf '\n# Added by bin/daily_run.sh: the sources run %s read for %s.\n' "$RUN_ID" "$DATA_DATE"
   printf 'export PYG_SOURCE_PATHS=%q\n' "$joined"
+  printf 'export PYG_PUBLISH_DATA_DAY=%q\n' "$DATA_DATE"
 } >> "$RD/env.sh"
 export PYG_SOURCE_PATHS="$joined"
 
