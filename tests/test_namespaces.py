@@ -36,7 +36,9 @@ from spark_jobs.utils.rdf_utils import (
     MARKET_ENRICHMENT,
     MARKET_QUOTES,
     NOAA_ENRICHMENT,
+    SEC_COMPANYFACTS,
     SEC_ENRICHMENT,
+    SEC_FILINGS,
     SOURCE_VOCABULARIES,
     PUBLISHER_VOCABULARIES,
     SYNTHETIC_TEMPORAL_IDS,
@@ -412,6 +414,16 @@ def test_every_current_source_vocabulary_is_nested_under_its_source():
             f"{SOURCE_BASE!r}; a source vocabulary is "
             f"ontology/<source>/<group>/"
         )
+
+
+def test_the_companyfacts_vocabulary_nests_under_sec_beside_filings():
+    """Beside sec/filings/ and sec/enrichment/, not inside either (#434)."""
+    sec = [str(SEC_COMPANYFACTS), str(SEC_FILINGS), str(SEC_ENRICHMENT)]
+    assert str(SEC_COMPANYFACTS) == f"{SOURCE_BASE}sec/companyfacts/"
+    assert str(SEC_COMPANYFACTS) in SOURCE_VOCABULARIES
+    for a in sec:
+        for b in sec:
+            assert a == b or not b.startswith(a), f"{a!r} is a prefix of {b!r}"
 
 
 # ======================================================================
