@@ -37,6 +37,7 @@ from spark_jobs.utils.namespaces import (  # noqa: F401
     PPI,
     REALER,
     SEC_COMMON,
+    SEC_COMPANYFACTS,
     SEC_ENRICHMENT,
     SEC_FILINGS,
     SOURCE_BASE,
@@ -268,7 +269,7 @@ def hashed_ontology_namespaces(
     namespace_prefixes: Optional[Sequence[Tuple[str, str]]] = None,
 ) -> List[str]:
     """The registered namespaces that get a hashed slot, in table order: those
-    not in ONTOLOGY_NAMESPACE_INDICES. None of today's.
+    not in ONTOLOGY_NAMESPACE_INDICES. Today, the companyfacts snapshot's.
 
     ``namespace_prefixes`` defaults to NAMESPACE_PREFIXES. A test passes a table
     with a toy source in it.
