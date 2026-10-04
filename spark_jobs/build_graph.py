@@ -136,6 +136,7 @@ from spark_jobs.graph.config import (
     parse_args,
     resolve_pyg_only_day,
 )
+from spark_jobs import sources as source_registry
 from spark_jobs.sources.spec import SourceSpec
 
 if PYG_BUILDER_AVAILABLE:
@@ -407,7 +408,9 @@ def execute_full_pipeline(
         spark, enriched_df, config.pyg_config,
         time_period=config.time_period,
         dataset=config.dataset,
-        sources=sorted(spec.name for spec in config.source_specs),
+        sources=source_registry.sources_read(
+            config.source_paths, config.registered_specs
+        ),
         day=config.source_data_day,
     )
 
