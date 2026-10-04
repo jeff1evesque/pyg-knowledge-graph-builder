@@ -1327,7 +1327,7 @@ def _source_families():
         ALERT, BLS_COMMON, BLS_ENRICHMENT, CAP, CPI, ECI, EMPSIT, JOLTS, LAUS,
         MARKET_ENRICHMENT, MARKET_QUOTES,
         METRO, NAMESPACE_PREFIXES, NOAA_ENRICHMENT, PPI, REALER,
-        SEC_COMMON, SEC_ENRICHMENT, SEC_FILINGS,
+        SEC_COMMON, SEC_COMPANYFACTS, SEC_ENRICHMENT, SEC_FILINGS,
         SOURCE_TEMPORAL, UNIFIED, WEATHER, WKYENG, XIMPIM,
     )
 
@@ -1335,7 +1335,7 @@ def _source_families():
     families = {
         "bls": (CPI, PPI, ECI, EMPSIT, JOLTS, LAUS, METRO, REALER, WKYENG,
                 XIMPIM, BLS_COMMON),
-        "sec": (SEC_FILINGS, SEC_COMMON),
+        "sec": (SEC_FILINGS, SEC_COMMON, SEC_COMPANYFACTS),
         "market": (MARKET_QUOTES,),
         "noaa": (CAP, WEATHER, ALERT),
         # Everything this pipeline mints itself. These are how sources REACH
