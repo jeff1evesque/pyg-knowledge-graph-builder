@@ -4,8 +4,8 @@ SEC Intra-Source Enrichment — PySpark Implementation
 Migrated from rdflib SPARQL-based enricher to fully distributed PySpark.
 All operations run on executors — no rdflib, no driver data operations.
 
-Handles the filings feed (Forms 3, 4, 5, 10-K, 10-Q, 8-K) -- the only SEC feed
-collected. Administrative proceedings, litigation releases and trading
+Handles the filings feed (Forms 3, 4, 5, 10-K, 10-Q, 8-K). The other SEC feed
+collected, the companyfacts snapshot, points at the same issuers. Administrative proceedings, litigation releases and trading
 suspensions were removed: upstream publishes no such feeds, so every step keyed
 on them matched nothing and returned nothing, which is indistinguishable from
 working correctly.
