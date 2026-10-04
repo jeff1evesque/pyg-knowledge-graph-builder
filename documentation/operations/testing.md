@@ -329,9 +329,11 @@ the run's `index.json`, and a table failure says so rather than reading as "the
 run did not go up". A run that wrote tables and has no `PYG_TABLES_ROOT`, or no
 sources in its `dataset.json`, is refused before anything is written.
 
-`PYG_PUBLISH_DATA_DAY` names the day the sources were cut from. It is needed only
-when the day-level source paths in the manifests name more than one day. A
-variant whose `graph_schema.json` records a different
+`PYG_PUBLISH_DATA_DAY` names the day the sources were cut from. Unset, the
+publish takes the day the job recorded in `dataset.json`, and then the one day
+the day-level source paths in the manifests name, so it is needed only when the
+paths name more than one day and the job was given none. Either day has to be
+one the paths name. A variant whose `graph_schema.json` records a different
 [`day`](../reference/outputs.md#which-date-is-which) is refused. The exit
 code goes to `<run-dir>/publish.done` and the output to `<run-dir>/publish.log`:
 `0` published; `1` the upload or its check failed, including a tables root that
