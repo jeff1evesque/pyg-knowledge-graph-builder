@@ -479,6 +479,10 @@ class MetadataCollector:
         edge_types_with_features = len(self._edge_types_with_features)
 
         return {
+            # 1.6: `build_metadata.sources` and `sources_in_graph` may name a
+            # feed beside its source, such as `sec-companyfacts` beside `sec`.
+            # No field is added or renamed.
+            #
             # 1.5: adds `build_metadata.day`, the day the graph's data was cut
             # from. Additive only. `time_period` is the month and
             # `build_timestamp` is when the build started, so before 1.5 a
@@ -506,7 +510,7 @@ class MetadataCollector:
             # features". Through 1.0 it was `count > 0` -- the node count --
             # which made it, and summary.node_types_with_literal_features,
             # true/total for every build. See _build_graph_schema's docstring.
-            "version": "1.5",
+            "version": "1.6",
             "build_metadata": {
                 "time_period": self._time_period,
                 # The same value as the query tables' day= partition and
