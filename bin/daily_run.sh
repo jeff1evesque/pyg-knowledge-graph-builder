@@ -50,6 +50,11 @@
 #   PYG_YEARLY_SOURCE_PREFIXES      optional, comma separated. Each prefix holds one
 #                                   YYYY.* file per year, and a run reads the newest
 #                                   one whose year is not after the data day's.
+#   PYG_LATEST_SOURCE_PREFIXES      optional, comma separated. Each prefix holds one
+#                                   year=YYYY/month=MM/DD.* file per day, and a run
+#                                   reads the newest one not after the data day.
+#   PYG_LATEST_SOURCE_LOOKBACK_DAYS optional. How many days before the data day such
+#                                   a file may be from; default 7.
 #   PYG_MEMFREE_GATE_GB             optional. MemFree every node must reach first.
 #   PYG_EXPECTED_WORKERS            optional. ALIVE workers on an idle cluster;
 #                                   default, the number of PYG_STAGE_NODES.
@@ -218,13 +223,18 @@ fi
 # The sources: every one there, or the day is skipped
 # ---------------------------------------------------------------------------
 SOURCES=()
-listed="$(python3 - "$DATA_DATE" "${PYG_SOURCE_PATHS:-}" "${PYG_YEARLY_SOURCE_PREFIXES:-}" <<'PY'
+LOOKBACK="${PYG_LATEST_SOURCE_LOOKBACK_DAYS:-7}"
+[[ "$LOOKBACK" =~ ^[0-9]+$ ]] \
+  || refuse "PYG_LATEST_SOURCE_LOOKBACK_DAYS must be a whole number of days, got '$LOOKBACK'"
+listed="$(python3 - "$DATA_DATE" "${PYG_SOURCE_PATHS:-}" "${PYG_YEARLY_SOURCE_PREFIXES:-}" \
+  "${PYG_LATEST_SOURCE_PREFIXES:-}" "$LOOKBACK" <<'PY'
+import datetime
 import json
 import re
 import subprocess
 import sys
 
-day, dated, yearly = sys.argv[1], sys.argv[2], sys.argv[3]
+day, dated, yearly, latest, lookback = sys.argv[1:6]
 year = int(day[:4])
 
 
@@ -274,6 +284,32 @@ for prefix in filter(None, (p.strip() for p in yearly.split(","))):
         print(f"missing: {scheme}://{bucket}/{key} has no YYYY file for {year} or before")
         missing += 1
 
+last = datetime.date.fromisoformat(day)
+first = last - datetime.timedelta(days=int(lookback))
+months = sorted({(first + datetime.timedelta(days=n)).strftime("year=%Y/month=%m/")
+                 for n in range((last - first).days + 1)})
+for prefix in filter(None, (p.strip() for p in latest.split(","))):
+    scheme, bucket, key = split(prefix.rstrip("/") + "/")
+    days = {}
+    for month in months:
+        for found in keys(bucket, key + month):
+            name = re.fullmatch(r"year=(\d{4})/month=(\d{2})/(\d{2})\.[^/]+", found[len(key):])
+            if not name:
+                continue
+            try:
+                when = datetime.date(*(int(part) for part in name.groups()))
+            except ValueError:
+                continue
+            if first <= when <= last:
+                days[when] = found
+    if days:
+        newest = days[max(days)]
+        print(f"SOURCE {scheme}://{bucket}/{newest}")
+        print(f"latest: {scheme}://{bucket}/{key} -> {newest[len(key):]}")
+    else:
+        print(f"missing: {scheme}://{bucket}/{key} has no day file from {first} to {last}")
+        missing += 1
+
 sys.exit(3 if missing else 0)
 PY
 )"
@@ -290,7 +326,7 @@ case "$listed_rc" in
   *) refuse "the sources for $DATA_DATE could not be listed" ;;
 esac
 (( ${#SOURCES[@]} > 0 )) \
-  || refuse "env.sh names no sources; set PYG_SOURCE_PATHS or PYG_YEARLY_SOURCE_PREFIXES"
+  || refuse "env.sh names no sources; set PYG_SOURCE_PATHS, PYG_YEARLY_SOURCE_PREFIXES or PYG_LATEST_SOURCE_PREFIXES"
 log "all ${#SOURCES[@]} sources are there"
 
 if [[ -n "$CHECK" ]]; then

@@ -54,7 +54,7 @@ When config is empty, sensible defaults are inferred from the data.
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
 | `--mode` | Yes | `full` | `full`, `enrichment_only`, or `pyg_only`. `parse_only` also exists but is a diagnostic, not a pipeline stage: it stops at the count that materialises the parse and writes nothing — see [The parse stall](testing.md#the-parse-stall) |
-| `--source_paths` | Modes 1,2 | — | Comma-separated source path(s)/URI(s): local directories or `s3a://...`. Each is loaded independently and the results are unioned into a single triples DataFrame before enrichment. Every path must belong to exactly one registered source: by a fragment such as `source=bls` or `quotes`, or else by a folder or file named after the source. A path that matches none, or two, is rejected before Spark starts, and the sources the paths name are the ones whose linkers, date links and cross-source keys are used — see [How a run picks its sources](../reference/sources.md#how-a-run-picks-its-sources). A path naming the archive's `source=sec` partition must also name `feed=filings`: that is the only SEC feed carrying RDF, and the job rejects the other seven up front rather than failing later on a missing Turtle column |
+| `--source_paths` | Modes 1,2 | — | Comma-separated source path(s)/URI(s): local directories or `s3a://...`. Each is loaded independently and the results are unioned into a single triples DataFrame before enrichment. Every path must belong to exactly one registered source: by a fragment such as `source=bls` or `quotes`, or else by a folder or file named after the source. A path that matches none, or two, is rejected before Spark starts, and the sources the paths name are the ones whose linkers, date links and cross-source keys are used — see [How a run picks its sources](../reference/sources.md#how-a-run-picks-its-sources). A path naming the archive's `source=sec` partition must also name `feed=filings` or `feed=companyfacts_snapshot`: those are the SEC feeds carrying RDF, and the job rejects the other eight up front rather than failing later on a missing Turtle column. A path naming the snapshot feed adds `sec-companyfacts` to the run's `sources` |
 | `--input_mode` | No | `s3` | Where `--source_paths` are opened from. `s3` reads the `s3a://` URIs directly — correct in the cloud, where executors sit beside the bucket. `local` reads a mirror of those same objects from node-local disk instead; see [Reading sources from local disk](#reading-sources-from-local-disk) |
 | `--local_source_root` | When `--input_mode local` | — | Root of the staged mirror. Must exist at the same path on every worker |
 | `--local_work_dir` | Yes | — | Working directory for the interim enriched Parquet and the final artifacts. Must be reachable by every worker — a shared mount (e.g. NFS) or a URI on shared storage (`s3a://...`); on a multi-node cluster a driver-local path won't do |
@@ -615,6 +615,13 @@ written so that one file serves every day:
 - **Yearly files go in `PYG_YEARLY_SOURCE_PREFIXES`.** A feed with one file per year can
   stay on last year's well into the new one, so a run reads the newest year that is not
   after the data day's, and logs which.
+- **Daily snapshots go in `PYG_LATEST_SOURCE_PREFIXES`.** A prefix holding one
+  `year=YYYY/month=MM/DD.*` file per day, such as the SEC company facts snapshot
+  (`raw/source=sec/feed=companyfacts_snapshot/`), is read at the newest day that is not
+  after the data day and at most `PYG_LATEST_SOURCE_LOOKBACK_DAYS` (default `7`) before
+  it, and the run logs which. A snapshot carries every company's latest numbers forward,
+  so a day whose snapshot is late builds from the one before. Only when none falls in the
+  look-back is the day skipped, as a missing `PYG_SOURCE_PATHS` object skips it.
 - **The schedule block.** `PYG_SCHEDULE_ONCALENDAR`, `PYG_SCHEDULE_UNIT`,
   `PYG_SCHEDULE_DATA_LAG_DAYS` and `PYG_SCHEDULE_RETAIN_RUNS`, and `PYG_PUBLISH_ROOT` with
   its companions: a schedule publishes, and its prune depends on that.

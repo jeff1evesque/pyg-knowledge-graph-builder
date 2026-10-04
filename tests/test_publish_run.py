@@ -549,6 +549,15 @@ def test_the_day_marker_lists_the_runs_sources_sorted(run):
     assert _marker(run)["sources"] == ["a", "stock-split", "z"]
 
 
+def test_the_day_marker_lists_the_companyfacts_feed_the_run_read(run):
+    """The job names the snapshot feed in dataset.json when a path read it,
+    and the marker carries it as it does any source (#434)."""
+    run.set_recorded_dataset("", ["sec", "sec-companyfacts"])
+    run.add_tables()
+    assert run.publish("--upload").returncode == 0
+    assert _marker(run)["sources"] == ["sec", "sec-companyfacts"]
+
+
 @pytest.mark.parametrize("part,listed", [
     (None, False),
     (b"the schema", True),

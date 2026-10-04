@@ -61,8 +61,8 @@ BLS_COMMON = Namespace(f"{SOURCE_BASE}bls/common/")
 # Were 'sec-common' and 'sec-filings', hyphenated for the same reason BLS_COMMON
 # was, and nested now for the same reason it is.
 
-# Only the filings feed is collected. sec-administrative-proceedings,
-# sec-litigation and sec-trading-suspensions were removed with the linker paths
+# Only the filings feed and the companyfacts snapshot are collected.
+# sec-administrative-proceedings, sec-litigation and sec-trading-suspensions were removed with the linker paths
 # that keyed on them: upstream publishes no administrative-proceedings or
 # trading-suspensions feed at all, and feed=litigation was last written 787 days
 # ago. Code keyed on a source nobody collects cannot be distinguished from
@@ -70,6 +70,9 @@ BLS_COMMON = Namespace(f"{SOURCE_BASE}bls/common/")
 # the defects on this branch stayed hidden.
 SEC_COMMON = Namespace(f"{SOURCE_BASE}sec/common/")
 SEC_FILINGS = Namespace(f"{SOURCE_BASE}sec/filings/")
+# The companyfacts snapshot: each company's latest XBRL numbers. Never flat, so
+# it has no legacy form.
+SEC_COMPANYFACTS = Namespace(f"{SOURCE_BASE}sec/companyfacts/")
 
 # ============================================
 # Market data namespace

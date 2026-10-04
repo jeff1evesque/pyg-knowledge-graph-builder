@@ -158,10 +158,11 @@ for name, entry in record["artifacts"].items():
 
 Complete inventory of every node type and edge type in the graph. The entry point for any consumer of the graph.
 
-**Schema version: `1.5`.** Every step since 1.1 has been additive: each field keeps the name and meaning it had, so the version says what is *there*.
+**Schema version: `1.6`.** Every step since 1.1 has been additive: each field keeps the name and meaning it had, so the version says what is *there*.
 
 | Version | What it changed |
 |---|---|
+| `1.6` | `build_metadata.sources` and `sources_in_graph` may name a feed beside its source: `sec-companyfacts` beside `sec`. See [What the graph is made of](#what-the-graph-is-made-of) |
 | `1.5` | adds `build_metadata.day` — the day the graph's data was cut from, which is the [query tables](tables.md)' `day`. See [Which date is which](#which-date-is-which) |
 | `1.4` | adds `build_metadata.sources_in_graph` and `build_metadata.excluded_node_types` — what this graph holds, as against what the run read |
 | `1.3` | adds `build_metadata.dataset` and `build_metadata.sources` — what the graph was built from. Below 1.3 the file cannot say, so an empty `sources` there means "this build did not record it", not "no sources" |
@@ -199,6 +200,8 @@ Three `build_metadata` fields answer three different questions, and a consumer a
 - **`sources`** (1.3) — the sources the run **read**, carried over from the enriched output's `dataset.json`. A `pyg_only` leg reads it back to learn what the Parquet it is assembling was built from, so it stays the read set and is never narrowed.
 - **`sources_in_graph`** (1.4) — the sources that **reached this `.pt`**. Derived from the node types actually built: each type's `source_type_uri` is matched against the registered vocabularies, longest prefix first.
 - **`excluded_node_types`** (1.4) — the node types the run was **told to leave out**. Always present, `[]` when there were none. `pipeline_config.exclude_node_types` is the same list echoed from the job's config, but only when the job was given one, so an absent key there means either "nothing was excluded" or "this build predates the setting".
+
+From 1.6 both lists may name a **feed** beside its source. A run that read the [SEC company facts snapshot](sources.md#sec-company-facts) lists `sec-companyfacts` after `sec` in `sources`, and a graph holding `companyfacts_CompanyFact` nodes lists it in `sources_in_graph`. A graph with SEC issuers but no facts lists `sec` alone. A feed's name is never a source's, so a reader matching names against the four sources has to allow for it.
 
 The shared vocabularies — `temporal`, `unified`, GeoSPARQL, OWL, RDFS — belong to no source, so the four `temporal_Source*` types name none. A graph holding nothing else reports `[]` rather than crediting whichever source was read.
 

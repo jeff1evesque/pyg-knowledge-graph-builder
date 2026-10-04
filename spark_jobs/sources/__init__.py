@@ -200,10 +200,43 @@ def source_of_type_uri(
 def sources_in_type_uris(
     uris: Sequence[str], specs: Sequence[SourceSpec] = REGISTERED,
 ) -> Tuple[str, ...]:
-    """The sources these terms come from, once each, in registration order."""
+    """The sources these terms come from, once each, in registration order,
+    each followed by its feeds whose namespaces hold one of the terms."""
     table = _owned_namespaces(specs)
     found = {name for name in (_source_of(uri, table) for uri in uris) if name}
-    return tuple(spec.name for spec in specs if spec.name in found)
+    names: List[str] = []
+    for spec in specs:
+        if spec.name not in found:
+            continue
+        names.append(spec.name)
+        names.extend(
+            feed.name
+            for feed in spec.feeds
+            if any(uri.startswith(feed.namespaces) for uri in uris)
+        )
+    return tuple(names)
+
+
+def _names_feed(path: str, fragment: str) -> bool:
+    """Whether a whole segment of the path is the fragment."""
+    return fragment.lower() in path.lower().replace("\\", "/").split("/")
+
+
+def sources_read(
+    paths: Sequence[str], specs: Sequence[SourceSpec] = REGISTERED,
+) -> List[str]:
+    """What a run's paths read, sorted: each source the paths pick, and each
+    of its feeds a path matched to it names."""
+    names = set()
+    for path in paths:
+        spec = match_path(path, specs)
+        names.add(spec.name)
+        names.update(
+            feed.name
+            for feed in spec.feeds
+            if _names_feed(path, feed.path_fragment)
+        )
+    return sorted(names)
 
 
 # ======================================================================

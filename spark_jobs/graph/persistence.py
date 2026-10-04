@@ -24,6 +24,7 @@ from typing import Any, Dict
 
 from pyspark.sql import SparkSession, DataFrame
 
+from spark_jobs import sources as source_registry
 from spark_jobs.graph.config import JobConfig
 from spark_jobs.pyg_builder.metadata_writer import (
     write_metadata_to_s3,
@@ -114,7 +115,8 @@ def save_dataset_descriptor(config: JobConfig, spark: SparkSession) -> None:
     know to go looking for. It is lost outright the moment a graph is copied
     anywhere else.
 
-    Labels, not paths: the names of the sources the run's paths picked, so a
+    Labels, not paths: the names of the sources the run's paths picked, and
+    of the feeds they name (see sources.sources_read), so a
     source is named without naming a bucket, and what is written here reaches
     the published graph schema.
 
@@ -122,7 +124,9 @@ def save_dataset_descriptor(config: JobConfig, spark: SparkSession) -> None:
     from it, so a pyg_only graph built from this output is stamped with this
     day and no other.
     """
-    labels = sorted(spec.name for spec in config.source_specs)
+    labels = source_registry.sources_read(
+        config.source_paths, config.registered_specs
+    )
     body = json.dumps({
         "dataset": config.dataset,
         "sources": labels,

@@ -156,6 +156,11 @@ export PYG_TIME_PERIOD=YYYY-MM
 # not after the data day's, and logs which: a feed can stay on last year's file well
 # into the new year.
 # export PYG_YEARLY_SOURCE_PREFIXES="s3a://BUCKET/PREFIX/feed=A/,s3a://BUCKET/PREFIX/feed=B/"
+# Prefixes that hold one year=YYYY/month=MM/DD.* snapshot per day. Each run reads the
+# newest day that is not after the data day and at most the look-back before it, and
+# logs which, so a day whose snapshot is late builds from the one before.
+# export PYG_LATEST_SOURCE_PREFIXES="s3a://BUCKET/raw/source=sec/feed=companyfacts_snapshot/"
+# export PYG_LATEST_SOURCE_LOOKBACK_DAYS=7
 # On a unified-memory host RAPIDS sizes its pool from MemFree; see bin/mem_reclaim.py.
 # export PYG_MEMFREE_GATE_GB=90
 # export PYG_EXPECTED_WORKERS=2                 # the notebook checks the same count
