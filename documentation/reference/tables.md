@@ -91,7 +91,7 @@ following as the contract:
 | `day` | the day, `YYYY-MM-DD`, the same as the marker's file name |
 | `run_id` | the run that published the day, as its id: the UTC time it started, `YYYYMMDDTHHMMSSZ`. It is the same id the run's builds are [published](outputs.md#published-runs) under |
 | `published` | when the upload that finished the day started, in UTC, as `YYYY-MM-DDTHH:MM:SSZ`. The day became readable later, once that upload was checked and the marker went up |
-| `sources` | the name of every source whose data the day's tables hold, sorted. It has each source the run read, which for the four-source run is `bls`, `market`, `noaa` and `sec`. It has `stock-split` when the day has a [`splits/`](#splits) partition, even an empty one. The split feed is not a source of the graph, but its rows are in the tables. A feed read into a table of its own later is listed the same way, by its name |
+| `sources` | the name of every source whose data the day's tables hold, sorted. It has each source the run read, which for the four-source run is `bls`, `market`, `noaa` and `sec`, and `sec-companyfacts` beside `sec` when the run read the [SEC company facts snapshot](sources.md#sec-company-facts). It has `stock-split` when the day has a [`splits/`](#splits) partition, even an empty one. The split feed is not a source of the graph, but its rows are in the tables. A feed read into a table of its own later is listed the same way, by its name |
 | written | once and last, after every table of the day; never rewritten |
 
 A marker published before `sources` was added has none, because markers are
