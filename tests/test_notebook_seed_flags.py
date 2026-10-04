@@ -208,6 +208,7 @@ def _submit(**overrides):
         "SPLITS_PREFIX": "",
         "S3_ARCHIVE_BUCKET": "",
         "DATASET": "",
+        "SOURCE_DATA_DAY": "",
     }
     ns.update(overrides)
     exec(src[start:end], ns)
@@ -264,3 +265,31 @@ def test_legs_that_write_no_tables_pass_no_split_feed(mode):
 def test_an_unset_split_feed_passes_no_flag():
     cmd = _submit()(mode="full", dry_run=True)["cmd"]
     assert "--stock_splits_bucket" not in cmd
+
+
+# --------------------------------------------------------------------------- #
+# The day the sources describe (#434)
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("mode", ["full", "enrichment_only"])
+def test_the_seed_leg_carries_the_day(mode):
+    """A snapshot from the day before puts a second day in the paths, and the
+    job then has to be told which one the run describes."""
+    cmd = _submit(SOURCE_DATA_DAY="2026-10-05")(mode=mode, dry_run=True)["cmd"]
+    assert cmd[cmd.index("--source_data_day") + 1] == "2026-10-05"
+
+
+@pytest.mark.parametrize("mode", ["pyg_only", "parse_only"])
+def test_legs_that_write_no_tables_pass_no_day(mode):
+    """pyg_only reads its day from dataset.json, and parse_only writes nothing."""
+    cmd = _submit(SOURCE_DATA_DAY="2026-10-05")(mode=mode, dry_run=True)["cmd"]
+    assert "--source_data_day" not in cmd
+
+
+def test_an_unset_day_passes_no_flag():
+    assert "--source_data_day" not in _submit()(mode="full", dry_run=True)["cmd"]
+
+
+def test_the_day_is_the_variable_the_nightly_sets():
+    """bin/daily_run.sh writes PYG_PUBLISH_DATA_DAY into the run's env.sh."""
+    assert 'SOURCE_DATA_DAY = os.environ.get("PYG_PUBLISH_DATA_DAY", "")' in _cell("cell-02")

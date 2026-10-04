@@ -109,7 +109,7 @@ USAGE
     # and a companyfacts snapshot day's facts for the sampled issuers, into
     # turtle_parquet/sec/companyfacts_sample.parquet
     .venv/bin/python bin/generate_sec_e2e_fixtures.py --date 2026-08-07 \
-        --companyfacts-date 2026-10-01
+        --companyfacts-date 2026-10-04
 
 Requires credentials with read access to the archive bucket. Output is
 deterministic: the same source objects produce byte-identical fixtures.

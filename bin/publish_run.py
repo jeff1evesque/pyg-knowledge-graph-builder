@@ -41,8 +41,9 @@ Environment:
   PYG_PUBLISH_DATASET   the source set's name, e.g. all-sources. Defaults to the name
                         the job wrote into dataset.json. One of the two must be set.
   PYG_PUBLISH_DATA_DAY  YYYY-MM-DD, the day the sources were cut from. Defaults to the
-                        one day the day-level source paths in the manifests name. A
-                        variant whose graph_schema.json names another day is refused.
+                        day the job recorded in dataset.json, then to the one day the
+                        day-level source paths in the manifests name. A variant whose
+                        graph_schema.json names another day is refused.
 
 Writes <run-dir>/publish/ (symlinks plus index.json) and appends to publish.log there.
 An --upload also writes its exit code to publish.done: 0 published; 1 the upload or
@@ -275,8 +276,21 @@ def dataset_name(enriched: Path, period: str, env):
     return name, recorded.get("sources", [])
 
 
-def data_day(work: Path, env) -> str:
-    """The path's month= segment cannot tell two runs apart, so index.json names the day."""
+def recorded_day(enriched: Path) -> str:
+    """The day the job recorded in dataset.json, or "" when it recorded none."""
+    descriptor = enriched / "dataset.json"
+    recorded = json.loads(descriptor.read_text()) if descriptor.exists() else {}
+    return str(recorded.get("day") or "").strip()
+
+
+def data_day(work: Path, enriched: Path, env) -> str:
+    """The path's month= segment cannot tell two runs apart, so index.json names the day.
+
+    PYG_PUBLISH_DATA_DAY when it is set, then the day the job recorded, then the one
+    day the source paths name. The job records the day it was told, which is how a
+    run whose paths name two days, such as one reading the day before's snapshot, is
+    published and pruned without the variable. Each has to be a day the paths name.
+    """
     named = set()
     for manifest in sorted(work.glob("manifests/year=*/month=*/*.json")):
         try:
@@ -288,12 +302,14 @@ def data_day(work: Path, env) -> str:
             if found:
                 named.add("-".join(found.groups()))
 
-    given = env.get("PYG_PUBLISH_DATA_DAY", "").strip()
+    given, where = env.get("PYG_PUBLISH_DATA_DAY", "").strip(), "PYG_PUBLISH_DATA_DAY"
+    if not given:
+        given, where = recorded_day(enriched), "the day in dataset.json"
     if given:
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", given):
-            raise Refused(f"PYG_PUBLISH_DATA_DAY {given} is not YYYY-MM-DD")
+            raise Refused(f"{where} {given} is not YYYY-MM-DD")
         if named and given not in named:
-            raise Refused(f"PYG_PUBLISH_DATA_DAY is {given}, but the source paths "
+            raise Refused(f"{where} is {given}, but the source paths "
                           f"name {', '.join(sorted(named))}")
         return given
     if len(named) != 1:
@@ -618,7 +634,7 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
         raise Refused(f"{enriched / 'triples'} has no _SUCCESS")
     graphs = find_graphs(pyg)
     dataset, sources = dataset_name(enriched, f"{year}-{month}", env)
-    day = data_day(work, env)
+    day = data_day(work, enriched, env)
     dst = f"{publish_root(env)}/{dataset}/{period_dirs}/{run_id}"
 
     # Resolved before anything is written: a run that produced tables and has
@@ -741,8 +757,9 @@ def check_published(rd: Path, env) -> int:
     run_id, work = read_run(rd)
     year, month = find_period(work)
     period_dirs = f"year={year}/month={month}"
-    dataset, _ = dataset_name(work / "enriched" / period_dirs, f"{year}-{month}", env)
-    day = data_day(work, env)
+    enriched = work / "enriched" / period_dirs
+    dataset, _ = dataset_name(enriched, f"{year}-{month}", env)
+    day = data_day(work, enriched, env)
     wanted = [(f"{publish_root(env)}/{dataset}/{period_dirs}/{run_id}", INDEX)]
     if tables_plan(work, day):
         wanted.append((tables_destination(env, dataset), f"{TABLES_MARKER}/{day}.json"))

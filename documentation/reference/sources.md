@@ -267,8 +267,8 @@ the days it files. On the day it was filed, a fact also points at
 `{accession}_Filing` through `reportedIn`. Its `periodEnd` and `filedOn` dates
 put it on the period spine at the day it is about and the day it became public.
 
-That adds about 15,600 nodes to a day's ~10.3 million, 0.15% more, and about
-65 MB to a 44 GB `.pt`. The vocabulary takes a hashed ontology-source slot and
+That adds about 15,600 nodes to a day's ~10.7 million (the build of 2026-10-02),
+0.15% more, and about 65 MB to its 48 GB `.pt`. The vocabulary takes a hashed ontology-source slot and
 brings no relation fragments, so `contract_digest` is unchanged. A run that
 read it lists `sec-companyfacts` in its `sources`, and a graph holding its
 nodes lists it in `sources_in_graph`; see [Outputs](outputs.md).

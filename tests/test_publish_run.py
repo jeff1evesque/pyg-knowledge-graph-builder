@@ -208,9 +208,11 @@ class Run:
         _write(partition / "_SUCCESS", b"")
         return {f"splits/day={day}/part-00000.zstd.parquet", f"splits/day={day}/_SUCCESS"}
 
-    def set_recorded_dataset(self, name: str, sources=("a", "b")) -> None:
-        _write(self.enriched / "dataset.json", json.dumps(
-            {"dataset": name, "sources": list(sources), "time_period": f"{YEAR}-{MONTH}"}))
+    def set_recorded_dataset(self, name: str, sources=("a", "b"), day=None) -> None:
+        body = {"dataset": name, "sources": list(sources), "time_period": f"{YEAR}-{MONTH}"}
+        if day is not None:
+            body["day"] = day
+        _write(self.enriched / "dataset.json", json.dumps(body))
 
     def set_graph_schema(self, graph: str, body) -> None:
         """Rewrite one variant's graph_schema.json, or remove it when body is None.
@@ -452,6 +454,24 @@ def test_source_paths_naming_two_days_need_the_day_given(run):
     assert refused.returncode == 2
     assert "PYG_PUBLISH_DATA_DAY" in refused.stdout
     assert run.publish(PYG_PUBLISH_DATA_DAY=DAY).returncode == 0
+
+
+def test_source_paths_naming_two_days_take_the_day_the_job_recorded(run):
+    """A snapshot from the day before puts a second day in the paths. The job is
+    told the day and records it, so the publish needs no variable, and neither
+    does the prune's --published, which asks about older runs (#434)."""
+    run.add_source_path("s3a://BUCKET/raw/source=c/year=2026/month=01/01.snappy.parquet")
+    run.set_recorded_dataset("", day=DAY)
+    assert run.publish("--upload").returncode == 0
+    assert json.loads((run.published / "index.json").read_text())["data_day"] == DAY
+    assert run.publish("--published").returncode == 0
+
+
+def test_a_recorded_day_the_paths_do_not_name_is_refused(run):
+    run.set_recorded_dataset("", day="2026-01-05")
+    refused = run.publish()
+    assert refused.returncode == 2
+    assert "the day in dataset.json is 2026-01-05" in refused.stdout
 
 
 def test_with_no_dataset_name_anywhere_the_run_is_refused(run):

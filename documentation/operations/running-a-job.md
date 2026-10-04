@@ -621,7 +621,11 @@ written so that one file serves every day:
   after the data day and at most `PYG_LATEST_SOURCE_LOOKBACK_DAYS` (default `7`) before
   it, and the run logs which. A snapshot carries every company's latest numbers forward,
   so a day whose snapshot is late builds from the one before. Only when none falls in the
-  look-back is the day skipped, as a missing `PYG_SOURCE_PATHS` object skips it.
+  look-back is the day skipped, as a missing `PYG_SOURCE_PATHS` object skips it. A late
+  snapshot puts a second day in the paths, so the schedule writes the data day into the
+  run's `env.sh` as `PYG_PUBLISH_DATA_DAY`. The notebook passes it to the job as
+  `--source_data_day`, the job records it in `dataset.json`, and the publish reads it
+  from there.
 - **The schedule block.** `PYG_SCHEDULE_ONCALENDAR`, `PYG_SCHEDULE_UNIT`,
   `PYG_SCHEDULE_DATA_LAG_DAYS` and `PYG_SCHEDULE_RETAIN_RUNS`, and `PYG_PUBLISH_ROOT` with
   its companions: a schedule publishes, and its prune depends on that.
