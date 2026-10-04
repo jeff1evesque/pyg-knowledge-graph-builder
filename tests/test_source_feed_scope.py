@@ -22,6 +22,7 @@ import pytest
 from spark_jobs import sources
 from spark_jobs.graph.config import JobConfig
 from spark_jobs.sources.sec import (
+    SEC_COMPANYFACTS_FEED,
     SEC_HANDLED_FEED,
     SEC_UNHANDLED_FEEDS,
     assert_sec_paths_name_the_handled_feed,
@@ -30,6 +31,10 @@ from spark_jobs.sources.spec import SourceSpec
 from spark_jobs.utils.namespaces import ONTOLOGY_BASE
 
 _HANDLED = f"/mnt/archive/raw/source=sec/{SEC_HANDLED_FEED}/year=2026/month=08/"
+_SNAPSHOT = (
+    f"/mnt/archive/raw/source=sec/{SEC_COMPANYFACTS_FEED}/year=2026/month=10/"
+    "01.snappy.parquet"
+)
 _BLS = "/mnt/archive/raw/source=bls/feed=cpi/year=2026/month=08/"
 _NOAA = "/mnt/archive/raw/noaa/year=2026/month=08/"
 
@@ -118,6 +123,39 @@ def test_filings_documents_is_not_mistaken_for_filings():
         assert_sec_paths_name_the_handled_feed(
             ["/mnt/archive/raw/source=sec/feed=filings_documents/"]
         )
+
+
+def test_the_companyfacts_snapshot_is_accepted():
+    config = _config(source_paths=f"{_HANDLED},{_SNAPSHOT}")
+    assert [spec.name for spec in config.source_specs] == ["sec"]
+
+
+def test_the_companyfacts_history_is_not_mistaken_for_the_snapshot():
+    """``feed=companyfacts`` starts the snapshot's feed name. It is the
+    history, and carries no RDF."""
+    with pytest.raises(ValueError, match="'feed=companyfacts'"):
+        assert_sec_paths_name_the_handled_feed(
+            ["/mnt/archive/raw/source=sec/feed=companyfacts/CIK0000320193.json"]
+        )
+
+
+def test_a_feed_no_list_names_is_rejected():
+    with pytest.raises(ValueError, match="unhandled SEC feed 'feed=new'"):
+        _config(source_paths="/mnt/archive/raw/source=sec/feed=new/")
+
+
+# --------------------------------------------------------------------------- #
+# what a run reports it read
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("paths,read", [
+    ([_HANDLED], ["sec"]),
+    ([_HANDLED, _SNAPSHOT], ["sec", "sec-companyfacts"]),
+    ([_SNAPSHOT, _BLS], ["bls", "sec", "sec-companyfacts"]),
+    (["/data/sec/feed=companyfacts_snapshot_old/"], ["sec"]),
+], ids=["filings", "filings and snapshot", "snapshot and bls", "not the segment"])
+def test_a_run_names_the_companyfacts_feed_when_a_path_does(paths, read):
+    assert sources.sources_read(paths) == read
 
 
 def test_one_bad_path_among_several_is_rejected():
