@@ -106,6 +106,11 @@ USAGE
     # fixture comes from 2026-08-07, the newest day upstream backfilled.
     .venv/bin/python bin/generate_sec_e2e_fixtures.py --date 2026-08-07
 
+    # and a companyfacts snapshot day's facts for the sampled issuers, into
+    # turtle_parquet/sec/companyfacts_sample.parquet
+    .venv/bin/python bin/generate_sec_e2e_fixtures.py --date 2026-08-07 \
+        --companyfacts-date 2026-10-01
+
 Requires credentials with read access to the archive bucket. Output is
 deterministic: the same source objects produce byte-identical fixtures.
 """
@@ -126,6 +131,17 @@ from pathlib import Path
 # column and no Turtle at all — the stub fixture this replaces came from one of
 # them, which is why it was a wall of text rather than a filing.
 RAW_PREFIX = "raw/source=sec/feed=filings/"
+
+# The companyfacts snapshot: one row per company, value property and period,
+# each row its own Turtle document with its issuer restated beside it.
+COMPANYFACTS_PREFIX = "raw/source=sec/feed=companyfacts_snapshot/"
+
+# Companies, and facts per company, kept from a snapshot day. Only issuers the
+# filings sample holds are taken, so each fact's aboutIssuer edge lands on a
+# node the fixture already has, and those that state a ticker come first, so
+# the facts reach the market side too.
+COMPANYFACTS_COMPANIES = 3
+COMPANYFACTS_PER_COMPANY = 4
 
 # Number of filings to sample. Sized against the BLS fixtures (~11 KiB per
 # feed): SEC filings are ~10 triples each, so 40 lands in the same ballpark and
@@ -173,6 +189,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "e2e"
 PARQUET_TARGET = FIXTURE_ROOT / "turtle_parquet" / "sec" / "sec_sample.parquet"
 NTRIPLES_TARGET = FIXTURE_ROOT / "ntriples" / "sec.nt"
+COMPANYFACTS_TARGET = FIXTURE_ROOT / "turtle_parquet" / "sec" / "companyfacts_sample.parquet"
 BLS_FIXTURES = FIXTURE_ROOT / "turtle_parquet" / "bls"
 
 # raw/source=sec/feed=filings/year=2026/month=08/14.snappy.parquet
@@ -665,6 +682,55 @@ def filing_states_trading_symbol(graph, subj) -> bool:
     return False
 
 
+def sample_issuer_ciks(graph) -> list[str]:
+    """The CIKs of the sample's issuers, those stating a ticker first."""
+    ciks = {}
+    for subj, pred, cik in graph:
+        if _local(pred) == "hasIssuerCik":
+            ticker = any(
+                _local(p) == "hasIssuerTradingSymbol"
+                for p, _o in graph.predicate_objects(subj)
+            )
+            ciks[str(cik)] = ciks.get(str(cik), False) or ticker
+    return sorted(ciks, key=lambda cik: (not ciks[cik], cik))
+
+
+def companyfacts_rows(s3, bucket: str, date: str, ciks: list[str]) -> list[str]:
+    """A snapshot day's rows for the first companies in ``ciks`` it carries.
+
+    Per company, one row per value property in property order, so the sample
+    spreads across properties rather than taking one property's periods.
+    """
+    import pandas as pd
+    import pyarrow.parquet as pq
+
+    year, month, day = date.split("-")
+    key = f"{COMPANYFACTS_PREFIX}year={year}/month={month}/{day}.snappy.parquet"
+    body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+    column = turtle_column(pq.read_schema(io.BytesIO(body)).names)
+    if column is None:
+        raise RuntimeError(f"{key} carries no Turtle column")
+    frame = pd.read_parquet(io.BytesIO(body), columns=[column, "cik", "property"])
+    frame["cik"] = frame["cik"].astype(str).str.zfill(10)
+    frame = frame.sort_values(["cik", "property"], kind="stable")
+
+    rows: list[str] = []
+    companies = 0
+    for cik in ciks:
+        facts = frame[frame["cik"] == cik.zfill(10)].drop_duplicates("property")
+        if facts.empty:
+            continue
+        rows += facts[column].head(COMPANYFACTS_PER_COMPANY).tolist()
+        companies += 1
+        if companies == COMPANYFACTS_COMPANIES:
+            break
+    if not rows:
+        raise RuntimeError(
+            f"{key} holds no fact for any of the sample's {len(ciks)} issuers"
+        )
+    return rows
+
+
 def ntriples_slice(graph, filings: list, count: int) -> str:
     """N-Triples serialization of ``count`` filings' closures.
 
@@ -869,6 +935,11 @@ def main() -> int:
         "--date", default="",
         help="YYYY-MM-DD day partition to sample; default = newest day with RDF",
     )
+    parser.add_argument(
+        "--companyfacts-date", default="",
+        help="YYYY-MM-DD companyfacts snapshot day to sample facts from for the "
+             "sample's issuers; without it the companyfacts fixture is left as it is",
+    )
     parser.add_argument("--filings", type=int, default=FILINGS_SAMPLED)
     parser.add_argument("--fan-out-cap", type=int, default=FAN_OUT_CAP)
     parser.add_argument(
@@ -924,6 +995,13 @@ def main() -> int:
 
     validate(sample, anchors, selected_types)
 
+    facts = []
+    if args.companyfacts_date:
+        facts = companyfacts_rows(
+            s3, args.bucket, args.companyfacts_date, sample_issuer_ciks(sample)
+        )
+        _log(f"  {len(facts)} companyfacts row(s) from {args.companyfacts_date}")
+
     if args.dry_run:
         _log("\ndry run — nothing written")
         return 0
@@ -936,6 +1014,14 @@ def main() -> int:
     )
     _log(f"  wrote {PARQUET_TARGET.relative_to(REPO_ROOT)} "
          f"({len(turtle_docs)} rows, {PARQUET_TARGET.stat().st_size / 1024:.0f} KiB)")
+
+    if facts:
+        pd.DataFrame({"triples": facts}).to_parquet(
+            COMPANYFACTS_TARGET, index=False, compression="snappy"
+        )
+        _log(f"  wrote {COMPANYFACTS_TARGET.relative_to(REPO_ROOT)} "
+             f"({len(facts)} rows, "
+             f"{COMPANYFACTS_TARGET.stat().st_size / 1024:.0f} KiB)")
 
     filings = sorted(
         subj for subj in set(sample.subjects(rdflib.RDF.type, None))
