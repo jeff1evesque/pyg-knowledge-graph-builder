@@ -66,6 +66,7 @@ day="$2"
 export PYG_RUN_DIR="$rd" PYG_DATA_YEAR="${day:0:4}" PYG_DATA_MONTH="${day:5:2}" PYG_DATA_DAY="${day:8:2}"
 . "$rd/env.sh"
 printf "%s\\n" "$PYG_SOURCE_PATHS" > "$FAKE_CALLS/launcher-sources.txt"
+printf "%s\\n" "${PYG_PUBLISH_DATA_DAY:-}" > "$FAKE_CALLS/launcher-day.txt"
 mkdir -p "$PYG_WORK_DIR"
 printf "run id      : %s\\nwork dir    : %s\\n" "$RUN_ID" "$PYG_WORK_DIR" > "$rd/run-config.txt"
 echo "${FAKE_RUN_RC:-0}" > "$rd/run.done"
@@ -95,6 +96,9 @@ from pathlib import Path
 rd, mode = Path(sys.argv[1]), sys.argv[2]
 with open(os.path.join(os.environ["FAKE_CALLS"], "publish.txt"), "a") as fh:
     fh.write(f"{rd.name} {mode}\\n")
+if os.environ.get("PYG_PUBLISH_DATA_DAY"):
+    with open(os.path.join(os.environ["FAKE_CALLS"], "publish-day.txt"), "a") as fh:
+        fh.write(f"{rd.name} {mode} {os.environ['PYG_PUBLISH_DATA_DAY']}\\n")
 if mode == "--upload":
     rc = int(os.environ.get("FAKE_PUBLISH_RC", "0"))
     if rc == 0:
@@ -354,7 +358,10 @@ def test_a_latest_prefix_reads_the_newest_day_not_after_the_data_day(
     schedule, days, data_day, read,
 ):
     """A snapshot carries every company's latest numbers forward, so a day whose
-    scraper run failed builds from the day before rather than skipping."""
+    upstream run failed builds from the day before rather than skipping.
+
+    The paths then name two days, so the run's env.sh names the day for the job.
+    The publisher is not given it: the prune asks it about older runs."""
     s = schedule()
     s.add_sources(data_day)
     _reading_the_latest_snapshot(s, *days)
@@ -365,6 +372,8 @@ def test_a_latest_prefix_reads_the_newest_day_not_after_the_data_day(
     assert f"s3a://{SNAPSHOT}{read}.snappy.parquet" in sources
     assert sources.count(SNAPSHOT) == 1
     assert f"-> {read}.snappy.parquet" in s.log()
+    assert s.recorded("launcher-day").strip() == data_day
+    assert s.recorded("publish-day") == ""
 
 
 @pytest.mark.parametrize("days, lookback", [
