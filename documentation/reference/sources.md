@@ -2,7 +2,7 @@
 
 The pipeline ingests RDF from four sources: BLS economic series, SEC filings,
 intraday market snapshots, and NOAA weather alerts. One mapper is written per
-published table, and the chart below is all one hundred of them — hover a bar
+published table, and the chart below is all 101 of them — hover a bar
 for the category behind it.
 
 <div>
@@ -10,10 +10,11 @@ for the category behind it.
      aria-labelledby="srcTitle srcDesc"
      style="width:100%;height:auto;display:block;margin:1.2rem auto">
   <title id="srcTitle">Mappers per source</title>
-  <desc id="srcDesc">One hundred mappers across four sources. BLS is ten
+  <desc id="srcDesc">101 mappers across four sources. BLS is ten
     categories holding 97 published tables between them: EMPSIT 27, JOLTS 15,
     ECI 14, XIMPIM 11, CPI 8, PPI 7, WKYENG 6, METRO 4, LAUS 3, REALER 2. SEC
-    filings, market quotes and NOAA alerts contribute one mapper each.</desc>
+    contributes two, filings and the companyfacts snapshot, and market quotes
+    and NOAA alerts one each.</desc>
 
   <style>
     .cap  { font: 600 11px var(--md-text-font-family, system-ui, sans-serif);
@@ -187,18 +188,18 @@ for the category behind it.
   <g class="grp">
     <rect class="frame" x="584" y="44" width="184" height="240" rx="8"/>
     <line class="axis" x1="598" y1="234" x2="754" y2="234"/>
-    <text class="cap" x="598" y="270">ONE MAPPER EACH</text>
+    <text class="cap" x="598" y="270">ONE OR TWO EACH</text>
 
     <g class="col">
       <rect class="hit" x="598" y="46" width="52" height="212"/>
       <line class="lead" x1="624" y1="44" x2="624" y2="228"/>
-      <rect class="bar" x="612" y="228" width="24" height="6" rx="2"/>
-      <text class="val" x="624" y="222">1</text>
+      <rect class="bar" x="612" y="222" width="24" height="12" rx="2"/>
+      <text class="val" x="624" y="216">2</text>
       <text class="tick" x="624" y="250">SEC</text>
       <g class="tip">
         <rect class="tipbox" x="492" y="4" width="264" height="38" rx="4"/>
-        <text class="lbl" x="504" y="21">Filings &#183; 10-K, 10-Q, 8-K, Forms 3/4/5</text>
-        <text class="sub" x="504" y="36">1 of 8 SEC feeds &#183; 1 mapper</text>
+        <text class="lbl" x="504" y="21">Filings and company facts (XBRL)</text>
+        <text class="sub" x="504" y="36">2 of 10 SEC feeds &#183; 2 mappers</text>
       </g>
     </g>
 
@@ -232,9 +233,11 @@ for the category behind it.
 </div>
 
 **BLS** is the only source split into categories — ten of them, 97 published
-tables between them. **SEC** is one feed of eight: `feed=filings` is the only one
-carrying RDF, and a source path naming any of the other seven is rejected before
-the job starts. **Market** is a single flat vocabulary, `EquitySnapshot` and
+tables between them. **SEC** is two feeds of ten: `feed=filings` and
+`feed=companyfacts_snapshot` are the ones carrying RDF, and a source path naming
+any of the other eight is rejected before the job starts. Feeds are matched as
+whole path segments, so `feed=companyfacts`, the snapshot's history, which holds
+no RDF, is one of the eight. **Market** is a single flat vocabulary, `EquitySnapshot` and
 `OptionSnapshot` with every field a direct property, covering ~500+ tickers with
 full options chains (~500K+ symbols per snapshot) at ~39 snapshots a day on
 20-minute intervals during market hours. **NOAA** is US weather alerts in CAP
@@ -246,6 +249,29 @@ the constituents list is read, so it never enters the triples or the `.pt`.
 
 > **Measured volume:** one four-source day loads **322.7M triples** and enriches
 > to **421.4M**. Market is 99.5% of that; BLS 1.3M, SEC 198K, NOAA 143K.
+
+### SEC company facts
+
+`feed=companyfacts_snapshot` is a daily snapshot of every S&P 500 company's
+latest XBRL numbers, about 15,600 rows a day. Each row is one `CompanyFact`
+under `ontology/sec/companyfacts/` (prefix `companyfacts`, so the node type is
+`companyfacts_CompanyFact`, with entities under `id/sec/companyfacts/`): one
+company's number for one concept and period, under one value property per
+concept and period length, such as `revenueQuarter` or `assets`. Each one is
+scaled against the same property at the other companies.
+
+A fact points at the filings vocabulary's own `Issuer_{cik}` through
+`aboutIssuer`, and the row restates that issuer with its type and
+`hasIssuerCik`, so every company reaches `UnifiedCompany` every day, not only on
+the days it files. On the day it was filed, a fact also points at
+`{accession}_Filing` through `reportedIn`. Its `periodEnd` and `filedOn` dates
+put it on the period spine at the day it is about and the day it became public.
+
+That adds about 15,600 nodes to a day's ~10.3 million, 0.15% more, and about
+65 MB to a 44 GB `.pt`. The vocabulary takes a hashed ontology-source slot and
+brings no relation fragments, so `contract_digest` is unchanged. A run that
+read it lists `sec-companyfacts` in its `sources`, and a graph holding its
+nodes lists it in `sources_in_graph`; see [Outputs](outputs.md).
 
 ## Registering a source
 
@@ -306,7 +332,7 @@ migrated, at the cost of one `contract_digest`.
 | `label` | No | How log lines name the source. Defaults to `name` |
 | `source_format` | No | `ntriples` or `turtle_parquet` for this source's paths. Empty means `--source_format` |
 | `turtle_columns` | No | Parquet columns that may hold this source's Turtle, in the order they are tried. Empty means `triples`, then `rdf_turtle` |
-| `check_paths` | No | Rejects a path of this source the job cannot read, before Spark starts. SEC's rejects every feed but `feed=filings` |
+| `check_paths` | No | Rejects a path of this source the job cannot read, before Spark starts. SEC's rejects every feed but `feed=filings` and `feed=companyfacts_snapshot` |
 | `canonicalize` | No | The source's identifier repair, applied only to the rows read from its own paths. Only SEC has one |
 | `linker` | No | Builds the source's intra-source linker, whose `enrich()` returns new triples |
 | `date_predicates`, `temporal_prefix` | No, but both or neither | Predicates whose values are dates, and where the period nodes made from them are minted. One predicate is enough to put a source's entities on the period spine |
@@ -321,6 +347,7 @@ migrated, at the cost of one `contract_digest`.
 | `sector_keys` | No | Links placing the source's entities in a sector, each under the predicate it has always used. SEC's come from SIC codes, market's from the GICS crosswalk |
 | `cross_source_steps` | No | Steps that pair the source with others by name, such as BLS indicators leading equity sectors. Each runs only when every source it names is present |
 | `measurement_types` | No | Source classes that cross-source linking also types as their `class_mappings` target |
+| `feeds` | No | Feeds named on their own beside the source, each by a name, a path segment and its namespaces. A run's `sources` names a feed when a path holds its segment, and `sources_in_graph` when a node type sits under one of its namespaces. SEC's is `sec-companyfacts` |
 
 The four registered sources set no `source_format`, because the e2e fixtures hold
 market, NOAA and SEC in both formats. A function field imports what it runs inside
