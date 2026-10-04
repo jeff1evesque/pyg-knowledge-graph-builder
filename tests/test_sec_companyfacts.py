@@ -72,17 +72,21 @@ def test_the_issuer_reaches_its_company_on_a_day_it_filed_nothing(
     spark, make_triples,
 ):
     """The snapshot names every company every day. A filing names one only
-    on the days it files."""
+    on the days it files. The quote meets the fact's issuer at the same company,
+    through the constituents CSV's ticker pairing."""
     snapshot = str(MARKET_QUOTES) + "snapshot/AAPL/2026-10-01"
     rows = _snapshot_row() + [
         (snapshot, RDF_TYPE, str(MARKET_QUOTES.EquitySnapshot)),
         (snapshot, str(MARKET_QUOTES.symbol), "AAPL"),
     ]
 
-    triples = _triple_set(CrossSourceLinker(spark, make_triples(rows)).enrich())
+    triples = _triple_set(CrossSourceLinker(
+        spark, make_triples(rows), ticker_cik_map={"AAPL": CIK},
+    ).enrich())
 
     company = f"{UNIFIED}Company_{CIK}"
     assert (ISSUER, str(BLS_ENRICHMENT.refersToCompany), company) in triples
+    assert (snapshot, str(BLS_ENRICHMENT.refersToCompany), company) in triples
 
 
 def test_a_fact_reaches_the_day_it_is_about_and_the_day_it_was_filed(
