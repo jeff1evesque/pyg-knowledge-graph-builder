@@ -45,7 +45,7 @@
   <text class="sub" x="20" y="176">weather alerts</text>
   <rect class="box" x="8" y="194" width="140" height="42" rx="5"/>
   <text class="lbl" x="20" y="214">SEC</text>
-  <text class="sub" x="20" y="228">filings</text>
+  <text class="sub" x="20" y="228">filings, company facts</text>
   <text class="sub" x="8" y="258">Turtle in Parquet</text>
   <text class="sub" x="8" y="272">100+ ontologies</text>
 
