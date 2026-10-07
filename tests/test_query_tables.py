@@ -18,6 +18,9 @@ about what must NOT reach them:
   * ``splits/`` comes from the split feed, not the triples. A day the feed
     listed no splits gets an empty partition, and a day it was not read for
     gets none, so the two can be told apart
+  * the companyfacts snapshot's facts reach no table, and ``companyfacts/``
+    comes from the company facts history instead, on the same terms as
+    ``splits/``
 
 Tier 4: real Spark, small frames, no cluster.
 """
@@ -26,6 +29,11 @@ from datetime import date, datetime, timezone
 
 import pytest
 
+from companyfacts_feed import fact, history_object
+from spark_jobs.enrichment.temporal_unifier import (
+    OBSERVED_IN_PERIOD_PRED,
+    SOURCE_DAY_TYPE,
+)
 from spark_jobs.graph.config import JobConfig
 from spark_jobs.graph.tables import table_path, write_query_tables
 from split_feed import feed_client, month_object
@@ -36,7 +44,10 @@ from spark_jobs.utils.rdf_utils import (
     MARKET_ENRICHMENT,
     MARKET_QUOTES,
     NOAA_ENRICHMENT,
+    SEC_COMPANYFACTS,
+    SEC_FILINGS,
     WEATHER,
+    identifier_namespace,
 )
 
 # Types and predicates taken from the namespace table's own vocabularies, so a
@@ -694,6 +705,180 @@ def test_reading_splits_changes_no_other_table(spark, tmp_path):
             for paths in (with_splits, without)
         ]
         assert rows[0] == rows[1], table
+
+
+# ======================================================================
+# The companyfacts snapshot's facts, and companyfacts/
+# ======================================================================
+
+FACTS_ID = identifier_namespace(str(SEC_COMPANYFACTS))
+FILINGS_ID = identifier_namespace(str(SEC_FILINGS))
+COMPANY_FACT = f"{FACTS_ID}Fact_0000320193_revenueQuarter_2026-06-27"
+ISSUER = f"{FILINGS_ID}Issuer_0000320193"
+FACT_DAY = "https://ex/temporal/2026-06-27"
+
+# What the snapshot and enrichment add beside a fact: its issuer, which the
+# filings feed names too, and the day its period ends on.
+ISSUER_AND_DAY = [
+    (ISSUER, RDF_TYPE, str(SEC_FILINGS.Issuer)),
+    (ISSUER, str(SEC_FILINGS.hasIssuerCik), "0000320193"),
+    (FACT_DAY, RDF_TYPE, SOURCE_DAY_TYPE),
+]
+# The fact: a number, a code, a text value, and its edges to the two.
+COMPANY_FACT_TRIPLES = [
+    (COMPANY_FACT, RDF_TYPE, str(SEC_COMPANYFACTS.CompanyFact)),
+    (COMPANY_FACT, str(SEC_COMPANYFACTS.revenueQuarter), "94930000000.0"),
+    (COMPANY_FACT, str(SEC_COMPANYFACTS.unit), "USD"),
+    (COMPANY_FACT, RDFS_LABEL, "Apple revenue"),
+    (COMPANY_FACT, str(SEC_COMPANYFACTS.aboutIssuer), ISSUER),
+    (COMPANY_FACT, OBSERVED_IN_PERIOD_PRED, FACT_DAY),
+]
+
+
+def _store_triples(path):
+    import pyoxigraph
+
+    return {
+        (str(q.subject.value), str(q.predicate.value), str(q.object.value))
+        for q in pyoxigraph.Store.read_only(path).quads_for_pattern(None, None, None)
+    }
+
+
+def test_the_snapshots_facts_reach_no_table(spark, tmp_path):
+    """The snapshot restates every company's latest numbers each day, so they
+    would repeat in every day's tables. Written with a fact and without it,
+    every table and the store come out the same: no node, edge, value or text
+    of the fact's. The issuer stays."""
+    written = {}
+    for name, rows in (
+        ("with", TRIPLES + ISSUER_AND_DAY + COMPANY_FACT_TRIPLES),
+        ("without", TRIPLES + ISSUER_AND_DAY),
+    ):
+        triples = spark.createDataFrame(
+            rows, "subject string, predicate string, object string"
+        )
+        written[name] = write_query_tables(
+            spark, triples, _config(tmp_path / name)
+        )
+
+    assert set(written["with"]) == set(written["without"])
+    for table in ("nodes", "edges", "edge_types", "facts", "entities", "snapshots"):
+        rows = [
+            sorted(map(str, spark.read.parquet(paths[table]).collect()))
+            for paths in (written["with"], written["without"])
+        ]
+        assert rows[0] == rows[1], table
+    assert _store_triples(written["with"]["graph"]) == _store_triples(
+        written["without"]["graph"]
+    )
+
+    nodes = spark.read.parquet(written["with"]["nodes"]).collect()
+    assert ISSUER in {row["uri"] for row in nodes}
+
+
+HISTORY_PREFIX = "raw/source=sec/feed=companyfacts"
+HISTORY_KEY = f"{HISTORY_PREFIX}/2026.snappy.parquet"
+# 23:15 and 21:59 Eastern on DAY, either side of EDGAR closing, in UTC.
+HISTORY_WRITTEN = datetime(2026, 9, 13, 3, 15, tzinfo=timezone.utc)
+HISTORY_EARLY = datetime(2026, 9, 13, 1, 59, tzinfo=timezone.utc)
+COMPANYFACTS_DTYPES = [
+    ("cik", "string"), ("entity_name", "string"), ("taxonomy", "string"),
+    ("concept", "string"), ("unit", "string"), ("period_start", "date"),
+    ("period_end", "date"), ("value", "double"), ("fy", "int"),
+    ("fp", "string"), ("form", "string"), ("accn", "string"),
+    ("filed", "date"), ("status", "string"), ("first_filed", "date"),
+    ("prior_value", "double"), ("property", "string"), ("length", "string"),
+]
+
+
+def _companyfacts_paths(spark, tmp_path, rows, written=HISTORY_WRITTEN, bucket="b"):
+    triples = spark.createDataFrame(
+        TRIPLES, "subject string, predicate string, object string"
+    )
+    client = feed_client({HISTORY_KEY: (history_object(rows), written)})
+    config = _config(
+        tmp_path,
+        companyfacts_history_bucket=bucket,
+        companyfacts_history_prefix=HISTORY_PREFIX,
+    )
+    return write_query_tables(spark, triples, config, s3_client=client), config
+
+
+def test_a_days_company_facts_are_written_without_the_repeats(spark, tmp_path):
+    paths, config = _companyfacts_paths(spark, tmp_path, [
+        fact(filed=DAY, first_filed=DAY),
+        fact(filed=DAY, first_filed="2026-07-31", status="repeated",
+             period_start="2025-03-30", period_end="2025-06-28"),
+        fact(filed="2026-09-11", first_filed="2026-09-11"),
+    ])
+
+    assert paths["companyfacts"] == table_path(
+        config.query_tables_path, "companyfacts", DAY
+    )
+    table = spark.read.parquet(paths["companyfacts"])
+    assert table.dtypes == COMPANYFACTS_DTYPES
+    rows = [row.asDict() for row in table.collect()]
+    assert len(rows) == 1
+    assert rows[0]["filed"] == date(2026, 9, 12)
+    assert (rows[0]["property"], rows[0]["length"], rows[0]["fy"]) == (
+        "revenue", "quarter", 2026,
+    )
+
+
+def test_a_day_nothing_was_filed_writes_an_empty_companyfacts_partition(
+    spark, tmp_path,
+):
+    paths, _ = _companyfacts_paths(
+        spark, tmp_path, [fact(filed="2026-09-11", first_filed="2026-09-11")]
+    )
+
+    table = spark.read.parquet(paths["companyfacts"])
+    assert table.dtypes == COMPANYFACTS_DTYPES
+    assert table.count() == 0
+
+
+@pytest.mark.parametrize("case", ["missing", "early", "no bucket"])
+def test_no_companyfacts_partition_when_the_history_was_not_read(
+    spark, tmp_path, case,
+):
+    triples = spark.createDataFrame(
+        TRIPLES, "subject string, predicate string, object string"
+    )
+    rows = [fact(filed=DAY, first_filed=DAY)]
+    objects = {
+        "missing": {},
+        "early": {HISTORY_KEY: (history_object(rows), HISTORY_EARLY)},
+        "no bucket": {HISTORY_KEY: (history_object(rows), HISTORY_WRITTEN)},
+    }[case]
+    config = _config(
+        tmp_path,
+        companyfacts_history_bucket="" if case == "no bucket" else "b",
+        companyfacts_history_prefix=HISTORY_PREFIX,
+    )
+
+    paths = write_query_tables(
+        spark, triples, config, s3_client=feed_client(objects)
+    )
+
+    assert "companyfacts" not in paths
+    assert not os.path.exists(
+        table_path(config.query_tables_path, "companyfacts", DAY)
+    )
+    assert paths["nodes"], "the other tables are written all the same"
+
+
+def test_reading_the_history_changes_no_other_table(spark, tmp_path):
+    rows = [fact(filed=DAY, first_filed=DAY)]
+    with_history, _ = _companyfacts_paths(spark, tmp_path / "with", rows)
+    without, _ = _companyfacts_paths(spark, tmp_path / "without", rows, bucket="")
+
+    assert set(with_history) - set(without) == {"companyfacts"}
+    for table in ("nodes", "edges", "edge_types", "facts", "entities", "snapshots"):
+        compared = [
+            sorted(map(str, spark.read.parquet(paths[table]).collect()))
+            for paths in (with_history, without)
+        ]
+        assert compared[0] == compared[1], table
 
 
 # ======================================================================
