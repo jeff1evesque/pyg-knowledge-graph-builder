@@ -292,6 +292,15 @@ class JobConfig:
         self.stock_splits_bucket = args.get("stock_splits_bucket", "") or ""
         self.stock_splits_prefix = args.get("stock_splits_prefix", "") or ""
 
+        # The SEC company facts history, read on the driver into the
+        # companyfacts/ query table the same way. No bucket, no table.
+        self.companyfacts_history_bucket = (
+            args.get("companyfacts_history_bucket", "") or ""
+        )
+        self.companyfacts_history_prefix = (
+            args.get("companyfacts_history_prefix", "") or ""
+        )
+
         # Source path(s)/URI(s): a single value or a comma-separated list.
         # Each entry is a local directory or an s3a:// URI, and belongs to one
         # registered source. Whitespace around each entry is stripped.
@@ -744,6 +753,20 @@ def parse_args() -> JobConfig:
         default="",
         help="Where the split feed's year= folders sit in "
              "--stock_splits_bucket. Empty is the bucket's root",
+    )
+    parser.add_argument(
+        "--companyfacts_history_bucket",
+        default="",
+        help="Bucket holding the SEC company facts history, one Parquet object "
+             "per year at <prefix>/YYYY.snappy.parquet. The numbers filed on "
+             "the run's day become the companyfacts/ query table. Unset, there "
+             "is no companyfacts table",
+    )
+    parser.add_argument(
+        "--companyfacts_history_prefix",
+        default="",
+        help="Where the history's year files sit in "
+             "--companyfacts_history_bucket. Empty is the bucket's root",
     )
 
     parsed = parser.parse_args()
