@@ -52,9 +52,12 @@
 #                                   one whose year is not after the data day's.
 #   PYG_LATEST_SOURCE_PREFIXES      optional, comma separated. Each prefix holds one
 #                                   year=YYYY/month=MM/DD.* file per day, and a run
-#                                   reads the newest one not after the data day.
+#                                   reads the newest one dated before the data day.
+#                                   A day's file is written that evening, after the
+#                                   market closed, so the data day's own file would
+#                                   hold numbers its market data could not have seen.
 #   PYG_LATEST_SOURCE_LOOKBACK_DAYS optional. How many days before the data day such
-#                                   a file may be from; default 7.
+#                                   a file may be from, 1 or more; default 7.
 #   PYG_MEMFREE_GATE_GB             optional. MemFree every node must reach first.
 #   PYG_EXPECTED_WORKERS            optional. ALIVE workers on an idle cluster;
 #                                   default, the number of PYG_STAGE_NODES.
@@ -224,8 +227,8 @@ fi
 # ---------------------------------------------------------------------------
 SOURCES=()
 LOOKBACK="${PYG_LATEST_SOURCE_LOOKBACK_DAYS:-7}"
-[[ "$LOOKBACK" =~ ^[0-9]+$ ]] \
-  || refuse "PYG_LATEST_SOURCE_LOOKBACK_DAYS must be a whole number of days, got '$LOOKBACK'"
+[[ "$LOOKBACK" =~ ^[1-9][0-9]*$ ]] \
+  || refuse "PYG_LATEST_SOURCE_LOOKBACK_DAYS must be a whole number of days, 1 or more, got '$LOOKBACK'"
 listed="$(python3 - "$DATA_DATE" "${PYG_SOURCE_PATHS:-}" "${PYG_YEARLY_SOURCE_PREFIXES:-}" \
   "${PYG_LATEST_SOURCE_PREFIXES:-}" "$LOOKBACK" <<'PY'
 import datetime
@@ -284,8 +287,9 @@ for prefix in filter(None, (p.strip() for p in yearly.split(","))):
         print(f"missing: {scheme}://{bucket}/{key} has no YYYY file for {year} or before")
         missing += 1
 
-last = datetime.date.fromisoformat(day)
-first = last - datetime.timedelta(days=int(lookback))
+# The day before the data day at the latest: see PYG_LATEST_SOURCE_PREFIXES above.
+last = datetime.date.fromisoformat(day) - datetime.timedelta(days=1)
+first = last - datetime.timedelta(days=int(lookback) - 1)
 months = sorted({(first + datetime.timedelta(days=n)).strftime("year=%Y/month=%m/")
                  for n in range((last - first).days + 1)})
 for prefix in filter(None, (p.strip() for p in latest.split(","))):
