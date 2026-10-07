@@ -290,6 +290,22 @@ def test_the_split_feeds_location_reaches_the_config():
     assert (_config().stock_splits_bucket, _config().stock_splits_prefix) == ("", "")
 
 
+def test_the_company_facts_historys_location_reaches_the_config():
+    c = _config(
+        companyfacts_history_bucket="b",
+        companyfacts_history_prefix="raw/source=sec/feed=companyfacts",
+    )
+    assert (c.companyfacts_history_bucket, c.companyfacts_history_prefix) == (
+        "b", "raw/source=sec/feed=companyfacts",
+    )
+
+    # Unset is no companyfacts table, not a failure.
+    unset = _config()
+    assert (
+        unset.companyfacts_history_bucket, unset.companyfacts_history_prefix
+    ) == ("", "")
+
+
 # ======================================================================
 # --source_data_day — stating the day the paths cannot
 # ======================================================================
