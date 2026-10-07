@@ -196,17 +196,21 @@ class Run:
         names |= {f"graph/day={day}/CURRENT", f"graph/day={day}/MANIFEST-000001"}
         return names
 
-    def add_splits(self, part: bytes = b"splits rows", day: str = DAY) -> set:
-        """A splits/ partition, as the job writes it when it read the split feed.
+    def add_feed_table(self, table: str, part: bytes = b"rows", day: str = DAY) -> set:
+        """A partition of a table read from a feed, as the job writes it when it
+        read the feed: splits/ or companyfacts/.
 
-        A day with no splits still gets one, with a part file holding only the
-        schema.
+        A day the feed listed nothing still gets one, with a part file holding
+        only the schema.
         """
-        partition = self.work / "tables" / "splits" / f"day={day}"
+        partition = self.work / "tables" / table / f"day={day}"
         _write(partition / "part-00000.zstd.parquet", part)
         _write(partition / ".part-00000.zstd.parquet.crc", b"c")
         _write(partition / "_SUCCESS", b"")
-        return {f"splits/day={day}/part-00000.zstd.parquet", f"splits/day={day}/_SUCCESS"}
+        return {f"{table}/day={day}/part-00000.zstd.parquet", f"{table}/day={day}/_SUCCESS"}
+
+    def add_splits(self, part: bytes = b"splits rows", day: str = DAY) -> set:
+        return self.add_feed_table("splits", part, day)
 
     def set_recorded_dataset(self, name: str, sources=("a", "b"), day=None) -> None:
         body = {"dataset": name, "sources": list(sources), "time_period": f"{YEAR}-{MONTH}"}
@@ -554,7 +558,8 @@ def test_the_day_marker_names_the_day_the_run_and_when_it_was_published(run):
 #
 # Every source the run read, and the split feed when the day has a splits/
 # partition. The feed never becomes a node, so a reader that works a day's
-# sources out from its node types never sees it (#432).
+# sources out from its node types never sees it (#432). The same for the
+# company facts history and companyfacts/ (#437).
 # --------------------------------------------------------------------------- #
 
 def _marker(run: Run) -> dict:
@@ -593,6 +598,34 @@ def test_the_split_feed_is_listed_when_the_day_has_a_splits_partition(run, part,
     assert _marker(run)["sources"] == (["a", "b", "stock-split"] if listed else ["a", "b"])
 
 
+@pytest.mark.parametrize("part,listed", [
+    (None, False),
+    (b"the schema", True),
+    (b"the schema and rows", True),
+], ids=["no partition", "empty partition", "partition with rows"])
+def test_the_companyfacts_history_is_listed_when_the_day_has_its_partition(
+    run, part, listed,
+):
+    """The history is read for its table alone, as the split feed is, so a run
+    that read no snapshot still names the feed when the day has the table
+    (#437)."""
+    run.add_tables()
+    if part is not None:
+        run.add_feed_table("companyfacts", part)
+    assert run.publish("--upload").returncode == 0
+    assert _marker(run)["sources"] == (
+        ["a", "b", "sec-companyfacts"] if listed else ["a", "b"]
+    )
+
+
+def test_a_run_that_read_both_companyfacts_feeds_lists_the_name_once(run):
+    run.set_recorded_dataset("", ["sec", "sec-companyfacts"])
+    run.add_tables()
+    run.add_feed_table("companyfacts")
+    assert run.publish("--upload").returncode == 0
+    assert _marker(run)["sources"] == ["sec", "sec-companyfacts"]
+
+
 def test_the_day_marker_keeps_its_other_fields(run):
     expected = run.add_tables() | run.add_splits()
     assert run.publish("--upload").returncode == 0
@@ -605,13 +638,15 @@ def test_the_day_marker_keeps_its_other_fields(run):
 
 def test_the_publisher_runs_on_a_python_with_no_packages(run):
     """The nightly runs it on the system python, which has no pyarrow. It
-    imports the split feed's name from spark_jobs/graph/splits.py, so that
-    module has to load with the standard library alone."""
+    imports the feeds' names from spark_jobs/graph/splits.py and
+    spark_jobs/graph/companyfacts.py, so both have to load with the standard
+    library alone."""
     run.add_tables()
     run.add_splits()
+    run.add_feed_table("companyfacts")
     r = run.publish("--upload", python_flags=["-S"])
     assert r.returncode == 0, r.stdout + r.stderr
-    assert _marker(run)["sources"] == ["a", "b", "stock-split"]
+    assert _marker(run)["sources"] == ["a", "b", "sec-companyfacts", "stock-split"]
 
 
 def test_index_json_names_the_tables_and_where_they_went(run):
