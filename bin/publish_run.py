@@ -66,9 +66,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-# This script runs on the system python, so splits.py must import with the
-# standard library alone. tests/test_publish_run.py runs it with no packages.
-from spark_jobs.graph.splits import FEED_NAME  # noqa: E402
+# This script runs on the system python, so splits.py and companyfacts.py must
+# import with the standard library alone. tests/test_publish_run.py runs it with
+# no packages.
+from spark_jobs.graph import companyfacts, splits  # noqa: E402
 
 CHECKSUMS = "checksums.json"
 INDEX = "index.json"
@@ -81,7 +82,7 @@ TABLES_TREE = "publish-tables"
 TABLES_MARKER = "_days"
 # Tables read from a feed rather than built from the triples, and the feed's
 # name. A day's marker lists the feed among its sources when the day has the table.
-FEED_TABLES = {"splits": FEED_NAME}
+FEED_TABLES = {"splits": splits.FEED_NAME, "companyfacts": companyfacts.FEED_NAME}
 
 # A day-level source path: .../year=2026/month=09/09.snappy.parquet or .../day=09/
 DAY_IN_PATH = re.compile(r"year=(\d{4})/month=(\d{2})/(?:day=)?(\d{2})(?:\.[\w.]+)?/?$")
