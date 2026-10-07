@@ -1,15 +1,18 @@
 # Query Tables
 
-The query tables are the part of a run meant for looking things up: seven Parquet
+The query tables are the part of a run meant for looking things up: eight Parquet
 tables and a triple store for each day, holding the enriched data's nodes,
-edges and values under their names and URIs, and the day's stock splits. SQL, SPARQL and an LLM's retrieval
+edges and values under their names and URIs, the day's stock splits, and the SEC
+numbers filed that day. SQL, SPARQL and an LLM's retrieval
 step can all read them. [Questions the tables answer](questions.md) shows what
 they answer, and [Using the tables with an LLM](llm.md) shows retrieval.
 
 They are not the `.pt`. A run's `hetero_data_<variant>.pt` is a PyTorch
 Geometric graph for training a graph neural network, built over every source
-except NOAA weather: numbers without names, in a 42 GB pickle that is deleted
-with its run after 21 days. The tables cover every source, weather included.
+except NOAA weather and the SEC filings' XBRL facts: numbers without names, in a
+42 GB pickle that is deleted with its run after 21 days. The tables cover every
+source, weather and XBRL facts included, and take a company's numbers from the
+SEC company facts history rather than from its daily snapshot.
 [The tables and the `.pt`](#the-tables-and-the-pt) lists every difference.
 
 They are written by the enriching leg of a run
@@ -26,6 +29,7 @@ on by default, and switched off with `--enable_query_tables false`.
 | `entities/` | one row per text-bearing node | ~0.01 GB |
 | `edge_types/` | one row per edge type | <0.01 GB |
 | `splits/` | the day's stock splits, one row per split | <0.01 GB |
+| `companyfacts/` | the SEC numbers filed that day, one row per number | <0.01 GB |
 
 ## A day at a time, kept for a year
 
@@ -65,6 +69,7 @@ whatever a second rule said.
 ├── entities/day=2026-09-10/
 ├── snapshots/day=2026-09-10/
 ├── splits/day=2026-09-10/
+├── companyfacts/day=2026-09-10/
 └── graph/day=2026-09-10/
 ```
 
@@ -91,7 +96,7 @@ following as the contract:
 | `day` | the day, `YYYY-MM-DD`, the same as the marker's file name |
 | `run_id` | the run that published the day, as its id: the UTC time it started, `YYYYMMDDTHHMMSSZ`. It is the same id the run's builds are [published](outputs.md#published-runs) under |
 | `published` | when the upload that finished the day started, in UTC, as `YYYY-MM-DDTHH:MM:SSZ`. The day became readable later, once that upload was checked and the marker went up |
-| `sources` | the name of every source whose data the day's tables hold, sorted. It has each source the run read, which for the four-source run is `bls`, `market`, `noaa` and `sec`, and `sec-companyfacts` beside `sec` when the run read the [SEC company facts snapshot](sources.md#sec-company-facts). It has `stock-split` when the day has a [`splits/`](#splits) partition, even an empty one. The split feed is not a source of the graph, but its rows are in the tables. A feed read into a table of its own later is listed the same way, by its name |
+| `sources` | the name of every source whose data the day's tables hold, sorted. It has each source the run read, which for the four-source run is `bls`, `market`, `noaa` and `sec`, and `sec-companyfacts` beside `sec` when the run read the [SEC company facts snapshot](sources.md#sec-company-facts). It has `stock-split` when the day has a [`splits/`](#splits) partition, and `sec-companyfacts` when it has a [`companyfacts/`](#companyfacts) partition, even an empty one. Neither feed is a source of the graph, but their rows are in the tables. A feed read into a table of its own later is listed the same way, by its name |
 | written | once and last, after every table of the day; never rewritten |
 
 A marker published before `sources` was added has none, because markers are
@@ -170,7 +175,8 @@ which is nothing.
 
 `(node_type, node_id, uri)`, sorted by `(node_type, node_id)` so a reader after
 one type skips the rest. It covers every node the sources carried, NOAA weather
-included.
+included, except the SEC company facts snapshot's `companyfacts_CompanyFact`
+nodes; see [`companyfacts/`](#companyfacts).
 
 ### `edges/`
 
@@ -280,6 +286,51 @@ so no split is in `nodes/`, `edges/`, `graph/` or the `.pt`.
   [a query](questions.md#a-split-in-the-price-series) can check a split against
   the price.
 
+### `companyfacts/`
+
+`(cik, entity_name, taxonomy, concept, unit, period_start, period_end, value, fy,
+fp, form, accn, filed, status, first_filed, prior_value, property, length)`, one
+row for each number a filing made that day reported for the first time or
+changed, sorted by company, concept and period. It is read from the SEC company
+facts history, one Parquet file per year, and not built from the triples, so no
+row of it is in `nodes/`, `edges/`, `graph/` or the `.pt`.
+[SEC company facts](sources.md#sec-company-facts) describes the feed.
+
+- **A number is on the day it was filed.** `filed` is the partition's day. A
+  filing reports earlier periods again beside the new one, and a number it
+  repeats unchanged is left out, so each number is here once, on the day it was
+  first filed. On 2026-08-04, the busiest day of 2026, that kept 11,919 of the
+  21,573 rows filed.
+- **`status` is `new` or `changed`.** `new` is the first time a number was filed
+  for that company, concept, unit and period. `changed` is a later filing giving
+  a different number for them, and `prior_value` holds the one before.
+  `first_filed` is the day the first of them was filed.
+- **`property` and `length` name the number plainly.** `property` is one of 27
+  names such as `revenue`, `netIncome` or `epsDiluted`, so a query can ask for
+  revenue without knowing each company's tag. `length` is `quarter`, `year` or
+  `balance` (a balance sheet number, as of `period_end`), and empty for a period
+  that is neither, such as six months to date. Concepts no property names leave
+  both empty: 44,487 of the 358,654 rows kept for 2026 have a `property`. A 10-K
+  reports the year, not its fourth quarter.
+- **A company is its CIK.** `cik` is ten digits, the same as an issuer's
+  `filings_hasIssuerCik` in `facts/`.
+  [A company's numbers, as filed](questions.md#a-companys-numbers-as-filed)
+  starts from a ticker.
+- **An empty partition means nothing was filed that day.** The partition is
+  written whenever the history was read, rows or not. A day with no
+  `companyfacts/` partition was not read: no location was set, the year's file
+  was missing, the file could not be read, or it was last written before 10 PM
+  Eastern on the day, when EDGAR stops taking filings, so it may lack some of
+  that day's. The run's log says which.
+- **It starts on the first day a run reads the history.** Each day holds only
+  that day's filings, so a number filed before then is not in the tables.
+- **The snapshot's facts are not here.** The SEC company facts snapshot restates
+  every company's latest numbers each day for the `.pt`. In the tables they
+  would repeat every day until a company files again, so no table holds a
+  `companyfacts_CompanyFact` node, edge or value. The days their dates name stay
+  on the period spine in `nodes/` and `edges/`: on 2026-10-05, 213 of the 277
+  `temporal_SourceDay` nodes were named only by a snapshot fact.
+
 ### `graph/`
 
 The non-snapshot subgraph as a [pyoxigraph](https://pyoxigraph.readthedocs.io/)
@@ -349,26 +400,34 @@ is here, so the sections above describe the tables alone.
   are the same data in shapes something can query, about 2.4 GB a day against
   94.9 GB for the run.
 - **Coverage.** A run's `.pt`, and its `node_index/`, hold only the node types
-  the run builds the `.pt` over, and runs leave NOAA weather out. The tables
-  ignore that setting and cover every source. NOAA is 0.05% of the nodes on
-  2026-09-09, shares nothing between days and has no edge to market, so it earns
-  little in a graph neural network and still answers state-by-month questions
-  in a table.
+  the run builds the `.pt` over, and the scheduled run leaves out NOAA weather
+  and the SEC filings' XBRL facts. The tables ignore that setting and cover
+  every source. NOAA is 0.05% of the nodes on 2026-09-09, shares nothing between
+  days and has no edge to market, so it earns little in a graph neural network
+  and still answers state-by-month questions in a table.
+- **A company's numbers.** The `.pt` takes them from the SEC company facts
+  snapshot dated the day before its data day, as `companyfacts_CompanyFact`
+  nodes: every company's latest numbers, every day. The tables take them from
+  the history instead, in [`companyfacts/`](#companyfacts), each number on the
+  day it was filed, and hold no `CompanyFact`.
+  [SEC company facts](sources.md#sec-company-facts) says why.
 - **Which day.** From schema 1.5, a `.pt`'s `build_metadata.day` names the
   tables partition it was built beside; see
   [Which date is which](outputs.md#which-date-is-which). Their counts agree per
-  node type, and their totals differ by the build's `excluded_node_types`,
-  which the tables keep. For 2026-09-24, each of the 151 node types in that
-  day's `.pt` held the same count as that day's `nodes/`, and `nodes/` held
-  4,456 more nodes, all in the four NOAA types the build excluded.
+  node type. Their totals differ by the build's `excluded_node_types`, which the
+  tables keep, and by `companyfacts_CompanyFact`, which only the `.pt` holds.
+  For 2026-09-24, each of the 151 node types in that day's `.pt` held the same
+  count as that day's `nodes/`, and `nodes/` held 4,456 more nodes, all in the
+  four NOAA types the build excluded.
 - **`nodes/` against `node_index/`.** The same three columns, over every source
   rather than over the node types the `.pt` holds.
 - **What counts as a number.** `is_numeric` in `facts/` uses the same test the
   feature extractor types the `.pt`'s numeric segment by, and `snapshots/` types
   its columns by the same majority rule, so the tables and the `.pt` agree.
-- **Splits.** `splits/` is in no `.pt`, and not in `graph/`. It is read from
-  the split feed rather than built from the triples, so a run's graph is the
-  same whether or not it read the feed.
+- **Splits and the company facts history.** `splits/` and `companyfacts/` are in
+  no `.pt`, and not in `graph/`. They are read from their feeds rather than
+  built from the triples, so a run's graph is the same whether or not it read
+  them.
 - **Feature vectors stay in the `.pt`.** The dense node feature matrix is
   38.16 GB for the dominant type, of which 183 of 1024 dimensions vary per row.
 - **Retention.** A run, with its `.pt`, is kept 21 days; each day of tables is
@@ -379,6 +438,9 @@ is here, so the sections above describe the tables alone.
 - **A snapshot's literals in `facts/`, and snapshot subjects in `graph/`.**
   They are in `snapshots/` and in `edges/`. Market's sector and moneyness hub
   nodes are not snapshots and are in `facts/` and `graph/` like anything else.
+- **The SEC company facts snapshot's facts.** Each day restates them; the
+  numbers are in [`companyfacts/`](#companyfacts) once, on the day they were
+  filed.
 - **A triple whose object is a URI nothing typed.** It is no edge, and putting a
   dangling pointer in a `value` column would have consumers reading it as a name.
 - **Anything that answers a question the data cannot.** See
