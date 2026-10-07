@@ -18,19 +18,22 @@ A run publishes two different things. This page uses only the first.
 
 | | Query tables | PyG graph (`.pt`) |
 |---|---|---|
-| What it is | Seven Parquet tables and a triple store, `graph/`: the nodes, the edges between them, their values, and the day's stock splits | One PyTorch Geometric `HeteroData` file: a matrix of numbers per node type, and each edge as a pair of row numbers |
+| What it is | Eight Parquet tables and a triple store, `graph/`: the nodes, the edges between them, their values, the day's stock splits, and the SEC numbers filed that day | One PyTorch Geometric `HeteroData` file: a matrix of numbers per node type, and each edge as a pair of row numbers |
 | What it is for | Looking things up and answering questions: SQL, SPARQL, or retrieval for an LLM | Training and running a graph neural network |
 | Names, text and dates | Yes. Every row carries a URI, and `facts/`, `entities/` and `snapshots/` carry the values | No. A row is a position, and `node_index/` says which entity it is |
 | Where | `<PYG_TABLES_ROOT>/<dataset>/<table>/day=YYYY-MM-DD/` | In the run's folder, as `<variant>/hetero_data_<variant>.pt` |
 | Kept for | 365 days | 21 days, with its run |
-| Covers | Every source the run read: BLS, SEC, market and NOAA weather | Every source except NOAA weather — each build names the sources it holds in `graph_schema.json`'s `sources_in_graph` |
+| Covers | Every source the run read: BLS, SEC, market and NOAA weather, with company numbers from the SEC company facts history | Every source except NOAA weather and the SEC filings' XBRL facts, with company numbers from the SEC company facts snapshot — each build names the sources it holds in `graph_schema.json`'s `sources_in_graph` |
 
 Weather is left out of the `.pt` on purpose and kept in the tables. NOAA is
 0.05% of the nodes on 2026-09-09, shares nothing between days and has no edge to
 market, so it earns little in a graph neural network, and it still answers
-weather questions from a table. Which node types a `.pt` leaves out is set per
-run (`exclude_node_types` in its PyG config), and the tables ignore that
-setting. A build says which sources it ended up with in
+weather questions from a table. The same goes for the XBRL facts inside a 10-K
+or 10-Q: the `.pt` takes every company's latest numbers from the SEC company
+facts snapshot instead, and the tables take each number on the day it was filed
+from its history; see [SEC company facts](sources.md#sec-company-facts). Which
+node types a `.pt` leaves out is set per run (`exclude_node_types` in its PyG
+config), and the tables ignore that setting. A build says which sources it ended up with in
 [`graph_schema.json`](outputs.md#what-the-graph-is-made-of)'s `sources_in_graph`
 — read that rather than `sources` beside it, which is what the run read, weather
 included. [Query tables](tables.md) describes the tables, and
@@ -49,6 +52,7 @@ What one day's tables hold depends on the source:
 | Source | One day's tables hold |
 |---|---|
 | SEC filings | the filings dated that day |
+| SEC company facts | the numbers filed that day, each once, in `companyfacts/` |
 | Market | that day's 19 snapshots, every 20 minutes from 9:40 AM to 3:40 PM ET |
 | NOAA | that day's weather alerts |
 | BLS | every series with its own history; most run from January 2026 to July or August |
@@ -130,9 +134,93 @@ nodes.
 The ticker-to-company join is the part a consumer would otherwise have to
 build, and `refersToCompany` is that join, already done. Market is not in
 `graph/`, so this is a chain of one-hop joins over the same day's `edges/` and
-`nodes/`.
+`nodes/`. The numbers the company reported are in `companyfacts/`; see
+[A company's numbers, as filed](#a-companys-numbers-as-filed).
 
 **Days needed:** one.
+
+### A company's numbers, as filed
+
+*What revenue has Microsoft reported this year, and when did each number become
+public?*
+
+Reads `companyfacts/`, and `facts/`, `edges/` and `nodes/` to find the company
+from its ticker.
+
+`companyfacts/` is keyed by CIK, which a company's issuer carries as
+`filings_hasIssuerCik`. From a ticker, take the company that carries it and the
+issuer that refers to it, on any one day:
+
+```sql
+CREATE VIEW companyfacts AS FROM read_parquet('<root>/companyfacts/*/*.parquet', hive_partitioning = true);
+
+WITH company AS (
+  SELECT n.node_type, n.node_id
+  FROM   facts f
+  JOIN   nodes n ON n.day = f.day AND n.uri = f.uri
+  WHERE  f.day = DATE '2026-10-05' AND n.day = DATE '2026-10-05'
+    AND  f.predicate_name = 'bls_enrichment_ticker' AND f.value = 'MSFT'
+), issuer AS (
+  SELECT n.uri
+  FROM   edges e
+  JOIN   company c ON e.dst_type = c.node_type AND e.dst_id = c.node_id
+  JOIN   nodes n   ON n.node_type = e.src_type AND n.node_id = e.src_id
+  WHERE  e.day = DATE '2026-10-05' AND n.day = DATE '2026-10-05'
+    AND  e.src_type = 'filings_Issuer' AND e.relation = 'bls_enrichment_refersToCompany'
+)
+SELECT DISTINCT f.value AS cik
+FROM   facts f
+JOIN   issuer i ON f.uri = i.uri
+WHERE  f.day = DATE '2026-10-05' AND f.predicate_name = 'filings_hasIssuerCik';
+```
+
+Keep the day and `e.src_type` filters. `refersToCompany` also links each of a
+day's option snapshots to its company, 9,214,506 of them on 2026-09-09, and a
+query that joins before filtering builds every one: one run of this query
+without the filters took over 100 GB of memory before it was stopped. With
+them it answers `0000789019` in 0.05 s on a local copy of 2026-10-05.
+
+Then the company's numbers, each on the day it was filed:
+
+```sql
+SELECT filed, form, fp, period_start, period_end, length, value, status, prior_value
+FROM   companyfacts
+WHERE  cik = '0000789019' AND property = 'revenue'
+ORDER  BY filed, period_end;
+```
+
+No published day holds `companyfacts/` yet, so these are Microsoft's rows filed
+in 2026 as the table keeps them, from the history upstream wrote on 2026-10-07:
+
+| filed | form | fp | period | length | value |
+|---|---|---|---|---|---:|
+| 2026-01-28 | 10-Q | Q2 | 2025-07-01 to 2025-12-31 | | 158,946,000,000 |
+| 2026-01-28 | 10-Q | Q2 | 2025-10-01 to 2025-12-31 | `quarter` | 81,273,000,000 |
+| 2026-04-29 | 10-Q | Q3 | 2025-07-01 to 2026-03-31 | | 241,832,000,000 |
+| 2026-04-29 | 10-Q | Q3 | 2026-01-01 to 2026-03-31 | `quarter` | 82,886,000,000 |
+| 2026-07-29 | 10-K | FY | 2025-07-01 to 2026-06-30 | `year` | 331,839,000,000 |
+
+Each number is there once. Those filings also reported earlier periods again,
+such as the same quarter a year before, and those repeats are left out. An empty
+`length` is a period that is neither a quarter nor a year, here six and nine
+months to date. A 10-K reports the year and not its fourth quarter, so the
+quarter to 2026-06-30 is the year less the nine months.
+
+What it does not answer:
+
+- **A number filed before the first day a run read the history.** Each day
+  holds that day's filings only, so the table fills in from that day on.
+- **Two companies by ticker.** On 2026-10-05 the route above reached 498 of the
+  500 companies the history covers. The company nodes of Berkshire Hathaway
+  (`BRK.B`) and Brown-Forman (`BF.B`) carry no ticker, so start from their CIKs,
+  `0001067983` and `0000014693`.
+- **A concept no property names.** 44,487 of the 358,654 rows kept for 2026 carry
+  a `property`. For the rest, ask by `taxonomy` and `concept`, the company's own
+  XBRL tag.
+
+**Days needed:** every day in the window. A number is published only on the day
+it was filed, so a year of revenue takes a year of `companyfacts/` partitions.
+A day with no partition was not read, so a series cannot vouch for it.
 
 ### Insider disclosure against the peer group
 
