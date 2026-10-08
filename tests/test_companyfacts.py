@@ -13,8 +13,6 @@ an object built by tests/companyfacts_feed.py.
 import logging
 from datetime import date, datetime, timezone
 
-import pytest
-
 from companyfacts_feed import HISTORY_SCHEMA, fact, history_object
 from spark_jobs.graph import companyfacts
 from spark_jobs.sources import sec
@@ -23,10 +21,10 @@ from split_feed import feed_client
 DAY = "2026-10-06"
 PREFIX = "raw/source=sec/feed=companyfacts"
 KEY = f"{PREFIX}/2026.snappy.parquet"
-# 23:15 Eastern on the day: 03:15 UTC the next morning in October.
+# 23:15 Eastern on the day, when upstream writes: 03:15 UTC the next morning.
 FRESH = datetime(2026, 10, 7, 3, 15, tzinfo=timezone.utc)
-# 21:59 Eastern on the day, a minute before EDGAR closes.
-EARLY = datetime(2026, 10, 7, 1, 59, tzinfo=timezone.utc)
+# 23:15 Eastern on the day before.
+EARLIER = datetime(2026, 10, 6, 3, 15, tzinfo=timezone.utc)
 
 # A day of the history: the day's own filings, a number a 10-Q only repeated,
 # and filings from the days either side.
@@ -169,35 +167,14 @@ def test_a_missing_object_is_a_warning_naming_it(caplog):
     assert f"s3://b/{KEY}" in warnings[0]
 
 
-def test_an_object_last_written_before_edgar_closed_is_not_read(caplog):
-    """EDGAR takes filings until 10 p.m. Eastern. Read earlier, the object can
-    lack some of the day's filings, and no later day puts them back."""
+def test_an_object_last_written_on_an_earlier_day_is_still_read(caplog):
+    """Upstream rewrites the object only when something new was filed, so on a
+    day nothing was it keeps an earlier day's write time. Rows are picked by
+    filed alone, and such a day is empty rather than missing."""
     with caplog.at_level(logging.WARNING, logger="build_graph"):
-        assert _read(written=EARLY) is None
-
-    warnings = _warnings(caplog)
-    assert len(warnings) == 1
-    assert "2026-10-06 21:59 EDT" in warnings[0]
-    assert f"before EDGAR closed on {DAY}" in warnings[0]
-
-
-@pytest.mark.parametrize("written", [
-    datetime(2026, 10, 7, 2, 0, tzinfo=timezone.utc),
-    FRESH,
-    datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc),
-], ids=["as EDGAR closes", "that night", "a rerun two weeks later"])
-def test_an_object_written_once_edgar_closed_is_read(written):
-    assert _read(written=written)
-
-
-def test_edgar_closes_on_eastern_time_in_winter_too():
-    """22:00 EST is 03:00 UTC, an hour later than in summer."""
-    day = "2026-12-01"
-    rows = [fact(filed=day, first_filed=day)]
-    before = datetime(2026, 12, 2, 2, 59, tzinfo=timezone.utc)
-    after = datetime(2026, 12, 2, 3, 0, tzinfo=timezone.utc)
-    assert _read(rows, written=before, day=day) is None
-    assert _read(rows, written=after, day=day)
+        assert _read([DAY_BEFORE], written=EARLIER) == []
+        assert _read(written=EARLIER) == _read()
+    assert _warnings(caplog) == []
 
 
 def test_a_dropped_connection_is_a_warning_not_a_failed_run(caplog):
