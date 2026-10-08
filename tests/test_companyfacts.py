@@ -115,9 +115,10 @@ def test_a_row_carries_the_tables_columns_and_types():
     }
 
 
-def test_upstreams_fetch_columns_are_left_out():
-    """The history also records upstream's own fetch: its URL, its user agent
-    and its timings. None of it describes a filing."""
+def test_the_columns_that_describe_no_filing_are_left_out():
+    """Besides the filing, the history holds the filed year again, an empty
+    Turtle column, and upstream's record of its own fetch: its URL, its user
+    agent and its timings."""
     left_out = set(HISTORY_SCHEMA.names) - set(companyfacts.COLUMNS)
     assert left_out == {
         "filed_year", "fetch_start_time", "fetch_end_time", "url",
