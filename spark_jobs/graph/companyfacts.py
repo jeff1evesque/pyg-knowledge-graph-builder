@@ -40,8 +40,8 @@ EDGAR_CLOSES = time(22, 0)
 # The status upstream gives a number a filing gave again, unchanged.
 REPEATED = "repeated"
 
-# The columns kept, in the history's own order. The rest of the history is
-# upstream's record of its own fetch and an empty Turtle column.
+# The columns kept, in the history's own order. The rest of the history is the
+# filed year again, an empty Turtle column and upstream's record of its own fetch.
 COLUMNS = (
     "cik", "entity_name", "taxonomy", "concept", "unit", "period_start",
     "period_end", "value", "fy", "fp", "form", "accn", "filed", "status",
