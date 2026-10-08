@@ -29,7 +29,7 @@ from spark_jobs.utils.namespaces import (
 #   feed=statements            2 objects
 #   feed=testimony             1 object
 #   feed=companyfacts_snapshot  one object a day        RDF (rdf_turtle column)
-#   feed=companyfacts           XBRL history, no Turtle column
+#   feed=companyfacts           one object a year       XBRL history, no Turtle
 #
 # filings_documents is not Parquet at all and not one format either: sampled
 # over 400,000 keys it is 233,759 .xml, 160,196 .zip (upstream now packages
@@ -60,7 +60,8 @@ SEC_COMPANYFACTS_FEED = "feed=companyfacts_snapshot"
 SEC_HANDLED_FEEDS = (SEC_HANDLED_FEED, SEC_COMPANYFACTS_FEED)
 # filings_documents starts with the handled feed's name, and companyfacts is
 # the start of the snapshot's, so feeds are matched as whole path segments.
-# companyfacts is the snapshot's history and carries no RDF.
+# companyfacts is the snapshot's history and carries no RDF. It is read for the
+# companyfacts/ query table instead (graph/companyfacts.py), never as a source.
 SEC_UNHANDLED_FEEDS = (
     "feed=filings_documents", "feed=filing-detail", "feed=litigation",
     "feed=press-release", "feed=speeches", "feed=statements",

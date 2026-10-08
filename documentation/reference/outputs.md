@@ -219,6 +219,8 @@ The run published on 2026-09-18 is that graph: 149 node types and 822 edge types
 
 **Why weather is excluded.** A `.pt` covers one day, the one its [`day`](#which-date-is-which) names, and alerts share no nodes between days, so in a one-day graph every alert is an island. On 2026-09-09, the last build that kept them, NOAA's four types were 4,711 nodes of 9,447,814 (0.05%) across 9 edge types, only two of which leave NOAA: 454 `affectsRegion` edges into BLS regions and 1,596 `observedInPeriod` edges into the day. What an alert is actually about is free text, and the `.pt` carries none. The [query tables](tables.md) keep all of it and [Questions](questions.md#weather-against-regional-economics) answers the weather questions from there. **This depends on the one-day window**: a graph accumulating days would give alerts recurrence through region and event type, and the decision would be worth measuring again. Which types a run drops is set per run — see [`PYG_EXCLUDE_NODE_TYPES`](../operations/running-a-job.md#node-types-kept-out-of-the-pt).
 
+**Why the SEC filings' XBRL facts are excluded.** The daily run also leaves out `filings_XbrlFact` and `filings_XbrlDimension`, so its `excluded_node_types` names them beside NOAA's four. A company's numbers come from the [SEC company facts snapshot](sources.md#sec-company-facts) instead, as `companyfacts_CompanyFact` nodes. The filings feed puts every number on one predicate, `filings_hasValue`, so EPS and revenue would share one scale, and it has a company's numbers only on the day the company files. The snapshot has a property per concept and period length, for every company every day. The [query tables](tables.md) keep the XBRL facts.
+
 #### Which date is which
 
 `build_metadata` carries three dates, and only `day` says which day of data the graph holds:
@@ -232,6 +234,8 @@ The run published on 2026-09-18 is that graph: 149 node types and 822 edge types
 The run time cannot stand in for the day. A [scheduled run](../operations/running-a-job.md#scheduled-runs) takes today less a lag, and a run given `--data-date` takes any day it is given. The nightly run that started 2026-09-25 at 05:00 UTC has a `time_period` of `2026-09` and a `build_timestamp` of 06:23 UTC that morning, and its data was cut from 2026-09-24, the day its tables were published under.
 
 `day` is `""` when the run has no single day and `--source_data_day` gives none: its source paths name no day, or more than one, or it is a `pyg_only` leg over enriched output written before 1.5. Nothing guesses one. A `pyg_only` leg, which builds every published `.pt`, reads the day from the enriched output's `dataset.json`, written beside the Parquet by the leg that cut it, so a `.pt` cannot carry a day other than its data's. Builds before 1.5 have no `day` at all; a published one's day is its run's `data_day`.
+
+A scheduled build's `companyfacts_CompanyFact` nodes are the one part not cut from `day`. They come from the [SEC company facts snapshot](sources.md#sec-company-facts) dated the day before, because a day's own snapshot is written after its market closed. A number filed on `day` first reaches the next day's build.
 
 ---
 

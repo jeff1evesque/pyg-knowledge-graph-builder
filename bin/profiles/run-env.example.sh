@@ -52,6 +52,15 @@ export PYG_TIME_PERIOD=YYYY-MM
 # export PYG_SPLITS_BUCKET=BUCKET
 # export PYG_SPLITS_PREFIX=PREFIX
 
+# The SEC company facts history, for the companyfacts/ query table, read the same way
+# from one YYYY.snappy.parquet file per year.
+# export PYG_COMPANYFACTS_HISTORY_BUCKET=BUCKET
+# export PYG_COMPANYFACTS_HISTORY_PREFIX=raw/source=sec/feed=companyfacts
+
+# Node types left out of the .pt. The query tables keep them. The scheduled run leaves
+# out NOAA weather and the filings feed's XBRL facts; see running-a-job.md.
+# export PYG_EXCLUDE_NODE_TYPES=cap_Area,cap_Geocode,cap_Info,weather_WeatherAlert,filings_XbrlFact,filings_XbrlDimension
+
 # --------------------------------------------------------------------------- #
 # Reading a staged local mirror instead of object storage
 # --------------------------------------------------------------------------- #
@@ -157,8 +166,9 @@ export PYG_TIME_PERIOD=YYYY-MM
 # into the new year.
 # export PYG_YEARLY_SOURCE_PREFIXES="s3a://BUCKET/PREFIX/feed=A/,s3a://BUCKET/PREFIX/feed=B/"
 # Prefixes that hold one year=YYYY/month=MM/DD.* snapshot per day. Each run reads the
-# newest day that is not after the data day and at most the look-back before it, and
-# logs which, so a day whose snapshot is late builds from the one before.
+# newest day before the data day and at most the look-back before it, and logs which.
+# The data day's own snapshot is written after its market closed, and a day whose
+# snapshot is late builds from an earlier one.
 # export PYG_LATEST_SOURCE_PREFIXES="s3a://BUCKET/raw/source=sec/feed=companyfacts_snapshot/"
 # export PYG_LATEST_SOURCE_LOOKBACK_DAYS=7
 # On a unified-memory host RAPIDS sizes its pool from MemFree; see bin/mem_reclaim.py.

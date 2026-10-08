@@ -74,6 +74,8 @@ When config is empty, sensible defaults are inferred from the data.
 | `--market_sector_definitions_key` | No | `""` | S3 **prefix** holding those CSVs, or that prefix's `latest.csv` — both work the same. Supplies three things: the ticker to company-ID map that keys the company bridge, the GICS sector classification, and the sub-industry peer links. Without it the first and third are empty and sector classification falls back to a small built-in list. Which CSV a run reads is [Picking the constituents CSV](#picking-the-constituents-csv) |
 | `--stock_splits_bucket` | No | `""` | S3 bucket holding the stock split feed. The day's splits become the [`splits/`](../reference/tables.md#splits) query table. Unset, there is no `splits/` table and nothing else changes; see [The stock split feed](#the-stock-split-feed) |
 | `--stock_splits_prefix` | No | `""` | Where the feed's `year=` folders sit in `--stock_splits_bucket`. Empty is the bucket's root |
+| `--companyfacts_history_bucket` | No | `""` | S3 bucket holding the SEC company facts history. The numbers filed on the run's day become the [`companyfacts/`](../reference/tables.md#companyfacts) query table. Unset, there is no `companyfacts/` table and nothing else changes; see [The company facts history](#the-company-facts-history) |
+| `--companyfacts_history_prefix` | No | `""` | Where the history's `YYYY.snappy.parquet` files sit in `--companyfacts_history_bucket`, such as `raw/source=sec/feed=companyfacts`. Empty is the bucket's root |
 
 Metadata files are always written when mode is `full` or `pyg_only`. Mode `enrichment_only` does not produce metadata files (no PyG graph is built in that mode).
 
@@ -139,6 +141,37 @@ writes no `splits/` partition for the day, and builds every other table and the
 The notebook passes the two flags to the seed leg from `PYG_SPLITS_BUCKET` and
 `PYG_SPLITS_PREFIX`. `bin/daily_run.sh` does not list the feed with the sources,
 so a day is never skipped for want of it.
+
+### The company facts history
+
+The SEC company facts history is not a source path either. It is one Parquet
+file per year, holding every number the companies' filings reported, under the
+year each was filed, and a run reads the file for its day's year on the driver:
+
+```
+<prefix>/YYYY.snappy.parquet
+```
+
+The run keeps the rows filed on its day, leaves out the ones upstream marks
+`repeated` (a number a filing gave again, unchanged), and writes the rest to
+[`companyfacts/`](../reference/tables.md#companyfacts) even when there are none:
+an empty partition means nothing was filed that day. It keeps the history's
+columns about the filing and leaves out upstream's record of its own fetch.
+
+Missing company facts never stop a run. In each of these cases the run logs why,
+writes no `companyfacts/` partition for the day, and builds every other table and
+the `.pt` as usual:
+
+| Case | Logged as |
+|---|---|
+| no `--companyfacts_history_bucket` | INFO |
+| no file for the day's year | WARNING, naming the file |
+| a file last written before 10 PM Eastern on the day, when EDGAR stops taking filings, so it may lack some of that day's | WARNING, with the file's write time |
+| a file that cannot be read, or lacks a column the table keeps | WARNING, with the error |
+
+The notebook passes the two flags to the seed leg from
+`PYG_COMPANYFACTS_HISTORY_BUCKET` and `PYG_COMPANYFACTS_HISTORY_PREFIX`, and
+`bin/daily_run.sh` does not list the history with the sources.
 
 Jobs are launched with `bin/submit_spark_job.sh`, which packages the code
 and submits to the Spark standalone master with the RAPIDS Accelerator
@@ -275,7 +308,7 @@ touches one. `notebook/multi_experiment.ipynb` reads the list from the run's
 `env.sh`, comma-separated, and puts it on every assembly leg:
 
 ```bash
-export PYG_EXCLUDE_NODE_TYPES=cap_Area,cap_Geocode,cap_Info,weather_WeatherAlert
+export PYG_EXCLUDE_NODE_TYPES=cap_Area,cap_Geocode,cap_Info,weather_WeatherAlert,filings_XbrlFact,filings_XbrlDimension
 ```
 
 It narrows the `.pt` and nothing else. The
@@ -299,6 +332,15 @@ text, which the `.pt` does not carry; the query tables keep all of it and answer
 the [weather questions](../reference/questions.md#weather-against-regional-economics)
 there. A graph accumulating days would give alerts recurrence through region and
 event type, so the decision is worth measuring again if that window changes.
+
+**It also excludes the SEC filings' XBRL facts**, `filings_XbrlFact` and
+`filings_XbrlDimension`. The `.pt` takes a company's numbers from the
+[SEC company facts snapshot](../reference/sources.md#sec-company-facts) instead,
+which has every company's latest numbers every day, one property per concept and
+period length. The XBRL facts put every number on one predicate, and reach a
+`.pt` only on the day the company files. Everything else from the filings feed
+stays in the `.pt`: filings, issuers, 8-K items, insider transactions and
+acceptance times. The query tables keep the XBRL facts too.
 
 ### Naming the dataset
 
@@ -617,15 +659,18 @@ written so that one file serves every day:
   after the data day's, and logs which.
 - **Daily snapshots go in `PYG_LATEST_SOURCE_PREFIXES`.** A prefix holding one
   `year=YYYY/month=MM/DD.*` file per day, such as the SEC company facts snapshot
-  (`raw/source=sec/feed=companyfacts_snapshot/`), is read at the newest day that is not
-  after the data day and at most `PYG_LATEST_SOURCE_LOOKBACK_DAYS` (default `7`) before
-  it, and the run logs which. A snapshot carries every company's latest numbers forward,
-  so a day whose snapshot is late builds from the one before. Only when none falls in the
-  look-back is the day skipped, as a missing `PYG_SOURCE_PATHS` object skips it. A late
-  snapshot puts a second day in the paths, so the schedule writes the data day into the
-  run's `env.sh` as `PYG_PUBLISH_DATA_DAY`. The notebook passes it to the job as
-  `--source_data_day`, the job records it in `dataset.json`, and the publish reads it
-  from there.
+  (`raw/source=sec/feed=companyfacts_snapshot/`), is read at the newest day **before**
+  the data day and at most `PYG_LATEST_SOURCE_LOOKBACK_DAYS` (default `7`, at least
+  `1`) before it, and the run logs which. A day's own snapshot is written that evening,
+  after its market closed, so it holds numbers filed after the day's last quote; read
+  from the day before, a number filed on the data day first reaches the next day's
+  run. A snapshot carries every company's latest numbers forward, so a day whose
+  snapshot is late builds from an earlier one. Only when none falls in the look-back is
+  the day skipped, as a missing `PYG_SOURCE_PATHS` object skips it, so a day before
+  2026-10-05, the day after the first snapshot, skips. The snapshot puts a second day in
+  the paths, so the schedule writes the data day into the run's `env.sh` as
+  `PYG_PUBLISH_DATA_DAY`. The notebook passes it to the job as `--source_data_day`, the
+  job records it in `dataset.json`, and the publish reads it from there.
 - **The schedule block.** `PYG_SCHEDULE_ONCALENDAR`, `PYG_SCHEDULE_UNIT`,
   `PYG_SCHEDULE_DATA_LAG_DAYS` and `PYG_SCHEDULE_RETAIN_RUNS`, and `PYG_PUBLISH_ROOT` with
   its companions: a schedule publishes, and its prune depends on that.

@@ -2207,12 +2207,14 @@ SOURCE_DISTANCES = {
     ("market", "noaa"): (8, None, None),
 }
 
-# What a production run leaves out of its .pt, through PYG_EXCLUDE_NODE_TYPES
-# in the run's own env.sh. Neither that variable nor these types are in any
-# tracked file yet; recording them is its own issue. Named here only to check
-# that leaving them out does not reroute the pairs that remain.
-WEATHER_NODE_TYPES = (
+# What the scheduled run leaves out of its .pt, through PYG_EXCLUDE_NODE_TYPES in
+# its env.sh (bin/profiles/run-env.example.sh): NOAA weather, and the filings
+# feed's XBRL facts, whose numbers the .pt takes from the companyfacts snapshot
+# instead (#437). Named here only to check that leaving them out does not
+# reroute the pairs that remain.
+PRODUCTION_EXCLUDED_NODE_TYPES = (
     "cap_Area", "cap_Geocode", "cap_Info", "weather_WeatherAlert",
+    "filings_XbrlFact", "filings_XbrlDimension",
 )
 
 
@@ -2307,21 +2309,22 @@ def _assert_source_distances(data):
             "again."
         )
 
-    # And the three pairs a production .pt holds are unchanged by the weather
-    # exclusion -- no route between them runs through a weather node.
+    # And the three pairs a production .pt holds are unchanged by its
+    # exclusions -- no route between them runs through a weather node or an
+    # XBRL fact.
     excluded = [
         node_type for node_type in map(str, data.node_types)
-        if node_type in WEATHER_NODE_TYPES
+        if node_type in PRODUCTION_EXCLUDED_NODE_TYPES
     ]
-    without_weather = _neighbours(data, excluded)
+    without_excluded = _neighbours(data, excluded)
     for a, b in (("bls", "sec"), ("bls", "market"), ("sec", "market")):
         starts = _family_nodes(data, a, by_prefix, excluded)
         targets = _family_nodes(data, b, by_prefix, excluded)
-        assert _distance(without_weather, starts, targets, False) == (
+        assert _distance(without_excluded, starts, targets, False) == (
             SOURCE_DISTANCES[(a, b)][0]
         ), (
-            f"leaving weather out moves {a} <-> {b}, so a production .pt is "
-            "not at the distance the page reports for it"
+            f"leaving {', '.join(excluded)} out moves {a} <-> {b}, so a "
+            "production .pt is not at the distance the page reports for it"
         )
 
 

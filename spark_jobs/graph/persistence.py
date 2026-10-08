@@ -636,6 +636,9 @@ def save_job_manifest(
             # the day is the result's query_tables, which names splits only then.
             "stock_splits_bucket": config.stock_splits_bucket,
             "stock_splits_prefix": config.stock_splits_prefix,
+            # The same for the companyfacts/ table.
+            "companyfacts_history_bucket": config.companyfacts_history_bucket,
+            "companyfacts_history_prefix": config.companyfacts_history_prefix,
             "pyg_config": config.pyg_config,
             "parquet_partitions": config.parquet_partitions,
         },

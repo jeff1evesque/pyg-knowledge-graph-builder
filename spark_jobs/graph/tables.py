@@ -6,7 +6,7 @@ about 95 GB, none of it filterable by ticker, by date or by meaning, and the
 graph's structure only recoverable by unpickling a 42 GB blob. These tables are
 the same data in shapes something can query, at roughly 2.5% of the size.
 
-Seven tables and a triple store:
+Eight tables and a triple store:
 
     nodes/        (node_type, node_id, uri)
     edges/        (src_type, src_id, relation, dst_type, dst_id)
@@ -15,6 +15,8 @@ Seven tables and a triple store:
     entities/     the text each node carries, assembled
     snapshots/    market quotes, pivoted wide -- one row per snapshot
     splits/       the day's stock splits, read from the split feed (splits.py)
+    companyfacts/ the SEC numbers filed that day, read from the company facts
+                  history (companyfacts.py)
     graph/        the non-snapshot subgraph as a triple store (graph_store.py)
 
 Three things about them are deliberate and easy to get wrong:
@@ -53,14 +55,21 @@ fourteen of them against 10.2 million quotes on 2026-09-17, eight carrying a
 value. They go where every other node goes, so a sector's
 ``relationConfidence`` is a fact and its route to the economic sectors is in
 the store.
+
+The companyfacts snapshot's facts are in no table. The snapshot restates every
+company's latest numbers each day, so they would repeat in every day's tables
+until a company files again; the 2026-10-05 snapshot matched 2026-10-04's on all
+15,618 rows. ``companyfacts/`` holds the numbers instead, each on the day it was
+filed. The issuers the snapshot names stay, as they are the filings feed's own.
 """
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
+from spark_jobs.graph.companyfacts import read_companyfacts
 from spark_jobs.graph.config import JobConfig
 from spark_jobs.graph.graph_store import write_graph_store
 from spark_jobs.graph.splits import read_splits
@@ -76,6 +85,7 @@ from spark_jobs.pyg_builder.naming import (
 from spark_jobs.pyg_builder.node_mapper import NodeMapper
 from spark_jobs.utils.rdf_utils import (
     MARKET_QUOTES,
+    SEC_COMPANYFACTS,
     SNAPSHOT_NODE_TYPE_PREFIX,
     classify_edge_origin,
 )
@@ -99,6 +109,12 @@ COMPRESSION = "zstd"
 _SNAPSHOT_SORT_TERMS = (
     prefixed_local_name(str(MARKET_QUOTES.underlyingSymbol)),
     prefixed_local_name(str(MARKET_QUOTES.symbol)),
+)
+
+# Node types no table holds, with every edge, value and store triple of theirs.
+# See the module docstring.
+LEFT_OUT_NODE_TYPES = (
+    prefixed_local_name(str(SEC_COMPANYFACTS.CompanyFact)),
 )
 
 # Local names whose values are prose rather than a code, a date or a
@@ -457,15 +473,18 @@ def write_entities(facts_df: DataFrame, root: str, day: str) -> str:
 # ============================================
 # graph/
 # ============================================
-def non_snapshot_triples(
+def store_triples(
     triples_df: DataFrame, node_id_df: DataFrame
 ) -> DataFrame:
-    """Every triple describing something other than a market snapshot.
+    """Every triple describing something other than a market snapshot or a
+    node of the LEFT_OUT_NODE_TYPES.
 
     By SUBJECT: a triple belongs to the node it describes. So an edge FROM a
     snapshot into a company is a snapshot row and stays out, while the
     company's own triples stay in -- the same line ``facts/`` and
     ``snapshots/`` draw, applied to whole triples rather than to literals.
+    ``node_id_df`` still holds the left-out nodes, so their triples are found
+    the same way.
 
     The market hub nodes are on the other side of that line: an
     ``EquitySector`` and its route to the economic sectors are in the store,
@@ -480,17 +499,20 @@ def non_snapshot_triples(
     SPARQL query over it worth writing, and a few hundred triples carry them.
     So the store holds the market VOCABULARY while holding no quote.
     """
-    snapshot_uris = (
+    kept_out = (
         node_id_df
-        .filter(_is_snapshot("node_type"))
-        .select(F.col("uri").alias("_snapshot_uri"))
+        .filter(
+            _is_snapshot("node_type")
+            | F.col("node_type").isin(list(LEFT_OUT_NODE_TYPES))
+        )
+        .select(F.col("uri").alias("_kept_out_uri"))
     )
 
     return (
         triples_df
         .join(
-            snapshot_uris,
-            triples_df["subject"] == snapshot_uris["_snapshot_uri"],
+            kept_out,
+            triples_df["subject"] == kept_out["_kept_out_uri"],
             "left_anti",
         )
         .select("subject", "predicate", "object")
@@ -624,6 +646,28 @@ def write_splits(
     return _write(frame, root, "splits", day)
 
 
+# In companyfacts.COLUMNS order, which read_companyfacts' rows follow.
+COMPANYFACTS_SCHEMA = (
+    "cik string, entity_name string, taxonomy string, concept string, "
+    "unit string, period_start date, period_end date, value double, fy int, "
+    "fp string, form string, accn string, filed date, status string, "
+    "first_filed date, prior_value double, property string, length string"
+)
+
+
+def write_companyfacts(
+    spark: SparkSession, rows: List[Tuple], root: str, day: str
+) -> str:
+    """The SEC numbers filed on the day, as ``read_companyfacts`` returned them.
+
+    Written even when there are none, as ``splits/`` is: an empty partition is a
+    day nothing was filed, and no partition is a day the history was not read.
+    """
+    # One file: 11,919 rows on the busiest day of 2026, already sorted.
+    frame = spark.createDataFrame(rows, COMPANYFACTS_SCHEMA).coalesce(1)
+    return _write(frame, root, "companyfacts", day)
+
+
 # ============================================
 # The whole set
 # ============================================
@@ -639,7 +683,8 @@ def write_query_tables(
     or cannot say which day its data describes. Neither is a failure: the graph
     the run builds is unaffected either way.
 
-    ``s3_client`` is for the split feed's read, and tests pass a stub.
+    ``s3_client`` is for the split feed's and the company facts history's
+    reads, and tests pass a stub.
     """
     if not config.enable_query_tables:
         logger.info("Query tables disabled (--enable_query_tables false)")
@@ -671,11 +716,25 @@ def write_query_tables(
         spark, {ALLOW_UNREGISTERED_NAMESPACES: allow_unregistered}
     ).build_node_id_table(triples_df)
 
+    # The tables' nodes: every type but LEFT_OUT_NODE_TYPES. edges/ and facts/
+    # join both ends or the subject to these, so a left-out node's edges and
+    # values go with it. Ids are numbered within a type, so no other type's
+    # ids move.
+    for node_type in LEFT_OUT_NODE_TYPES:
+        count = node_counts.pop(node_type, 0)
+        if count:
+            logger.info(
+                f"  Leaving {count:,} {node_type} nodes out of the tables"
+            )
+    table_nodes = node_id_df.filter(
+        ~F.col("node_type").isin(list(LEFT_OUT_NODE_TYPES))
+    )
+
     written: Dict[str, str] = {}
     try:
-        written["nodes"] = write_nodes(node_id_df, root, day)
+        written["nodes"] = write_nodes(table_nodes, root, day)
 
-        edges_df = resolve_edges(triples_df, node_id_df).persist(
+        edges_df = resolve_edges(triples_df, table_nodes).persist(
             StorageLevel.DISK_ONLY
         )
         try:
@@ -695,7 +754,7 @@ def write_query_tables(
 
         # One frame, two shapes: the market rows pivot wide and the rest stay
         # long. Cached because both readings scan it.
-        literals_df = literals(triples_df, node_id_df).persist(
+        literals_df = literals(triples_df, table_nodes).persist(
             StorageLevel.DISK_ONLY
         )
         try:
@@ -712,7 +771,7 @@ def write_query_tables(
             literals_df.unpersist()
 
         store = write_graph_store(
-            non_snapshot_triples(triples_df, node_id_df),
+            store_triples(triples_df, node_id_df),
             table_path(root, "graph", day),
         )
         if store:
@@ -727,6 +786,16 @@ def write_query_tables(
     )
     if splits is not None:
         written["splits"] = write_splits(spark, splits, root, day)
+
+    # Read on its own too, and None in the same cases.
+    facts = read_companyfacts(
+        config.companyfacts_history_bucket,
+        config.companyfacts_history_prefix,
+        day,
+        s3_client,
+    )
+    if facts is not None:
+        written["companyfacts"] = write_companyfacts(spark, facts, root, day)
 
     logger.info(
         f"Wrote {len(written)} query tables for {day} "

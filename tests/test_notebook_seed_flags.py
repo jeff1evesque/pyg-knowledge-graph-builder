@@ -206,6 +206,8 @@ def _submit(**overrides):
         "SECTOR_DEFINITIONS_KEY": "",
         "SPLITS_BUCKET": "",
         "SPLITS_PREFIX": "",
+        "COMPANYFACTS_HISTORY_BUCKET": "",
+        "COMPANYFACTS_HISTORY_PREFIX": "",
         "S3_ARCHIVE_BUCKET": "",
         "DATASET": "",
         "SOURCE_DATA_DAY": "",
@@ -265,6 +267,54 @@ def test_legs_that_write_no_tables_pass_no_split_feed(mode):
 def test_an_unset_split_feed_passes_no_flag():
     cmd = _submit()(mode="full", dry_run=True)["cmd"]
     assert "--stock_splits_bucket" not in cmd
+
+
+# --------------------------------------------------------------------------- #
+# The SEC company facts history (#437)
+# --------------------------------------------------------------------------- #
+
+HISTORY = {
+    "COMPANYFACTS_HISTORY_BUCKET": "b",
+    "COMPANYFACTS_HISTORY_PREFIX": "raw/source=sec/feed=companyfacts",
+}
+
+
+@pytest.mark.parametrize("mode", ["full", "enrichment_only"])
+def test_the_seed_leg_carries_the_company_facts_history(mode):
+    cmd = _submit(**HISTORY)(mode=mode, dry_run=True)["cmd"]
+    assert cmd[cmd.index("--companyfacts_history_bucket") + 1] == "b"
+    assert cmd[cmd.index("--companyfacts_history_prefix") + 1] == (
+        "raw/source=sec/feed=companyfacts"
+    )
+
+
+def test_a_history_at_the_buckets_root_passes_no_prefix():
+    cmd = _submit(COMPANYFACTS_HISTORY_BUCKET="b")(mode="full", dry_run=True)["cmd"]
+    assert "--companyfacts_history_bucket" in cmd
+    assert "--companyfacts_history_prefix" not in cmd
+
+
+@pytest.mark.parametrize("mode", ["pyg_only", "parse_only"])
+def test_legs_that_write_no_tables_pass_no_history(mode):
+    cmd = _submit(**HISTORY)(mode=mode, dry_run=True)["cmd"]
+    assert "--companyfacts_history_bucket" not in cmd
+
+
+def test_an_unset_history_passes_no_flag():
+    cmd = _submit()(mode="full", dry_run=True)["cmd"]
+    assert "--companyfacts_history_bucket" not in cmd
+
+
+def test_the_history_is_read_from_the_variables_env_sh_sets():
+    src = _cell("cell-02")
+    assert (
+        'COMPANYFACTS_HISTORY_BUCKET = os.environ.get("PYG_COMPANYFACTS_HISTORY_BUCKET", "")'
+        in src
+    )
+    assert (
+        'COMPANYFACTS_HISTORY_PREFIX = os.environ.get("PYG_COMPANYFACTS_HISTORY_PREFIX", "")'
+        in src
+    )
 
 
 # --------------------------------------------------------------------------- #

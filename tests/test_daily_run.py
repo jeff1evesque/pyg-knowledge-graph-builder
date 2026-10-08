@@ -349,22 +349,25 @@ def _reading_the_latest_snapshot(s, *days, lookback=None):
         s.put(f"{SNAPSHOT}year={y}/month={m}/{d}.snappy.parquet")
 
 
-@pytest.mark.parametrize("days, data_day, read", [
-    (("2026-09-27", "2026-09-29", "2026-10-02"), "2026-09-30", "year=2026/month=09/29"),
-    (("2026-09-30",), "2026-09-30", "year=2026/month=09/30"),
-    (("2026-09-28",), "2026-10-02", "year=2026/month=09/28"),
-], ids=["the newest before", "the day's own", "across a month"])
-def test_a_latest_prefix_reads_the_newest_day_not_after_the_data_day(
-    schedule, days, data_day, read,
+@pytest.mark.parametrize("days, data_day, lookback, read", [
+    (("2026-09-27", "2026-09-29", "2026-10-02"), "2026-09-30", None, "year=2026/month=09/29"),
+    (("2026-09-29", "2026-09-30"), "2026-09-30", None, "year=2026/month=09/29"),
+    (("2026-09-28",), "2026-10-02", None, "year=2026/month=09/28"),
+    (("2026-09-29",), "2026-09-30", 1, "year=2026/month=09/29"),
+], ids=["the newest before", "not the day's own", "across a month", "a one-day look-back"])
+def test_a_latest_prefix_reads_the_newest_day_before_the_data_day(
+    schedule, days, data_day, lookback, read,
 ):
-    """A snapshot carries every company's latest numbers forward, so a day whose
-    upstream run failed builds from the day before rather than skipping.
+    """The data day's own snapshot is written that evening, after the market
+    closed, so it holds numbers filed after the day's last quote. A snapshot
+    carries every company's latest numbers forward, so a day whose upstream run
+    failed builds from an earlier one rather than skipping.
 
-    The paths then name two days, so the run's env.sh names the day for the job.
+    The paths name two days, so the run's env.sh names the day for the job.
     The publisher is not given it: the prune asks it about older runs."""
     s = schedule()
     s.add_sources(data_day)
-    _reading_the_latest_snapshot(s, *days)
+    _reading_the_latest_snapshot(s, *days, lookback=lookback)
 
     r = s.run("--data-date", data_day)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -380,7 +383,8 @@ def test_a_latest_prefix_reads_the_newest_day_not_after_the_data_day(
     ((), None),
     (("2026-09-22",), None),
     (("2026-09-28",), 1),
-], ids=["none", "older than a week", "older than the look-back"])
+    (("2026-09-30",), None),
+], ids=["none", "older than a week", "older than the look-back", "only the day's own"])
 def test_a_latest_prefix_with_nothing_in_the_look_back_skips_the_day(
     schedule, days, lookback,
 ):
@@ -393,10 +397,12 @@ def test_a_latest_prefix_with_nothing_in_the_look_back_skips_the_day(
     assert s.recorded("launcher") == ""
 
 
-def test_a_look_back_that_is_not_a_number_is_refused(schedule):
+@pytest.mark.parametrize("lookback", ["week", "0"])
+def test_a_look_back_that_is_not_a_number_of_days_is_refused(schedule, lookback):
+    """0 fits no day: the snapshot is read from a day before the data day."""
     s = schedule()
     s.add_sources("2026-09-30")
-    _reading_the_latest_snapshot(s, "2026-09-30", lookback="week")
+    _reading_the_latest_snapshot(s, "2026-09-29", lookback=lookback)
 
     assert s.run().returncode == 2
     assert "PYG_LATEST_SOURCE_LOOKBACK_DAYS" in s.log()

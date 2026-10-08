@@ -237,7 +237,8 @@ tables between them. **SEC** is two feeds of ten: `feed=filings` and
 `feed=companyfacts_snapshot` are the ones carrying RDF, and a source path naming
 any of the other eight is rejected before the job starts. Feeds are matched as
 whole path segments, so `feed=companyfacts`, the snapshot's history, which holds
-no RDF, is one of the eight. **Market** is a single flat vocabulary, `EquitySnapshot` and
+no RDF, is one of the eight. It is read on its own instead, for the
+[`companyfacts/`](tables.md#companyfacts) query table. **Market** is a single flat vocabulary, `EquitySnapshot` and
 `OptionSnapshot` with every field a direct property, covering ~500+ tickers with
 full options chains (~500K+ symbols per snapshot) at ~39 snapshots a day on
 20-minute intervals during market hours. **NOAA** is US weather alerts in CAP
@@ -245,20 +246,63 @@ format.
 
 Stock splits are read as well, but not as a source. The split feed is plain
 Parquet, read directly into the [`splits/`](tables.md#splits) query table the way
-the constituents list is read, so it never enters the triples or the `.pt`.
+the constituents list is read, so it never enters the triples or the `.pt`. The
+SEC company facts history is read the same way, into
+[`companyfacts/`](tables.md#companyfacts).
 
 > **Measured volume:** one four-source day loads **322.7M triples** and enriches
 > to **421.4M**. Market is 99.5% of that; BLS 1.3M, SEC 198K, NOAA 143K.
 
 ### SEC company facts
 
+The `.pt` and the query tables take a company's numbers from different SEC feeds:
+
+| SEC data | In the `.pt` | In the query tables |
+|---|---|---|
+| Filings, issuers, 8-K items, insider transactions and acceptance times, from `feed=filings` | yes | yes |
+| The XBRL facts inside a 10-K or 10-Q, from `feed=filings` (`filings_XbrlFact`, `filings_XbrlDimension`) | no, in the scheduled run | yes |
+| Each company's latest numbers, from `feed=companyfacts_snapshot` (`companyfacts_CompanyFact`) | yes, from the snapshot dated the day before | no |
+| Every number as it was filed, from `feed=companyfacts` | no | yes, in [`companyfacts/`](tables.md#companyfacts), on the day it was filed |
+
+#### The snapshot, in the `.pt`
+
 `feed=companyfacts_snapshot` is a daily snapshot of every S&P 500 company's
-latest XBRL numbers, about 15,600 rows a day. Each row is one `CompanyFact`
-under `ontology/sec/companyfacts/` (prefix `companyfacts`, so the node type is
+latest XBRL numbers. Each row is one `CompanyFact` under
+`ontology/sec/companyfacts/` (prefix `companyfacts`, so the node type is
 `companyfacts_CompanyFact`, with entities under `id/sec/companyfacts/`): one
 company's number for one concept and period, under one value property per
-concept and period length, such as `revenueQuarter` or `assets`. Each one is
-scaled against the same property at the other companies.
+concept and period length, such as `revenueQuarter` or `assets`.
+
+Through 2026-10-05 that was 39 properties and 15,618 rows a day. From 2026-10-06
+upstream adds 43 more, worked out from a year of history: growth against the
+same quarter or year a year earlier (`revenueQuarterGrowth`, `revenueYearGrowth`),
+trailing 12-month totals (`revenueTrailing12`), and the days since the company's
+last 10-K or 10-Q and until its next, the next one estimated from the same
+report a year earlier (`daysSinceReport`, `daysToNextReport`). The 2026-10-06
+snapshot holds 32,263 rows for 500 companies.
+
+**Each property gets its own scale.** A property is its own predicate, so the
+`.pt` scales it against the same property at the other companies: EPS against
+EPS, revenue against revenue, and a new property from the day it appears. The
+filings feed's XBRL facts put every number on one predicate, `filings_hasValue`.
+On 2026-10-05 its 2,209 numeric values ran from −355,647,000 to
+1,887,814,313,346, so scaled as one property they put EPS of about $1.50 on the
+same scale as revenue of about $100B. They also reach a `.pt` only on the day
+their filing was filed: Apple's newest 10-Q was filed 2026-07-31, so a 10-day
+window that misses that day holds no Apple numbers from the filings feed. So the
+scheduled run leaves `filings_XbrlFact` and `filings_XbrlDimension` out of the
+`.pt` (see
+[`PYG_EXCLUDE_NODE_TYPES`](../operations/running-a-job.md#node-types-kept-out-of-the-pt)),
+and the snapshot gives every company's numbers every day.
+
+**A run reads the snapshot dated the day before its data day.** A day's
+snapshot is written that evening, at 23:16 ET on 2026-10-05 and on 2026-10-06,
+so it holds numbers filed after the day's last market snapshot at 3:40 PM. Read
+on its own day, a 10-Q accepted at 4:05 PM would be in a `.pt` whose market data
+ends before it. A number filed on the data day first reaches the next day's
+`.pt`, and `daysSinceReport` and `daysToNextReport` count from the snapshot's
+day. [Scheduled runs](../operations/running-a-job.md#setting-one-up) says how the
+file is picked.
 
 A fact points at the filings vocabulary's own `Issuer_{cik}` through
 `aboutIssuer`, and the row restates that issuer with its type and
@@ -267,11 +311,38 @@ the days it files. On the day it was filed, a fact also points at
 `{accession}_Filing` through `reportedIn`. Its `periodEnd` and `filedOn` dates
 put it on the period spine at the day it is about and the day it became public.
 
-That adds about 15,600 nodes to a day's ~10.7 million (the build of 2026-10-02),
-0.15% more, and about 65 MB to its 48 GB `.pt`. The vocabulary takes a hashed ontology-source slot and
-brings no relation fragments, so `contract_digest` is unchanged. A run that
-read it lists `sec-companyfacts` in its `sources`, and a graph holding its
-nodes lists it in `sources_in_graph`; see [Outputs](outputs.md).
+Through 2026-10-05 that added about 15,600 nodes to a day's ~10.7 million (the
+build of 2026-10-02), 0.15% more, and about 65 MB to its 48 GB `.pt`. From
+2026-10-06 it is about 32,300 nodes; no build with them has been measured yet.
+The vocabulary takes a hashed ontology-source slot and brings no relation
+fragments, so `contract_digest` is unchanged. A run that read it lists
+`sec-companyfacts` in its `sources`, and a graph holding its nodes lists it in
+`sources_in_graph`; see [Outputs](outputs.md).
+
+#### The history, in the query tables
+
+`feed=companyfacts` is the snapshot's history: one Parquet file per year,
+`YYYY.snappy.parquet`, from 2009, holding every number the same companies'
+filings reported, under the year each was filed. It carries no RDF, so it is
+never a source path. A run reads the data day's year file on the driver, as it
+reads the split feed, and writes the rows filed that day to
+[`companyfacts/`](tables.md#companyfacts).
+
+A filing reports earlier periods again beside the new one, so the history holds
+a number once for every filing that reported it. Upstream marks a number a
+filing gave again, unchanged, as `status = 'repeated'`: 317,283 of the 675,937
+rows filed in 2026, on 2026-10-07. Those rows are left out, so each number is in
+the tables once, on the day it was first filed, and again only on a day a filing
+changed it. `property` and `length` name 27 of the concepts plainly, such as
+`revenue` and `quarter`, so a query can ask for revenue without knowing each
+company's tag. 44,487 of the 358,654 rows kept for 2026 carry one.
+
+The snapshot's `CompanyFact` nodes are in no table. A snapshot restates every
+company's latest numbers each day, so they would land in every day's tables
+until the company files again: the 2026-10-05 snapshot matched 2026-10-04's on
+all 15,618 rows. The issuers it names stay, as they are the filings feed's own.
+A day whose tables have a `companyfacts/` partition lists `sec-companyfacts` in
+its [day marker](tables.md#the-day-marker)'s `sources`.
 
 ## Registering a source
 

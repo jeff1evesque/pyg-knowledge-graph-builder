@@ -16,6 +16,7 @@ The `.pt` has no part in this. It holds numbers without names; see
 | `edge_types/` | the relations that exist, and whether each link was stated by a source (`raw`) or inferred by this pipeline (`enrichment`, `unification`) | 838 rows on 2026-09-09 |
 | `facts/` | names, dates, amounts and codes on every non-market node | several rows per node |
 | `snapshots/` | option and equity quotes | 9.3 million rows a day: summarize before prompting |
+| `companyfacts/` | a company's reported numbers, by CIK, with `property` and `length` naming them plainly | a number is only on the day it was filed, so read the window's days |
 | `entities/` | finding a node by name, or embedding | mostly short names and labels |
 | `graph/` | multi-hop questions over one day, in SPARQL | one day at a time, and no market data |
 
@@ -137,6 +138,27 @@ What it relies on:
 On S3, each call to `linked` reads the whole day of `edges/`, about 0.67 GB. For
 more than a few questions, copy the day's tables to local disk and point `ROOT`
 at the copy.
+
+The company's reported numbers are in `companyfacts/`, by CIK, each on the day it
+was filed, so they come from the window's days rather than from `DAY` alone. The
+CIK is on its issuers, among the values step 3 read:
+
+```python
+ciks = sorted({value for _, name, value in values if name == "filings_hasIssuerCik"})
+numbers = con.execute(f"""
+    SELECT filed, form, property, length, period_end, value
+    FROM read_parquet('{ROOT}/companyfacts/*/*.parquet', hive_partitioning = true)
+    WHERE list_contains($ciks, cik) AND property IS NOT NULL
+      AND filed BETWEEN CAST($day AS DATE) - INTERVAL 90 DAY AND CAST($day AS DATE)
+    ORDER BY ALL
+""", {"ciks": ciks, "day": DAY}).fetchall()
+lines += [f"{TICKER} {name} ({length or 'to date'}) for the period to {end}: "
+          f"{value:,.0f}, filed {filed} on a {form}"
+          for filed, form, name, length, end, value in numbers]
+```
+
+A day before the first run that read the history has no `companyfacts/`
+partition; see [`companyfacts/`](tables.md#companyfacts).
 
 ## Letting the LLM write the query
 
