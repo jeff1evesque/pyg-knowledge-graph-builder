@@ -18,9 +18,9 @@ about what must NOT reach them:
   * ``splits/`` comes from the split feed, not the triples. A day the feed
     listed no splits gets an empty partition, and a day it was not read for
     gets none, so the two can be told apart
-  * the companyfacts snapshot's facts reach no table, and ``companyfacts/``
-    comes from the company facts history instead, on the same terms as
-    ``splits/``
+  * the companyfacts snapshot's facts reach no table, nor do the period days
+    only they were dated to, and ``companyfacts/`` comes from the company facts
+    history instead, on the same terms as ``splits/``
 
 Tier 4: real Spark, small frames, no cluster.
 """
@@ -31,8 +31,12 @@ import pytest
 
 from companyfacts_feed import fact, history_object
 from spark_jobs.enrichment.temporal_unifier import (
+    COVERS_DAY_PRED,
     OBSERVED_IN_PERIOD_PRED,
+    OWL_SAME_AS,
     SOURCE_DAY_TYPE,
+    UNIFIED_DAY_TYPE,
+    UNIFIED_MONTH_TYPE,
 )
 from spark_jobs.graph.config import JobConfig
 from spark_jobs.graph.tables import table_path, write_query_tables
@@ -715,23 +719,40 @@ FACTS_ID = identifier_namespace(str(SEC_COMPANYFACTS))
 FILINGS_ID = identifier_namespace(str(SEC_FILINGS))
 COMPANY_FACT = f"{FACTS_ID}Fact_0000320193_revenueQuarter_2026-06-27"
 ISSUER = f"{FILINGS_ID}Issuer_0000320193"
-FACT_DAY = "https://ex/temporal/2026-06-27"
+FILING = f"{FILINGS_ID}0000320193-26-000071_Filing"
 
-# What the snapshot and enrichment add beside a fact: its issuer, which the
-# filings feed names too, and the day its period ends on.
-ISSUER_AND_DAY = [
+# The period spine around the fact, as enrichment builds it: the source day the
+# fact's period ends on, the unified day that is sameAs it, and the month
+# covering that. The month is there with or without the fact.
+SEC_DAY = "https://ex/temporal/sec/2026-06-27"
+NOAA_DAY = "https://ex/temporal/noaa/2026-06-27"
+UNIFIED_DAY = "https://ex/unified/Day2026-06-27"
+UNIFIED_JUNE = "https://ex/unified/June"
+
+ISSUER_AND_MONTH = [
     (ISSUER, RDF_TYPE, str(SEC_FILINGS.Issuer)),
     (ISSUER, str(SEC_FILINGS.hasIssuerCik), "0000320193"),
-    (FACT_DAY, RDF_TYPE, SOURCE_DAY_TYPE),
+    (UNIFIED_JUNE, RDF_TYPE, UNIFIED_MONTH_TYPE),
 ]
-# The fact: a number, a code, a text value, and its edges to the two.
+UNIFIED_DAY_ROWS = [
+    (UNIFIED_DAY, RDF_TYPE, UNIFIED_DAY_TYPE),
+    (UNIFIED_DAY, RDFS_LABEL, "2026-06-27"),
+    (UNIFIED_JUNE, COVERS_DAY_PRED, UNIFIED_DAY),
+]
+SEC_DAY_ROWS = [
+    (SEC_DAY, RDF_TYPE, SOURCE_DAY_TYPE),
+    (SEC_DAY, RDFS_LABEL, "2026-06-27"),
+    (UNIFIED_DAY, OWL_SAME_AS, SEC_DAY),
+]
+# The fact: a number, a code, a text value, and its edges to its issuer and to
+# the day its period ends on.
 COMPANY_FACT_TRIPLES = [
     (COMPANY_FACT, RDF_TYPE, str(SEC_COMPANYFACTS.CompanyFact)),
     (COMPANY_FACT, str(SEC_COMPANYFACTS.revenueQuarter), "94930000000.0"),
     (COMPANY_FACT, str(SEC_COMPANYFACTS.unit), "USD"),
     (COMPANY_FACT, RDFS_LABEL, "Apple revenue"),
     (COMPANY_FACT, str(SEC_COMPANYFACTS.aboutIssuer), ISSUER),
-    (COMPANY_FACT, OBSERVED_IN_PERIOD_PRED, FACT_DAY),
+    (COMPANY_FACT, OBSERVED_IN_PERIOD_PRED, SEC_DAY),
 ]
 
 
@@ -744,23 +765,19 @@ def _store_triples(path):
     }
 
 
-def test_the_snapshots_facts_reach_no_table(spark, tmp_path):
-    """The snapshot restates every company's latest numbers each day, so they
-    would repeat in every day's tables. Written with a fact and without it,
-    every table and the store come out the same: no node, edge, value or text
-    of the fact's. The issuer stays."""
+def _written_with_and_without(spark, tmp_path, with_rows, without_rows):
     written = {}
-    for name, rows in (
-        ("with", TRIPLES + ISSUER_AND_DAY + COMPANY_FACT_TRIPLES),
-        ("without", TRIPLES + ISSUER_AND_DAY),
-    ):
+    for name, rows in (("with", with_rows), ("without", without_rows)):
         triples = spark.createDataFrame(
             rows, "subject string, predicate string, object string"
         )
         written[name] = write_query_tables(
             spark, triples, _config(tmp_path / name)
         )
+    return written
 
+
+def _assert_the_same_tables(spark, written):
     assert set(written["with"]) == set(written["without"])
     for table in ("nodes", "edges", "edge_types", "facts", "entities", "snapshots"):
         rows = [
@@ -772,15 +789,101 @@ def test_the_snapshots_facts_reach_no_table(spark, tmp_path):
         written["without"]["graph"]
     )
 
-    nodes = spark.read.parquet(written["with"]["nodes"]).collect()
-    assert ISSUER in {row["uri"] for row in nodes}
+
+def _uris(spark, written, table="nodes"):
+    return {row["uri"] for row in spark.read.parquet(written["with"][table]).collect()}
+
+
+def test_the_snapshots_facts_reach_no_table(spark, tmp_path):
+    """The snapshot restates every company's latest numbers each day, so they
+    would repeat in every day's tables. Written with a fact and the day only it
+    was dated to, and without them, every table and the store come out the
+    same: no node, edge, value or text of the fact's, and no day left with
+    nothing pointing at it. The issuer stays."""
+    written = _written_with_and_without(
+        spark, tmp_path,
+        TRIPLES + ISSUER_AND_MONTH + UNIFIED_DAY_ROWS + SEC_DAY_ROWS
+        + COMPANY_FACT_TRIPLES,
+        TRIPLES + ISSUER_AND_MONTH,
+    )
+
+    _assert_the_same_tables(spark, written)
+    assert ISSUER in _uris(spark, written)
+
+
+def test_a_day_a_filing_is_dated_to_stays(spark, tmp_path):
+    """Only the fact's own edge to it goes."""
+    filing = [
+        (FILING, RDF_TYPE, str(SEC_FILINGS.SECFiling)),
+        (FILING, OBSERVED_IN_PERIOD_PRED, SEC_DAY),
+    ]
+    day = ISSUER_AND_MONTH + UNIFIED_DAY_ROWS + SEC_DAY_ROWS + filing
+    written = _written_with_and_without(
+        spark, tmp_path, TRIPLES + day + COMPANY_FACT_TRIPLES, TRIPLES + day,
+    )
+
+    _assert_the_same_tables(spark, written)
+    assert {SEC_DAY, UNIFIED_DAY} <= _uris(spark, written)
+
+
+def test_a_unified_day_another_sources_day_is_sameas_stays(spark, tmp_path):
+    """A weather alert on the same date keeps the unified day, and the SEC day
+    only the fact was dated to still goes."""
+    alert_day = [
+        (NOAA_DAY, RDF_TYPE, SOURCE_DAY_TYPE),
+        (UNIFIED_DAY, OWL_SAME_AS, NOAA_DAY),
+        (ALERT, OBSERVED_IN_PERIOD_PRED, NOAA_DAY),
+    ]
+    written = _written_with_and_without(
+        spark, tmp_path,
+        TRIPLES + ISSUER_AND_MONTH + UNIFIED_DAY_ROWS + alert_day
+        + SEC_DAY_ROWS + COMPANY_FACT_TRIPLES,
+        TRIPLES + ISSUER_AND_MONTH + UNIFIED_DAY_ROWS + alert_day,
+    )
+
+    _assert_the_same_tables(spark, written)
+    nodes = _uris(spark, written)
+    assert UNIFIED_DAY in nodes
+    assert SEC_DAY not in nodes
+
+
+def test_leaving_a_day_out_moves_no_other_nodes_id(spark, tmp_path):
+    """Ids are numbered within a type by URI, and stay as they were numbered
+    over every node, as the .pt numbers them: the day after a left-out one
+    keeps id 1."""
+    earlier = "https://ex/temporal/sec/2026-03-28"
+    rows = TRIPLES + ISSUER_AND_MONTH + [
+        (earlier, RDF_TYPE, SOURCE_DAY_TYPE),
+        (SEC_DAY, RDF_TYPE, SOURCE_DAY_TYPE),
+        (FILING, RDF_TYPE, str(SEC_FILINGS.SECFiling)),
+        (FILING, OBSERVED_IN_PERIOD_PRED, SEC_DAY),
+        (COMPANY_FACT, RDF_TYPE, str(SEC_COMPANYFACTS.CompanyFact)),
+        (COMPANY_FACT, OBSERVED_IN_PERIOD_PRED, earlier),
+    ]
+    triples = spark.createDataFrame(
+        rows, "subject string, predicate string, object string"
+    )
+    paths = write_query_tables(spark, triples, _config(tmp_path))
+
+    days = {
+        row["uri"]: row["node_id"]
+        for row in spark.read.parquet(paths["nodes"]).collect()
+        if row["node_type"] == "temporal_SourceDay"
+    }
+    assert days == {SEC_DAY: 1}
+    edges = [
+        row.asDict() for row in spark.read.parquet(paths["edges"]).collect()
+        if row["dst_type"] == "temporal_SourceDay"
+    ]
+    assert [(e["src_type"], e["dst_id"]) for e in edges] == [
+        ("filings_SECFiling", 1)
+    ]
 
 
 HISTORY_PREFIX = "raw/source=sec/feed=companyfacts"
 HISTORY_KEY = f"{HISTORY_PREFIX}/2026.snappy.parquet"
-# 23:15 and 21:59 Eastern on DAY, either side of EDGAR closing, in UTC.
+# 23:15 Eastern on DAY, when upstream writes, in UTC.
 HISTORY_WRITTEN = datetime(2026, 9, 13, 3, 15, tzinfo=timezone.utc)
-HISTORY_EARLY = datetime(2026, 9, 13, 1, 59, tzinfo=timezone.utc)
 COMPANYFACTS_DTYPES = [
     ("cik", "string"), ("entity_name", "string"), ("taxonomy", "string"),
     ("concept", "string"), ("unit", "string"), ("period_start", "date"),
@@ -837,7 +940,7 @@ def test_a_day_nothing_was_filed_writes_an_empty_companyfacts_partition(
     assert table.count() == 0
 
 
-@pytest.mark.parametrize("case", ["missing", "early", "no bucket"])
+@pytest.mark.parametrize("case", ["missing", "unreadable", "no bucket"])
 def test_no_companyfacts_partition_when_the_history_was_not_read(
     spark, tmp_path, case,
 ):
@@ -847,7 +950,7 @@ def test_no_companyfacts_partition_when_the_history_was_not_read(
     rows = [fact(filed=DAY, first_filed=DAY)]
     objects = {
         "missing": {},
-        "early": {HISTORY_KEY: (history_object(rows), HISTORY_EARLY)},
+        "unreadable": {HISTORY_KEY: (b"not parquet", HISTORY_WRITTEN)},
         "no bucket": {HISTORY_KEY: (history_object(rows), HISTORY_WRITTEN)},
     }[case]
     config = _config(
