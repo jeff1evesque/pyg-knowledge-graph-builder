@@ -158,6 +158,13 @@ The run keeps the rows filed on its day, leaves out the ones upstream marks
 an empty partition means nothing was filed that day. It keeps the history's
 columns about the filing and leaves out upstream's record of its own fetch.
 
+Upstream rewrites the file at 23:15 Eastern, Monday to Saturday, adding what was
+filed that day, and leaves it as it is on a day nothing new was filed. So the
+file's write time says nothing about which days it holds, and rows are picked by
+`filed` alone. A scheduled run starts at 1 AM Eastern, after that write. A run
+started by hand before 23:15 on the day it builds would find none of that day's
+filings, and publish the day empty.
+
 Missing company facts never stop a run. In each of these cases the run logs why,
 writes no `companyfacts/` partition for the day, and builds every other table and
 the `.pt` as usual:
@@ -166,7 +173,6 @@ the `.pt` as usual:
 |---|---|
 | no `--companyfacts_history_bucket` | INFO |
 | no file for the day's year | WARNING, naming the file |
-| a file last written before 10 PM Eastern on the day, when EDGAR stops taking filings, so it may lack some of that day's | WARNING, with the file's write time |
 | a file that cannot be read, or lacks a column the table keeps | WARNING, with the error |
 
 The notebook passes the two flags to the seed leg from
