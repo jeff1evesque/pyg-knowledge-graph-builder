@@ -61,9 +61,11 @@ company's latest numbers each day, so they would repeat in every day's tables
 until a company files again; the 2026-10-05 snapshot matched 2026-10-04's on all
 15,618 rows. ``companyfacts/`` holds the numbers instead, each on the day it was
 filed. The issuers the snapshot names stay, as they are the filings feed's own.
+The period days only its facts were dated to go with them, as nothing else
+points at them (days_only_left_out_nodes_dated).
 """
 import logging
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Sequence, Tuple
 
 from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession
@@ -84,9 +86,11 @@ from spark_jobs.pyg_builder.naming import (
 )
 from spark_jobs.pyg_builder.node_mapper import NodeMapper
 from spark_jobs.utils.rdf_utils import (
+    BLS_ENRICHMENT,
     MARKET_QUOTES,
     SEC_COMPANYFACTS,
     SNAPSHOT_NODE_TYPE_PREFIX,
+    SOURCE_TEMPORAL,
     classify_edge_origin,
 )
 from spark_jobs.utils.spark_rdf_utils import (
@@ -116,6 +120,11 @@ _SNAPSHOT_SORT_TERMS = (
 LEFT_OUT_NODE_TYPES = (
     prefixed_local_name(str(SEC_COMPANYFACTS.CompanyFact)),
 )
+
+# The day rung of the period spine (enrichment/temporal_unifier.py): the source
+# day a dated node points at, and the unified day that is sameAs it.
+SOURCE_DAY_TYPE = prefixed_local_name(str(SOURCE_TEMPORAL.SourceDay))
+UNIFIED_DAY_TYPE = prefixed_local_name(str(BLS_ENRICHMENT.UnifiedDay))
 
 # Local names whose values are prose rather than a code, a date or a
 # measurement. Matched against the local name, case-insensitively, so
@@ -268,6 +277,67 @@ def resolve_edges(triples_df: DataFrame, node_id_df: DataFrame) -> DataFrame:
             ["src_type", "src_id", "relation", "dst_type", "dst_id"]
         )
     )
+
+
+def days_only_left_out_nodes_dated(edges_df: DataFrame) -> Dict[str, List[int]]:
+    """The period days that only nodes of LEFT_OUT_NODE_TYPES were dated to, as
+    {node_type: [node_id]}.
+
+    A source day goes when every node pointing at it is left out, and a unified
+    day when every source day it is sameAs goes. Kept, nothing would point at
+    them: on 2026-10-05, 213 of the 277 source days were dated only by a
+    snapshot fact. Read off ``edges_df`` over every node, left-out ones too, and
+    small: a few hundred days.
+    """
+    # One row per source day: whether every node pointing at it is left out
+    # (null when only its unified day does), and the unified days sameAs it.
+    is_unified = F.col("src_type") == UNIFIED_DAY_TYPE
+    days = (
+        edges_df
+        .filter(F.col("dst_type") == SOURCE_DAY_TYPE)
+        .groupBy("dst_id")
+        .agg(
+            F.min(
+                F.when(
+                    ~is_unified,
+                    F.col("src_type").isin(list(LEFT_OUT_NODE_TYPES)).cast("int"),
+                )
+            ).alias("_only_left_out"),
+            F.collect_set(F.when(is_unified, F.col("src_id"))).alias("_unified"),
+        )
+        .collect()
+    )
+    source_days = {row["dst_id"] for row in days if row["_only_left_out"] == 1}
+    if not source_days:
+        return {}
+
+    stands_for: Dict[int, set] = {}
+    for row in days:
+        for unified in row["_unified"]:
+            stands_for.setdefault(unified, set()).add(row["dst_id"])
+    unified_days = {
+        unified for unified, sources in stands_for.items()
+        if sources <= source_days
+    }
+
+    left_out = {SOURCE_DAY_TYPE: sorted(source_days)}
+    if unified_days:
+        left_out[UNIFIED_DAY_TYPE] = sorted(unified_days)
+    return left_out
+
+
+def kept_node(left_out_days: Dict[str, List[int]]) -> Callable[[str, str], F.Column]:
+    """``kept(type_column, id_column)``: whether a node is in the tables, by its
+    type and id. Not one of LEFT_OUT_NODE_TYPES, and not one of the days
+    ``days_only_left_out_nodes_dated`` found."""
+    def kept(type_column: str, id_column: str) -> F.Column:
+        keep = ~F.col(type_column).isin(list(LEFT_OUT_NODE_TYPES))
+        for node_type, ids in left_out_days.items():
+            keep = keep & ~(
+                (F.col(type_column) == node_type) & F.col(id_column).isin(ids)
+            )
+        return keep
+    return kept
 
 
 def _predicates_named(triples_df: DataFrame, relations: List[str]) -> List[str]:
@@ -474,7 +544,9 @@ def write_entities(facts_df: DataFrame, root: str, day: str) -> str:
 # graph/
 # ============================================
 def store_triples(
-    triples_df: DataFrame, node_id_df: DataFrame
+    triples_df: DataFrame,
+    node_id_df: DataFrame,
+    left_out_day_uris: Sequence[str] = (),
 ) -> DataFrame:
     """Every triple describing something other than a market snapshot or a
     node of the LEFT_OUT_NODE_TYPES.
@@ -484,7 +556,9 @@ def store_triples(
     company's own triples stay in -- the same line ``facts/`` and
     ``snapshots/`` draw, applied to whole triples rather than to literals.
     ``node_id_df`` still holds the left-out nodes, so their triples are found
-    the same way.
+    the same way. ``left_out_day_uris`` are the days only left-out nodes
+    were dated to, and a triple pointing at one goes too: the month's
+    coversDay link to it would otherwise point at nothing.
 
     The market hub nodes are on the other side of that line: an
     ``EquitySector`` and its route to the economic sectors are in the store,
@@ -508,7 +582,7 @@ def store_triples(
         .select(F.col("uri").alias("_kept_out_uri"))
     )
 
-    return (
+    stored = (
         triples_df
         .join(
             kept_out,
@@ -517,6 +591,12 @@ def store_triples(
         )
         .select("subject", "predicate", "object")
     )
+    if left_out_day_uris:
+        days = list(left_out_day_uris)
+        stored = stored.filter(
+            ~F.col("subject").isin(days) & ~F.col("object").isin(days)
+        )
+    return stored
 
 
 # ============================================
@@ -716,41 +796,61 @@ def write_query_tables(
         spark, {ALLOW_UNREGISTERED_NAMESPACES: allow_unregistered}
     ).build_node_id_table(triples_df)
 
-    # The tables' nodes: every type but LEFT_OUT_NODE_TYPES. edges/ and facts/
-    # join both ends or the subject to these, so a left-out node's edges and
-    # values go with it. Ids are numbered within a type, so no other type's
-    # ids move.
-    for node_type in LEFT_OUT_NODE_TYPES:
-        count = node_counts.pop(node_type, 0)
-        if count:
-            logger.info(
-                f"  Leaving {count:,} {node_type} nodes out of the tables"
-            )
-    table_nodes = node_id_df.filter(
-        ~F.col("node_type").isin(list(LEFT_OUT_NODE_TYPES))
-    )
-
     written: Dict[str, str] = {}
     try:
-        written["nodes"] = write_nodes(table_nodes, root, day)
-
-        edges_df = resolve_edges(triples_df, table_nodes).persist(
+        # Over every node, left-out ones too: the days only they were dated to
+        # are read off these edges. Ids are numbered within a type, so leaving
+        # nodes out moves no other node's id.
+        edges_df = resolve_edges(triples_df, node_id_df).persist(
             StorageLevel.DISK_ONLY
         )
         try:
-            edge_types = count_edge_types(edges_df)
+            left_out_days = days_only_left_out_nodes_dated(edges_df)
+            for node_type in LEFT_OUT_NODE_TYPES:
+                count = node_counts.pop(node_type, 0)
+                if count:
+                    logger.info(
+                        f"  Leaving {count:,} {node_type} nodes out of the tables"
+                    )
+            for node_type, ids in left_out_days.items():
+                node_counts[node_type] -= len(ids)
+                logger.info(
+                    f"  Leaving {len(ids):,} {node_type} nodes out of the "
+                    f"tables: only left-out nodes were dated to them"
+                )
+            kept = kept_node(left_out_days)
+
+            # The tables' nodes. edges/ and facts/ keep only rows whose ends or
+            # subject are among them, so a left-out node's edges and values go
+            # with it.
+            table_nodes = node_id_df.filter(kept("node_type", "node_id"))
+            written["nodes"] = write_nodes(table_nodes, root, day)
+
+            table_edges = edges_df.filter(
+                kept("src_type", "src_id") & kept("dst_type", "dst_id")
+            )
+            edge_types = count_edge_types(table_edges)
             check_registered_names(
                 "Relations",
                 (row["relation"] for row in edge_types),
                 allow_unregistered,
                 lambda names: _predicates_named(triples_df, names),
             )
-            written["edges"] = write_edges(edges_df, root, day)
+            written["edges"] = write_edges(table_edges, root, day)
             written["edge_types"] = write_edge_types(
                 spark, edge_types, root, day
             )
         finally:
             edges_df.unpersist()
+
+        left_out_day_uris = [
+            row["uri"]
+            for row in node_id_df
+            .filter(~kept("node_type", "node_id"))
+            .filter(~F.col("node_type").isin(list(LEFT_OUT_NODE_TYPES)))
+            .select("uri")
+            .collect()
+        ] if left_out_days else []
 
         # One frame, two shapes: the market rows pivot wide and the rest stay
         # long. Cached because both readings scan it.
@@ -771,7 +871,7 @@ def write_query_tables(
             literals_df.unpersist()
 
         store = write_graph_store(
-            store_triples(triples_df, node_id_df),
+            store_triples(triples_df, node_id_df, left_out_day_uris),
             table_path(root, "graph", day),
         )
         if store:

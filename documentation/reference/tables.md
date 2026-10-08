@@ -136,7 +136,9 @@ day to the next by its `uri`.
 `node_id` is `row_number()` over a uri-ordered window within a node type, so a
 URI's id changes whenever the node set changes — which is every day. An edge
 row carries ids and not URIs, because URIs would multiply the table several
-times over, and that is the price.
+times over, and that is the price. The numbering runs over every node, the ones
+the tables [leave out](#companyfacts) included, so the ids a type keeps are the
+`.pt`'s and can have gaps.
 
 ```sql
 SELECT e.relation, n.uri AS source, m.uri AS target
@@ -316,20 +318,22 @@ row of it is in `nodes/`, `edges/`, `graph/` or the `.pt`.
   `filings_hasIssuerCik` in `facts/`.
   [A company's numbers, as filed](questions.md#a-companys-numbers-as-filed)
   starts from a ticker.
-- **An empty partition means nothing was filed that day.** The partition is
-  written whenever the history was read, rows or not. A day with no
-  `companyfacts/` partition was not read: no location was set, the year's file
-  was missing, the file could not be read, or it was last written before 10 PM
-  Eastern on the day, when EDGAR stops taking filings, so it may lack some of
-  that day's. The run's log says which.
+- **An empty partition means nothing was filed that day.** Upstream rewrites the
+  year's file at 23:15 Eastern, Monday to Saturday, adding what was filed that
+  day, and leaves it as it is on a day nothing new was filed, so rows are picked
+  by `filed` alone. The scheduled run starts at 1 AM Eastern, after that write.
+  A day with no `companyfacts/` partition was not read: no location was set, the
+  year's file was missing, or it could not be read. The run's log says which.
 - **It starts on the first day a run reads the history.** Each day holds only
-  that day's filings, so a number filed before then is not in the tables.
+  that day's filings, and is published once, so a number filed before then, or
+  added upstream later for an earlier day, is not in the tables.
 - **The snapshot's facts are not here.** The SEC company facts snapshot restates
   every company's latest numbers each day for the `.pt`. In the tables they
   would repeat every day until a company files again, so no table holds a
-  `companyfacts_CompanyFact` node, edge or value. The days their dates name stay
-  on the period spine in `nodes/` and `edges/`: on 2026-10-05, 213 of the 277
-  `temporal_SourceDay` nodes were named only by a snapshot fact.
+  `companyfacts_CompanyFact` node, edge or value. Nor do they hold the period
+  days only those facts were dated to, each a `temporal_SourceDay` and its
+  `bls_enrichment_UnifiedDay`, which nothing else would point at: on 2026-10-05,
+  213 of the 277 source days. A day a filing or a quote is dated to stays.
 
 ### `graph/`
 
@@ -414,9 +418,10 @@ is here, so the sections above describe the tables alone.
 - **Which day.** From schema 1.5, a `.pt`'s `build_metadata.day` names the
   tables partition it was built beside; see
   [Which date is which](outputs.md#which-date-is-which). Their counts agree per
-  node type. Their totals differ by the build's `excluded_node_types`, which the
-  tables keep, and by `companyfacts_CompanyFact`, which only the `.pt` holds.
-  For 2026-09-24, each of the 151 node types in that day's `.pt` held the same
+  node type, and so do their ids. They differ by the build's
+  `excluded_node_types`, which the tables keep, and by the
+  `companyfacts_CompanyFact` nodes and the period days only they were dated to,
+  which only the `.pt` holds. For 2026-09-24, each of the 151 node types in that day's `.pt` held the same
   count as that day's `nodes/`, and `nodes/` held 4,456 more nodes, all in the
   four NOAA types the build excluded.
 - **`nodes/` against `node_index/`.** The same three columns, over every source

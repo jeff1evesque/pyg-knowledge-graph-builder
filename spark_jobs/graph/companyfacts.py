@@ -14,16 +14,16 @@ again, unchanged, as ``repeated``, and those rows are left out. What remains is
 each number once, on the day it was first filed, and each later change on the
 day it was filed.
 
-EDGAR takes filings until 10 p.m. Eastern. An object last written before then on
-the day can still lack some of the day's filings, so it counts as not written for
-that day. Read, it would publish part of a day as the whole of it, and no later
-day's table puts the rest back.
+Upstream rewrites the year's object at 23:15 Eastern, Monday to Saturday, adding
+what was filed that day, and leaves it as it is on a day nothing new was filed.
+So the object's write time says nothing about which days it holds: rows are
+picked by ``filed`` alone, and a day with none is a day nothing was filed. The
+nightly run starts at 1 AM Eastern, after that write.
 """
 import io
 import logging
-from datetime import date, datetime, time
+from datetime import date
 from typing import List, Optional, Tuple
-from zoneinfo import ZoneInfo
 
 # The job's logger, not this module's -- see the note in graph/config.py.
 logger = logging.getLogger("build_graph")
@@ -32,10 +32,6 @@ logger = logging.getLogger("build_graph")
 # marker lists it among the day's sources when the day has a companyfacts/
 # partition (bin/publish_run.py).
 FEED_NAME = "sec-companyfacts"
-
-FEED_TIMEZONE = ZoneInfo("America/New_York")
-# When EDGAR stops taking filings for the day, in FEED_TIMEZONE.
-EDGAR_CLOSES = time(22, 0)
 
 # The status upstream gives a number a filing gave again, unchanged.
 REPEATED = "repeated"
@@ -91,9 +87,8 @@ def read_companyfacts(
     in COLUMNS order, sorted by company, concept and period.
 
     ``[]`` when the history was read and nothing was filed that day. None when
-    it was not read for the day: no location set, no object, an object last
-    written before EDGAR closed on the day, or one that could not be read. Each
-    None is logged.
+    it was not read for the day: no location set, no object for the day's year,
+    or one that could not be read. Each None is logged.
     """
     # Imported here, not at the top, so bin/publish_run.py can import this
     # module on the system python with the standard library alone.
@@ -135,22 +130,6 @@ def read_companyfacts(
         logger.warning(
             f"Could not read the company facts history from {where}: {e}. No "
             f"companyfacts table for {day}"
-        )
-        return None
-
-    written = response.get("LastModified")
-    closed = datetime.combine(
-        date.fromisoformat(day), EDGAR_CLOSES, tzinfo=FEED_TIMEZONE
-    )
-    if written is None or written < closed:
-        when = (
-            written.astimezone(FEED_TIMEZONE).strftime("%Y-%m-%d %H:%M %Z")
-            if written is not None else "at an unknown time"
-        )
-        logger.warning(
-            f"Company facts history {where} was last written {when}, before "
-            f"EDGAR closed on {day}, so it may lack some of that day's filings. "
-            f"No companyfacts table"
         )
         return None
 

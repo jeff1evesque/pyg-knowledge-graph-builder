@@ -326,7 +326,9 @@ fragments, so `contract_digest` is unchanged. A run that read it lists
 filings reported, under the year each was filed. It carries no RDF, so it is
 never a source path. A run reads the data day's year file on the driver, as it
 reads the split feed, and writes the rows filed that day to
-[`companyfacts/`](tables.md#companyfacts).
+[`companyfacts/`](tables.md#companyfacts). Upstream rewrites the file at 23:15
+Eastern, Monday to Saturday, in the same run that writes the snapshot, and only
+when something new was filed; the scheduled run reads it at 1 AM.
 
 A filing reports earlier periods again beside the new one, so the history holds
 a number once for every filing that reported it. Upstream marks a number a
@@ -337,10 +339,11 @@ changed it. `property` and `length` name 27 of the concepts plainly, such as
 `revenue` and `quarter`, so a query can ask for revenue without knowing each
 company's tag. 44,487 of the 358,654 rows kept for 2026 carry one.
 
-The snapshot's `CompanyFact` nodes are in no table. A snapshot restates every
-company's latest numbers each day, so they would land in every day's tables
-until the company files again: the 2026-10-05 snapshot matched 2026-10-04's on
-all 15,618 rows. The issuers it names stay, as they are the filings feed's own.
+The snapshot's `CompanyFact` nodes are in no table, and neither are the period
+days only they were dated to. A snapshot restates every company's latest
+numbers each day, so they would land in every day's tables until the company
+files again: the 2026-10-05 snapshot matched 2026-10-04's on all 15,618 rows.
+The issuers it names stay, as they are the filings feed's own.
 A day whose tables have a `companyfacts/` partition lists `sec-companyfacts` in
 its [day marker](tables.md#the-day-marker)'s `sources`.
 
