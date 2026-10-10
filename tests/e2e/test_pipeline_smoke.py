@@ -248,6 +248,12 @@ def _assert_valid_graph_and_metadata(config, work_dir):
     # is_unique above compares URIs as strings, so it is satisfied by exactly
     # the defect this looks for: one filer under both a padded and an unpadded
     # CIK is two distinct strings and two distinct nodes.
+    # The check keys on how a CIK-keyed URI is spelled, so a spelling it does
+    # not know leaves it nothing to compare, and it passes.
+    assert any(_CIK_KEYED_URI.match(uri) for uri in map(str, index["uri"])), (
+        "no node_index URI matches _CIK_KEYED_URI, so the padding check below "
+        "compares nothing"
+    )
     _assert_no_entity_is_split_by_identifier_padding(index)
 
     # --- the graph has a temporal dimension ---
@@ -533,7 +539,7 @@ def _incident_edge_counts(data):
 # empsit_UnemploymentDurationData, empsit_UnemploymentReasonData — so they can
 # no longer name a node type in any graph built from this data. The eighth is
 # filings_SECFiling, which was orphaned because the SEC fixture was three
-# scraped-HTML stubs pointing at nothing; a real filing states hasIssuer,
+# HTML-page stubs pointing at nothing; a real filing states hasIssuer,
 # hasFilingDate and hasPeriodOfReport, and all three resolve.
 #
 # The two market_quotes_* entries are gone as of the cross-source join fixes.
@@ -1314,7 +1320,7 @@ def _source_families():
     staleness that produced the defect this file exists to catch.
 
     A "family" is one upstream source, which is NOT one namespace: SEC spans
-    filings and sec-common, and a filing pointing at its own sec-common Date
+    filings and sec_common, and a filing pointing at its own sec_common Date
     node has not left SEC. Grouping by namespace instead of by
     family is exactly the mistake that made the first version of the assertion
     below pass on the broken graph: node types were split on their first
@@ -1637,7 +1643,7 @@ BRIDGE_COVERAGE = (
         resolved_against="hasIssuerTradingSymbol",
         label="market snapshot -> unified company",
         floor=1.0,
-        # The market half reads market-quotes:symbol off equity and option
+        # The market half reads market_quotes:symbol off equity and option
         # snapshots alike, and equity_symbol() resolves an OCC option symbol to
         # its underlying, so no well-formed symbol is dropped on the way in.
         #
@@ -1962,7 +1968,7 @@ def _assert_transaction_chains_are_complete(config):
 # utils/sec_identifiers.py deliberately: a check built from the same constants
 # as the code under test agrees with that code's mistakes.
 _CIK_KEYED_URI = re.compile(
-    r"^(.*/id/sec-filings/(?:Issuer|ReportingOwner|Owner)_)(\d+)(?:\.0+)?$"
+    r"^(.*/id/sec/filings/(?:Issuer|ReportingOwner|Owner)_)(\d+)(?:\.0+)?$"
 )
 
 

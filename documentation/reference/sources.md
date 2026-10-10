@@ -366,8 +366,6 @@ registers fails the build and names the namespace. An exploratory run can set
 `allow_unregistered_namespaces` in `pyg_config` to keep them under `unknown_`
 names instead.
 
-### Two spellings of one vocabulary
-
 A source vocabulary is two segments under the base — `ontology/bls/cpi/`,
 `ontology/sec/filings/` — and the pipeline mints its own terms one level down
 from the source, at `ontology/<source>/enrichment/`. That separation is load
@@ -376,26 +374,6 @@ inferred with a prefix test, so an enrichment namespace holding a source
 vocabulary inside it would report every reported fact as something the pipeline
 invented. `tests/test_namespaces.py` asserts no such prefix relationship exists,
 over every pair.
-
-The mappers used to emit those vocabularies flat — `ontology/cpi/`,
-`ontology/sec-filings/` — and nothing rewrites the archive, so objects written
-before they changed still carry the flat spellings. `LEGACY_VOCABULARIES` in
-`spark_jobs/utils/namespaces.py` registers each one beside its current form at
-the **same prefix** and the **same slot**, so both name one node type and encode
-one feature. `cpi:Index` is `cpi_Index` either way.
-
-That handles terms. It cannot handle identity, because a node is its URI:
-`id/cpi/February` and `id/bls/common/February` are two subjects and so two
-nodes. The loader therefore rewrites legacy URIs to the current spelling before
-anything reads the frame (`canonicalize_legacy_namespaces`), per path, so each
-source pays only its own rewrites. Without it the hub individuals — months,
-years, categories, states, areas — split in two: 11,382 of 101,342 BLS
-individuals are declared by more than one row, and a BLS object can hold both
-spellings at once because appends stream stored row groups through undecoded.
-
-A run therefore reads flat input, nested input, or one object holding both,
-with the same result. The legacy entries can be dropped if the archive is ever
-migrated, at the cost of one `contract_digest`.
 
 | Field | Required | What it declares |
 |---|---|---|

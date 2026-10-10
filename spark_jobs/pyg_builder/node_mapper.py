@@ -11,11 +11,11 @@ Responsibilities:
 4. Return a cached DataFrame on executors + a small counts dict
 
 Node type naming:
-    Full URI: https://jefflevesque.com/ontology/cpi/Index
+    Full URI: https://jefflevesque.com/ontology/bls/cpi/Index
     PyG name: cpi_Index
 
-    Full URI: https://jefflevesque.com/ontology/market-feeds/PriceObservation
-    PyG name: market_feeds_PriceObservation
+    Full URI: https://jefflevesque.com/ontology/market/quotes/OptionSnapshot
+    PyG name: market_quotes_OptionSnapshot
 
     A type URI in no registered namespace would be named unknown_<local name>.
     It fails the build instead, unless pyg_config sets
@@ -116,7 +116,7 @@ def _subsumed_node_types(
 
         40 SEC filings became five node types (filings_SECFiling 33, Form4 3,
         Form8K 2, Form10K 1, Form10Q 1) because a Form 4 filing is typed BOTH
-        sec-filings:Form4 and sec-filings:SECFiling. filings_hasIssuer then
+        filings:Form4 and filings:SECFiling. filings_hasIssuer then
         became five edge types pointing at the same filings_Issuer, and a GNN
         allocates five weight matrices where the relation is one.
 

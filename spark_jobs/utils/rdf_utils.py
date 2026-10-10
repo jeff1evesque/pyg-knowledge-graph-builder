@@ -27,8 +27,6 @@ from spark_jobs.utils.namespaces import (  # noqa: F401
     IDENTIFIER_BASE,
     JOLTS,
     LAUS,
-    LEGACY_IDENTIFIER_OVERRIDES,
-    LEGACY_VOCABULARIES,
     MARKET_ENRICHMENT,
     MARKET_QUOTES,
     METRO,
@@ -46,9 +44,7 @@ from spark_jobs.utils.namespaces import (  # noqa: F401
     WEATHER,
     WKYENG,
     XIMPIM,
-    canonical_uri,
     identifier_namespace,
-    legacy_rewrites,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,7 +69,7 @@ SOURCE_VOCABULARIES: Tuple[str, ...] = sources.source_vocabularies()
 # This list is short, and deliberately so. It was checked rather than assumed:
 # api.weather.gov/ontology# looked like it belonged here, but NWS publishes
 # wx:Alert plus ~30 lowercase properties there and not one of the ~29 terms
-# the scraper emitted was among them.
+# the upstream mapper emitted was among them.
 PUBLISHER_VOCABULARIES: Tuple[str, ...] = (
     str(ALERT),
     str(GEOSPARQL),
@@ -218,7 +214,7 @@ NAMESPACE_PREFIXES: List[Tuple[str, str]] = sources.namespace_prefixes()
 # its slot does not depend on what else is registered. The cost is that it can
 # land on a slot another namespace uses, and when the segment has fewer dims
 # than there are namespaces it always does. Production runs use 16.
-_CURRENT_NAMESPACE_INDICES: List[Tuple[str, int]] = [
+ONTOLOGY_NAMESPACE_INDICES: List[Tuple[str, int]] = [
     (str(CPI), 0),
     (str(PPI), 1),
     (str(ECI), 2),
@@ -245,17 +241,6 @@ _CURRENT_NAMESPACE_INDICES: List[Tuple[str, int]] = [
     (str(SOURCE_TEMPORAL), 23),
     (str(OWL), 24),
     (str(RDFS), 25),
-]
-
-# Each legacy vocabulary takes its current form's slot, so a node encodes the
-# same whichever spelling it arrived in. Derived rather than written out: a
-# legacy entry that drifted onto a slot of its own would give the same BLS
-# measurement two different ontology-source features depending on whether its
-# row happened to be restated after the mapper deploy.
-ONTOLOGY_NAMESPACE_INDICES: List[Tuple[str, int]] = _CURRENT_NAMESPACE_INDICES + [
-    (LEGACY_VOCABULARIES[namespace], index)
-    for namespace, index in _CURRENT_NAMESPACE_INDICES
-    if namespace in LEGACY_VOCABULARIES
 ]
 
 # The seed a namespace outside that table hashes its URI with, recorded in the
@@ -349,7 +334,7 @@ def classify_edge_origin(
     supposedly-raw edge types.
 
     Anything whose predicate and both endpoints are outside the pipeline's own
-    namespaces came from a source scraper.
+    namespaces came from a source.
 
     Three values, not the four the metadata docstring once listed (raw /
     intra-enrichment / cross-enrichment / unification): intra- and cross-source

@@ -7,7 +7,6 @@ from spark_jobs.utils.namespaces import (
     NOAA_ENRICHMENT,
     UNIFIED,
     WEATHER,
-    with_legacy,
 )
 
 
@@ -27,12 +26,12 @@ SPEC = SourceSpec(
     name="noaa",
     label="NOAA",
     path_fragments=("/noaa/",),
-    namespaces=with_legacy((
+    namespaces=(
         (str(CAP), "cap"),
         (str(WEATHER), "weather"),
         (str(ALERT), "alert"),
         (str(NOAA_ENRICHMENT), "noaa_enrichment"),
-    )),
+    ),
     enrichment_namespace=str(NOAA_ENRICHMENT),
     # All five are stated on the alert's Info subject, not on the alert. The
     # date collection keys on the predicate alone, so the entity it links to a

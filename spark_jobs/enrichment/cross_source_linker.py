@@ -398,7 +398,7 @@ class CrossSourceLinker:
         # economic sector through that table or not at all.
         #
         # Scoped to the two ontology namespaces, not to a "Sector" suffix:
-        # id/eci/State_and_local_government_workers_WorkerSector is real source
+        # id/bls/eci/State_and_local_government_workers_WorkerSector is real source
         # data and must still be classified.
         vocabulary_match = F.lit(False)
         for namespace in (str(BLS_ENRICHMENT), str(MARKET_ENRICHMENT)):

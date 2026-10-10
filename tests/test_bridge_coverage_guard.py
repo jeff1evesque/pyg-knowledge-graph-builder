@@ -29,13 +29,13 @@ _spec.loader.exec_module(_smoke)
 _ONT = "https://jefflevesque.com/ontology/"
 _ID = "https://jefflevesque.com/id/"
 
-_TICKER = f"{_ONT}sec-filings/hasIssuerTradingSymbol"
-_CIK = f"{_ONT}sec-filings/hasIssuerCik"
-_SYMBOL = f"{_ONT}market-quotes/symbol"
+_TICKER = f"{_ONT}sec/filings/hasIssuerTradingSymbol"
+_CIK = f"{_ONT}sec/filings/hasIssuerCik"
+_SYMBOL = f"{_ONT}market/quotes/symbol"
 _REFERS = f"{_ONT}bls/refersToCompany"
 
 _CIKS = [f"000000000{n}" for n in range(1, 4)]
-_ISSUERS = [f"{_ID}sec-filings/Issuer_{cik}" for cik in _CIKS]
+_ISSUERS = [f"{_ID}sec/filings/Issuer_{cik}" for cik in _CIKS]
 _TICKERS = [f"TCK{n}" for n in range(len(_CIKS))]
 
 # The snapshots are named for the tickers they quote, and those tickers are
@@ -43,7 +43,7 @@ _TICKERS = [f"TCK{n}" for n in range(len(_CIKS))]
 # coverage rule narrows its candidates to snapshots whose symbol an ingested
 # filing also states, because the bridge resolves a ticker to a CIK and a
 # snapshot for a company with no filings here has nothing to resolve against.
-_SNAPSHOTS = [f"{_ID}market-quotes/snapshot/{t}" for t in _TICKERS[:2]]
+_SNAPSHOTS = [f"{_ID}market/quotes/snapshot/{t}" for t in _TICKERS[:2]]
 
 
 class _Config:
@@ -230,20 +230,20 @@ def test_every_rule_is_exercised_by_the_committed_fixtures():
 # leave `precedes` present and every term involved live.
 
 _RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
-_ND_TYPE = f"{_ONT}sec-filings/NonDerivativeTransaction"
-_D_TYPE = f"{_ONT}sec-filings/DerivativeTransaction"
-_HAS_ND = f"{_ONT}sec-filings/hasNonDerivativeTransaction"
-_HAS_D = f"{_ONT}sec-filings/hasDerivativeTransaction"
-_TX_DATE = f"{_ONT}sec-filings/hasTransactionDate"
-_REPORTING_OWNER = f"{_ONT}sec-filings/hasReportingOwner"
+_ND_TYPE = f"{_ONT}sec/filings/NonDerivativeTransaction"
+_D_TYPE = f"{_ONT}sec/filings/DerivativeTransaction"
+_HAS_ND = f"{_ONT}sec/filings/hasNonDerivativeTransaction"
+_HAS_D = f"{_ONT}sec/filings/hasDerivativeTransaction"
+_TX_DATE = f"{_ONT}sec/filings/hasTransactionDate"
+_REPORTING_OWNER = f"{_ONT}sec/filings/hasReportingOwner"
 _PRECEDES = f"{_ONT}sec/precedes"
 
-_OWNER = f"{_ID}sec-filings/ReportingOwner_0000000001"
-_FILING = f"{_ID}sec-filings/0000000001-26-000001_Filing"
+_OWNER = f"{_ID}sec/filings/ReportingOwner_0000000001"
+_FILING = f"{_ID}sec/filings/0000000001-26-000001_Filing"
 
 
 def _transaction(index, kind="NonDerivative"):
-    return f"{_ID}sec-filings/0000000001-26-000001_{kind}Transaction_{index}"
+    return f"{_ID}sec/filings/0000000001-26-000001_{kind}Transaction_{index}"
 
 
 def _reported(index, date, kind="NonDerivative"):
@@ -377,17 +377,17 @@ def test_padded_and_unpadded_nodes_are_reported_as_one_entity_split():
     """The graph-level statement of the CIK defect."""
     with pytest.raises(AssertionError, match="differing only in CIK padding"):
         _smoke._assert_no_entity_is_split_by_identifier_padding(_index([
-            f"{_ID}sec-filings/Issuer_0001729997",
-            f"{_ID}sec-filings/Issuer_1729997",
+            f"{_ID}sec/filings/Issuer_0001729997",
+            f"{_ID}sec/filings/Issuer_1729997",
         ]))
 
 
 def test_distinct_filers_are_not_confused_for_a_split():
     """Two genuinely different CIKs must not collide."""
     _smoke._assert_no_entity_is_split_by_identifier_padding(_index([
-        f"{_ID}sec-filings/Issuer_0001729997",
-        f"{_ID}sec-filings/Issuer_0001729998",
-        f"{_ID}sec-filings/ReportingOwner_0001729997",
+        f"{_ID}sec/filings/Issuer_0001729997",
+        f"{_ID}sec/filings/Issuer_0001729998",
+        f"{_ID}sec/filings/ReportingOwner_0001729997",
     ]))
 
 
@@ -400,8 +400,8 @@ def test_positional_issuer_nodes_do_not_collide():
     an accession number, so neither is considered a CIK-keyed URI at all.
     """
     _smoke._assert_no_entity_is_split_by_identifier_padding(_index([
-        f"{_ID}sec-filings/0001-26-1_Issuer_0",
-        f"{_ID}sec-filings/0002-26-1_Issuer_0",
+        f"{_ID}sec/filings/0001-26-1_Issuer_0",
+        f"{_ID}sec/filings/0002-26-1_Issuer_0",
     ]))
 
 

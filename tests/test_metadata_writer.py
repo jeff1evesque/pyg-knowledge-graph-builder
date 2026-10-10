@@ -1211,9 +1211,9 @@ def test_edge_origin_is_populated_not_unknown():
             ("Sector", "correlatesWith", "Sector"): 2,
         },
         edge_predicate_uris={
-            "reports": "https://jefflevesque.com/ontology/cpi/reports",
+            "reports": "https://jefflevesque.com/ontology/bls/cpi/reports",
             "correlatesWith": (
-                "https://jefflevesque.com/ontology/bls-common/enrichment/correlatesWith"
+                "https://jefflevesque.com/ontology/bls/enrichment/correlatesWith"
             ),
         },
         edge_origins={

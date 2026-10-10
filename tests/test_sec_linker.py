@@ -40,11 +40,11 @@ from spark_jobs.utils.rdf_utils import identifier_namespace
 
 # The imported _SEC_*_NS constants are the TERM namespaces -- they name the
 # classes and properties. Filings are things, and the mappers put them under
-# id/sec-filings/, so entity URIs are built from this instead.
+# id/sec/filings/, so entity URIs are built from this instead.
 #
 # Building entities on the term namespace passed only while the linker's own
 # filtering shared that conflation; against real data the URIs it produced
-# (ontology/sec-filings/Form4_001) do not occur.
+# (ontology/sec/filings/Form4_001) do not occur.
 _SEC_FILINGS_ID = identifier_namespace(_SEC_FILINGS_NS)
 
 

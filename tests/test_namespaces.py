@@ -20,12 +20,9 @@ import pytest
 from spark_jobs.utils import rdf_utils
 from spark_jobs.utils.rdf_utils import (
     ENRICHMENT_NAMESPACES,
-    LEGACY_VOCABULARIES,
     NAMESPACE_PREFIXES,
     ONTOLOGY_BASE,
-    ONTOLOGY_NAMESPACE_INDICES,
     SOURCE_BASE,
-    canonical_uri,
     classify_edge_origin,
     PIPELINE_NODE_TYPE_PREFIXES,
     PROVENANCE,
@@ -51,10 +48,10 @@ from spark_jobs.utils.rdf_utils import (
 # excluded here on the grounds that they were the publishers' own terms. That
 # was wrong, and checking it is what corrected it: BLS publishes CSV and the
 # SEC publishes XML, so nobody there defined cpi:Index or filings:Form4. The
-# scrapers did. NWS was the sharpest case -- its live JSON-LD context really
-# does declare https://api.weather.gov/ontology# as @vocab, but it holds
+# upstream mappers did. NWS was the sharpest case -- its live JSON-LD context
+# really does declare https://api.weather.gov/ontology# as @vocab, but it holds
 # wx:Alert and ~30 lowercase properties, and not one of the ~29 terms the
-# scraper emitted was among them.
+# mapper emitted was among them.
 #
 # What survived the check is in PUBLISHER_VOCABULARIES: alert: identifiers,
 # GeoSPARQL, Atom.
@@ -66,10 +63,9 @@ MINTED = {
     "UNIFIED": str(UNIFIED),
     "SOURCE_TEMPORAL": str(SOURCE_TEMPORAL),
     "PROVENANCE": str(PROVENANCE),
-    # Keyed on the whole path under the base, not the last segment: a
-    # vocabulary and its legacy form share a last segment (bls/cpi/ and cpi/
-    # both end in cpi), so keying on that collapsed the two and quietly dropped
-    # the legacy entries out of this dict.
+    # Keyed on the whole path under the base, not the last segment: bls/common/
+    # and sec/common/ both end in common, so keying on that would collapse the
+    # two and quietly drop one of them out of this dict.
     **{
         f"SOURCE[{namespace[len(SOURCE_BASE):].strip('/')}]": namespace
         for namespace in SOURCE_VOCABULARIES
@@ -294,7 +290,7 @@ def test_no_source_vocabulary_sits_on_a_publishers_domain():
         for domain in PUBLISHER_DOMAINS:
             assert domain not in namespace, (
                 f"{namespace} claims {domain} as the authority for a term the "
-                f"scrapers invented"
+                f"upstream mappers invented"
             )
 
 
@@ -328,29 +324,14 @@ def test_longer_namespaces_precede_the_shorter_ones_they_extend():
     )
 
 
-def test_prefixes_are_unique_except_across_a_legacy_pair():
-    """Two namespaces sharing a prefix silently merge UNRELATED node types.
-
-    A vocabulary and its legacy form are not unrelated -- they are one
-    vocabulary at two URIs, and merging them is the point: an archive object
-    written before the mapper deploy has to produce the same node type as one
-    written after it. Everything else sharing a prefix is still the defect this
-    has always caught.
-    """
+def test_prefixes_are_unique():
+    """Two namespaces sharing a prefix silently merge unrelated node types."""
     seen = {}
     for namespace, prefix in NAMESPACE_PREFIXES:
-        other = seen.get(prefix)
-        if other is not None:
-            pair = {namespace, other}
-            allowed = any(
-                pair == {current, legacy}
-                for current, legacy in LEGACY_VOCABULARIES.items()
-            )
-            assert allowed, (
-                f"prefix {prefix!r} is claimed by both {other!r} and "
-                f"{namespace!r}, which are not a legacy pair; their node types "
-                f"would collapse into one name"
-            )
+        assert prefix not in seen, (
+            f"prefix {prefix!r} is claimed by both {seen.get(prefix)!r} and "
+            f"{namespace!r}; their node types would collapse into one name"
+        )
         seen[prefix] = namespace
 
 
@@ -395,19 +376,13 @@ def test_no_enrichment_namespace_is_a_prefix_of_a_source_vocabulary():
     )
 
 
-def test_every_current_source_vocabulary_is_nested_under_its_source():
+def test_every_source_vocabulary_is_nested_under_its_source():
     """Two segments under the base -- ontology/<source>/<group>/ -- not one.
 
     The mirror of the upstream side's own shape test. Both repos asserting it
     is what keeps the two from drifting apart again.
-
-    Legacy forms are exempt by definition: they are the one-segment layout, kept
-    readable because the archive still holds them.
     """
-    legacy = set(LEGACY_VOCABULARIES.values())
     for namespace in SOURCE_VOCABULARIES:
-        if namespace in legacy:
-            continue
         rest = namespace[len(SOURCE_BASE):].strip("/")
         assert len(rest.split("/")) == 2, (
             f"{namespace!r} is {len(rest.split('/'))} segment(s) under "
@@ -424,102 +399,6 @@ def test_the_companyfacts_vocabulary_nests_under_sec_beside_filings():
     for a in sec:
         for b in sec:
             assert a == b or not b.startswith(a), f"{a!r} is a prefix of {b!r}"
-
-
-# ======================================================================
-# Legacy vocabularies: one vocabulary, two spellings
-# ======================================================================
-
-def test_every_legacy_vocabulary_is_registered():
-    """A legacy form nobody registers is a namespace the naming rule cannot
-    resolve, so every pre-deploy object would build unknown_* node types."""
-    registered = {ns for ns, _prefix in NAMESPACE_PREFIXES}
-    missing = sorted(set(LEGACY_VOCABULARIES.values()) - registered)
-    assert not missing, f"legacy vocabularies not in NAMESPACE_PREFIXES: {missing}"
-
-
-def test_a_legacy_vocabulary_shares_its_current_prefix_and_slot():
-    """Both spellings have to name one node type and encode one feature.
-
-    Without the shared slot a BLS measurement gets a different ontology-source
-    feature depending on whether its row happened to be restated after the
-    deploy -- and BLS interleaves both forms inside a single object, so that
-    split falls within one run.
-    """
-    prefixes = dict(NAMESPACE_PREFIXES)
-    slots = {}
-    for namespace, index in ONTOLOGY_NAMESPACE_INDICES:
-        slots.setdefault(namespace, index)
-
-    for current, legacy in LEGACY_VOCABULARIES.items():
-        assert prefixes[legacy] == prefixes[current], (
-            f"{legacy!r} is named {prefixes[legacy]!r} but {current!r} is "
-            f"named {prefixes[current]!r}; one vocabulary, two node types"
-        )
-        assert slots[legacy] == slots[current], (
-            f"{legacy!r} encodes at slot {slots[legacy]} but {current!r} at "
-            f"{slots[current]}; one vocabulary, two features"
-        )
-
-
-@pytest.mark.parametrize("uri,expected", [
-    # Months and years sit directly under the shared space.
-    (f"{IDENTIFIER_BASE}bls/June", f"{IDENTIFIER_BASE}bls/common/June"),
-    # States sit a segment deeper in it, which makes them the same SHAPE as a
-    # nested dataset identifier. The anchor refuses both; only the vocabulary
-    # knows 'state' is not one of the ten dataset names.
-    (f"{IDENTIFIER_BASE}bls/state/Alabama",
-     f"{IDENTIFIER_BASE}bls/common/state/Alabama"),
-    # Already nested. Must survive untouched -- an unanchored id/bls/ rule would
-    # turn this into id/bls/common/cpi/February.
-    (f"{IDENTIFIER_BASE}bls/cpi/February", f"{IDENTIFIER_BASE}bls/cpi/February"),
-    (f"{IDENTIFIER_BASE}bls/common/state/Alabama",
-     f"{IDENTIFIER_BASE}bls/common/state/Alabama"),
-    # A flat dataset identifier, including one with its own deeper segments.
-    (f"{IDENTIFIER_BASE}cpi/February", f"{IDENTIFIER_BASE}bls/cpi/February"),
-    (f"{IDENTIFIER_BASE}ppi/commodity/0721",
-     f"{IDENTIFIER_BASE}bls/ppi/commodity/0721"),
-    # A term, not an individual.
-    (f"{SOURCE_BASE}cpi/hasMonth", f"{SOURCE_BASE}bls/cpi/hasMonth"),
-    # Nothing to do with us.
-    ("https://api.weather.gov/alerts/abc", "https://api.weather.gov/alerts/abc"),
-])
-def test_canonical_uri_moves_the_legacy_spellings_and_only_those(uri, expected):
-    assert canonical_uri(uri) == expected
-
-
-def test_every_declared_rewrite_actually_fires():
-    """A prefix declared but never reachable is the failure this guards.
-
-    id/bls/state/ was missing entirely: the anchored id/bls/ rule refused it for
-    being two segments deep, so 2,572 metro individuals passed through still
-    spelled the pre-deploy way while post-deploy rows spelled them the new way.
-    Nothing failed -- the states just split in two.
-    """
-    for old, new, _anchored in rdf_utils.legacy_rewrites():
-        assert canonical_uri(f"{old}Thing") == f"{new}Thing", (
-            f"{old!r} is declared but does not rewrite; a URI under it would "
-            f"keep its pre-deploy spelling"
-        )
-
-
-def test_canonicalising_a_canonical_uri_changes_nothing():
-    """Idempotence. A run reading post-deploy data must not rewrite it again,
-    and a mixed object must land in the same place from either spelling."""
-    for old, new, _anchored in rdf_utils.legacy_rewrites():
-        once = canonical_uri(f"{old}Thing")
-        assert canonical_uri(once) == once
-        assert canonical_uri(f"{new}Thing") == f"{new}Thing"
-
-
-def test_no_legacy_vocabulary_is_still_the_current_form():
-    """A stale entry mapping a namespace to itself would look like coverage
-    while asserting nothing."""
-    same = sorted(
-        current for current, legacy in LEGACY_VOCABULARIES.items()
-        if current == legacy
-    )
-    assert not same, f"legacy form identical to the current one: {same}"
 
 
 def test_every_minted_namespace_is_registered_except_provenance():

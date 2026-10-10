@@ -8,7 +8,7 @@ WHY THIS EXISTS
 check_vocabulary_drift.py answers "does upstream still know this word". That is
 the right question for a dead join, but it is not sufficient for a SPARSE one.
 A term can be declared in the ontology, correctly mapped by the upstream
-scraper, and still never carry a value -- market-quotes:underlyingSymbol is
+mapper, and still never carry a value -- market_quotes:underlyingSymbol is
 mapped from reference.underlyingSymbol and is NULL on all 524,731 option rows,
 because the broker returns nothing for it. A presence/absence scan reports that
 term as EMITTED, and a join on it still matches nothing.
@@ -72,12 +72,12 @@ _PREFIX_OF = {"SEC_FILINGS": "sec-filings", "SEC_COMMON": "sec-common"}
 #                              document that states no CIK (a 13F names a
 #                              security, not an issuer), not merely a legacy
 #                              shape from before the 2026-08-09 change
-#   Issuer_apple_inc           name-slug, from the retired scrapy crawler
+#   Issuer_apple_inc           name-slug, from a retired crawler
 # A lowercase letter straight after "Issuer_" separates the slug form cleanly,
 # because a CIK is digits.
-_ISSUER_CIK = re.compile(r"/id/sec-filings/Issuer_(\d+)")
-_ISSUER_POSITIONAL = re.compile(r"/id/sec-filings/[^\s>\"]*?_Issuer_(\d+)\b")
-_ISSUER_SLUG = re.compile(r"/id/sec-filings/Issuer_([a-z][\w.-]*)")
+_ISSUER_CIK = re.compile(r"/id/sec/filings/Issuer_(\d+)")
+_ISSUER_POSITIONAL = re.compile(r"/id/sec/filings/[^\s>\"]*?_Issuer_(\d+)\b")
+_ISSUER_SLUG = re.compile(r"/id/sec/filings/Issuer_([a-z][\w.-]*)")
 
 
 def _log(msg: str) -> None:

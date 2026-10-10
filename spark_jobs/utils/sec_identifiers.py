@@ -8,8 +8,8 @@ runs in the loader and is not enrichment.
 
 Measured instance, from 23,983 filing rows across four dates:
 
-    <.../id/sec-filings/Issuer_0001729997>  ns1:hasIssuerCik "0001729997"
-    <.../id/sec-filings/Issuer_1729997>     ns1:hasIssuerCik 1729997.0
+    <.../id/sec/filings/Issuer_0001729997>  ns1:hasIssuerCik "0001729997"
+    <.../id/sec/filings/Issuer_1729997>     ns1:hasIssuerCik 1729997.0
 
 Both are stated by the SAME Form 144 filing, which carries two ``hasIssuer``
 objects as a result. 84 issuer references in 12 distinct filers arrived
@@ -85,7 +85,7 @@ import re
 
 _SEC_FILINGS_ID = identifier_namespace(str(SEC_FILINGS))
 
-# Identifier locals keyed by a CIK: "<Word>_<cik>" under the sec-filings id
+# Identifier locals keyed by a CIK: "<Word>_<cik>" under the SEC filings id
 # namespace. Issuer is the shape measured splitting; the other two are the same
 # minting path with the same hazard, and padding an already-padded CIK is a
 # no-op, so covering them costs nothing and closes the case where the next
@@ -182,7 +182,7 @@ def _padded(digits: Column, width: int) -> Column:
 
 
 def _canonical_cik_uri(column: Column) -> Column:
-    """Rewrite ``.../id/sec-filings/<Word>_<cik>`` to its padded form."""
+    """Rewrite ``.../id/sec/filings/<Word>_<cik>`` to its padded form."""
     result = column
     for local in CIK_KEYED_LOCALS:
         prefix = f"{_SEC_FILINGS_ID}{local}_"
@@ -245,7 +245,7 @@ def canonicalize_sec_identifiers(triples_df: DataFrame) -> DataFrame:
     Rewrites, in place and without changing the row count:
 
       * subject and object URIs of the form
-        ``.../id/sec-filings/Issuer_<cik>`` (and the other CIK_KEYED_LOCALS),
+        ``.../id/sec/filings/Issuer_<cik>`` (and the other CIK_KEYED_LOCALS),
         zero-padded to CIK_DIGITS;
       * the object of every PADDED_IDENTIFIER_WIDTHS statement, with a trailing
         ``.0`` dropped and the digits zero-padded to that identifier's width;

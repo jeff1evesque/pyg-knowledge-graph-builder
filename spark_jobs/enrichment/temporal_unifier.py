@@ -389,7 +389,7 @@ class TemporalUnifier:
         the synthetic period is an island. See that constant for the history.
 
         Some sources state the date as a URI rather than a literal -- SEC points
-        hasFilingDate at sec-common:Date_2026-08-14 -- and the regexes below
+        hasFilingDate at id/sec/filings/Date_2026-08-14 -- and the regexes below
         read the date out of either form, so both shapes land on the spine. The
         entity linked to the period is the one that STATED the date (the
         filing), not the date node, so the period sits one hop from the filing

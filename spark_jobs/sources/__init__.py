@@ -20,7 +20,6 @@ from spark_jobs.sources import bls, market, noaa, sec
 from spark_jobs.sources.spec import RELATION_CATEGORIES, SourceSpec
 from spark_jobs.utils.namespaces import (
     GEOSPARQL,
-    LEGACY_VOCABULARIES,
     SOURCE_BASE,
     SOURCE_TEMPORAL,
     UNIFIED,
@@ -131,27 +130,12 @@ def entity_prefixes(namespaces: Sequence[str]) -> List[str]:
     individuals, which live under id/, so the term namespace alone matches none
     of them. A publisher's own vocabulary, such as NOAA's alert identifiers, has
     no id/ namespace and is matched as it is.
-
-    Each namespace's legacy form gets the same treatment, so an entity written
-    before the mapper deploy is still matched to its source: ontology/bls/cpi/
-    contributes id/bls/cpi/ and the flat id/cpi/ beside it.
-
-    Note what this deliberately does NOT produce: a bare id/bls/. The flat feeds
-    put their shared months and years there (<id/bls/June> a laus:Month), but
-    id/bls/ is a string prefix of all ten id/bls/<dataset>/, so registering it
-    would swallow every nested BLS identifier. Those individuals stay unmatched,
-    exactly as they are today -- identifier_namespace(BLS_COMMON) derived
-    id/bls-common/, which nothing has ever minted into. The nested feeds move
-    them to id/bls/common/, where the derivation does resolve.
     """
     prefixes: List[str] = []
     for namespace in namespaces:
-        for form in (namespace, LEGACY_VOCABULARIES.get(namespace)):
-            if not form:
-                continue
-            prefixes.append(form)
-            if form.startswith(SOURCE_BASE):
-                prefixes.append(identifier_namespace(form))
+        prefixes.append(namespace)
+        if namespace.startswith(SOURCE_BASE):
+            prefixes.append(identifier_namespace(namespace))
     return prefixes
 
 
