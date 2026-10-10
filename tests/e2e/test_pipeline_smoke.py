@@ -539,7 +539,7 @@ def _incident_edge_counts(data):
 # empsit_UnemploymentDurationData, empsit_UnemploymentReasonData — so they can
 # no longer name a node type in any graph built from this data. The eighth is
 # filings_SECFiling, which was orphaned because the SEC fixture was three
-# scraped-HTML stubs pointing at nothing; a real filing states hasIssuer,
+# HTML-page stubs pointing at nothing; a real filing states hasIssuer,
 # hasFilingDate and hasPeriodOfReport, and all three resolve.
 #
 # The two market_quotes_* entries are gone as of the cross-source join fixes.
