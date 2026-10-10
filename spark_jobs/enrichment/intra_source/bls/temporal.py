@@ -1,6 +1,6 @@
 """BLS periods: the month, year and quarter URIs the BLS datasets state.
 
-BLS states its periods as URIs (id/cpi/November, id/wkyeng/Q1), not as date
+BLS states its periods as URIs (id/bls/cpi/November, id/bls/wkyeng/Q1), not as date
 literals, so the temporal unifier cannot find them through a date predicate.
 The BLS source spec hands these collectors to the unifier instead.
 """
@@ -26,8 +26,8 @@ from spark_jobs.utils.namespaces import (
 
 # BLS monthly dataset IDENTIFIER prefixes.
 #
-# These match period URIs -- id/cpi/February, id/jolts/2024 -- which are
-# individuals, not terms. Keying them on the term namespaces (ontology/cpi/)
+# These match period URIs -- id/bls/cpi/February, id/bls/jolts/2024 -- which are
+# individuals, not terms. Keying them on the term namespaces (ontology/bls/cpi/)
 # matched nothing at all: no BLS period was ever collected, so none was typed
 # temporal:SourceMonth, so node_mapper's _CANONICAL_TYPE_PRIORITY had nothing
 # to prefer and every period sharded across cpi_Month / jolts_Month /
@@ -59,11 +59,11 @@ def collect_bls_months_years(triples_df: DataFrame) -> Optional[DataFrame]:
     Collect month and year URIs from BLS monthly datasets.
 
     BLS datasets use URI-based temporal entities like:
-      id/cpi/November, id/ppi/November, id/cpi/2024, id/ppi/2024
+      id/bls/cpi/November, id/bls/ppi/November, id/bls/cpi/2024, id/bls/ppi/2024
 
     We find these by looking for URIs under BLS IDENTIFIER prefixes whose
     local name matches a month name or 4-digit year. Identifier, not term:
-    periods are things, and nothing is ever minted under ontology/cpi/.
+    periods are things, and nothing is ever minted under ontology/bls/cpi/.
     """
     # Build filter: object URI starts with any BLS monthly prefix
     # and is used as an object in any triple (i.e., referenced as a value)
