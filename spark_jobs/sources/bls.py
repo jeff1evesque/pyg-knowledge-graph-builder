@@ -14,7 +14,6 @@ from spark_jobs.utils.namespaces import (
     UNIFIED,
     WKYENG,
     XIMPIM,
-    with_legacy,
 )
 
 
@@ -48,7 +47,7 @@ SPEC = SourceSpec(
     name="bls",
     label="BLS",
     path_fragments=("source=bls",),
-    namespaces=with_legacy((
+    namespaces=(
         (str(CPI), "cpi"),
         (str(PPI), "ppi"),
         (str(ECI), "eci"),
@@ -61,9 +60,9 @@ SPEC = SourceSpec(
         (str(XIMPIM), "ximpim"),
         (str(BLS_COMMON), "bls_common"),
         (str(BLS_ENRICHMENT), "bls_enrichment"),
-    )),
+    ),
     enrichment_namespace=str(BLS_ENRICHMENT),
-    # No date predicates: BLS states its periods as URIs (id/cpi/February),
+    # No date predicates: BLS states its periods as URIs (id/bls/cpi/February),
     # which _collect_periods reads directly.
     temporal_collector=_collect_periods,
     linker=_linker,
