@@ -69,7 +69,7 @@ SOURCE_VOCABULARIES: Tuple[str, ...] = sources.source_vocabularies()
 # This list is short, and deliberately so. It was checked rather than assumed:
 # api.weather.gov/ontology# looked like it belonged here, but NWS publishes
 # wx:Alert plus ~30 lowercase properties there and not one of the ~29 terms
-# the scraper emitted was among them.
+# the upstream mapper emitted was among them.
 PUBLISHER_VOCABULARIES: Tuple[str, ...] = (
     str(ALERT),
     str(GEOSPARQL),
@@ -334,7 +334,7 @@ def classify_edge_origin(
     supposedly-raw edge types.
 
     Anything whose predicate and both endpoints are outside the pipeline's own
-    namespaces came from a source scraper.
+    namespaces came from a source.
 
     Three values, not the four the metadata docstring once listed (raw /
     intra-enrichment / cross-enrichment / unification): intra- and cross-source
