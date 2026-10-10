@@ -13,7 +13,7 @@ form::
         sec-filings:hasDocumentType "unknown" ;
         sec-filings:hasTextContent \"\"\"h1: Filing Detail ...\"\"\" .
 
-That is a scraped HTML page with its tags stripped, typed ``SECFiling`` and
+That is an HTML page with its tags stripped, typed ``SECFiling`` and
 attached to nothing. Every SEC entity the pipeline knows how to link — the
 issuer, the filing date, the reporting period, the holdings — was absent, so
 ``filings_SECFiling`` sat in the e2e graph as an orphaned node type and the SEC
@@ -127,7 +127,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # Only this feed carries RDF. `filing-detail`, `litigation`, `press-release`,
-# `speeches`, `statements` and `testimony` are scraped HTML with a `parsed`
+# `speeches`, `statements` and `testimony` are HTML pages with a `parsed`
 # column and no Turtle at all — the stub fixture this replaces came from one of
 # them, which is why it was a wall of text rather than a filing.
 RAW_PREFIX = "raw/source=sec/feed=filings/"
