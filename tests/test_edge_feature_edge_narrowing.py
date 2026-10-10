@@ -39,8 +39,8 @@ from tests.test_edge_feature_extractor import (
 
 # Two more registered CPI classes, so the fixture graph carries edge types that
 # differ in their endpoints rather than only in edge count.
-CPI_AREA = "https://jefflevesque.com/ontology/cpi/Area"
-CPI_ITEM = "https://jefflevesque.com/ontology/cpi/Item"
+CPI_AREA = "https://jefflevesque.com/ontology/bls/cpi/Area"
+CPI_ITEM = "https://jefflevesque.com/ontology/bls/cpi/Item"
 
 LARGE_KEY = ("cpi_Index", PRECEDES_REL, "cpi_Series")
 SMALL_KEY = ("cpi_Area", PRECEDES_REL, "cpi_Item")
