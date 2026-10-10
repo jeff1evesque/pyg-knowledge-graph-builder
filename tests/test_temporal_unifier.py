@@ -7,7 +7,7 @@ Mirrors the linker test files (test_{bls,noaa,market,sec,cross_source}_linker.py
     asserted at the value level (shared unified URI + owl:sameAs links).
   - Different-period observations are NOT unified — two distinct entities,
     no cross-period sameAs.
-  - The market period path (market-quotes:captureTime) is pinned. It replaced
+  - The market period path (market_quotes:captureTime) is pinned. It replaced
     an expirationDate/observedAt pair from a feeds vocabulary that no longer
     exists; that pair is also where a reference to a non-existent
     MARKET_OPTIONS symbol once broke build_graph in all modes (Bug B).
@@ -72,7 +72,7 @@ def test_same_period_across_sources_unifies_to_one_entity(spark, make_triples):
     cpi_month = CPI_ID + "November"
     rows = [
         (CPI_ID + "obs/1", CPI + "hasMonth", cpi_month),
-        ("https://jefflevesque.com/id/market-quotes/snap/1", MARKET_CAPTURE_TIME,
+        ("https://jefflevesque.com/id/market/quotes/snap/1", MARKET_CAPTURE_TIME,
          "2024-11-15T10:00:00"),
     ]
 
@@ -96,7 +96,7 @@ def test_different_periods_are_not_unified(spark, make_triples):
     cpi_month = CPI_ID + "November"
     rows = [
         (CPI_ID + "obs/1", CPI + "hasMonth", cpi_month),
-        ("https://jefflevesque.com/id/market-quotes/snap/1", MARKET_CAPTURE_TIME,
+        ("https://jefflevesque.com/id/market/quotes/snap/1", MARKET_CAPTURE_TIME,
          "2024-03-10T10:00:00"),
     ]
 
@@ -131,7 +131,7 @@ def test_source_temporal_uris_are_typed(spark, make_triples):
     rows = [
         (CPI_ID + "obs/1", CPI + "hasMonth", cpi_month),
         (CPI_ID + "obs/1", CPI + "hasYear", cpi_year),
-        ("https://jefflevesque.com/id/market-quotes/snap/1", MARKET_CAPTURE_TIME,
+        ("https://jefflevesque.com/id/market/quotes/snap/1", MARKET_CAPTURE_TIME,
          "2024-11-15T10:00:00"),
     ]
 
@@ -169,12 +169,12 @@ def test_dated_entities_reach_the_period_they_state(spark, make_triples):
     three sub-monthly sources, and the month it belongs to is reached through
     the day's coversDay link. See the period-ladder note in temporal_unifier.
     """
-    filing = "https://jefflevesque.com/id/sec-filings/0000842657-26-000011_Filing"
+    filing = "https://jefflevesque.com/id/sec/filings/0000842657-26-000011_Filing"
     rows = [
         (filing, RDF_TYPE, str(SEC_FILINGS.SECFiling)),
         # Stated as a URI rather than a literal, which is the live shape.
         (filing, str(SEC_FILINGS.hasFilingDate),
-         "https://jefflevesque.com/id/sec-filings/Date_2026-08-14"),
+         "https://jefflevesque.com/id/sec/filings/Date_2026-08-14"),
     ]
 
     triples = _triple_set(TemporalUnifier(spark).enrich(make_triples(rows)))
@@ -214,7 +214,7 @@ def test_quote_snapshots_reach_the_spine_via_capture_time(spark, make_triples):
     milliseconds, and the date parser reads `(\\d{4})` as a year, so
     "1783009237630" would mint a period called 1783.
     """
-    snap = "https://jefflevesque.com/id/market-quotes/snapshot/A/2026-07-02"
+    snap = "https://jefflevesque.com/id/market/quotes/snapshot/A/2026-07-02"
     rows = [
         (snap, RDF_TYPE, str(MARKET_QUOTES.EquitySnapshot)),
         (snap, str(MARKET_QUOTES.captureTime), "2026-07-02T16:40:40.167Z"),
@@ -272,7 +272,7 @@ def _quotes_over(days, per_day=1):
     rows = []
     for date in days:
         for n in range(per_day):
-            snap = f"https://jefflevesque.com/id/market-quotes/snapshot/S{n}/{date}"
+            snap = f"https://jefflevesque.com/id/market/quotes/snapshot/S{n}/{date}"
             rows.append((snap, RDF_TYPE, str(MARKET_QUOTES.EquitySnapshot)))
             rows.append((snap, MARKET_CAPTURE_TIME, f"{date}T16:40:40.167Z"))
     return rows
@@ -312,7 +312,7 @@ def test_a_monthly_source_stays_on_the_month_grain(spark, make_triples):
     so they never reach the day collector at all -- the routing is structural,
     not a source list someone has to keep in sync.
     """
-    obs = "https://jefflevesque.com/id/cpi/AllItems_November2026_Index"
+    obs = "https://jefflevesque.com/id/bls/cpi/AllItems_November2026_Index"
     month = identifier_namespace(str(_CPI_NS)) + "November"
     rows = [
         (obs, RDF_TYPE, str(_CPI_NS.Index)),
@@ -390,7 +390,7 @@ def test_a_date_with_no_day_still_reaches_its_month(spark, make_triples):
     day. A quote snapshot would be the wrong fixture -- captureTime is an
     instant and cannot lose its day.
     """
-    filing = "https://jefflevesque.com/id/sec-filings/0000842657-26-000012_Filing"
+    filing = "https://jefflevesque.com/id/sec/filings/0000842657-26-000012_Filing"
     rows = [
         (filing, RDF_TYPE, str(SEC_FILINGS.SECFiling)),
         (filing, str(SEC_FILINGS.hasPeriodOfReport), "2026-06"),
@@ -444,7 +444,7 @@ def test_one_date_predicate_puts_a_new_source_on_the_period_spine(spark, make_tr
 def test_a_source_the_run_did_not_pick_contributes_no_period(spark, make_triples):
     """Market's capture time is read only when the run picked market."""
     rows = [
-        ("https://jefflevesque.com/id/market-quotes/snap/1", MARKET_CAPTURE_TIME,
+        ("https://jefflevesque.com/id/market/quotes/snap/1", MARKET_CAPTURE_TIME,
          "2024-11-15T10:00:00"),
     ]
     without_market = tuple(
