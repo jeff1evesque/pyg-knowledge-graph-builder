@@ -40,8 +40,8 @@ _RDF_TYPE = str(RDF.type)
 # working code.
 #
 # Nothing is lost by that. Every one of those surveys already exposes its
-# geography as a NAMED node -- laus:hasState -> id/laus/Alabama,
-# jolts:hasRegion -> id/jolts/Midwest_Region -- and the name is what this module
+# geography as a NAMED node -- laus:hasState -> id/bls/laus/Alabama,
+# jolts:hasRegion -> id/bls/jolts/Midwest_Region -- and the name is what this module
 # joins on. The full path weather alert -> state region -> census region ->
 # jolts region is live on the fixtures today.
 #
@@ -58,7 +58,7 @@ _JOLTS_REGION_TYPE = str(JOLTS.Region)
 def delimited_local_name(subject: Column) -> Column:
     """The URI's local name with every run of non-letters as one "_", wrapped.
 
-    "…/id/laus/Arkansas_June2026_HiresLevel" -> "_Arkansas_June_HiresLevel_"
+    "…/id/bls/laus/Arkansas_June2026_HiresLevel" -> "_Arkansas_June_HiresLevel_"
 
     Wrapping in the separator is what turns a substring test into a WORD test:
     "_Arkansas_June_" does not contain "_Kansas_", while the raw URI does
@@ -142,7 +142,7 @@ def _census_region_entities(context: CrossSourceContext) -> DataFrame:
     one of the census regions, matched by NAME.
 
     This is the only path, and it is sufficient: the job-openings survey
-    states its region as a named node (id/jolts/Midwest_Region) and never
+    states its region as a named node (id/bls/jolts/Midwest_Region) and never
     as a code. A code-keyed path was written first, on the strength of an
     issue claiming jolts:hasCensusRegionCode was coming; it is not, and the
     upstream region identifier is "MW" rather than a census number anyway, so

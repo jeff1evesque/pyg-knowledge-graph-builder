@@ -40,8 +40,8 @@ EVERYTHING HERE JOINS ON NAMES, NOT CODES
 -----------------------------------------
 Both halves work today and neither waits on anything. The weather side arrives
 with a state FIPS on its geocodes; the economic side names its geography as
-node URIs -- `laus:hasState -> id/laus/Alabama`,
-`jolts:hasRegion -> id/jolts/Midwest_Region` -- and the name is the join key.
+node URIs -- `laus:hasState -> id/bls/laus/Alabama`,
+`jolts:hasRegion -> id/bls/jolts/Midwest_Region` -- and the name is the join key.
 
 An earlier version of this module also read `laus:hasStateFIPS`,
 `metro:hasStateFIPS` and `jolts:hasCensusRegionCode`, because an issue said

@@ -9,7 +9,6 @@ from spark_jobs.utils.namespaces import (
     SEC_COMPANYFACTS,
     SEC_ENRICHMENT,
     SEC_FILINGS,
-    with_legacy,
 )
 
 # ============================================
@@ -134,12 +133,12 @@ SPEC = SourceSpec(
     name="sec",
     label="SEC",
     path_fragments=("source=sec",),
-    namespaces=with_legacy((
+    namespaces=(
         (str(SEC_FILINGS), "filings"),
         (str(SEC_COMMON), "sec_common"),
         (str(SEC_ENRICHMENT), "sec_enrichment"),
         (str(SEC_COMPANYFACTS), "companyfacts"),
-    )),
+    ),
     enrichment_namespace=str(SEC_ENRICHMENT),
     date_predicates=(
         str(SEC_FILINGS.hasPeriodOfReport),

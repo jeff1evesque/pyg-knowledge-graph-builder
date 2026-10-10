@@ -99,17 +99,10 @@ QUOTES_PREFIX = os.environ.get("MARKET_QUOTES_PREFIX", "")
 # tests/test_fixture_hygiene.py is the backstop: it fails on any prefix label in
 # a committed fixture that is not a known-neutral one, so a future regeneration
 # cannot quietly reintroduce a vendor name here or in any other source.
-# Both spellings, because a regeneration reads whatever the archive holds.
-# Objects written before the mappers nested each vocabulary under its source
-# say market-quotes/; ones written after say market/quotes/. Keyed on only one
-# of them, a regeneration on the other silently keeps the vendor's own label --
-# the exact leak this table exists to stop, and the hygiene test would be the
-# only thing between it and a public fixture.
 #
 # Spelled out rather than imported: this script deliberately depends on nothing
 # in spark_jobs, and its REPO_ROOT is defined further down.
 PREFERRED_PREFIXES = {
-    "https://jefflevesque.com/ontology/market-quotes/": "mq",
     "https://jefflevesque.com/ontology/market/quotes/": "mq",
 }
 
@@ -468,7 +461,7 @@ def validate(graph, anchors: set[str]) -> None:
     symbols = {
         str(o).strip().upper()
         for _s, p, o in graph
-        if str(p).endswith("market-quotes/symbol")
+        if str(p).endswith("market/quotes/symbol")
     }
     roots = {occ_root(s) or s for s in symbols}
     if anchors and not (roots & anchors):

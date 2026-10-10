@@ -467,7 +467,7 @@ def test_the_unmapped_gics_sectors_get_no_membership_edge(spark, make_triples):
 def test_real_source_data_named_sector_is_still_classified(spark, make_triples):
     """The exclusion is scoped to the vocabulary, not to a "Sector" suffix.
 
-    id/eci/State_and_local_government_workers_WorkerSector is a real ECI
+    id/bls/eci/State_and_local_government_workers_WorkerSector is a real ECI
     category and must still reach a sector. Excluding on the name rather than
     the namespace would drop it along with the vocabulary nodes.
     """
