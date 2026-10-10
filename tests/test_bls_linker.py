@@ -64,10 +64,10 @@ def _cpi(local):
 
     Individuals, not terms: every caller builds a thing -- an index entity, a
     category entity, a month, a year -- and the RML mappers put all of those
-    under id/cpi/. The predicates stay on the term namespace via CPI.hasMonth
+    under id/bls/cpi/. The predicates stay on the term namespace via CPI.hasMonth
     and friends above.
 
-    This used to return str(CPI[local]), i.e. ontology/cpi/Food_Nov2024_Index,
+    This used to return str(CPI[local]), i.e. ontology/bls/cpi/Food_Nov2024_Index,
     which no mapper emits. It passed only because the linker's own dataset
     detection had the same conflation, so the test agreed with the bug instead
     of with the data.
@@ -196,7 +196,7 @@ def test_quarter_name_comes_from_the_last_uri_segment(spark, make_triples):
 
     This is the property the rewrite actually depends on, stated on its own so
     a future change to the extraction fails here rather than silently returning
-    an unlinked graph. A URI of .../id/wkyeng/2024/Q2 must read as "Q2".
+    an unlinked graph. A URI of .../id/bls/wkyeng/2024/Q2 must read as "Q2".
     """
     category = _wk("Men")
     rows = []
