@@ -210,7 +210,7 @@ _REPORTING_DATE_RE = re.compile(r"ReportingDate_(\d{4})-(\d{2})-\d{2}")
 # object or as its own subject, which is why the matches are deduplicated
 # before they are counted.
 _TRANSACTION_RE = re.compile(
-    r"/id/sec-filings/([^\s<>\"]*_((?:Non)?DerivativeTransaction)_\d+)"
+    r"/id/sec/filings/([^\s<>\"]*_((?:Non)?DerivativeTransaction)_\d+)"
 )
 
 MONTH_NAMES = (
@@ -423,7 +423,7 @@ def bls_fixture_periods() -> set[tuple[str, str]]:
         for doc in table.column(column).to_pylist():
             if not doc:
                 continue
-            # BLS states periods as bare URIs — .../id/cpi/June, .../id/cpi/2026
+            # BLS states periods as bare URIs — .../id/bls/cpi/June, .../id/bls/cpi/2026
             # — reachable by hasMonth / hasYear. The measurement URI carries
             # both, spelled "June2026", which is the cheap thing to read.
             for month, year in re.findall(
