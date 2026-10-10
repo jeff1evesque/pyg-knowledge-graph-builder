@@ -5,7 +5,6 @@ from spark_jobs.utils.namespaces import (
     MARKET_ENRICHMENT,
     MARKET_QUOTES,
     UNIFIED,
-    with_legacy,
 )
 
 
@@ -70,10 +69,10 @@ SPEC = SourceSpec(
     # sat at ontology/market/ and would have claimed every ontology/market/
     # quotes/ URI listed after it, naming EquitySnapshot
     # market_enrichment_EquitySnapshot.
-    namespaces=with_legacy((
+    namespaces=(
         (str(MARKET_ENRICHMENT), "market_enrichment"),
         (str(MARKET_QUOTES), "market_quotes"),
-    )),
+    ),
     enrichment_namespace=str(MARKET_ENRICHMENT),
     # captureTime is the only ISO-8601 time a snapshot carries. quoteTime and
     # tradeTime are epoch milliseconds, which the date parser cannot read.
