@@ -24,7 +24,9 @@ doubles resolution. The default 1024 is recommended for production.
 All encoding runs on Spark executors using deterministic hash-based
 functions expressed as pure Spark column expressions. Only the final
 [num_nodes, vector_dim] float32 array per node type is collected to
-the driver.
+the driver. A node type listed in feature_trim.py stores only the
+positions that vary: its array is [num_nodes, k], and the positions it
+drops never leave the executors.
 
 Driver memory safety:
   The dense tensor for a node type is num_nodes × vector_dim × 4 bytes.
@@ -51,7 +53,7 @@ from typing import Dict, Any, List, Optional, Sequence, Set, Tuple
 import numpy as np
 import torch
 from pyspark import StorageLevel
-from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql import SparkSession, DataFrame, Observation
 from pyspark.sql import functions as F
 
 from spark_jobs import sources
@@ -87,6 +89,13 @@ from spark_jobs.utils.spark_rdf_utils import (
 # so there is no cycle.
 from spark_jobs.pyg_builder.node_mapper import build_type_uri_mapping
 from spark_jobs.pyg_builder.sparse_scatter import scatter_sparse_entries
+# The node types whose x keeps only the positions that carry information.
+from spark_jobs.pyg_builder.feature_trim import (
+    TrimCheck,
+    TrimSpec,
+    scatter_chunk,
+    trims_for,
+)
 # What the slot assignments below collided on, and the check that stops a build
 # whose class_identity segment can no longer separate its classes.
 from spark_jobs.pyg_builder.collision_report import (
@@ -404,6 +413,48 @@ def _local_name(uri: str) -> str:
     return uri.rsplit("/", 1)[-1].rsplit("#", 1)[-1]
 
 
+def _trimmed_rows(spec: TrimSpec):
+    """The rows of a trimmed type that are collected to the driver.
+
+    The kept and copied positions, and any nonzero where a position should
+    hold 0. Constant positions are never collected: _held_counts counts them
+    on the executors instead.
+    """
+    return F.col("dim").isin([*spec.kept, *spec.copy_of]) | (
+        ~F.col("dim").isin(list(spec.constant)) & (F.col("value") != 0)
+    )
+
+
+def _held_counts(spec: TrimSpec) -> List:
+    """Per constant position, how many rows of a chunk hold its value.
+
+    Taken with observe(), so in the same pass that collects the chunk. A
+    separate count would read every option row again (#346 removed one).
+    """
+    return [F.count(F.lit(1)).alias("entries")] + [
+        F.count(
+            F.when(
+                (F.col("dim") == p)
+                & (F.col("value") == F.lit(v).cast("float")),
+                True,
+            )
+        ).alias(f"held_{p}")
+        for p, v in spec.constant.items()
+    ]
+
+
+def _log_trim_check(node_type: str, check: TrimCheck) -> None:
+    """Log a trimmed type's check: a warning when a position broke.
+
+    A warning, not a failure: a failed leg blocks the night's publish, tables
+    included, and feature_spec.json records what broke for a consumer to act on.
+    """
+    if check.violations():
+        logger.warning(f"      [{node_type}] {check.summary()}")
+    else:
+        logger.info(f"      [{node_type}] {check.summary()}")
+
+
 class FeatureExtractor:
     """
     Builds universal fixed-width ontology-aware feature vectors for all
@@ -425,6 +476,7 @@ class FeatureExtractor:
         spark: SparkSession,
         config: Dict[str, Any],
         specs: Optional[Sequence[SourceSpec]] = None,
+        trims: Optional[Dict[str, TrimSpec]] = None,
     ):
         self.spark = spark
         self.config = config
@@ -467,6 +519,18 @@ class FeatureExtractor:
             class_identity_dim=self._class_identity_dim,
         )
 
+        # Node types whose x keeps only some positions (#443), from the list in
+        # feature_trim.py. On unless feature_config.trim_node_features is false.
+        # ``trims`` replaces that list, for a test with a type of its own.
+        if not feat_config.get("trim_node_features", True):
+            self._trims: Dict[str, TrimSpec] = {}
+        elif trims is not None:
+            self._trims = dict(trims)
+        else:
+            self._trims = trims_for(self._layout)
+        # Each trimmed type's check, filled in by build_features().
+        self._trim_checks: Dict[str, TrimCheck] = {}
+
         # Ontology-wide existence flags, populated once per build_features()
         # run and reused across all node types (see the hoist in that method).
         # Conservative defaults so a direct encoder call can't AttributeError.
@@ -496,6 +560,41 @@ class FeatureExtractor:
         """Return the VectorLayout instance for metadata registration."""
         return self._layout
 
+    def stored_dim(self, node_type: str) -> int:
+        """How many columns ``node_type``'s x has.
+
+        vector_dim, except for a trimmed type, whose x holds only its kept
+        positions.
+        """
+        spec = self._trims.get(node_type)
+        return spec.width if spec else self._layout.vector_dim
+
+    def has_literal_values(self, node_type: str, x) -> bool:
+        """Whether ``x`` holds a nonzero in the literal_values segment.
+
+        A trimmed x's columns are not positions, so its kept list says where
+        that segment is.
+        """
+        start = self._layout.seg3_start
+        spec = self._trims.get(node_type)
+        if spec is None:
+            return bool(x[:, start:].any())
+        return spec.any_nonzero_from(x, start)
+
+    def get_trimmed_node_types(self) -> Dict[str, Dict[str, Any]]:
+        """Each trimmed type this build made an x for: its list and its check.
+
+        What feature_spec.json records. A type the list names that is not in
+        this graph is left out.
+        """
+        return {
+            node_type: {
+                **self._trims[node_type].to_dict(),
+                "check": check.to_dict(),
+            }
+            for node_type, check in sorted(self._trim_checks.items())
+        }
+
     def get_encoding_config(self) -> Dict[str, Any]:
         """
         Return the complete encoding configuration needed to
@@ -510,7 +609,7 @@ class FeatureExtractor:
         with MetadataCollector.
         """
         layout = self._layout
-        return {
+        config = {
             "version": "1.0",
             "hash_algorithm": "spark_murmur3",
             "node_features": {
@@ -594,6 +693,15 @@ class FeatureExtractor:
                 },
             },
         }
+        # The positions a trimmed type's x keeps, which a model's input layer
+        # is sized to (#443). Left out when nothing is trimmed, so a build with
+        # trimming off keeps the digest it had before.
+        if self._trims:
+            config["node_features"]["trimmed_node_types"] = {
+                node_type: spec.to_dict()
+                for node_type, spec in sorted(self._trims.items())
+            }
+        return config
         # NOTE: no "checksum" key here. The total dim it used to carry is
         # already recorded as node_features.total_dim, and a dimension is not a
         # checksum -- two builds with different seeds but the same vector width
@@ -651,7 +759,7 @@ class FeatureExtractor:
 
         # Log driver memory budget estimate
         total_dense_bytes = sum(
-            n * vector_dim * 4 for n in node_counts.values()
+            n * self.stored_dim(t) * 4 for t, n in node_counts.items()
         )
         total_dense_mb = total_dense_bytes / (1024 * 1024)
         logger.info(
@@ -821,12 +929,18 @@ class FeatureExtractor:
         ]
 
         if not all_parts:
-            # No sparse entries at all — every type is a zero tensor.
+            # No sparse entries at all — every type is a zero tensor, and a
+            # trimmed type's constants held on none of its rows.
             for node_type, num_nodes in active_types:
                 feature_tensors[node_type] = torch.zeros(
-                    num_nodes, vector_dim, dtype=torch.float32
+                    num_nodes, self.stored_dim(node_type), dtype=torch.float32
                 )
                 feature_names[node_type] = segment_names
+                if node_type in self._trims:
+                    check = TrimCheck(self._trims[node_type])
+                    check.add(num_nodes, held={})
+                    self._trim_checks[node_type] = check
+                    _log_trim_check(node_type, check)
         else:
             combined = all_parts[0]
             for p in all_parts[1:]:
@@ -894,29 +1008,44 @@ class FeatureExtractor:
         path below may cache what it filters out of it -- one node type is
         ~98% of the graph, so caching that type's slice is a second copy of
         nearly the whole frame.
+
+        A trimmed type (#443) always takes the chunked path, whatever its
+        size: that is where its dropped positions are left on the executors
+        and checked.
         """
         import torch
 
         large = [
-            (t, n) for t, n in active_types if n > self._chunk_threshold
+            (t, n) for t, n in active_types
+            if n > self._chunk_threshold or t in self._trims
         ]
         small = [
-            (t, n) for t, n in active_types if n <= self._chunk_threshold
+            (t, n) for t, n in active_types
+            if n <= self._chunk_threshold and t not in self._trims
         ]
 
         for node_type, num_nodes in large:
-            logger.info(
-                f"    [{node_type}] {num_nodes:,} nodes (chunked collection)"
+            spec = self._trims.get(node_type)
+            width = self.stored_dim(node_type)
+            stored = (
+                f", {width} of {vector_dim} positions stored" if spec else ""
             )
-            tensor = np.zeros((num_nodes, vector_dim), dtype=np.float32)
+            logger.info(
+                f"    [{node_type}] {num_nodes:,} nodes (chunked collection"
+                f"{stored})"
+            )
+            tensor = np.zeros((num_nodes, width), dtype=np.float32)
             type_combined = (
                 combined
                 .filter(F.col("node_type") == node_type)
                 .select("node_id", "dim", "value")
             )
-            self._collect_and_scatter_chunked(
-                type_combined, tensor, num_nodes, vector_dim
+            check = self._collect_and_scatter_chunked(
+                type_combined, tensor, num_nodes, vector_dim, trim=spec
             )
+            if check is not None:
+                self._trim_checks[node_type] = check
+                _log_trim_check(node_type, check)
             feature_tensors[node_type] = torch.from_numpy(tensor).contiguous()
             feature_names[node_type] = segment_names
             gc.collect()
@@ -1442,7 +1571,8 @@ class FeatureExtractor:
         tensor: np.ndarray,
         num_nodes: int,
         vector_dim: int,
-    ) -> None:
+        trim: Optional[TrimSpec] = None,
+    ) -> Optional[TrimCheck]:
         """
         Collect sparse entries in chunks by node_id range and scatter
         into the pre-allocated dense array incrementally.
@@ -1457,6 +1587,11 @@ class FeatureExtractor:
 
         The entry total is summed from the chunks. Taking it with a ``count()``
         first read every row for a log line -- a whole extra pass.
+
+        With ``trim`` (#443), ``tensor`` has one column per kept position.
+        The executors drop the constant and zero positions before collection
+        and count, in the same pass, the rows holding each constant. Returns
+        the check those counts fill in; None without ``trim``.
         """
         chunk_size = self._chunk_threshold
         num_chunks = (num_nodes + chunk_size - 1) // chunk_size
@@ -1467,6 +1602,8 @@ class FeatureExtractor:
         )
 
         total_entries = 0
+        collected = 0
+        check = TrimCheck(trim) if trim is not None else None
 
         for chunk_idx in range(num_chunks):
             lo = chunk_idx * chunk_size
@@ -1476,9 +1613,30 @@ class FeatureExtractor:
                 (F.col("node_id") >= lo) & (F.col("node_id") < hi)
             )
 
-            pdf = chunk_df.toPandas()
-            total_entries += len(pdf)
-            scatter_sparse_entries(pdf, tensor, "node_id", vector_dim)
+            if trim is None:
+                pdf = chunk_df.toPandas()
+                total_entries += len(pdf)
+                scatter_sparse_entries(pdf, tensor, "node_id", vector_dim)
+            else:
+                counts = Observation()
+                pdf = (
+                    chunk_df
+                    .observe(counts, *_held_counts(trim))
+                    .filter(_trimmed_rows(trim))
+                    .toPandas()
+                )
+                held = counts.get
+                total_entries += held["entries"]
+                collected += len(pdf)
+                zero_broken, copy_broken = scatter_chunk(
+                    trim, pdf, tensor, lo, hi
+                )
+                check.add(
+                    hi - lo,
+                    {p: held[f"held_{p}"] for p in trim.constant},
+                    zero_broken,
+                    copy_broken,
+                )
             del pdf
             gc.collect()
 
@@ -1488,10 +1646,18 @@ class FeatureExtractor:
                     f"(nodes {lo:,}–{hi:,})"
                 )
 
-        logger.info(
-            f"      Collected {total_entries:,} sparse entries "
-            f"for {num_nodes:,} nodes"
-        )
+        if trim is None:
+            logger.info(
+                f"      Collected {total_entries:,} sparse entries "
+                f"for {num_nodes:,} nodes"
+            )
+        else:
+            logger.info(
+                f"      Collected {collected:,} of {total_entries:,} sparse "
+                f"entries for {num_nodes:,} nodes; the other "
+                f"{total_entries - collected:,} stayed on the executors"
+            )
+        return check
 
     # ================================================================
     # Metadata collection helpers
