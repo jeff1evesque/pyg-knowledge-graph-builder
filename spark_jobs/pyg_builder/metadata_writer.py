@@ -131,6 +131,7 @@ class MetadataCollector:
         self._ontology_schema: Optional[Dict[str, Any]] = None
         self._slot_mapping: Optional[Dict[str, Any]] = None
         self._sub_segment_status: Dict[str, Optional[str]] = {}
+        self._trimmed_node_types: Dict[str, Dict[str, Any]] = {}
         self._edge_feature_categories: Dict[str, str] = {}
         self._edge_types_with_features: List[str] = []
         self._edge_types_without_features: List[str] = []
@@ -339,6 +340,20 @@ class MetadataCollector:
                 reported as carrying features.
         """
         self._sub_segment_status = status
+
+    def register_trimmed_node_types(
+        self,
+        trimmed: Dict[str, Dict[str, Any]],
+    ) -> None:
+        """
+        Register the node types whose x stores only some positions (Step 3).
+
+        Args:
+            trimmed: Dict[pyg_name -> the kept positions, what each dropped
+                position holds, and the build's check of them]. Empty when
+                no type is trimmed.
+        """
+        self._trimmed_node_types = dict(trimmed)
 
     def register_edge_feature_classification(
         self,
@@ -861,11 +876,21 @@ class MetadataCollector:
                     edge_type_derivations[rel] = cat
 
         return {
-            "version": "1.0",
+            # 1.1: adds node_features.trimmed_node_types, the node types whose
+            # x stores only some of the total_dim positions, with what each
+            # dropped position holds and the build's check of them (#443).
+            # Always present, {} when no type is trimmed.
+            "version": "1.1",
             "node_features": {
                 "total_dim": self._vector_dim,
                 "structural_dims_shared_within_type": True,
                 "segments": node_segments,
+                # x[:, i] of a type listed here holds position
+                # kept_positions[i]. Every other position holds 0, a constant,
+                # or a copy of a kept one, so the full total_dim rebuild from
+                # x and this entry -- exactly, when its check lists no
+                # violations.
+                "trimmed_node_types": self._trimmed_node_types,
             },
             "edge_features": {
                 "enabled": self._edge_features_enabled,
