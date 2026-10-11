@@ -127,7 +127,7 @@ def _truthy(val) -> bool:
     return str(val).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _submit(mode: str):
+def _submit(mode: str, pyg_config: str = ""):
     """Submit the job once through its own launcher; return (result, work_dir).
 
     ``mode`` selects how far the pipeline runs. ``enrichment_only`` is the fast
@@ -156,6 +156,8 @@ def _submit(mode: str):
         "--time_period", "2099-01",
         "--parquet_partitions", "2",
     ]
+    if pyg_config:
+        cmd += ["--pyg_config", pyg_config]
 
     # start_new_session so the launcher and the spark-submit JVM it spawns share a
     # process group we can kill as a unit. Without this, a timeout kills only the shell
@@ -204,8 +206,15 @@ def full_submission():
     is the quick signal on launcher/submit/IAM wiring and stays worth having on
     its own. This one costs a few minutes more and is the only place PyG
     construction meets a real filesystem.
+
+    Built on the nightly's node layout, so the market options are trimmed
+    (#443) and that path runs on the cluster's executors too.
     """
-    return _submit("full")
+    import json
+
+    return _submit("full", pyg_config=json.dumps(
+        {"feature_config": {"class_identity_dim": 192}}
+    ))
 
 
 @requires_cluster
