@@ -74,8 +74,8 @@ The pipeline is designed to prevent driver OOM even with millions of nodes per t
 
 - Driver holds the `feature_tensors` dict, accumulating, plus `edge_indices`.
 - Per type:
-    1. Pre-allocate a dense numpy array of `num_nodes × vector_dim × 4` bytes.
-    2. Collect sparse entries via `toPandas()` — types under 500K nodes in a single collect at about 120 MB peak, larger ones chunked by `node_id` range at about 120 MB a chunk.
+    1. Pre-allocate a dense numpy array of `num_nodes × vector_dim × 4` bytes, or `num_nodes × 173 × 4` for the trimmed option type.
+    2. Collect sparse entries via `toPandas()` — types under 500K nodes in a single collect at about 120 MB peak, larger ones chunked by `node_id` range at about 120 MB a chunk. The trimmed option type is always chunked, and its executors drop the positions it does not store before collecting, counting in the same pass the rows that held each one's value.
     3. Scatter into the dense array in place, no copy.
     4. Delete the Pandas DataFrame and `gc.collect()`.
     5. Convert numpy to torch, zero-copy via `from_numpy`.
@@ -155,7 +155,7 @@ numpy circular references that CPython's reference counting alone may not free.
 | Enriched Parquet write | Spark executors | `repartition` + `write.parquet` — executors write directly to the shared local dir |
 | PyG .pt write | Driver | `torch.save` through a file handle, hashed as it streams — written by scheme: direct local I/O for a POSIX `--local_work_dir`, staged to a temp file and moved by the Hadoop FileSystem for an `s3a://` one (+ a second serialization that boto3 uploads from disk when archiving). Peak memory is the `HeteroData`, never the serialized copy |
 
-**Universal node feature width**: HeteroData stores node feature tensors of the same `vector_dim` for every node type. The ontology-aware encoding keeps vectors informative even for types with few literal properties — the ontology structure and property schema segments still carry meaningful signal.
+**Universal node feature width, with one exception**: every node type's vector has the same `vector_dim` positions, and HeteroData stores all of them for every type but one. The ontology-aware encoding keeps vectors informative even for types with few literal properties — the ontology structure and property schema segments still carry meaningful signal. The exception is `market_quotes_OptionSnapshot`, most of the graph, whose `x` stores only the 173 of 1024 positions that vary from one option to the next. The other 851 are the same on every option row and are recorded once in `feature_spec.json` instead; see [One type stores only the positions that vary](../design/node-features.md#one-type-stores-only-the-positions-that-vary). The executors drop those 851 before collection, so the driver allocates `[N, 173]` for the type rather than `[N, 1024]`.
 
 **Selective edge feature width**: HeteroData stores edge feature tensors (`edge_attr`) only for edge types that received features. Edge types without features have no `edge_attr` attribute, allowing the GNN to use simpler message-passing layers for those types.
 
@@ -163,7 +163,7 @@ numpy circular references that CPython's reference counting alone may not free.
 |-------------------|--------------|-----------------|----------------|-------------|
 | cpi_Index | ~50K | ~200 MB | ~100 MB | CPI class hierarchy, index/change properties, BLS source |
 | market_EquitySnapshot | ~500K-1M | ~2-4 GB | ~1-2 GB | Equity class, price/volume/52wk properties, market source |
-| market_OptionSnapshot | ~1-2M | ~4-8 GB | ~2-4 GB | Option subclass, strike/expiry/greeks/underlying properties |
+| market_quotes_OptionSnapshot | 10,715,848 on 2026-10-09 | 43.9 GB if stored in full; 7.4 GB as stored, 173 positions | ~21.9 GB | Option subclass, strike/expiry/greeks/underlying properties. Trimmed only at the nightly's 1024-wide layout, so at 512-d it stores every position |
 | jolts_JobOpeningsLevel | ~10K | ~40 MB | ~20 MB | JOLTS hierarchy, level/rate properties, BLS source |
 | filings_Form4 | ~50K | ~200 MB | ~100 MB | SEC filing class, transaction properties, SEC source |
 | unified_UnifiedMonth | ~12 | ~48 KB | ~24 KB | Temporal class, cross-source membership |
