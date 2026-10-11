@@ -2159,3 +2159,30 @@ def test_the_committed_list_runs_through_spark(spark):
     assert check == {
         "rows_checked": 3, "positions_checked": 851, "violations": [],
     }
+
+
+def test_a_trimmed_chunk_is_planned_without_the_gpu_plugin(spark, monkeypatch):
+    """The RAPIDS plugin cannot plan observe(), and fails the query rather than
+    leaving that step on the CPU (#443, seen on 25.02). So the trimmed chunk
+    query runs with spark.rapids.sql.enabled off, and the switch is put back
+    afterwards for every other query."""
+    switch = "spark.rapids.sql.enabled"
+    seen = []
+    original = DataFrame.toPandas
+
+    def spy(self, *args, **kwargs):
+        seen.append(spark.conf.get(switch, None))
+        return original(self, *args, **kwargs)
+
+    spark.conf.set(switch, "true")
+    try:
+        monkeypatch.setattr(DataFrame, "toPandas", spy)
+        _scatter_opt(spark, _CLEAN_OPT_ROWS, {"opt": _opt_spec()})
+        monkeypatch.undo()
+        after = spark.conf.get(switch, None)
+    finally:
+        spark.conf.unset(switch)
+
+    # Two chunks of "opt" with the plugin off, then the "other" batch with it on.
+    assert seen == ["false", "false", "true"]
+    assert after == "true"
