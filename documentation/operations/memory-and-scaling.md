@@ -75,7 +75,7 @@ The pipeline is designed to prevent driver OOM even with millions of nodes per t
 - Driver holds the `feature_tensors` dict, accumulating, plus `edge_indices`.
 - Per type:
     1. Pre-allocate a dense numpy array of `num_nodes × vector_dim × 4` bytes, or `num_nodes × 173 × 4` for the trimmed option type.
-    2. Collect sparse entries via `toPandas()` — types under 500K nodes in a single collect at about 120 MB peak, larger ones chunked by `node_id` range at about 120 MB a chunk. The trimmed option type is always chunked, and its executors drop the positions it does not store before collecting, counting in the same pass the rows that held each one's value.
+    2. Collect sparse entries via `toPandas()` — types under 500K nodes in a single collect at about 120 MB peak, larger ones chunked by `node_id` range at about 120 MB a chunk. The trimmed option type is always chunked, and its executors drop the positions it does not store before collecting, counting in the same pass the rows that held each one's value. Those chunk queries are planned with the RAPIDS plugin off, because the plugin cannot plan the count (Spark's `observe()`) and fails the query instead. They read the `DISK_ONLY` cache, which is held on the CPU side, so this costs them little, and the cache itself is still built on the GPU.
     3. Scatter into the dense array in place, no copy.
     4. Delete the Pandas DataFrame and `gc.collect()`.
     5. Convert numpy to torch, zero-copy via `from_numpy`.
