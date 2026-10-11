@@ -1867,3 +1867,295 @@ def test_the_property_is_still_present_and_still_a_data_predicate(spark):
 
     coverage = fx._property_schema_coverage(triples, {})
     assert coverage["data_predicates"] >= 2
+
+
+# ======================================================================
+# Trimmed node types — x keeps only the listed positions (#443)
+# ======================================================================
+#
+# The committed list is for the nightly's 1024-wide layout. These tests hand
+# the extractor a list of their own for cpi_Index at VDIM, measured from an
+# untrimmed build the way #443's was.
+
+FLAG = "https://example.org/flag"   # a property only some nodes have
+
+
+def _trim_rows():
+    rows = []
+    for i in range(5):
+        node = f"https://ex/i{i}"
+        rows += [
+            (node, RDF_TYPE, CPI_INDEX),
+            (node, METRIC, str(10 * i)),
+            (node, SECTOR, ["Energy", "Finance"][i % 2]),
+        ]
+        if i % 2 == 0:
+            rows.append((node, FLAG, "x"))
+    rows += [
+        ("https://ex/s0", RDF_TYPE, CPI_SERIES),
+        ("https://ex/s0", METRIC, "5"),
+    ]
+    return rows
+
+
+def _trim_build(spark, trims=None, **feature_config):
+    """Build _trim_rows with a two-node chunk, so the trimmed type takes
+    three chunks. Returns the extractor and {pyg_name: np.ndarray}."""
+    config = {
+        "feature_config": {
+            "vector_dim": VDIM, "chunk_node_threshold": 2, **feature_config,
+        }
+    }
+    triples = spark.createDataFrame(
+        _trim_rows(), schema="subject STRING, predicate STRING, object STRING"
+    )
+    node_id_df, counts = NodeMapper(spark, config).build_node_id_table(triples)
+    extractor = FeatureExtractor(spark, config, trims=trims)
+    tensors, _ = extractor.build_features(triples, node_id_df, counts)
+    return extractor, {t: v.numpy() for t, v in tensors.items()}
+
+
+def _spec_from(x, node_type):
+    """The list an untrimmed x implies: varying positions kept, unless equal to
+    a lower one; constant positions with their value; the rest 0."""
+    from spark_jobs.pyg_builder.feature_trim import TrimSpec
+
+    lo, hi = x.min(axis=0), x.max(axis=0)
+    varying = [int(p) for p in np.flatnonzero(lo != hi)]
+    copy_of = {}
+    for i, a in enumerate(varying):
+        if a in copy_of:
+            continue
+        for b in varying[i + 1:]:
+            if b not in copy_of and np.array_equal(x[:, a], x[:, b]):
+                copy_of[b] = a
+    return TrimSpec(
+        node_type,
+        x.shape[1],
+        [p for p in varying if p not in copy_of],
+        {int(p): float(lo[p]) for p in np.flatnonzero((lo == hi) & (lo != 0))},
+        copy_of,
+    )
+
+
+def test_a_trimmed_type_stores_its_kept_positions_in_list_order(spark):
+    _, full = _trim_build(spark)
+    spec = _spec_from(full["cpi_Index"], "cpi_Index")
+    # Not vacuous: the list drops constants and copies as well as zeros.
+    assert spec.constant and spec.copy_of and spec.width < VDIM
+
+    extractor, trimmed = _trim_build(spark, trims={"cpi_Index": spec})
+
+    x = trimmed["cpi_Index"]
+    assert x.shape == (5, spec.width)
+    np.testing.assert_array_equal(x, full["cpi_Index"][:, list(spec.kept)])
+    # Every other type is built as before, full width.
+    assert trimmed["cpi_Series"].shape == (1, VDIM)
+    np.testing.assert_array_equal(trimmed["cpi_Series"], full["cpi_Series"])
+
+    recorded = extractor.get_trimmed_node_types()["cpi_Index"]
+    assert recorded["kept_positions"] == list(spec.kept)
+    assert recorded["check"] == {
+        "rows_checked": 5,
+        "positions_checked": VDIM - spec.width,
+        "violations": [],
+    }
+    assert extractor.stored_dim("cpi_Index") == spec.width
+    assert extractor.stored_dim("cpi_Series") == VDIM
+    # The literal segment is found by position, not by column.
+    start = VectorLayout(VDIM).seg3_start
+    assert extractor.has_literal_values("cpi_Index", x) == bool(
+        full["cpi_Index"][:, start:].any()
+    )
+
+
+def test_switching_trimming_off_gives_todays_tensors(spark):
+    _, full = _trim_build(spark)
+    spec = _spec_from(full["cpi_Index"], "cpi_Index")
+
+    extractor, off = _trim_build(
+        spark, trims={"cpi_Index": spec}, trim_node_features=False
+    )
+
+    assert set(off) == set(full)
+    for node_type in full:
+        np.testing.assert_array_equal(off[node_type], full[node_type])
+    assert extractor.get_trimmed_node_types() == {}
+    assert "trimmed_node_types" not in (
+        extractor.get_encoding_config()["node_features"]
+    )
+
+
+def _opt_frame(spark, rows):
+    return spark.createDataFrame(rows, schema=_SPARSE_SCHEMA).cache()
+
+
+def _opt_spec():
+    from spark_jobs.pyg_builder.feature_trim import TrimSpec
+
+    # Keeps 5 and 6; 1 and 2 hold 1.0 and 2.0; 8 copies 6; the rest are 0.
+    return TrimSpec("opt", VDIM, (5, 6), {1: 1.0, 2: 2.0}, {8: 6})
+
+
+_CLEAN_OPT_ROWS = [
+    ("opt", 0, 1, 1.0), ("opt", 0, 2, 2.0), ("opt", 0, 5, 0.5),
+    ("opt", 0, 6, 1.0), ("opt", 0, 8, 1.0),
+    ("opt", 1, 1, 1.0), ("opt", 1, 2, 2.0), ("opt", 1, 5, 0.7),
+    ("opt", 2, 1, 1.0), ("opt", 2, 2, 2.0), ("opt", 2, 6, 2.0),
+    ("opt", 2, 8, 2.0), ("opt", 2, 51, 0.0),   # a 0.0 where 0 belongs is fine
+    ("opt", 3, 1, 1.0), ("opt", 3, 2, 2.0), ("opt", 3, 5, 0.2),
+    ("other", 0, 4, 1.0),
+]
+
+
+def _scatter_opt(spark, rows, trims, chunk_node_threshold=2):
+    extractor = FeatureExtractor(
+        spark,
+        {"feature_config": {
+            "vector_dim": VDIM, "chunk_node_threshold": chunk_node_threshold,
+        }},
+        trims=trims,
+    )
+    tensors, names = {}, {}
+    extractor._scatter_all_types(
+        _opt_frame(spark, rows), [("opt", 4), ("other", 1)], VDIM,
+        tensors, names, ["seg"],
+    )
+    return extractor, tensors
+
+
+def test_the_check_reports_nothing_when_every_dropped_position_holds(spark):
+    extractor, tensors = _scatter_opt(spark, _CLEAN_OPT_ROWS, {"opt": _opt_spec()})
+
+    np.testing.assert_array_equal(
+        tensors["opt"].numpy(),
+        np.array([[0.5, 1.0], [0.7, 0.0], [0.0, 2.0], [0.2, 0.0]], np.float32),
+    )
+    assert tensors["other"].shape == (1, VDIM)
+    assert extractor.get_trimmed_node_types()["opt"]["check"]["violations"] == []
+
+
+def test_the_check_reports_each_kind_of_broken_position(spark):
+    broken = [
+        row for row in _CLEAN_OPT_ROWS
+        if row[:3] not in {("opt", 3, 1), ("opt", 2, 2)}
+    ] + [
+        ("opt", 2, 2, 3.0),     # a constant with another value
+        ("opt", 1, 8, 4.0),     # a copy that differs from its twin
+        ("opt", 0, 50, 0.25),   # a nonzero where 0 belongs
+    ]
+    # Node 3 now lacks position 1 altogether.
+
+    extractor, tensors = _scatter_opt(spark, broken, {"opt": _opt_spec()})
+
+    assert extractor.get_trimmed_node_types()["opt"]["check"] == {
+        "rows_checked": 4,
+        "positions_checked": VDIM - 2,
+        "violations": [
+            {"position": 1, "expected": 1.0, "rows_affected": 1},
+            {"position": 2, "expected": 2.0, "rows_affected": 1},
+            {"position": 8, "copy_of": 6, "rows_affected": 1},
+            {"position": 50, "expected": 0.0, "rows_affected": 1},
+        ],
+    }
+    # Warned, not failed: x is still built from the kept positions.
+    assert tensors["opt"].shape == (4, 2)
+
+
+def test_dropped_positions_never_reach_the_driver(spark, monkeypatch):
+    """The constants are counted on the executors, not collected.
+
+    That is the point of #443's fifth proposal: on 2026-10-09 the constant
+    positions were 1,018,005,560 of the 1,783,166,635 nonzero option values.
+    """
+    collected = []
+    original = DataFrame.toPandas
+
+    def spy(self, *args, **kwargs):
+        pdf = original(self, *args, **kwargs)
+        if "node_type" not in pdf.columns:   # a chunk, not a batch of small types
+            collected.extend(pdf["dim"].tolist())
+        return pdf
+
+    monkeypatch.setattr(DataFrame, "toPandas", spy)
+    _scatter_opt(spark, _CLEAN_OPT_ROWS, {"opt": _opt_spec()})
+    monkeypatch.undo()
+
+    assert collected, "the chunked path collected nothing; the test is vacuous"
+    assert set(collected) <= {5, 6, 8}, (
+        f"collected dims {sorted(set(collected))}: a constant or zero position "
+        f"reached the driver"
+    )
+
+
+def test_the_check_runs_no_spark_job_of_its_own(spark):
+    """The counts ride on each chunk's collect (observe), so a trimmed type
+    costs the same jobs as an untrimmed one -- no extra pass (#346)."""
+    tracker = spark.sparkContext.statusTracker()
+
+    def jobs(trims, group):
+        frame = _opt_frame(spark, _CLEAN_OPT_ROWS)
+        frame.count()                      # fill the cache outside the count
+        spark.sparkContext.setJobGroup(group, group)
+        try:
+            extractor = FeatureExtractor(
+                spark,
+                {"feature_config": {
+                    "vector_dim": VDIM, "chunk_node_threshold": 2,
+                }},
+                trims=trims,
+            )
+            extractor._scatter_all_types(
+                frame, [("opt", 4)], VDIM, {}, {}, ["seg"]
+            )
+        finally:
+            spark.sparkContext.setLocalProperty("spark.jobGroup.id", None)
+        return len(tracker.getJobIdsForGroup(group))
+
+    # Both take the chunked path: the threshold is below the type's size.
+    untrimmed = jobs({}, "trim-check-untrimmed")
+    trimmed = jobs({"opt": _opt_spec()}, "trim-check-trimmed")
+    assert untrimmed > 0
+    assert trimmed == untrimmed
+
+
+def test_the_committed_list_runs_through_spark(spark):
+    """The nightly's list counts 95 constants in every chunk's collect. A plan
+    with that many counts has to build and run, not only the two-constant one
+    above; the default config picks the list up with no trims= given."""
+    options = "market_quotes_OptionSnapshot"
+    config = {"feature_config": {
+        "vector_dim": 1024, "class_identity_dim": 192, "chunk_node_threshold": 2,
+    }}
+    extractor = FeatureExtractor(spark, config)
+    spec = extractor._trims[options]
+
+    rng = np.random.default_rng(443)
+    full = np.zeros((3, 1024), dtype=np.float32)
+    rows = []
+    for node in range(3):
+        for p in spec.kept:
+            full[node, p] = float(rng.integers(1, 9))
+        for p, v in spec.constant.items():
+            full[node, p] = v
+        for p, twin in spec.copy_of.items():
+            full[node, p] = full[node, twin]
+        rows += [
+            (options, node, int(p), float(full[node, p]))
+            for p in np.flatnonzero(full[node])
+        ]
+
+    tensors = {}
+    extractor._scatter_all_types(
+        spark.createDataFrame(rows, schema=_SPARSE_SCHEMA).cache(),
+        [(options, 3)], 1024, tensors, {}, ["seg"],
+    )
+
+    assert tensors[options].shape == (3, 173)
+    np.testing.assert_array_equal(
+        tensors[options].numpy(), full[:, list(spec.kept)]
+    )
+    check = extractor.get_trimmed_node_types()[options]["check"]
+    assert check == {
+        "rows_checked": 3, "positions_checked": 851, "violations": [],
+    }
