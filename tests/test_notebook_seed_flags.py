@@ -343,3 +343,45 @@ def test_an_unset_day_passes_no_flag():
 def test_the_day_is_the_variable_the_nightly_sets():
     """bin/daily_run.sh writes PYG_PUBLISH_DATA_DAY into the run's env.sh."""
     assert 'SOURCE_DATA_DAY = os.environ.get("PYG_PUBLISH_DATA_DAY", "")' in _cell("cell-02")
+
+
+# --------------------------------------------------------------------------- #
+# Trimmed node features (#443)
+#
+# The leg cell sets the switch on every assembly leg, the way it passes
+# PYG_EXCLUDE_NODE_TYPES, so one day can be built both ways.
+# --------------------------------------------------------------------------- #
+
+def _legs(monkeypatch, value=None):
+    """Run the leg cell against stubs; return the legs it would submit."""
+    os = __import__("os")
+    for name in ("PYG_SEED_ONLY", "PYG_EXCLUDE_NODE_TYPES"):
+        monkeypatch.delenv(name, raising=False)
+    if value is None:
+        monkeypatch.delenv("PYG_TRIM_NODE_FEATURES", raising=False)
+    else:
+        monkeypatch.setenv("PYG_TRIM_NODE_FEATURES", value)
+    ns = {
+        "os": os,
+        "json": json,
+        "show": lambda *a, **k: None,
+        "flag_set": (lambda name: os.environ.get(name, "")
+                     .strip().lower() not in {"", "0", "false", "no"}),
+        "pyg_output_path": lambda name=None: f"/work/{name}",
+    }
+    exec(_cell("cell-10"), ns)
+    assert ns["EXPERIMENTS"], "the cell defined no legs; the test is vacuous"
+    return ns["EXPERIMENTS"]
+
+
+@pytest.mark.parametrize("value", [None, "", "1", "true", "yes"])
+def test_every_leg_trims_unless_told_not_to(monkeypatch, value):
+    """On by default: unset and empty both mean on."""
+    for leg in _legs(monkeypatch, value):
+        assert leg["pyg_config"]["feature_config"]["trim_node_features"] is True
+
+
+@pytest.mark.parametrize("value", ["false", "0", "no", " FALSE "])
+def test_the_switch_turns_trimming_off_on_every_leg(monkeypatch, value):
+    for leg in _legs(monkeypatch, value):
+        assert leg["pyg_config"]["feature_config"]["trim_node_features"] is False
