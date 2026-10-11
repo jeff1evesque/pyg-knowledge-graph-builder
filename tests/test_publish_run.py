@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -111,25 +112,26 @@ def expected_names() -> set:
 class Run:
     """A finished run: its run directory, its work directory, and an empty fake S3."""
 
-    def __init__(self, tmp_path: Path):
+    def __init__(self, tmp_path: Path, run_id: str = RUN_ID):
+        self.run_id = run_id
         self.rd = tmp_path / "run"
-        self.work = tmp_path / "work" / RUN_ID
+        self.work = tmp_path / "work" / run_id
         self.pyg = self.work / "pyg" / f"year={YEAR}" / f"month={MONTH}"
         self.enriched = self.work / "enriched" / f"year={YEAR}" / f"month={MONTH}"
         self.manifests = self.work / "manifests" / f"year={YEAR}" / f"month={MONTH}"
         self.s3 = tmp_path / "s3"
         self.s3.mkdir()
         self.published = (self.s3 / "bucket" / "runs" / "all-sources"
-                          / f"year={YEAR}" / f"month={MONTH}" / RUN_ID)
+                          / f"year={YEAR}" / f"month={MONTH}" / run_id)
         self.published_tables = self.s3 / "bucket" / "tables" / "all-sources"
         self.calls = tmp_path / "aws-calls.txt"
         self.bin = tmp_path / "stubbin"
         _write(self.bin / "aws", STUB_AWS).chmod(0o755)
 
         # The run directory, as the launcher and the recorder leave it.
-        _write(self.rd / "run.log", f"[12:00:00] RUN_ID={RUN_ID}\n")
+        _write(self.rd / "run.log", f"[12:00:00] RUN_ID={run_id}\n")
         _write(self.rd / "run-config.txt",
-               f"run id      : {RUN_ID}\nwork dir    : {self.work}\n")
+               f"run id      : {run_id}\nwork dir    : {self.work}\n")
         _write(self.rd / "run.done", "0\n")
         _write(self.rd / "outcome.txt", "harness  : runner rc=0\nstate    : all 3 submissions ok\n")
         cells = ["=== seed (enrichment_only, 2026-01)"]
@@ -839,3 +841,242 @@ def test_published_writes_nothing(run):
 def test_published_is_not_confirmed_when_the_listing_fails(run):
     assert run.publish("--upload").returncode == 0
     assert run.publish("--published", FAKE_S3_DENY_LIST="runs/").returncode == 1
+
+
+# --------------------------------------------------------------------------- #
+# --archive: the local archive
+# --------------------------------------------------------------------------- #
+
+def _archive_root(tmp_path: Path) -> Path:
+    root = tmp_path / "drive" / "archive"
+    root.mkdir(parents=True)
+    return root
+
+
+def _archived_run(root: Path, run_id: str = RUN_ID) -> Path:
+    return root / "runs" / "all-sources" / f"year={YEAR}" / f"month={MONTH}" / run_id
+
+
+def _archived_tables(root: Path) -> Path:
+    return root / "tables" / "all-sources"
+
+
+def _snapshot(folder: Path) -> dict:
+    """Each file's bytes and mtime, so a test can tell nothing was written again."""
+    return {p.relative_to(folder).as_posix(): (p.read_bytes(), p.stat().st_mtime_ns)
+            for p in folder.rglob("*") if p.is_file()}
+
+
+def _second_run_of_the_day(tmp_path: Path) -> Run:
+    (tmp_path / "rerun").mkdir()
+    return Run(tmp_path / "rerun", run_id="20260101T180000Z")
+
+
+def _archive_an_older_day(root: Path, day: str, run_id: str) -> Path:
+    """A day already in the archive, as an earlier --archive left it."""
+    year, month, _ = day.split("-")
+    folder = root / "runs" / "all-sources" / f"year={year}" / f"month={month}" / run_id
+    _write(folder / "1024d" / "hetero_data_1024d.pt", b"older")
+    _write(_archived_tables(root) / "nodes" / f"day={day}" / "part-00000.zstd.parquet", b"rows")
+    _write(_archived_tables(root) / "_days" / f"{day}.json",
+           json.dumps({"day": day, "run_id": run_id}))
+    return folder
+
+
+def test_an_archive_holds_the_run_and_its_tables_as_real_files_and_sends_nothing(run, tmp_path):
+    """The published layout less the enriched triples and index.json, as files rather
+    than links, with no S3 at all: it needs neither publish root."""
+    tables = run.add_tables()
+    root = _archive_root(tmp_path)
+
+    r = run.publish("--archive", str(root), PYG_PUBLISH_ROOT=None, PYG_TABLES_ROOT=None)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert files(_archived_run(root)) == {name for name in expected_names()
+                                          if not name.startswith("enriched/")
+                                          and name != "index.json"}
+    assert files(_archived_tables(root)) == tables | {f"_days/{DAY}.json"}
+    assert not [p for p in root.rglob("*") if p.is_symlink()]
+    assert ((_archived_run(root) / "1024d" / "hetero_data_1024d.pt").read_bytes()
+            == (run.pyg / "hetero_data_1024d.pt").read_bytes())
+    assert files(run.s3) == set()
+    assert run.calls_text() == ""
+
+
+def test_the_archives_tables_root_reads_like_the_published_one(run, tmp_path):
+    """The same names under <root>/tables/<dataset> as under the tables root, and a day
+    marker with the same fields."""
+    run.add_tables()
+    run.add_splits()
+    root = _archive_root(tmp_path)
+    assert run.publish("--upload").returncode == 0
+    assert run.publish("--archive", str(root)).returncode == 0
+
+    assert files(_archived_tables(root)) == files(run.published_tables)
+    archived = json.loads((_archived_tables(root) / "_days" / f"{DAY}.json").read_text())
+    published = json.loads((run.published_tables / "_days" / f"{DAY}.json").read_text())
+    archived.pop("published")
+    published.pop("published")
+    assert archived == published
+
+
+def test_the_day_marker_is_the_last_file_the_archive_writes(run, tmp_path):
+    run.add_tables()
+    root = _archive_root(tmp_path)
+    assert run.publish("--archive", str(root)).returncode == 0
+
+    marker = _archived_tables(root) / "_days" / f"{DAY}.json"
+    others = [p for p in root.rglob("*") if p.is_file() and p != marker]
+    assert marker.stat().st_mtime_ns >= max(p.stat().st_mtime_ns for p in others)
+
+
+def test_archiving_a_run_again_changes_nothing(run, tmp_path):
+    run.add_tables()
+    root = _archive_root(tmp_path)
+    assert run.publish("--archive", str(root)).returncode == 0
+    before = _snapshot(root)
+
+    r = run.publish("--archive", str(root))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "nothing to copy" in r.stdout
+    assert _snapshot(root) == before
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a file whatever its mode")
+def test_a_copy_stopped_before_its_marker_is_finished_by_running_again(run, tmp_path):
+    """No marker until every file is there and checked. The next run finishes the copy
+    and leaves no temporary file behind."""
+    tables = run.add_tables()
+    root = _archive_root(tmp_path)
+    blocked = run.pyg / "hetero_data_1024d_node_index" / "part-00000.snappy.parquet"
+    blocked.chmod(0)
+    try:
+        r = run.publish("--archive", str(root))
+    finally:
+        blocked.chmod(0o644)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "ARCHIVE FAILED" in r.stdout
+    assert not (_archived_tables(root) / "_days").exists()
+    assert files(_archived_run(root))
+
+    r = run.publish("--archive", str(root))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert files(_archived_tables(root)) == tables | {f"_days/{DAY}.json"}
+    assert "1024d/node_index/part-00000.snappy.parquet" in files(_archived_run(root))
+    assert not list(root.rglob("*.partial"))
+
+
+def test_a_second_run_of_the_day_replaces_that_days_copy(run, tmp_path):
+    """The archive keeps days, not runs. Nothing of the first run's copy stays beside the
+    second's: not its run, and not a table only the first run wrote."""
+    run.add_tables()
+    run.add_splits()
+    root = _archive_root(tmp_path)
+    assert run.publish("--archive", str(root)).returncode == 0
+    rerun = _second_run_of_the_day(tmp_path)
+    tables = rerun.add_tables()
+
+    r = rerun.publish("--archive", str(root))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not _archived_run(root).exists()
+    assert files(_archived_run(root, rerun.run_id))
+    assert files(_archived_tables(root)) == tables | {f"_days/{DAY}.json"}
+    marker = json.loads((_archived_tables(root) / "_days" / f"{DAY}.json").read_text())
+    assert marker["run_id"] == rerun.run_id
+
+
+def test_keep_days_keeps_the_newest_days_and_takes_out_the_rest(run, tmp_path):
+    run.add_tables()
+    root = _archive_root(tmp_path)
+    kept = _archive_an_older_day(root, "2025-12-31", "20260101T050000Z")
+    gone = [_archive_an_older_day(root, "2025-12-30", "20251231T050000Z"),
+            _archive_an_older_day(root, "2025-11-28", "20251129T050000Z")]
+
+    r = run.publish("--archive", str(root), "--keep-days", "2")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert sorted(p.name for p in (_archived_tables(root) / "_days").iterdir()) == [
+        "2025-12-31.json", f"{DAY}.json"]
+    assert kept.is_dir()
+    assert (_archived_tables(root) / "nodes" / "day=2025-12-31").is_dir()
+    for folder in gone:
+        assert not folder.exists()
+    assert not (_archived_tables(root) / "nodes" / "day=2025-12-30").exists()
+    # A month whose last day left goes with it.
+    assert not (root / "runs" / "all-sources" / "year=2025" / "month=11").exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root removes a file whatever its folder's mode")
+def test_an_older_days_marker_is_removed_before_its_files(run, tmp_path):
+    """A trim that stops partway leaves files with no marker, a day plainly unfinished,
+    never a marker naming files that are gone."""
+    root = _archive_root(tmp_path)
+    stuck = _archive_an_older_day(root, "2025-12-30", "20251231T050000Z") / "1024d"
+    stuck.chmod(0o555)
+    try:
+        r = run.publish("--archive", str(root), "--keep-days", "1")
+    finally:
+        stuck.chmod(0o755)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert not (_archived_tables(root) / "_days" / "2025-12-30.json").exists()
+    assert (stuck / "hetero_data_1024d.pt").exists()
+    assert (_archived_tables(root) / "_days" / f"{DAY}.json").exists()
+
+
+def test_an_archive_root_that_is_not_there_is_refused(run, tmp_path):
+    """An unmounted drive leaves no root, and the copy must not land on whatever disk
+    holds the mount point."""
+    root = tmp_path / "drive" / "archive"
+    r = run.publish("--archive", str(root))
+    assert r.returncode == 2
+    assert "is its drive mounted" in r.stdout
+    assert not root.exists()
+
+
+def test_a_run_that_did_not_succeed_is_not_archived(run, tmp_path):
+    root = _archive_root(tmp_path)
+    _write(run.rd / "run.done", "1\n")
+    assert run.publish("--archive", str(root)).returncode == 2
+    assert files(root) == set()
+
+
+def test_a_graph_that_no_longer_matches_checksums_json_is_not_archived(run, tmp_path):
+    root = _archive_root(tmp_path)
+    _write(run.pyg / "hetero_data_1024d.pt", b"not what was hashed")
+    r = run.publish("--archive", str(root))
+    assert r.returncode == 2
+    assert "checksums.json" in r.stdout
+    assert files(root) == set()
+
+
+def test_keep_days_goes_with_archive(run):
+    r = run.publish("--keep-days", "3")
+    assert r.returncode == 2
+    assert "goes with --archive" in r.stderr
+
+
+# --------------------------------------------------------------------------- #
+# --archived: what a prune asks when the schedule keeps an archive
+# --------------------------------------------------------------------------- #
+
+def test_archived_is_true_only_once_the_day_and_its_run_are_in_the_archive(run, tmp_path):
+    root = _archive_root(tmp_path)
+    assert run.publish("--archived", str(root)).returncode == 1
+    assert run.publish("--archive", str(root)).returncode == 0
+
+    r = run.publish("--archived", str(root))
+    assert r.returncode == 0, r.stdout + r.stderr
+    shutil.rmtree(_archived_run(root))
+    assert run.publish("--archived", str(root)).returncode == 1
+
+
+def test_archived_holds_for_a_run_whose_day_a_second_run_replaced(run, tmp_path):
+    root = _archive_root(tmp_path)
+    assert run.publish("--archive", str(root)).returncode == 0
+    assert _second_run_of_the_day(tmp_path).publish("--archive", str(root)).returncode == 0
+    assert run.publish("--archived", str(root)).returncode == 0
+
+
+def test_archived_writes_nothing(run, tmp_path):
+    root = _archive_root(tmp_path)
+    run.publish("--archived", str(root))
+    assert files(root) == set()
+    assert not (run.rd / "publish.log").exists()
