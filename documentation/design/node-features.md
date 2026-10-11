@@ -287,12 +287,52 @@ config = {
     | `cpi_Index` | `[ontology 25%, schema 37.5%, literals 37.5%]` | 1024-d, universal |
     | `ppi_Index` | `[ontology 25%, schema 37.5%, literals 37.5%]` | 1024-d, universal |
 
-    - The same tensor width for every node type.
+    - The same 1024 positions for every node type. One type stores only the
+      positions that vary; see below.
     - Ontology bits are shared wherever two types share ancestry.
     - The GNN can use shared layers across all types.
     - Cross-type message passing works naturally.
     - Property presence distinguishes missing from not applicable.
     - `vector_dim` is an override, trading memory against fidelity.
+
+### One type stores only the positions that vary
+
+`market_quotes_OptionSnapshot` is most of the graph: 10,715,848 of the 10.9M nodes
+on 2026-10-09. On every option row, 851 of the 1024 positions hold the same thing:
+
+| What the 851 hold | Positions |
+|---|---|
+| 0 | 749 |
+| one fixed value, the same on every row | 95: the four `class_identity` slots, one `ontology_source` slot, and `property_presence`, `domain_range` and `property_hierarchy` positions for properties every option has |
+| a copy of another position | 7, where one property's flag lands in several hashed slots |
+
+So an option's `x` stores the other 173, in layout order: 29 numeric positions, all
+127 categorical positions, and 17 `property_presence` and `domain_range` positions
+for properties only some options have. That is 7.4 GB instead of 43.9 GB. Every
+other node type stores all 1024.
+
+Nothing is lost. [`feature_spec.json`](../reference/outputs.md#feature_specjson)
+records the kept positions and what each dropped one holds, and the full 1024
+rebuild exactly from the two. A model that shares one input layer across types
+does not even need to rebuild them. For a layer `W` over the full vector:
+
+```text
+W x = W[:, kept] x_kept + W[:, fixed] c
+```
+
+`fixed` is the zero and constant positions and `c` their values. Those are the same
+on every row, so the second term is one fixed vector: a bias for the option type.
+A copy always holds its twin's value, so before this each copy's column of `W` is
+added into its twin's column.
+
+The list of kept positions is fixed in `spark_jobs/pyg_builder/feature_trim.py`,
+not worked out by each build. A trained model's input layer is sized to it, so
+changing it is a deliberate change, and it changes `contract_digest`. It was
+measured on the nightly's layout, 1024 positions with `class_identity_dim` 192, and
+a build on any other layout keeps all 1024. Each build checks that the dropped
+positions still hold their values and records any that do not. See
+[Running a Job](../operations/running-a-job.md#option-rows-store-only-the-positions-that-vary)
+for the switch that turns this off.
 
 ## All Node Encoding Runs on Spark Executors
 

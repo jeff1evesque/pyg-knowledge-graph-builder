@@ -295,3 +295,108 @@ def test_the_day_reaches_the_graph_schema(spark):
     )
 
     assert metadata._build_graph_schema()["build_metadata"]["day"] == "2026-09-24"
+
+
+# ======================================================================
+# A trimmed node type keeps only its listed positions (#443)
+# ======================================================================
+#
+# The committed list is for market_quotes_OptionSnapshot. These swap in a list
+# for cpi_Index, on the nightly's layout (1024 wide, class_identity 192), which
+# is the only one a list applies to.
+
+NIGHTLY = {
+    "feature_config": {"class_identity_dim": 192},
+    **NO_EDGE_FEATURES,
+}
+
+TRIM_ROWS = [
+    ("https://ex/n0", RDF_TYPE, CPI_INDEX),
+    ("https://ex/n1", RDF_TYPE, CPI_INDEX),
+    ("https://ex/n2", RDF_TYPE, CPI_INDEX),
+    ("https://ex/n0", METRIC, "10"),
+    ("https://ex/n1", METRIC, "20"),
+    ("https://ex/n2", METRIC, "30"),
+    ("https://ex/o1", RDF_TYPE, CPI_SERIES),
+]
+
+
+def _list_for(x):
+    """cpi_Index's list, read off its untrimmed x: varying positions kept,
+    constants with their value, the rest 0. No two columns here are equal."""
+    lo, hi = x.min(axis=0), x.max(axis=0)
+    return {
+        "kept": tuple(int(p) for p in np.flatnonzero(lo != hi)),
+        "constant": {
+            int(p): float(lo[p]) for p in np.flatnonzero((lo == hi) & (lo != 0))
+        },
+        "copy_of": {},
+    }
+
+
+def _with_list(monkeypatch, spark):
+    """Build untrimmed, then put cpi_Index's list where the build reads it."""
+    from spark_jobs.pyg_builder import feature_trim
+
+    untrimmed = _build(spark, TRIM_ROWS, config={
+        **NIGHTLY,
+        "feature_config": {"class_identity_dim": 192,
+                           "trim_node_features": False},
+    })
+    listed = _list_for(untrimmed["cpi_Index"].x.numpy())
+    monkeypatch.setattr(
+        feature_trim, "TRIMMED_NODE_TYPES", {"cpi_Index": listed}
+    )
+    return untrimmed, listed
+
+
+def test_a_trimmed_type_gets_its_own_width_in_the_graph(spark, monkeypatch):
+    untrimmed, listed = _with_list(monkeypatch, spark)
+    triples = spark.createDataFrame(
+        TRIM_ROWS, schema="subject STRING, predicate STRING, object STRING"
+    )
+    data, metadata, _ = build_hetero_data(spark, triples, config=NIGHTLY)
+
+    kept = list(listed["kept"])
+    assert data["cpi_Index"].x.shape == (3, len(kept))
+    assert torch.equal(data["cpi_Index"].x, untrimmed["cpi_Index"].x[:, kept])
+    assert data["cpi_Series"].x.shape == (1, VECTOR_DIM)
+
+    files = metadata.to_metadata_files()
+    entry = files["feature_spec.json"]["node_features"]["trimmed_node_types"][
+        "cpi_Index"
+    ]
+    assert entry["kept_positions"] == kept
+    assert entry["check"]["violations"] == []
+    # has_features read off the trimmed x by position, as it was untrimmed.
+    assert files["graph_schema.json"]["node_types"]["cpi_Index"][
+        "has_features"
+    ] is True
+    assert "cpi_Index" in files["encoding_config.json"]["node_features"][
+        "trimmed_node_types"
+    ]
+
+
+def test_a_trimmed_type_with_no_entries_gets_a_zero_x_of_its_width(
+    spark, monkeypatch
+):
+    """Step 5 fills any type the extractor returned no x for. A trimmed type
+    gets its own width there, not vector_dim."""
+    from spark_jobs.pyg_builder.feature_extractor import FeatureExtractor
+
+    _untrimmed, listed = _with_list(monkeypatch, spark)
+    original = FeatureExtractor.build_features
+
+    def without_cpi_index(self, *args, **kwargs):
+        tensors, names = original(self, *args, **kwargs)
+        tensors.pop("cpi_Index")
+        return tensors, names
+
+    monkeypatch.setattr(FeatureExtractor, "build_features", without_cpi_index)
+    data = _build(spark, TRIM_ROWS, config=NIGHTLY)
+
+    x = data["cpi_Index"].x
+    assert x.shape == (3, len(listed["kept"]))
+    assert x.dtype == torch.float32
+    assert not bool(x.any())
+    assert data["cpi_Series"].x.shape == (1, VECTOR_DIM)

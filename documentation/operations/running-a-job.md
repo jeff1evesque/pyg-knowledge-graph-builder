@@ -36,6 +36,7 @@ The PyG builder accepts an optional configuration dict:
 | `feature_config.normalize` | `true` | Z-score normalize numeric features (single-pass per-predicate) |
 | `feature_config.vector_dim` | `1024` | Node feature vector dimension — all segments scale proportionally. Minimum 32. |
 | `feature_config.chunk_node_threshold` | `500000` | Node count above which chunked collection is used |
+| `feature_config.trim_node_features` | `true` | Store only the positions that vary for the node types listed in `spark_jobs/pyg_builder/feature_trim.py`: today `market_quotes_OptionSnapshot`, 173 of 1024. Applies only on the layout the list was measured on, 1024 wide with `class_identity_dim` 192. `false` builds every type at full width — see [Option rows store only the positions that vary](#option-rows-store-only-the-positions-that-vary) |
 | `--class_mappings` (CLI) | built-in table | JSON object (or path to a JSON file) of `{source_class_uri: target_class_uri}` merged over `ontology_mapper.CLASS_MAPPINGS`. A `null` target drops a built-in entry. Lets a new source declare its class semantics without editing the module. Where two or more sources share a target the relationship is published as `rdfs:subClassOf`, not `owl:equivalentClass`. |
 | `feature_config.numeric_predicate_min_share` | `0.5` | Share of a property's literal values that must parse as numbers for the property to be treated as numeric. At or below it, every value is a category label. Lower it to admit sparsely numeric properties; raise it toward `1.0` to demand near-uniformly numeric ones. |
 | `edge_feature_config.enabled` | `true` | Enable/disable edge feature extraction entirely |
@@ -347,6 +348,34 @@ period length. The XBRL facts put every number on one predicate, and reach a
 `.pt` only on the day the company files. Everything else from the filings feed
 stays in the `.pt`: filings, issuers, 8-K items, insider transactions and
 acceptance times. The query tables keep the XBRL facts too.
+
+### Option rows store only the positions that vary
+
+`market_quotes_OptionSnapshot`'s `x` stores 173 of its 1024 positions; the other 851
+hold the same thing on every option row and are recorded once in
+[`feature_spec.json`](../reference/outputs.md#trimmed-node-types). This is on by
+default. `feature_config.trim_node_features` turns it off, and
+`notebook/multi_experiment.ipynb` puts that switch on every assembly leg from the
+run's `env.sh`:
+
+```bash
+export PYG_TRIM_NODE_FEATURES=false
+```
+
+Unset means on, and so does any value but `false`, `0` or `no`. Off builds every
+node type at all 1024 positions, as before, which is how one day is built both
+ways to compare them. The two builds have different `contract_digest`s, so a model
+made for one layout cannot load the other without noticing.
+
+The list applies only to the layout it was measured on, 1024 wide with
+`class_identity_dim` 192, which is what every leg of the notebook builds. A build on
+another layout keeps every position and logs a warning saying so. The file keeps
+its name, `hetero_data_1024d.pt`, because the layout is still 1024 positions.
+
+Each build checks that the dropped positions held their values and logs the
+result beside the option type's chunked collection. A position that did not hold
+its value is a warning, not a failure, and is recorded in `feature_spec.json`; see
+[the check](../reference/outputs.md#trimmed-node-types).
 
 ### Naming the dataset
 

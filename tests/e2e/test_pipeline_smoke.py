@@ -82,6 +82,46 @@ def _load_hetero(pt_path):
     return torch.load(pt_path, weights_only=False)
 
 
+# The nightly's node layout, the only one the trimmed list applies to (#443).
+NIGHTLY_FEATURES = {"feature_config": {"class_identity_dim": 192}}
+
+
+def _rebuild(x, entry, total_dim):
+    """A trimmed x at full width, from x and its feature_spec.json entry.
+
+    The recipe documentation/reference/outputs.md gives a consumer.
+    """
+    import torch
+
+    full = torch.zeros(x.shape[0], total_dim, dtype=x.dtype)
+    full[:, entry["kept_positions"]] = x
+    for position, value in entry["constant_positions"]:
+        full[:, position] = value
+    for position, twin in entry["copied_positions"]:
+        full[:, position] = full[:, twin]
+    return full
+
+
+def _rebuild_trimmed_types(data, config):
+    """Give each trimmed type its full width back, in place (#443).
+
+    Every check after this one is written against the full layout. A consumer
+    rebuilds a trimmed x this same way, so passing them on the rebuilt x is the
+    property that matters: x and feature_spec.json together are the graph.
+    """
+    spec = json.loads(
+        (Path(derive_metadata_prefix(config.pyg_output_path))
+         / "feature_spec.json").read_bytes()
+    )["node_features"]
+    for nt, entry in spec["trimmed_node_types"].items():
+        x = data[nt].x
+        assert x.shape[1] == entry["stored_dim"] == len(entry["kept_positions"]), (
+            f"{nt}.x is {x.shape[1]} wide; feature_spec.json says it stores "
+            f"{entry['stored_dim']} positions"
+        )
+        data[nt].x = _rebuild(x, entry, spec["total_dim"])
+
+
 def _assert_valid_graph_and_metadata(config, work_dir):
     import os
 
@@ -101,6 +141,9 @@ def _assert_valid_graph_and_metadata(config, work_dir):
     total_edges = sum(data[et].edge_index.shape[1] for et in data.edge_types)
     assert total_nodes > 0, "graph has no nodes"
     assert total_edges > 0, "graph has no edges"
+
+    # --- a trimmed type is the width feature_spec.json says, and rebuilds ---
+    _rebuild_trimmed_types(data, config)
 
     # --- every edge index actually addresses a node that exists ---
     _assert_indices_are_in_range(data)
@@ -394,7 +437,11 @@ def test_split_enrichment_then_pyg(spark, tmp_path):
     )
 
     # Same work dir + time_period -> pyg_only reads the enriched parquet above.
-    pyg = _make_config(local_work_dir=work, mode="pyg_only")
+    # The nightly's layout, so the market options are trimmed (#443).
+    pyg = _make_config(
+        local_work_dir=work, mode="pyg_only",
+        pyg_config=json.dumps(NIGHTLY_FEATURES),
+    )
     execute_pyg_only(pyg, spark, s3_client=None)
     _assert_valid_graph_and_metadata(pyg, tmp_path)
 
@@ -405,6 +452,84 @@ def test_split_enrichment_then_pyg(spark, tmp_path):
          / "graph_schema.json").read_text()
     )
     assert schema["build_metadata"]["day"] == "2099-01-02"
+
+    # Last, because it writes a second set of metadata into the work dir, and
+    # the validator above reads whichever copy it finds.
+    _assert_trimming_loses_only_what_it_reports(spark, work, pyg)
+
+
+def _assert_trimming_loses_only_what_it_reports(spark, work, trimmed_config):
+    """#443's acceptance check, on the fixtures: the same day built both ways.
+
+    Every other type's x is identical. The trimmed type rebuilds to the
+    untrimmed x exactly, except on the rows its check reports, position by
+    position. The fixture options need not hold the nightly's constants, so
+    that report may be non-empty here; what matters is that it is exact.
+    """
+    import torch
+
+    from spark_jobs.build_graph import execute_pyg_only
+
+    untrimmed_config = _make_config(
+        local_work_dir=work, mode="pyg_only",
+        pyg_filename="hetero_data_untrimmed.pt",
+        pyg_config=json.dumps({"feature_config": {
+            **NIGHTLY_FEATURES["feature_config"], "trim_node_features": False,
+        }}),
+    )
+    execute_pyg_only(untrimmed_config, spark, s3_client=None)
+
+    trimmed = _load_hetero(trimmed_config.pyg_output_path)
+    untrimmed = _load_hetero(untrimmed_config.pyg_output_path)
+
+    def node_spec(config):
+        return json.loads(
+            (Path(derive_metadata_prefix(config.pyg_output_path))
+             / "feature_spec.json").read_bytes()
+        )["node_features"]
+
+    spec = node_spec(trimmed_config)
+    entries = spec["trimmed_node_types"]
+    assert "market_quotes_OptionSnapshot" in entries, (
+        "the fixtures carry option rows, so the nightly's layout must trim them"
+    )
+    assert node_spec(untrimmed_config)["trimmed_node_types"] == {}
+    assert set(trimmed.node_types) == set(untrimmed.node_types)
+
+    for nt in untrimmed.node_types:
+        if nt in entries:
+            continue
+        assert torch.equal(trimmed[nt].x, untrimmed[nt].x), (
+            f"{nt} is not trimmed, yet its x changed"
+        )
+
+    for nt, entry in entries.items():
+        x = trimmed[nt].x
+        assert x.shape == (untrimmed[nt].num_nodes, entry["stored_dim"])
+        assert torch.equal(x, untrimmed[nt].x[:, entry["kept_positions"]])
+
+        differs = (
+            _rebuild(x, entry, spec["total_dim"]) != untrimmed[nt].x
+        ).sum(dim=0)
+        found = {p: int(n) for p, n in enumerate(differs.tolist()) if n}
+        reported = {
+            v["position"]: v["rows_affected"]
+            for v in entry["check"]["violations"]
+        }
+        assert found == reported, (
+            f"{nt}: the rebuilt x differs from the untrimmed one at "
+            f"{found}, but the check reported {reported}"
+        )
+
+    def digest(config):
+        return json.loads(
+            (Path(derive_metadata_prefix(config.pyg_output_path))
+             / "encoding_config.json").read_bytes()
+        )["checksum"]["contract_digest"]
+
+    assert digest(trimmed_config) != digest(untrimmed_config), (
+        "a model sized to the trimmed layout must not load an untrimmed graph"
+    )
 
 
 # --------------------------------------------------------------------------- #
