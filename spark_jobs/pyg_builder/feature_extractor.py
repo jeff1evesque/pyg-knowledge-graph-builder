@@ -48,6 +48,7 @@ Why this replaces the old per-type variable-width approach:
 """
 import logging
 import gc
+from contextlib import contextmanager
 from typing import Dict, Any, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
@@ -441,6 +442,33 @@ def _held_counts(spec: TrimSpec) -> List:
         ).alias(f"held_{p}")
         for p, v in spec.constant.items()
     ]
+
+
+# The RAPIDS plugin's switch, read each time a query is planned.
+_GPU_SQL = "spark.rapids.sql.enabled"
+
+
+@contextmanager
+def _planned_on_the_cpu(spark: SparkSession):
+    """Plan the queries inside the block without the RAPIDS plugin.
+
+    The plugin (25.02) cannot plan observe(): it fails the query with "Found an
+    aggregation function in an unexpected context" instead of leaving that step
+    on the CPU. A trimmed type's chunk query observes, so it is planned with
+    the plugin off. It reads the DISK_ONLY cache, held on the CPU side, and
+    sends rows to the driver, so the GPU did little for it. The cache's own
+    plan was fixed when it was persisted and stays on the GPU, even when this
+    query is the first to fill it (measured on 25.02).
+    """
+    before = spark.conf.get(_GPU_SQL, None)
+    spark.conf.set(_GPU_SQL, "false")
+    try:
+        yield
+    finally:
+        if before is None:
+            spark.conf.unset(_GPU_SQL)
+        else:
+            spark.conf.set(_GPU_SQL, before)
 
 
 def _log_trim_check(node_type: str, check: TrimCheck) -> None:
@@ -1619,12 +1647,13 @@ class FeatureExtractor:
                 scatter_sparse_entries(pdf, tensor, "node_id", vector_dim)
             else:
                 counts = Observation()
-                pdf = (
-                    chunk_df
-                    .observe(counts, *_held_counts(trim))
-                    .filter(_trimmed_rows(trim))
-                    .toPandas()
-                )
+                with _planned_on_the_cpu(chunk_df.sparkSession):
+                    pdf = (
+                        chunk_df
+                        .observe(counts, *_held_counts(trim))
+                        .filter(_trimmed_rows(trim))
+                        .toPandas()
+                    )
                 held = counts.get
                 total_entries += held["entries"]
                 collected += len(pdf)
