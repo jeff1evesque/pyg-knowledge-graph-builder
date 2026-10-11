@@ -12,14 +12,15 @@ pyg-knowledge-graph-builder/
 │   │   └── pyg-daily.timer.example         # the timer that starts it
 │   ├── census_sec_terms.py                 # per-form census of the SEC filings vocabulary
 │   ├── check_vocabulary_drift.py           # terms we key on that upstream no longer emits
-│   ├── daily_run.sh                        # one scheduled day: check, run, publish, prune
+│   ├── daily_run.sh                        # one scheduled day: check, run, publish, archive, prune
 │   ├── generate_bls_e2e_fixtures.py        # rebuild the BLS e2e fixtures from the archive
 │   ├── generate_market_e2e_fixtures.py     # rebuild the market e2e fixtures from snapshots
 │   ├── generate_report.sh                  # run every suite -> reports/tests/report.{html,json}
 │   ├── generate_sec_e2e_fixtures.py        # rebuild the SEC e2e fixtures from the archive
 │   ├── generate_test_report.py             # the report renderer (reads pytest JUnit XML)
 │   ├── package_venv.sh                     # package the venv so executors can run our Python
-│   ├── publish_run.py                      # copy a finished run to the published prefix
+│   ├── publish_run.py                      # copy a finished run to the published prefix,
+│   │                                       # or into the local archive
 │   ├── record_run_outcome.sh               # summarise a finished (or abandoned) run
 │   ├── run_cluster_notebook.sh             # drive one cluster run; --data-date names the day
 │   ├── run_e2e_tests.sh                    # the e2e smoke suite, local SparkSession (CPU/GPU)
@@ -161,6 +162,48 @@ pyg-knowledge-graph-builder/
 ├── requirements-docs.txt                   # MkDocs Material, pinned
 └── requirements.txt
 ```
+
+## The local archive
+
+`bin/publish_run.py <run-dir> --archive <root>` copies a finished run onto a local
+drive, for a reader that needs more days than the work disk keeps and cannot read the
+published copies back. `bin/daily_run.sh` does it after every night's publish when
+`PYG_SCHEDULE_ARCHIVE_ROOT` is set (see
+[Scheduled runs](../operations/running-a-job.md#scheduled-runs)). The layout is the
+published one ([Outputs](outputs.md)) less the enriched triples and `index.json`, in
+real files rather than links:
+
+```
+<root>/
+├── runs/<dataset>/year=YYYY/month=MM/<RUN_ID>/
+│   ├── <variant>/                          # hetero_data_<variant>.pt, the metadata
+│   │   │                                   # JSON and checksums.json, as published
+│   │   └── node_index/
+│   └── manifests/
+└── tables/<dataset>/
+    ├── <table>/day=YYYY-MM-DD/             # the day's query tables
+    └── _days/<day>.json                    # the day's marker, written last
+```
+
+- **Days, not runs.** The archive holds one copy of each data day, and the day's marker
+  names the run its graphs came from. Archiving a second run of a day replaces the first
+  one's copy, starting with its marker.
+- **`<root>/tables/<dataset>` reads as a tables root, with no S3.** The names and the
+  marker are the published tables' own ([Query tables](tables.md)). Read only the days
+  whose marker exists.
+- **Checked as it goes in.** The checks a publish runs come first. After the copy, every
+  `.pt` and metadata file is read back from the drive and compared with
+  `checksums.json`, and every other file is checked by size. Only then is the marker
+  written, so a copy that stops partway has none, and running it again finishes it.
+  Running it again on a finished day changes nothing.
+- **The newest days only.** `--keep-days N` (the schedule passes
+  `PYG_SCHEDULE_ARCHIVE_DAYS`, `100` unless set) removes every older day: its marker
+  first, then its tables, then its run.
+- **About 14 GB a day since option rows were trimmed
+  ([#443](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/issues/443)).**
+  Measured on 2026-10-09: the `.pt` is 12.15 GB, its node index and metadata 0.15 GB, and
+  the tables 1.23 GB in 674 files. On an exFAT drive with 2 MB clusters every small file
+  is rounded up, and the tables take 2.1 GB, so 100 days take about 1.44 TB.
 
 ## Module Roles
 
