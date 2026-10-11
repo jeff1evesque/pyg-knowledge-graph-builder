@@ -182,6 +182,15 @@ export PYG_TIME_PERIOD=YYYY-MM
 # export PYG_PUBLISH_ROOT=s3://BUCKET/PREFIX
 # export PYG_TABLES_ROOT=s3://BUCKET/PREFIX
 #
+# A local archive of each day's graphs and tables as real files, for days the work disk
+# no longer keeps (bin/publish_run.py --archive). A folder on a mounted drive; when it
+# is not there, the night fails after its publish and prunes nothing. With it set, an
+# older run is pruned only once its day is in the archive too. Unset, nothing changes.
+# The archive keeps the newest PYG_SCHEDULE_ARCHIVE_DAYS data days (default 100), which
+# must be more than PYG_SCHEDULE_RETAIN_RUNS.
+# export PYG_SCHEDULE_ARCHIVE_ROOT=/mnt/DRIVE/FOLDER
+# export PYG_SCHEDULE_ARCHIVE_DAYS=100
+#
 # PYG_PUBLISH_DATASET is read at run time as well: the notebook passes it as
 # --dataset, so the enriched descriptor and every graph_schema.json record the name
 # index.json publishes. Set it before the run, not just before the publish.
