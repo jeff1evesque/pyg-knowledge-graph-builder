@@ -23,7 +23,9 @@ Node feature vectors:
                              property hierarchy)
 - Segment 3 (dims 640–1023): Literal values (numeric hashed slots,
                               categorical multi-hot)
-- Same width across all node types enables shared GNN layers
+- Same width across all node types enables shared GNN layers. One type,
+  market_quotes_OptionSnapshot, stores only the positions that vary
+  (feature_trim.py), and feature_spec.json says what the rest hold
 
 Edge feature vectors (selective, default 32-d):
 - Only high-value edge types receive features (temporal, option-stock,
@@ -212,9 +214,14 @@ def build_hetero_data(
         logger.warning("No nodes found — returning empty HeteroData")
         return HeteroData(), metadata, _node_index(node_id_df)
 
+    # Made here rather than at Step 3 because its widths size the estimate
+    # below: a trimmed type's x is narrower than vector_dim (#443).
+    feature_extractor = FeatureExtractor(spark, config)
+
     # Log estimated driver memory for feature tensors
     total_feature_bytes = sum(
-        n * vector_dim * 4 for n in node_counts.values()
+        n * feature_extractor.stored_dim(t) * 4
+        for t, n in node_counts.items()
     )
     total_feature_mb = total_feature_bytes / (1024 * 1024)
     logger.info(
@@ -266,7 +273,6 @@ def build_hetero_data(
     # ============================================
     logger.info("Step 3/5: Building ontology-aware node feature tensors...")
 
-    feature_extractor = FeatureExtractor(spark, config)
     feature_tensors, feature_names = feature_extractor.build_features(
         triples_df, node_id_df, node_counts
     )
@@ -295,12 +301,12 @@ def build_hetero_data(
     # (constructor falls back to zeros below), and ontology_structure is
     # populated for every typed node, so neither distinguishes anything; literal
     # values are what taxonomy types (EconomicSector, TimePeriod, ...) genuinely
-    # lack.
-    seg3_start = feature_extractor.get_layout().seg3_start
+    # lack. A trimmed type's columns are not positions, so the extractor finds
+    # that segment for it.
     metadata.register_node_literal_features(
         ntype
         for ntype, tensor in feature_tensors.items()
-        if bool(tensor[:, seg3_start:].any())
+        if feature_extractor.has_literal_values(ntype, tensor)
     )
 
     artifacts = feature_extractor.get_metadata_artifacts()
@@ -316,6 +322,9 @@ def build_hetero_data(
     if artifacts["slot_mapping"] is not None:
         metadata.register_slot_mapping(artifacts["slot_mapping"])
     metadata.register_sub_segment_status(artifacts["sub_segment_status"])
+    metadata.register_trimmed_node_types(
+        feature_extractor.get_trimmed_node_types()
+    )
 
     # Build combined encoding config from node + edge extractors
     encoding_config = feature_extractor.get_encoding_config()
@@ -421,7 +430,9 @@ def build_hetero_data(
             data[node_type].x = feature_tensors[node_type]
         else:
             data[node_type].x = torch.zeros(
-                num_nodes, vector_dim, dtype=torch.float32
+                num_nodes,
+                feature_extractor.stored_dim(node_type),
+                dtype=torch.float32,
             )
         data[node_type].num_nodes = num_nodes
 
@@ -444,10 +455,24 @@ def build_hetero_data(
     logger.info("HeteroData assembly complete")
     logger.info(f"  Node types: {data.node_types}")
     logger.info(f"  Edge types: {data.edge_types}")
-    logger.info(
-        f"  Universal node feature dim: {vector_dim} "
-        f"(all node types share same width)"
-    )
+    trimmed = {
+        ntype: feature_extractor.stored_dim(ntype)
+        for ntype in data.node_types
+        if feature_extractor.stored_dim(ntype) != vector_dim
+    }
+    if trimmed:
+        stored = ", ".join(
+            f"{t} stores {w}" for t, w in sorted(trimmed.items())
+        )
+        logger.info(
+            f"  Node feature layout: {vector_dim} positions, stored in full "
+            f"by every node type except: {stored}"
+        )
+    else:
+        logger.info(
+            f"  Universal node feature dim: {vector_dim} "
+            f"(all node types share same width)"
+        )
 
     # Log which edge types have features
     edge_types_with_features = [
