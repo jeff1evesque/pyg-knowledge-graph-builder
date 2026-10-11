@@ -675,8 +675,9 @@ directory of its own; none of it is in the code.
 A day, in order: refuse a checkout with uncommitted changes, check that every source for
 the day is there, wait for an idle cluster, stage the sources, bring free memory up on
 every node, run `bin/run_cluster_notebook.sh --data-date`, publish with
-`bin/publish_run.py`, and only after that publish went through, prune. The launcher and
-the publish step are the ones in [Testing](testing.md#driving-a-real-cluster-run).
+`bin/publish_run.py`, copy the day into the local archive when one is set, and only
+after that publish (and that archive) went through, prune. The launcher and the publish
+step are the ones in [Testing](testing.md#driving-a-real-cluster-run).
 
 ### Setting one up
 
@@ -709,6 +710,17 @@ written so that one file serves every day:
 - **The schedule block.** `PYG_SCHEDULE_ONCALENDAR`, `PYG_SCHEDULE_UNIT`,
   `PYG_SCHEDULE_DATA_LAG_DAYS` and `PYG_SCHEDULE_RETAIN_RUNS`, and `PYG_PUBLISH_ROOT` with
   its companions: a schedule publishes, and its prune depends on that.
+- **An archive, for more days than the work disk keeps.** The work disk holds only the
+  newest `PYG_SCHEDULE_RETAIN_RUNS` runs, and the published copies can't be read back
+  with the cluster's identity and expire after 21 days. Set `PYG_SCHEDULE_ARCHIVE_ROOT` to
+  a folder on a local drive, and after its publish each day is also copied there as real
+  files, by `bin/publish_run.py --archive`: the graphs with their node index and
+  metadata, and the day's query tables, but not the enriched triples (see
+  [The local archive](../reference/layout.md#the-local-archive)). The archive keeps the
+  newest `PYG_SCHEDULE_ARCHIVE_DAYS` data days, `100` unless set, and that number must be
+  more than `PYG_SCHEDULE_RETAIN_RUNS`. A missing or unmounted drive fails the night
+  after its publish: the run stays and nothing is pruned. Unset, nothing changes; unset
+  later, nothing more is copied or trimmed, and the drive keeps what it already holds.
 - **A checkout of its own.** Each day builds from the checkout `PYG_REPO_ROOT` names, and
   the assembly leg packages it more than an hour into the run. Give the schedule a
   detached worktree that nothing else checks out, and move it forward on purpose. The
@@ -748,14 +760,19 @@ runs it, with `bin/daily_run.sh --data-date YYYY-MM-DD <schedule-dir>`.
 - **Logs.** `<schedule-dir>/daily.log` has a line per step, and each day's run directory,
   `runs/<RUN_ID>/`, holds its copy of `env.sh` and everything the launcher and the
   publish step leave. Under the timer, `journalctl --user -u pyg-daily` has the same lines.
-- **Exit codes.** `0` published; `1` the staging, the run or the publish failed, and the
-  run stays; `2` refused before the run started; `3` skipped, because a source is not
-  there — upstream is late, or the market was shut. The unit counts `3` as success, so a
+- **Exit codes.** `0` published (and archived); `1` the staging, the run, the publish or
+  the archive failed, and the run stays; `2` refused before the run started; `3` skipped,
+  because a source is not there — upstream is late, or the market was shut. The unit counts `3` as success, so a
   late upstream write does not read as a failed unit.
 - **Only what the schedule made is removed.** The newest `PYG_SCHEDULE_RETAIN_RUNS` runs
   are kept whole. An older run loses its work directory and its run directory together,
   once `bin/publish_run.py --published` finds it listed at the destination; a run that is
-  not listed stays. The staged mirror is shared with runs started by hand, so the
+  not listed stays. With an archive set, its day must be in the archive too
+  (`bin/publish_run.py --archived`); a run whose day is not, such as one from a night the
+  drive was missing, stays until it is archived by hand with
+  `bin/publish_run.py <run-dir> --archive <root>`. The archive itself drops its days past
+  the newest `PYG_SCHEDULE_ARCHIVE_DAYS`, each day's marker first, then its tables and its
+  run. The staged mirror is shared with runs started by hand, so the
   schedule keeps its own list of the copies its staging downloaded,
   `<schedule-dir>/mirror-downloads.tsv`, and removes only those, once no day it runs reads
   them. Runs started by hand, their work directories and whatever they staged are never
