@@ -18,11 +18,13 @@ import hashlib
 import json
 from datetime import datetime
 
+import numpy as np
 import pytest
 
 from spark_jobs import sources
-from spark_jobs.pyg_builder import feature_extractor
+from spark_jobs.pyg_builder import feature_extractor, feature_trim
 from spark_jobs.pyg_builder.feature_extractor import FeatureExtractor, VectorLayout
+from spark_jobs.pyg_builder.feature_trim import trims_for
 from spark_jobs.pyg_builder.edge_feature_extractor import EdgeVectorLayout
 from spark_jobs.pyg_builder.metadata_writer import (
     CHECKSUMS_FILE,
@@ -645,6 +647,109 @@ def test_feature_spec_edge_disabled_zeros_dim_and_drops_segments():
 
 
 # ======================================================================
+# feature_spec.json — node types whose x keeps only some positions (#443)
+# ======================================================================
+
+OPTIONS = "market_quotes_OptionSnapshot"
+
+
+def _options_spec():
+    """The committed list, as the nightly's layout builds it."""
+    return trims_for(VectorLayout(1024, class_identity_dim=192))[OPTIONS]
+
+
+def _trimmed_entry(spec, violations=()):
+    return {
+        **spec.to_dict(),
+        "check": {
+            "rows_checked": 6,
+            "positions_checked": spec.vector_dim - spec.width,
+            "violations": list(violations),
+        },
+    }
+
+
+def _full_x(spec, rows=6, seed=443):
+    """An untrimmed x the list describes: random where kept, 0, a constant or
+    a copy everywhere else."""
+    rng = np.random.default_rng(seed)
+    full = np.zeros((rows, spec.vector_dim), dtype=np.float32)
+    full[:, list(spec.kept)] = rng.standard_normal(
+        (rows, spec.width)
+    ).astype(np.float32)
+    for p, v in spec.constant.items():
+        full[:, p] = v
+    for p, twin in spec.copy_of.items():
+        full[:, p] = full[:, twin]
+    return full
+
+
+def _rebuild(x, entry, total_dim):
+    """A consumer's rebuild of the full vector, from x and feature_spec.json
+    alone -- the recipe documentation/reference/outputs.md gives."""
+    full = np.zeros((x.shape[0], total_dim), dtype=x.dtype)
+    full[:, entry["kept_positions"]] = x
+    for position, value in entry["constant_positions"]:
+        full[:, position] = value
+    for position, twin in entry["copied_positions"]:
+        full[:, position] = full[:, twin]
+    return full
+
+
+def test_feature_spec_lists_no_trimmed_type_when_none_is_trimmed():
+    spec = _fully_registered_collector()._build_feature_spec()
+    assert spec["version"] == "1.1"
+    assert spec["node_features"]["trimmed_node_types"] == {}
+
+
+def test_feature_spec_lists_the_kept_positions_and_every_dropped_value():
+    options = _options_spec()
+    c = _fully_registered_collector()
+    c.register_trimmed_node_types({OPTIONS: _trimmed_entry(options)})
+
+    entry = c._build_feature_spec()["node_features"]["trimmed_node_types"][
+        OPTIONS
+    ]
+    assert entry["stored_dim"] == 173
+    assert entry["kept_positions"] == list(options.kept)
+    dropped = (
+        entry["zero_positions"]
+        + [p for p, _ in entry["constant_positions"]]
+        + [p for p, _ in entry["copied_positions"]]
+    )
+    assert len(dropped) == 851
+    assert sorted(dropped + entry["kept_positions"]) == list(range(1024))
+    assert [341, 278] in entry["copied_positions"]
+    assert entry["check"]["violations"] == []
+
+
+def test_rebuilding_from_x_and_feature_spec_gives_the_untrimmed_x():
+    options = _options_spec()
+    full = _full_x(options)
+    x = full[:, list(options.kept)]
+
+    c = _fully_registered_collector()
+    c.register_trimmed_node_types({OPTIONS: _trimmed_entry(options)})
+    # Through the bytes a consumer reads, not the dict in memory.
+    spec = json.loads(json.dumps(c._build_feature_spec()))
+    node = spec["node_features"]
+
+    rebuilt = _rebuild(x, node["trimmed_node_types"][OPTIONS], node["total_dim"])
+    np.testing.assert_array_equal(rebuilt, full)
+
+
+def test_a_check_with_violations_reaches_feature_spec_as_recorded():
+    options = _options_spec()
+    broken = [{"position": 18, "expected": 1.0, "rows_affected": 2}]
+    c = _fully_registered_collector()
+    c.register_trimmed_node_types({OPTIONS: _trimmed_entry(options, broken)})
+    entry = c._build_feature_spec()["node_features"]["trimmed_node_types"][
+        OPTIONS
+    ]
+    assert entry["check"]["violations"] == broken
+
+
+# ======================================================================
 # normalization.json
 # ======================================================================
 
@@ -1190,6 +1295,48 @@ def test_the_registered_sources_do_not_change_the_digest():
     today = _digest_of(_node_encoding_config())
     assert _digest_of(_node_encoding_config((*sources.REGISTERED, toy))) == today
     assert _digest_of(_node_encoding_config(without_sec)) == today
+
+
+# The nightly's layout: the one the trimmed list was measured on (#443).
+NIGHTLY_FEATURES = {"feature_config": {"class_identity_dim": 192}}
+
+
+def _nightly_encoding_config(**feature_config):
+    config = {
+        "feature_config": {**NIGHTLY_FEATURES["feature_config"], **feature_config}
+    }
+    return FeatureExtractor(None, config).get_encoding_config()
+
+
+def test_the_encoding_config_carries_the_trimmed_list():
+    recorded = _nightly_encoding_config()["node_features"]["trimmed_node_types"]
+    assert recorded == {OPTIONS: _options_spec().to_dict()}
+
+
+def test_trimming_changes_the_contract_digest():
+    """A model sized to 173 columns must not load a 1024-wide option x."""
+    trimmed = _nightly_encoding_config()
+    untrimmed = _nightly_encoding_config(trim_node_features=False)
+    assert "trimmed_node_types" not in untrimmed["node_features"]
+    assert _digest_of(trimmed) != _digest_of(untrimmed)
+
+
+def test_changing_the_list_changes_the_contract_digest(monkeypatch):
+    before = _digest_of(_nightly_encoding_config())
+    entry = feature_trim.TRIMMED_NODE_TYPES[OPTIONS]
+    moved = dict(entry["constant"])
+    del moved[18]                          # position 18 now reads as 0
+    monkeypatch.setattr(feature_trim, "TRIMMED_NODE_TYPES", {
+        OPTIONS: {**entry, "constant": moved},
+    })
+    assert _digest_of(_nightly_encoding_config()) != before
+
+
+def test_a_layout_the_list_was_not_measured_on_keeps_todays_digest():
+    """vector_dim 1024 at the default class_identity width trims nothing, so
+    its contract is exactly what it was before trimming existed."""
+    config = FeatureExtractor(None, {}).get_encoding_config()
+    assert "trimmed_node_types" not in config["node_features"]
 
 
 # ======================================================================
