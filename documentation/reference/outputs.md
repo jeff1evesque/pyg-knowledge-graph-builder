@@ -158,10 +158,11 @@ for name, entry in record["artifacts"].items():
 
 Complete inventory of every node type and edge type in the graph. The entry point for any consumer of the graph.
 
-**Schema version: `1.6`.** Every step since 1.1 has been additive: each field keeps the name and meaning it had, so the version says what is *there*.
+**Schema version: `1.7`.** Every step since 1.1 has been additive: each field keeps the name and meaning it had, so the version says what is *there*.
 
 | Version | What it changed |
 |---|---|
+| `1.7` | adds each node type's `stored_dim`, how many columns its `x` has, and `build_metadata.node_feature_dim`, the layout's width. Since [#443](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/issues/443) one type's `x` is narrower than the layout |
 | `1.6` | `build_metadata.sources` and `sources_in_graph` may name a feed beside its source: `sec-companyfacts` beside `sec`. See [What the graph is made of](#what-the-graph-is-made-of) |
 | `1.5` | adds `build_metadata.day` — the day the graph's data was cut from, which is the [query tables](tables.md)' `day`. See [Which date is which](#which-date-is-which) |
 | `1.4` | adds `build_metadata.sources_in_graph` and `build_metadata.excluded_node_types` — what this graph holds, as against what the run read |
@@ -172,7 +173,8 @@ Complete inventory of every node type and edge type in the graph. The entry poin
 Check the `version` field before relying on any of them. At 1.3 and below the only account of what the graph is made of is `sources`, which is the set the run **read** — see [What the graph is made of](#what-the-graph-is-made-of).
 
 **Contents:**
-- Every node type with its count, source ontology URI, category tag, and `has_features`
+- Every node type with its count, source ontology URI, category tag, `has_features`, and `stored_dim`
+  - `stored_dim` (1.7) is how many columns the type's `x` has, read off the assembled `x` the way `has_features` is, so it cannot disagree with the `.pt`. It is `build_metadata.node_feature_dim` for every type but a trimmed one. On the nightly's layout `market_quotes_OptionSnapshot` stores 173 of 1024 positions, and on 2026-10-09 it was 10,715,848 of the graph's 10,898,124 nodes. [`feature_spec.json`](#trimmed-node-types) says how to rebuild the full vector. A collector that never reached assembly reports `0`.
   - `has_features` means the type carries **literal-value features**: a non-zero `literal_values` segment (the last of the three node-vector segments). On the e2e fixtures 76 of 100 node types qualify; the other 24 are pure taxonomy types (`EconomicSector`, `GeographicRegion`, `TimePeriod`, …) that carry ontology structure but no measurements.
   - It cannot usefully mean "a feature tensor exists" — `constructor.py` gives *every* node type an `x`, falling back to a zeros placeholder — nor "any non-zero value", since the `ontology_structure` segment is populated for every typed node. Literal values are the segment that actually varies between types.
   - **Through schema `1.0` this field was `count > 0`** — the node count, not features at all. It was therefore true for essentially every type, and `summary.node_types_with_literal_features` was identical to `total_node_types` by construction (a real build reported 100 and 100). A consumer filtering node types on `has_features` against a 1.0 artifact gets every type back.
@@ -187,9 +189,10 @@ Check the `version` field before relying on any of them. At 1.3 and below the on
   - `origin` is the one group field whose edge types can genuinely disagree, since origin reads the endpoints and a group spans endpoint pairs by definition: `jolts:hasIndustry` is `raw` across 21 of its edge types and `enrichment` on the one leaving a pipeline-minted node. Such a group reports **`mixed`**, meaning *ask the edge types* — deliberately not a fourth origin value, so a consumer switching on `origin` cannot read it as a trust level. Naming one member's origin instead is how the field was wrong before: `origin` was keyed by relation name, so all of a relation's edge types collapsed to whichever the builder wrote last, and 3 edge types (90 edges) published `raw` for links the pipeline had inferred.
   - Nothing is lost by tying: each edge type also carries `src_type_index` / `dst_type_index` into the node-type table (whose entries now carry a stable `index`, assigned by sorted name), so a shared relation weight can still condition on endpoint type through a node-type embedding — one table of *N* types rather than *N×M* matrices.
 - Summary statistics: total node types, total edge types, total relation groups, total nodes, total edges, edge types with features
-- Build metadata: time period, the day its data was cut from, build timestamp, dataset name, pipeline config, and three fields saying [what the graph is made of](#what-the-graph-is-made-of)
+- Build metadata: time period, the day its data was cut from, build timestamp, dataset name, pipeline config, `node_feature_dim` (1.7), and three fields saying [what the graph is made of](#what-the-graph-is-made-of)
+  - `node_feature_dim` is the node layout's width, `feature_spec.json`'s `total_dim`. Always present. A type whose `stored_dim` is below it is trimmed. `pipeline_config.feature_config.vector_dim` stays the echo of what the job was handed, the way `excluded_node_types` sits beside `pipeline_config.exclude_node_types`.
 
-**Generated by:** `constructor.py` after HeteroData assembly, from `node_mapper.node_counts`, `node_mapper.get_type_uri_mapping()`, `edge_mapper.build_edge_indices()`, and `edge_feature_extractor.get_edge_classification()`. The per-type `has_features` flag is read off the assembled feature tensors themselves (`MetadataCollector.register_node_literal_features`), so it cannot drift from the `.pt` it describes.
+**Generated by:** `constructor.py` after HeteroData assembly, from `node_mapper.node_counts`, `node_mapper.get_type_uri_mapping()`, `edge_mapper.build_edge_indices()`, and `edge_feature_extractor.get_edge_classification()`. The per-type `has_features` flag is read off the assembled feature tensors themselves (`MetadataCollector.register_node_literal_features`), and `stored_dim` off the assembled `x` (`register_node_feature_widths`), so neither can drift from the `.pt` it describes.
 
 **Changes between builds:** Yes — counts change every time period; new types may appear when new data sources are added.
 
@@ -262,7 +265,9 @@ does not hold all `total_dim` positions. On the nightly's layout that is
 `market_quotes_OptionSnapshot`, which stores 173 of 1024: the other 851 hold the
 same thing on every option row (see
 [One type stores only the positions that vary](../design/node-features.md#one-type-stores-only-the-positions-that-vary)).
-Every type not listed stores all `total_dim`.
+Every type not listed stores all `total_dim`. From schema 1.7, `graph_schema.json` gives
+every type's [`stored_dim`](#graph_schemajson), so a reader holding only that file can
+tell which `x` is narrower; this list is what rebuilds it.
 
 ```json
 "trimmed_node_types": {
