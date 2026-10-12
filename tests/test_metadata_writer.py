@@ -105,6 +105,8 @@ def _fully_registered_collector(day=""):
     # the taxonomy-node shape that makes has_features discriminating. Mirrors
     # the edge types below, where one has features and one does not.
     collector.register_node_literal_features(["Observation"])
+    # Step 5's widths. Both full here; the 1.7 tests register a narrower one.
+    collector.register_node_feature_widths({"Observation": 1024, "Company": 1024})
 
     collector.register_edge_types(
         edge_counts={
@@ -185,6 +187,7 @@ def test_graph_schema_node_types():
         "source_type_uri": "http://ex/Observation",
         "category": "measurement",
         "has_features": True,
+        "stored_dim": 1024,
     }
     assert nodes["Company"]["index"] == 0
     assert nodes["Company"]["category"] == "entity"
