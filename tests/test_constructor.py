@@ -50,12 +50,17 @@ NO_EDGE_FEATURES = {"edge_feature_config": {"enabled": False}}
 
 def _build(spark, rows, config=None):
     """Run the real assembly over a list of (subject, predicate, object) rows."""
+    return _build_with_metadata(spark, rows, config)[0]
+
+
+def _build_with_metadata(spark, rows, config=None):
+    """The same, with the metadata collector beside the graph."""
     triples = spark.createDataFrame(
         rows, schema="subject STRING, predicate STRING, object STRING"
     )
     cfg = NO_EDGE_FEATURES if config is None else config
     data, metadata, _node_index = build_hetero_data(spark, triples, config=cfg)
-    return data
+    return data, metadata
 
 
 # ======================================================================
@@ -350,17 +355,27 @@ def _with_list(monkeypatch, spark):
     return untrimmed, listed
 
 
+def _schema_widths(data, metadata):
+    """Each node type's stored_dim in graph_schema.json, and its x's width."""
+    nodes = metadata.to_metadata_files()["graph_schema.json"]["node_types"]
+    return ({t: nodes[t]["stored_dim"] for t in data.node_types},
+            {t: data[t].x.shape[1] for t in data.node_types})
+
+
 def test_a_trimmed_type_gets_its_own_width_in_the_graph(spark, monkeypatch):
     untrimmed, listed = _with_list(monkeypatch, spark)
-    triples = spark.createDataFrame(
-        TRIM_ROWS, schema="subject STRING, predicate STRING, object STRING"
-    )
-    data, metadata, _ = build_hetero_data(spark, triples, config=NIGHTLY)
+    data, metadata = _build_with_metadata(spark, TRIM_ROWS, config=NIGHTLY)
 
     kept = list(listed["kept"])
     assert data["cpi_Index"].x.shape == (3, len(kept))
     assert torch.equal(data["cpi_Index"].x, untrimmed["cpi_Index"].x[:, kept])
     assert data["cpi_Series"].x.shape == (1, VECTOR_DIM)
+    # graph_schema.json 1.7 says so, read off the same x.
+    published, actual = _schema_widths(data, metadata)
+    assert published == actual == {"cpi_Index": len(kept), "cpi_Series": VECTOR_DIM}
+    assert metadata.to_metadata_files()["graph_schema.json"]["build_metadata"][
+        "node_feature_dim"
+    ] == VECTOR_DIM
 
     files = metadata.to_metadata_files()
     entry = files["feature_spec.json"]["node_features"]["trimmed_node_types"][
@@ -393,10 +408,26 @@ def test_a_trimmed_type_with_no_entries_gets_a_zero_x_of_its_width(
         return tensors, names
 
     monkeypatch.setattr(FeatureExtractor, "build_features", without_cpi_index)
-    data = _build(spark, TRIM_ROWS, config=NIGHTLY)
+    data, metadata = _build_with_metadata(spark, TRIM_ROWS, config=NIGHTLY)
 
     x = data["cpi_Index"].x
     assert x.shape == (3, len(listed["kept"]))
     assert x.dtype == torch.float32
     assert not bool(x.any())
     assert data["cpi_Series"].x.shape == (1, VECTOR_DIM)
+    # The zero x's width is what graph_schema.json reports.
+    published, actual = _schema_widths(data, metadata)
+    assert published == actual
+    assert published["cpi_Index"] == len(listed["kept"])
+
+
+def test_with_trimming_off_every_type_reports_the_full_width(spark, monkeypatch):
+    """A listed type built with trim_node_features false is 1024 wide, and says so."""
+    _with_list(monkeypatch, spark)
+    data, metadata = _build_with_metadata(spark, TRIM_ROWS, config={
+        **NIGHTLY,
+        "feature_config": {"class_identity_dim": 192, "trim_node_features": False},
+    })
+
+    published, actual = _schema_widths(data, metadata)
+    assert published == actual == {"cpi_Index": VECTOR_DIM, "cpi_Series": VECTOR_DIM}

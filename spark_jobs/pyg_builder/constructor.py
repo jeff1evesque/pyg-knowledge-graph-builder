@@ -443,6 +443,13 @@ def build_hetero_data(
         if edge_key in edge_feature_tensors:
             data[edge_key].edge_attr = edge_feature_tensors[edge_key]
 
+    # Each type's width for graph_schema.json, read off the x just assembled,
+    # as has_features is read off the tensors, so the two cannot disagree with
+    # the .pt. A trimmed type's x is narrower than vector_dim.
+    metadata.register_node_feature_widths(
+        {node_type: data[node_type].x.shape[1] for node_type in node_counts}
+    )
+
     # Release executor memory for node ID table
     node_id_df.unpersist()
 

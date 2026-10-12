@@ -121,6 +121,8 @@ class MetadataCollector:
         # None until register_node_literal_features() is called; see
         # _build_graph_schema for what that distinction means in the output.
         self._node_types_with_literal_features: Optional[set] = None
+        # How many columns each node type's assembled x has (Step 5).
+        self._node_feature_widths: Dict[str, int] = {}
         self._edge_counts: Dict[str, int] = {}
         self._edge_type_details: Dict[str, Dict[str, Any]] = {}
         self._node_layout: Optional[Dict[str, Any]] = None
@@ -179,6 +181,21 @@ class MetadataCollector:
         self._node_types_with_literal_features = set(
             node_types_with_literal_features
         )
+
+    def register_node_feature_widths(self, widths: Dict[str, int]) -> None:
+        """
+        Register how many columns each node type's x has (Step 5).
+
+        Read off the assembled tensors, as has_features is, so the published
+        width cannot disagree with the .pt. Since #443 one type stores fewer
+        positions than the layout's vector_dim.
+
+        Args:
+            widths: Dict[pyg_name -> x.shape[1]]
+        """
+        self._node_feature_widths = {
+            name: int(width) for name, width in widths.items()
+        }
 
     def register_edge_types(
         self,
@@ -469,6 +486,12 @@ class MetadataCollector:
                     if with_literals is not None
                     else False
                 ),
+                # Schema 1.7. How many columns this type's x has: the layout's
+                # vector_dim, or fewer for a type that stores only the positions
+                # that vary (feature_spec.json says how to rebuild it). 0 when
+                # the collector never reached Step 5, for the same reason
+                # has_features is False there.
+                "stored_dim": self._node_feature_widths.get(pyg_name, 0),
             }
 
         # Edge types, each carrying the endpoint indices assigned above so a
@@ -494,6 +517,13 @@ class MetadataCollector:
         edge_types_with_features = len(self._edge_types_with_features)
 
         return {
+            # 1.7: adds each node type's `stored_dim` and
+            # `build_metadata.node_feature_dim`. Additive only. Since #443 one
+            # node type's x is narrower than the layout (on the nightly's,
+            # market_quotes_OptionSnapshot stores 173 of 1024 positions, and it
+            # is 98% of the nodes), and through 1.6 this file had no width but
+            # pipeline_config's vector_dim, which is not that x's.
+            #
             # 1.6: `build_metadata.sources` and `sources_in_graph` may name a
             # feed beside its source, such as `sec-companyfacts` beside `sec`.
             # No field is added or renamed.
@@ -525,7 +555,7 @@ class MetadataCollector:
             # features". Through 1.0 it was `count > 0` -- the node count --
             # which made it, and summary.node_types_with_literal_features,
             # true/total for every build. See _build_graph_schema's docstring.
-            "version": "1.6",
+            "version": "1.7",
             "build_metadata": {
                 "time_period": self._time_period,
                 # The same value as the query tables' day= partition and
@@ -562,6 +592,11 @@ class MetadataCollector:
                 "excluded_node_types": sorted(
                     self._config.get("exclude_node_types") or []
                 ),
+                # The node layout's width, feature_spec.json's total_dim. A
+                # type whose stored_dim is below it is trimmed. Always present;
+                # pipeline_config's vector_dim stays the echo of what the job
+                # was handed, as with excluded_node_types above.
+                "node_feature_dim": self._vector_dim,
                 "build_timestamp": self._build_timestamp,
                 "pipeline_config": _sanitize_config(self._config),
             },
