@@ -309,7 +309,10 @@ on 2026-10-09. On every option row, 851 of the 1024 positions hold the same thin
 So an option's `x` stores the other 173, in layout order: 29 numeric positions, all
 127 categorical positions, and 17 `property_presence` and `domain_range` positions
 for properties only some options have. That is 7.4 GB instead of 43.9 GB. Every
-other node type stores all 1024.
+other node type stores all 1024. From schema 1.7,
+[`graph_schema.json`](../reference/outputs.md#graph_schemajson) gives each type's
+`stored_dim`, 173 for the options and 1024 for the rest, so a reader of that file
+alone can tell which `x` is narrower.
 
 Nothing is lost. [`feature_spec.json`](../reference/outputs.md#feature_specjson)
 records the kept positions and what each dropped one holds, and the full 1024
