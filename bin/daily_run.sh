@@ -27,7 +27,8 @@
 #   bring MemFree up to PYG_MEMFREE_GATE_GB on every node, when that is set
 #   bin/run_cluster_notebook.sh --data-date <day> <run-dir>
 #   bin/publish_run.py <run-dir> --upload
-#   prune, only after that publish went through
+#   bin/publish_run.py <run-dir> --archive <root> --keep-days <N>, when an archive is set
+#   prune, only after that publish (and that archive) went through
 #
 # WHAT IT REMOVES
 # Only what this schedule made. Runs started by hand, their work directories and
@@ -37,7 +38,11 @@
 #     when bin/publish_run.py --published finds it listed at the destination and its
 #     work directory is its own, inside this schedule's work root. An older run that
 #     is not listed stays, for inspection. An older day that never started (refused
-#     or failed before the launcher) left only logs, and its run directory goes.
+#     or failed before the launcher) left only logs, and its run directory goes. With
+#     an archive set, an older run also needs its day in the archive first; one whose
+#     day is not there stays, to be archived by hand with --archive.
+#   - Archived days. The archive keeps the newest PYG_SCHEDULE_ARCHIVE_DAYS data days;
+#     an older day loses its marker first, then its tables and its run.
 #   - Local source copies. The mirror is shared with runs started by hand, so the
 #     schedule lists the copies its own staging fetched in
 #     <schedule-dir>/mirror-downloads.tsv, leaving out any a node already held, and
@@ -63,10 +68,19 @@
 #                                   default, the number of PYG_STAGE_NODES.
 #   PYG_SCHEDULE_IDLE_WAIT_SECONDS  optional. How long to wait for idle; default 600.
 #   PYG_SCHEDULE_RETRY_SECONDS      optional. Pause between tries; default 60.
+#   PYG_SCHEDULE_ARCHIVE_ROOT       optional. A folder on a local drive that keeps each
+#                                   day's graphs and tables as real files, in the
+#                                   published layout (bin/publish_run.py --archive).
+#                                   Unset, nothing is archived and the prune needs
+#                                   only the publish.
+#   PYG_SCHEDULE_ARCHIVE_DAYS       optional. How many of the newest data days the
+#                                   archive keeps; default 100. More than
+#                                   PYG_SCHEDULE_RETAIN_RUNS.
 #
 # EXIT CODES
-#   0  published, then pruned
-#   1  the staging, the run or the publish failed; the run stays, nothing is pruned
+#   0  published (and archived), then pruned
+#   1  the staging, the run, the publish or the archive failed; the run stays, nothing
+#      is pruned
 #   2  refused before the run started: a setting, a dirty checkout, sources that
 #      could not be listed, a busy cluster, or memory that would not come free
 #   3  skipped: a source is not there, because upstream is late or the day has
@@ -191,6 +205,18 @@ RETAIN="${PYG_SCHEDULE_RETAIN_RUNS:-}"
   || refuse "PYG_WORK_DIR must end in the run id, got '${PYG_WORK_DIR:-}'"
 [[ -n "${PYG_PUBLISH_ROOT:-}" ]] \
   || refuse "PYG_PUBLISH_ROOT is not set; a schedule publishes, and its prune depends on that"
+ARCHIVE_ROOT="${PYG_SCHEDULE_ARCHIVE_ROOT:-}"
+ARCHIVE_ROOT="${ARCHIVE_ROOT%/}"
+ARCHIVE_DAYS="${PYG_SCHEDULE_ARCHIVE_DAYS:-100}"
+if [[ -n "$ARCHIVE_ROOT" ]]; then
+  [[ "$ARCHIVE_ROOT" == /?* ]] \
+    || refuse "PYG_SCHEDULE_ARCHIVE_ROOT must be an absolute path, got '${PYG_SCHEDULE_ARCHIVE_ROOT}'"
+  # A run past the newest RETAIN is pruned only once its day is in the archive. An
+  # archive keeping no more days than that would already have dropped the day, and
+  # the run would never go.
+  [[ "$ARCHIVE_DAYS" =~ ^[1-9][0-9]*$ ]] && (( ARCHIVE_DAYS > RETAIN )) \
+    || refuse "PYG_SCHEDULE_ARCHIVE_DAYS must be more than PYG_SCHEDULE_RETAIN_RUNS ($RETAIN), got '$ARCHIVE_DAYS'"
+fi
 RETRY="${PYG_SCHEDULE_RETRY_SECONDS:-60}"
 IDLE_WAIT="${PYG_SCHEDULE_IDLE_WAIT_SECONDS:-600}"
 [[ "$RETRY" =~ ^[0-9]+$ && "$IDLE_WAIT" =~ ^[0-9]+$ ]] \
@@ -337,6 +363,11 @@ if [[ -n "$CHECK" ]]; then
   for uri in "${SOURCES[@]}"; do
     log "  reads $uri"
   done
+  if [[ -n "$ARCHIVE_ROOT" && -d "$ARCHIVE_ROOT" ]]; then
+    log "  archives into $ARCHIVE_ROOT, keeping the newest $ARCHIVE_DAYS days"
+  elif [[ -n "$ARCHIVE_ROOT" ]]; then
+    log "  the archive root $ARCHIVE_ROOT is not there, so the archive step would fail; is its drive mounted?"
+  fi
   log "checked: nothing was staged, run, published or removed"
   exit 0
 fi
@@ -534,6 +565,18 @@ publish_rc=$?
   || fail "the publish exited $publish_rc; the run stays on the mount and nothing is pruned. See $RD/publish.log"
 log "published"
 
+# After the publish, and failing the night the same way: a drive that is missing or
+# unmounted leaves the run where it is and prunes nothing.
+if [[ -n "$ARCHIVE_ROOT" ]]; then
+  log "archiving into $ARCHIVE_ROOT, keeping the newest $ARCHIVE_DAYS days; see $RD/publish.log"
+  python3 "$REPO/bin/publish_run.py" "$RD" --archive "$ARCHIVE_ROOT" --keep-days "$ARCHIVE_DAYS" \
+    > "$RD/archive.out" 2>&1
+  archive_rc=$?
+  [[ "$archive_rc" == "0" ]] \
+    || fail "the archive step exited $archive_rc; the run stays and nothing is pruned. See $RD/publish.log"
+  log "archived"
+fi
+
 # ---------------------------------------------------------------------------
 # The prune; see WHAT IT REMOVES at the top. Whether a run is published is asked of
 # the destination rather than read from publish.done: a publish run again on a
@@ -566,10 +609,15 @@ for id in $(for dir in "$SD"/runs/*/; do dir="${dir%/}"; echo "${dir##*/}"; done
     log "  kept $id: the destination does not list it as published"
     continue
   fi
+  if [[ -n "$ARCHIVE_ROOT" ]] \
+      && ! python3 "$REPO/bin/publish_run.py" "$run_dir" --archived "$ARCHIVE_ROOT" >> "$RD/prune.log" 2>&1; then
+    log "  kept $id: its day is not in the archive"
+    continue
+  fi
   rm -rf -- "$work" || { log "  kept $id: its work dir could not be removed"; continue; }
   rm -rf -- "$run_dir"
   removed=$((removed + 1))
   log "  removed $id: its work directory and its run directory"
 done
-log "done: $DATA_DATE is published as run $RUN_ID; removed $removed older run(s)"
+log "done: $DATA_DATE is published${ARCHIVE_ROOT:+ and archived} as run $RUN_ID; removed $removed older run(s)"
 exit 0

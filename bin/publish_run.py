@@ -4,6 +4,10 @@
     bin/publish_run.py <run-dir>              dry run: lay the upload out and show it
     bin/publish_run.py <run-dir> --upload     upload, check the listing, then index.json
     bin/publish_run.py <run-dir> --published  exit 0 only if the destination lists it all
+    bin/publish_run.py <run-dir> --archive <root> [--keep-days N]
+                                              copy it into a local archive, marker last
+    bin/publish_run.py <run-dir> --archived <root>
+                                              exit 0 only if the archive holds its day
 
 The job's work directory is not the published layout. It differs in four ways:
 
@@ -34,8 +38,25 @@ the shortest expiration where two prefix rules overlap, so a table under the run
 prefix would be deleted with it. They get their own root, their own sync and their own
 per-day marker under _days/.
 
+--archive copies the same layout, less the enriched triples and index.json, onto a
+local drive as real files, for a reader that needs more days than the work disk keeps
+and cannot read the published copies back:
+
+  <root>/runs/<dataset>/year=YYYY/month=MM/<run id>/<v>/ and manifests/
+  <root>/tables/<dataset>/<table>/day=YYYY-MM-DD/
+  <root>/tables/<dataset>/_days/<day>.json, the day's marker, written last
+
+so <root>/tables/<dataset> reads as a tables root with no S3. It runs the upload's
+checks first, then reads every .pt and metadata file back from the drive against
+checksums.json and checks every file's size. The archive keeps days, not runs: a
+second run of a day replaces that day's copy, and --keep-days N then removes every day
+but the newest N, each one's marker before its files. A copy that stops partway has
+no marker, and running again finishes it; running again on a finished one changes
+nothing. Nothing is sent to S3, and --archive needs neither root below.
+
 Environment:
-  PYG_PUBLISH_ROOT      where published runs go, s3://BUCKET/PREFIX. Required.
+  PYG_PUBLISH_ROOT      where published runs go, s3://BUCKET/PREFIX. Required, except
+                        by --archive and --archived.
   PYG_TABLES_ROOT       where query tables go, s3://BUCKET/PREFIX. Required when the
                         run wrote any; they land under <root>/<dataset>/<table>/day=.
   PYG_PUBLISH_DATASET   the source set's name, e.g. all-sources. Defaults to the name
@@ -80,6 +101,10 @@ TABLES_TREE = "publish-tables"
 # own name is a day rather than a run, because that is what the tables are
 # keyed by -- two runs over the same day publish the same day.
 TABLES_MARKER = "_days"
+# The local archive's two halves, under its root: runs keyed by run, tables by day.
+ARCHIVE_RUNS = "runs"
+ARCHIVE_TABLES = "tables"
+RUN_ID_NAME = re.compile(r"\d{8}T\d{6}Z")
 # Tables read from a feed rather than built from the triples, and the feed's
 # name. A day's marker lists the feed among its sources when the day has the table.
 FEED_TABLES = {"splits": splits.FEED_NAME, "companyfacts": companyfacts.FEED_NAME}
@@ -406,6 +431,23 @@ def day_sources(run_sources, tables) -> list:
     return sorted(set(run_sources) | feeds)
 
 
+def day_marker(day: str, run_id: str, sources, items) -> dict:
+    """A day's marker, the same in the published tables and in the archive.
+
+    day, run_id, published and sources are a contract another service reads; see
+    documentation/reference/tables.md.
+    """
+    tables = sorted({name.split("/", 1)[0] for name, _ in items})
+    return {
+        "day": day,
+        "run_id": run_id,
+        "published": utc_now(),
+        "sources": day_sources(sources, tables),
+        "tables": tables,
+        "files": len(items),
+    }
+
+
 def variant_entry(graph: str, labels: dict, in_graph: dict) -> dict:
     entry = {"path": f"{graph}/", "notebook_label": labels.get(graph)}
     if graph in in_graph:
@@ -569,17 +611,7 @@ def publish_tables(rd: Path, items, dst: str, day: str, run_id: str, sources,
     """
     marker = f"{TABLES_MARKER}/{day}.json"
     tree = rd / TABLES_TREE
-    tables = sorted({name.split("/", 1)[0] for name, _ in items})
-    # day, run_id, published and sources are a contract another service reads;
-    # see documentation/reference/tables.md.
-    index = {
-        "day": day,
-        "run_id": run_id,
-        "published": utc_now(),
-        "sources": day_sources(sources, tables),
-        "tables": tables,
-        "files": len(items),
-    }
+    index = day_marker(day, run_id, sources, items)
     build_tree(tree, items, index, marker)
 
     log(f"tables tree {tree}:")
@@ -777,15 +809,233 @@ def check_published(rd: Path, env) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------- #
+# The local archive
+# --------------------------------------------------------------------------- #
+
+def archive_copy(source: Path, target: Path) -> int:
+    """Copy one file as a real file. Returns the bytes written, 0 when it is already
+    there at the right size.
+
+    Written under a temporary name, synced, then renamed, so a copy that stops never
+    leaves a short file under the real name, and a file there at the right size is
+    whole.
+    """
+    size = source.stat().st_size
+    if target.is_file() and not target.is_symlink() and target.stat().st_size == size:
+        return 0
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_name(f".{target.name}.partial")
+    with open(source, "rb") as src, open(partial, "wb") as dst:
+        shutil.copyfileobj(src, dst, 16 << 20)
+        dst.flush()
+        os.fsync(dst.fileno())
+    os.replace(partial, target)
+    return size
+
+
+def sha256_on_disk(path: Path) -> str:
+    """The sha256 of what the drive holds, not of the page cache the copy just filled."""
+    if hasattr(os, "posix_fadvise"):
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        finally:
+            os.close(fd)
+    return sha256(path)
+
+
+def archived_run_folders(root: Path, dataset: str, run_id: str) -> list:
+    return sorted(p for p in (root / ARCHIVE_RUNS / dataset).glob(f"year=*/month=*/{run_id}")
+                  if p.is_dir())
+
+
+def remove_tree(folder: Path, stop: Path) -> None:
+    """Remove a folder, then each parent it leaves empty, up to stop."""
+    shutil.rmtree(folder)
+    parent = folder.parent
+    while parent != stop and parent.is_dir() and not any(parent.iterdir()):
+        parent.rmdir()
+        parent = parent.parent
+
+
+def remove_archived_day(root: Path, dataset: str, day: str, log: Log) -> None:
+    """Take one day out of the archive: its marker first, so a removal that stops
+    partway leaves a day plainly unfinished, then its tables, then the run it names."""
+    tables_root = root / ARCHIVE_TABLES / dataset
+    marker = tables_root / TABLES_MARKER / f"{day}.json"
+    run_id = ""
+    if marker.exists():
+        try:
+            run_id = str(json.loads(marker.read_text()).get("run_id") or "")
+        except ValueError:
+            pass
+        marker.unlink()
+    for partition in sorted(tables_root.glob(f"*/day={day}")):
+        remove_tree(partition, tables_root)
+    if RUN_ID_NAME.fullmatch(run_id):
+        for folder in archived_run_folders(root, dataset, run_id):
+            remove_tree(folder, root / ARCHIVE_RUNS / dataset)
+    log(f"  removed {day} from the archive, with run {run_id or '(not named)'}")
+
+
+def trim_archive(root: Path, dataset: str, keep_days: int, log: Log) -> None:
+    """Keep the newest keep_days days that have a marker; take out the rest."""
+    markers = sorted((p for p in (root / ARCHIVE_TABLES / dataset / TABLES_MARKER).glob("*.json")
+                      if re.fullmatch(r"\d{4}-\d{2}-\d{2}\.json", p.name)), reverse=True)
+    older = markers[keep_days:]
+    for marker in older:
+        remove_archived_day(root, dataset, marker.name[:-len(".json")], log)
+    log(f"the archive keeps the newest {keep_days} days: {len(markers) - len(older)} kept, "
+        f"{len(older)} removed")
+
+
+def check_archive(items, run_dst: Path, table_items, tables_dst: Path, pyg: Path,
+                  graphs, log: Log) -> None:
+    """Every file by size, then each .pt and metadata file read back against checksums.json."""
+    for base, listed in ((run_dst, items), (tables_dst, table_items)):
+        for name, source in listed:
+            target = base / name
+            if not target.is_file() or target.stat().st_size != source.stat().st_size:
+                raise Failed(f"{target} is missing or the wrong size")
+    checked = 0
+    for graph in graphs:
+        meta = pyg / f"hetero_data_{graph}_metadata"
+        for name, want in json.loads((meta / CHECKSUMS).read_text())["artifacts"].items():
+            target = run_dst / graph / name.rsplit("/", 1)[-1]
+            if sha256_on_disk(target) != want["sha256"]:
+                raise Failed(f"{target} does not match its sha256 in checksums.json")
+            checked += 1
+    log(f"check ok: all {len(items) + len(table_items)} files are there at the right size; "
+        f"{checked} read back match checksums.json")
+
+
+def archive(rd: Path, root: Path, env, log: Log, keep_days=None) -> int:
+    """Copy a finished run into the archive at root. Returns an exit code."""
+    # An unmounted drive leaves no root, and that has to fail the step, not land the
+    # copy on whatever disk holds the mount point.
+    if not root.is_dir():
+        raise Refused(f"the archive root {root} is not there; is its drive mounted?")
+    run_id, work = read_run(rd)
+    check_succeeded(rd)
+    year, month = find_period(work)
+    period_dirs = f"year={year}/month={month}"
+    pyg, enriched = work / "pyg" / period_dirs, work / "enriched" / period_dirs
+    if not (enriched / "triples" / "_SUCCESS").exists():
+        raise Refused(f"{enriched / 'triples'} has no _SUCCESS")
+    graphs = find_graphs(pyg)
+    dataset, sources = dataset_name(enriched, f"{year}-{month}", env)
+    day = data_day(work, enriched, env)
+    table_items = tables_plan(work, day)
+    if table_items and not sources:
+        raise Refused(f"the run recorded no sources in {enriched / 'dataset.json'}, "
+                      "so the day's marker could not say what its tables hold")
+    items = [(name, path) for name, path in plan(work, period_dirs, graphs)
+             if not name.startswith("enriched/")]
+    run_dst = root / ARCHIVE_RUNS / dataset / period_dirs / run_id
+    tables_dst = root / ARCHIVE_TABLES / dataset
+    marker = tables_dst / TABLES_MARKER / f"{day}.json"
+
+    log(f"run {run_id}, day {day}, dataset {dataset}, graphs: {', '.join(graphs)}")
+    log(f"from {work}")
+    log(f"to   {run_dst}/")
+    log(f"and  {tables_dst}/ ({len(table_items)} table files for day={day})")
+
+    held = ""
+    if marker.exists():
+        try:
+            held = str(json.loads(marker.read_text()).get("run_id") or "")
+        except ValueError:
+            held = ""
+    whole = held == run_id and all(
+        (base / name).is_file() and (base / name).stat().st_size == path.stat().st_size
+        for base, listed in ((run_dst, items), (tables_dst, table_items))
+        for name, path in listed)
+    try:
+        if whole:
+            log(f"{marker} already names this run and every file is there; nothing to copy")
+        else:
+            for graph in graphs:
+                check_graph_day(pyg, graph, day)
+            log("checking the graph files against checksums.json")
+            for graph in graphs:
+                check_graph(pyg, graph, log)
+            if held:
+                log(f"{marker} names run {held}; replacing that day's copy")
+                remove_archived_day(root, dataset, day, log)
+            else:
+                # Left by a copy that stopped, of this run or of another run of the day.
+                # A day's tables are rewritten whole, so no part file of another run
+                # stays beside this run's to be read twice.
+                for partition in sorted(tables_dst.glob(f"*/day={day}")):
+                    remove_tree(partition, tables_dst)
+            copied = 0
+            for name, source in items:
+                copied += archive_copy(source, run_dst / name)
+            for name, source in table_items:
+                copied += archive_copy(source, tables_dst / name)
+            log(f"copied {copied / 1e9:.2f} GB")
+            check_archive(items, run_dst, table_items, tables_dst, pyg, graphs, log)
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            partial = marker.with_name(f".{marker.name}.partial")
+            with open(partial, "w") as fh:
+                fh.write(json.dumps(day_marker(day, run_id, sources, table_items), indent=2) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(partial, marker)
+            log(f"archived {day}: {len(items)} run files and {len(table_items)} table files, "
+                f"then {marker}")
+        if keep_days:
+            trim_archive(root, dataset, keep_days, log)
+    except OSError as why:
+        raise Failed(f"{why}. Running again finishes the copy")
+    return 0
+
+
+def check_archived(rd: Path, root: Path, env) -> int:
+    """0 when the archive holds the run's day: its marker, and the run folder the marker
+    names, which may be another run of the same day. 1 when it does not. Writes nothing.
+
+    The archive keeps days, not runs, so a run whose day a later run of it replaced
+    is archived in that sense, and a prune may remove it.
+    """
+    run_id, work = read_run(rd)
+    year, month = find_period(work)
+    enriched = work / "enriched" / f"year={year}/month={month}"
+    dataset, _ = dataset_name(enriched, f"{year}-{month}", env)
+    day = data_day(work, enriched, env)
+    marker = root / ARCHIVE_TABLES / dataset / TABLES_MARKER / f"{day}.json"
+    try:
+        named = str(json.loads(marker.read_text()).get("run_id") or "")
+    except (OSError, ValueError):
+        print(f"not archived: no readable {marker}")
+        return 1
+    if not RUN_ID_NAME.fullmatch(named) or not archived_run_folders(root, dataset, named):
+        print(f"not archived: {marker} names run '{named}', whose folder is not there")
+        return 1
+    print(f"archived: {marker}, run {named}")
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description="Publish a finished cluster run. Without --upload nothing is written.")
+        description="Publish a finished cluster run. Without --upload or --archive "
+                    "nothing is written.")
     parser.add_argument("run_dir")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--upload", action="store_true", help="write to the destination")
     mode.add_argument("--published", action="store_true",
                       help="only say whether the run is published; exit 0 if it is")
+    mode.add_argument("--archive", metavar="ROOT",
+                      help="copy the run into the local archive at ROOT, as real files")
+    mode.add_argument("--archived", metavar="ROOT",
+                      help="only say whether the archive at ROOT holds the run's day; "
+                           "exit 0 if it does")
+    parser.add_argument("--keep-days", type=int, metavar="N",
+                        help="with --archive: then keep only the newest N days there")
     args = parser.parse_args(argv)
+    if args.keep_days is not None and (args.archive is None or args.keep_days < 1):
+        parser.error("--keep-days takes a number of days, 1 or more, and goes with --archive")
 
     rd = Path(args.run_dir).expanduser().resolve()
     if not rd.is_dir():
@@ -797,7 +1047,25 @@ def main(argv=None) -> int:
         except Refused as why:
             print(f"cannot tell: {why}")
             return 2
+    if args.archived is not None:
+        try:
+            return check_archived(rd, Path(args.archived).expanduser(), os.environ)
+        except Refused as why:
+            print(f"cannot tell: {why}")
+            return 2
     log = Log(rd / "publish.log")
+    if args.archive is not None:
+        log(f"==== archive to {args.archive} started {utc_now()} ====")
+        try:
+            rc = archive(rd, Path(args.archive).expanduser(), os.environ, log, args.keep_days)
+        except Refused as why:
+            log(f"NOT ARCHIVED: {why}")
+            rc = 2
+        except Failed as why:
+            log(f"ARCHIVE FAILED: {why}")
+            rc = 1
+        log(f"==== finished rc={rc} {utc_now()} ====")
+        return rc
     log(f"==== {'upload' if args.upload else 'dry run'} started {utc_now()} ====")
     try:
         rc = publish(rd, args.upload, os.environ, log)

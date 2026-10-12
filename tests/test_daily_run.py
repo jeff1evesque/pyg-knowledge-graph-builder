@@ -89,7 +89,8 @@ for uri in "${uris[@]}"; do
 done
 '''
 
-# A run counts as listed at the destination once an upload of it has succeeded.
+# A run counts as listed at the destination once an upload of it has succeeded, and as
+# in the archive once an archive of it has.
 STUB_PUBLISH = '''import os, sys
 from pathlib import Path
 
@@ -104,6 +105,15 @@ if mode == "--upload":
     if rc == 0:
         (rd / "listed").touch()
     sys.exit(rc)
+if mode == "--archive":
+    with open(os.path.join(os.environ["FAKE_CALLS"], "archive.txt"), "a") as fh:
+        fh.write(" ".join(sys.argv[2:]) + "\\n")
+    rc = int(os.environ.get("FAKE_ARCHIVE_RC", "0"))
+    if rc == 0:
+        (rd / "archived").touch()
+    sys.exit(rc)
+if mode == "--archived":
+    sys.exit(0 if (rd / "archived").exists() else 1)
 sys.exit(0 if mode == "--published" and (rd / "listed").exists() else 1)
 '''
 
@@ -199,7 +209,8 @@ class Schedule:
         for year in years:
             self.put(f"bucket/raw/source=b/feed=x/{year}.snappy.parquet")
 
-    def add_old_run(self, run_id: str, published: bool = True, work_dir=None) -> Path:
+    def add_old_run(self, run_id: str, published: bool = True, work_dir=None,
+                    archived: bool = False) -> Path:
         """An earlier day's run, as this script and the launcher leave it."""
         rd = self.sd / "runs" / run_id
         rd.mkdir(parents=True)
@@ -208,7 +219,20 @@ class Schedule:
         (rd / "run-config.txt").write_text(f"run id      : {run_id}\nwork dir    : {work}\n")
         if published:
             (rd / "listed").touch()
+        if archived:
+            (rd / "archived").touch()
         return work
+
+    def set_archive(self, days=None) -> Path:
+        """An archive root, on a drive that is there, named in env.sh."""
+        root = self.tmp / "drive" / "archive"
+        root.mkdir(parents=True, exist_ok=True)
+        lines = [f'export PYG_SCHEDULE_ARCHIVE_ROOT="{root}"']
+        if days is not None:
+            lines.append(f"export PYG_SCHEDULE_ARCHIVE_DAYS={days}")
+        with open(self.sd / "env.sh", "a") as fh:
+            fh.write("\n".join(lines) + "\n")
+        return root
 
     def run(self, *args: str, **env_changes):
         env = dict(os.environ)
@@ -613,3 +637,108 @@ def test_check_says_when_a_source_is_not_there(schedule):
 
     assert s.run("--check").returncode == 3
     assert "missing: s3a://bucket/quotes/year=2026/month=09/day=30/" in s.log()
+
+
+# --------------------------------------------------------------------------- #
+# The archive: a local drive keeping more days than the work disk
+# --------------------------------------------------------------------------- #
+
+def test_with_an_archive_set_the_day_is_archived_after_its_upload(schedule):
+    s = schedule(retain=2)
+    s.add_sources("2026-09-30")
+    root = s.set_archive(days=5)
+
+    r = s.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert s.recorded("publish").splitlines() == [f"{RUN_ID} --upload", f"{RUN_ID} --archive"]
+    assert s.recorded("archive") == f"--archive {root} --keep-days 5\n"
+    assert "2026-09-30 is published and archived" in s.log()
+
+
+def test_the_archive_keeps_100_days_unless_told_otherwise(schedule):
+    s = schedule()
+    s.add_sources("2026-09-30")
+    s.set_archive()
+
+    assert s.run().returncode == 0
+    assert s.recorded("archive").split()[-2:] == ["--keep-days", "100"]
+
+
+def test_a_failed_archive_fails_the_night_and_blocks_the_prune(schedule):
+    """A missing or unmounted drive: the day stays published and on disk, and no older
+    run goes that night."""
+    s = schedule(retain=1)
+    s.add_sources("2026-09-30")
+    s.set_archive()
+    older = s.add_old_run("20260929T043000Z", archived=True)
+
+    r = s.run(FAKE_ARCHIVE_RC="1")
+    assert r.returncode == 1
+    assert "FAILED: the archive step" in s.log()
+    assert (s.work_root / RUN_ID).is_dir()
+    assert older.is_dir()
+    assert "--published" not in s.recorded("publish")
+
+
+def test_with_an_archive_set_the_prune_keeps_a_run_whose_day_is_not_archived(schedule):
+    s = schedule(retain=1)
+    s.add_sources("2026-09-30")
+    s.set_archive()
+    archived = s.add_old_run("20260929T043000Z", archived=True)
+    not_archived = s.add_old_run("20260928T043000Z")
+
+    r = s.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not archived.exists()
+    assert not_archived.is_dir()
+    assert (s.sd / "runs" / "20260928T043000Z").is_dir()
+    assert "kept 20260928T043000Z: its day is not in the archive" in s.log()
+
+
+def test_with_no_archive_set_the_night_is_what_it_was(schedule):
+    s = schedule(retain=1)
+    s.add_sources("2026-09-30")
+    older = s.add_old_run("20260929T043000Z")
+
+    r = s.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not older.exists()
+    assert "--archive" not in s.recorded("publish")
+    assert s.recorded("archive") == ""
+    assert "archiving" not in s.log()
+    assert "published as run" in s.log()
+
+
+@pytest.mark.parametrize("days", ["2", "0", "many"])
+def test_an_archive_keeping_no_more_days_than_the_runs_kept_is_refused(schedule, days):
+    """A run past the newest kept is pruned only once its day is archived; an archive
+    keeping no more days would already have dropped the day, and the run would stay."""
+    s = schedule(retain=2)
+    s.add_sources("2026-09-30")
+    s.set_archive(days=days)
+
+    assert s.run().returncode == 2
+    assert "PYG_SCHEDULE_ARCHIVE_DAYS must be more than PYG_SCHEDULE_RETAIN_RUNS" in s.log()
+    assert s.recorded("launcher") == ""
+
+
+def test_an_archive_root_that_is_not_an_absolute_path_is_refused(schedule):
+    s = schedule()
+    s.add_sources("2026-09-30")
+    with open(s.sd / "env.sh", "a") as fh:
+        fh.write("export PYG_SCHEDULE_ARCHIVE_ROOT=drive/archive\n")
+
+    assert s.run().returncode == 2
+    assert "PYG_SCHEDULE_ARCHIVE_ROOT must be an absolute path" in s.log()
+
+
+def test_check_names_the_archive_and_says_when_it_is_not_there(schedule):
+    s = schedule()
+    s.add_sources("2026-09-30")
+    root = s.set_archive(days=7)
+
+    assert s.run("--check").returncode == 0
+    assert f"archives into {root}, keeping the newest 7 days" in s.log()
+    root.rmdir()
+    assert s.run("--check").returncode == 0
+    assert f"the archive root {root} is not there" in s.log()
