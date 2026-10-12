@@ -466,8 +466,62 @@ def test_graph_schema_version_is_bumped_for_the_new_semantics():
     1.6 lets sources and sources_in_graph name a feed beside its source. No
     field changes, but a consumer matching names against the registered
     sources has to know a name may be a feed's.
+
+    1.7 adds each node type's stored_dim and build_metadata.node_feature_dim.
+    Additive: at 1.6 the only node width in the file is pipeline_config's
+    vector_dim, which since #443 is not the width of the option type's x, 98%
+    of the nightly's nodes. The version tells a consumer whether to read a
+    type's width here or go to feature_spec.json for it.
     """
-    assert _fully_registered_collector()._build_graph_schema()["version"] == "1.6"
+    assert _fully_registered_collector()._build_graph_schema()["version"] == "1.7"
+
+
+# ======================================================================
+# graph_schema.json — each node type's width (1.7)
+# ======================================================================
+
+def test_graph_schema_stored_dim_is_the_width_registered_for_each_type():
+    """A type registered narrower than vector_dim keeps its own width: the
+    nightly's option type is 173 wide in a 1024 layout."""
+    c = _fully_registered_collector()
+    c.register_node_feature_widths({"Observation": 173, "Company": 1024})
+
+    nodes = c._build_graph_schema()["node_types"]
+    assert nodes["Observation"]["stored_dim"] == 173
+    assert nodes["Company"]["stored_dim"] == 1024
+
+
+def test_graph_schema_stored_dim_is_zero_when_no_width_was_registered():
+    """Present, and 0, for a collector that never reached Step 5: an unknown
+    width is not guessed as vector_dim, as has_features is not guessed True."""
+    c = MetadataCollector("2099-01", 1024, 64, True, {})
+    c.register_node_types(
+        node_counts={"Empty": 0, "Populated": 7},
+        node_type_uris={"Empty": "http://ex/Empty"},
+    )
+    c.register_node_feature_widths({"Populated": 1024})
+
+    nodes = c._build_graph_schema()["node_types"]
+    assert nodes["Empty"]["stored_dim"] == 0
+    assert nodes["Populated"]["stored_dim"] == 1024
+    assert all(
+        entry["stored_dim"] == 0
+        for entry in _collector_reading_four_sources(
+            node_type_uris={"cpi_Index": f"{CPI}Index"},
+        )._build_graph_schema()["node_types"].values()
+    )
+
+
+@pytest.mark.parametrize("vector_dim", [1024, 512])
+def test_graph_schema_node_feature_dim_is_the_layouts_width(vector_dim):
+    """feature_spec.json's total_dim, whatever a trimmed type stores."""
+    c = MetadataCollector("2099-01", vector_dim, 64, True, {})
+    c.register_node_types(node_counts={"A": 1}, node_type_uris={})
+    c.register_node_feature_widths({"A": 173})
+
+    meta = c._build_graph_schema()["build_metadata"]
+    assert meta["node_feature_dim"] == vector_dim
+    assert meta["node_feature_dim"] == c._build_feature_spec()["node_features"]["total_dim"]
 
 
 # ======================================================================
@@ -966,6 +1020,21 @@ def test_latest_alias_carries_the_day(tmp_path):
 
     written = json.loads((latest / "graph_schema.json").read_text())
     assert written["build_metadata"]["day"] == "2026-09-24"
+
+
+def test_latest_alias_carries_the_widths(tmp_path):
+    """The one file the site reads tells it the option type is stored narrower."""
+    collector = _fully_registered_collector()
+    collector.register_node_feature_widths({"Observation": 173, "Company": 1024})
+    latest = tmp_path / "latest" / "metadata"
+
+    write_latest_alias(collector.to_metadata_files(), str(latest))
+
+    written = json.loads((latest / "graph_schema.json").read_text())
+    assert written["build_metadata"]["node_feature_dim"] == 1024
+    assert {name: entry["stored_dim"] for name, entry in written["node_types"].items()} == {
+        "Observation": 173, "Company": 1024,
+    }
 
 
 def test_latest_alias_overwrites_so_the_pointer_tracks_the_newest_build(
