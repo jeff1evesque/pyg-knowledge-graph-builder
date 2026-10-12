@@ -531,6 +531,27 @@ def _assert_trimming_loses_only_what_it_reports(spark, work, trimmed_config):
         "a model sized to the trimmed layout must not load an untrimmed graph"
     )
 
+    # graph_schema.json 1.7 (#446): each build reports every type's x width, so
+    # a reader holding only that file can tell the option type is narrower in
+    # the trimmed build, and that every type is full in the untrimmed one.
+    def schema(config):
+        return json.loads(
+            (Path(derive_metadata_prefix(config.pyg_output_path))
+             / "graph_schema.json").read_bytes()
+        )
+
+    for config, graph in ((trimmed_config, trimmed), (untrimmed_config, untrimmed)):
+        published = schema(config)
+        assert published["build_metadata"]["node_feature_dim"] == spec["total_dim"]
+        widths = {nt: published["node_types"][nt]["stored_dim"] for nt in graph.node_types}
+        assert widths == {nt: graph[nt].x.shape[1] for nt in graph.node_types}, (
+            f"{config.pyg_output_path}: graph_schema.json's stored_dim disagrees with x"
+        )
+    for nt in entries:
+        assert schema(trimmed_config)["node_types"][nt]["stored_dim"] < spec["total_dim"]
+    assert {entry["stored_dim"] for entry in
+            schema(untrimmed_config)["node_types"].values()} == {spec["total_dim"]}
+
 
 # --------------------------------------------------------------------------- #
 # reproducibility — the same input must yield an identical graph
