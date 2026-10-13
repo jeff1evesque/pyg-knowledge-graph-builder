@@ -707,6 +707,19 @@ written so that one file serves every day:
   the paths, so the schedule writes the data day into the run's `env.sh` as
   `PYG_PUBLISH_DATA_DAY`. The notebook passes it to the job as `--source_data_day`, the
   job records it in `dataset.json`, and the publish reads it from there.
+- **Day files published only on federal workdays go in `PYG_HOLIDAY_OPTIONAL_SOURCE_PATHS`.**
+  The SEC filings day file is one: EDGAR takes no filings on a federal holiday, and
+  upstream writes no file for a day without filings, but the market can still trade, as
+  on Columbus Day and Veterans Day. These are written like `PYG_SOURCE_PATHS` and
+  required like them, except on a federal holiday, when a missing one is left out, the
+  day builds from the rest, and `daily.log` says so:
+  `left out: <path>: 2026-10-12 is Columbus Day, a federal holiday`. The calendar is
+  [`bin/federal_holidays.py`](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/blob/master/bin/federal_holidays.py):
+  the holidays of 5 U.S.C. 6103(a), one on a Saturday observed on the Friday before and
+  one on a Sunday on the Monday after. A Saturday New Year's Day therefore makes the
+  Friday before it, Dec 31, a holiday, and the market trades that day. One-off closings,
+  such as by executive order, go in `PYG_EXTRA_CLOSED_DAYS`, comma separated and
+  written `YYYY-MM-DD`. A market holiday still skips, because its quotes are missing.
 - **The schedule block.** `PYG_SCHEDULE_ONCALENDAR`, `PYG_SCHEDULE_UNIT`,
   `PYG_SCHEDULE_DATA_LAG_DAYS` and `PYG_SCHEDULE_RETAIN_RUNS`, and `PYG_PUBLISH_ROOT` with
   its companions: a schedule publishes, and its prune depends on that.
@@ -762,7 +775,8 @@ runs it, with `bin/daily_run.sh --data-date YYYY-MM-DD <schedule-dir>`.
   publish step leave. Under the timer, `journalctl --user -u pyg-daily` has the same lines.
 - **Exit codes.** `0` published (and archived); `1` the staging, the run, the publish or
   the archive failed, and the run stays; `2` refused before the run started; `3` skipped,
-  because a source is not there — upstream is late, or the market was shut. The unit counts `3` as success, so a
+  because a source is not there — upstream is late, the market was shut, or a
+  holiday-optional source is missing on a day that isn't a federal holiday. The unit counts `3` as success, so a
   late upstream write does not read as a failed unit.
 - **Only what the schedule made is removed.** The newest `PYG_SCHEDULE_RETAIN_RUNS` runs
   are kept whole. An older run loses its work directory and its run directory together,
