@@ -171,6 +171,14 @@ export PYG_TIME_PERIOD=YYYY-MM
 # snapshot is late builds from an earlier one.
 # export PYG_LATEST_SOURCE_PREFIXES="s3a://BUCKET/raw/source=sec/feed=companyfacts_snapshot/"
 # export PYG_LATEST_SOURCE_LOOKBACK_DAYS=7
+# Day files published only on federal workdays, such as the SEC filings day file: EDGAR
+# takes no filings on a federal holiday, though the market may trade. Written like
+# PYG_SOURCE_PATHS and required like it, except on a federal holiday
+# (bin/federal_holidays.py), when a missing one is left out, the day builds from the
+# rest, and the log says so. One-off closings, such as by executive order, are listed in
+# PYG_EXTRA_CLOSED_DAYS.
+# export PYG_HOLIDAY_OPTIONAL_SOURCE_PATHS="s3a://BUCKET/raw/source=sec/feed=filings/year=${PYG_DATA_YEAR}/month=${PYG_DATA_MONTH}/${PYG_DATA_DAY}.snappy.parquet"
+# export PYG_EXTRA_CLOSED_DAYS=YYYY-MM-DD,YYYY-MM-DD
 # On a unified-memory host RAPIDS sizes its pool from MemFree; see bin/mem_reclaim.py.
 # export PYG_MEMFREE_GATE_GB=90
 # export PYG_EXPECTED_WORKERS=2                 # the notebook checks the same count
