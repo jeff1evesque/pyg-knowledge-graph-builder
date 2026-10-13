@@ -433,6 +433,124 @@ def test_a_look_back_that_is_not_a_number_of_days_is_refused(schedule, lookback)
 
 
 # --------------------------------------------------------------------------- #
+# A source published only on federal workdays
+# --------------------------------------------------------------------------- #
+
+FILINGS = "bucket/raw/source=d/feed=filings/"
+COLUMBUS_DAY = "2026-10-12"     # the market traded, and EDGAR took no filings
+THE_DAY_AFTER = "2026-10-13"    # a Tuesday like any other
+
+
+def _filings_key(day):
+    y, m, d = day.split("-")
+    return f"{FILINGS}year={y}/month={m}/{d}.snappy.parquet"
+
+
+def _reading_a_holiday_optional_source(s, *days, extra_closed_days=None):
+    """env.sh names a day file published only on federal workdays, as the SEC filings
+    file is, and the bucket holds these days' files."""
+    month = "year=${PYG_DATA_YEAR:?}/month=${PYG_DATA_MONTH}"
+    lines = ["export PYG_HOLIDAY_OPTIONAL_SOURCE_PATHS="
+             f'"s3a://{FILINGS}{month}/${{PYG_DATA_DAY}}.snappy.parquet"']
+    if extra_closed_days is not None:
+        lines.append(f'export PYG_EXTRA_CLOSED_DAYS="{extra_closed_days}"')
+    with (s.sd / "env.sh").open("a") as fh:
+        fh.write("\n".join(lines) + "\n")
+    for day in days:
+        s.put(_filings_key(day))
+
+
+def test_a_holiday_leaves_out_a_missing_holiday_optional_source(schedule):
+    """Columbus Day: the market traded, but the filings file never comes, because EDGAR
+    took no filings. Skipping would lose a trading day. The run's env.sh names what the
+    run read, so not the file left out."""
+    s = schedule()
+    s.add_sources(COLUMBUS_DAY)
+    _reading_a_holiday_optional_source(s)
+
+    r = s.run("--data-date", COLUMBUS_DAY)
+    assert r.returncode == 0, r.stdout + r.stderr
+    left_out = f"s3a://{_filings_key(COLUMBUS_DAY)}"
+    assert f"left out: {left_out}: 2026-10-12 is Columbus Day, a federal holiday" in s.log()
+    assert "s3a://bucket/quotes/year=2026/month=10/day=12/" in s.recorded("launcher-sources")
+    assert FILINGS not in s.recorded("launcher-sources")
+    assert FILINGS not in s.recorded("stage")
+    assert left_out not in (s.sd / "runs" / RUN_ID / "env.sh").read_text()
+
+
+def test_a_missing_holiday_optional_source_skips_a_day_that_is_not_a_holiday(schedule):
+    """The day after, a missing filings file means upstream is late."""
+    s = schedule()
+    s.add_sources(THE_DAY_AFTER)
+    _reading_a_holiday_optional_source(s)
+
+    assert s.run("--data-date", THE_DAY_AFTER).returncode == 3
+    assert f"missing: s3a://{_filings_key(THE_DAY_AFTER)}" in s.log()
+    assert "left out" not in s.log()
+    assert s.recorded("launcher") == ""
+
+
+@pytest.mark.parametrize("day", [COLUMBUS_DAY, THE_DAY_AFTER], ids=["a holiday", "a workday"])
+def test_a_holiday_optional_source_that_is_there_is_read(schedule, day):
+    s = schedule()
+    s.add_sources(day)
+    _reading_a_holiday_optional_source(s, day)
+
+    r = s.run("--data-date", day)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"s3a://{_filings_key(day)}" in s.recorded("launcher-sources")
+    assert "left out" not in s.log()
+
+
+def test_a_day_in_the_extra_closed_days_counts_as_a_holiday(schedule):
+    """A one-off closing by executive order, which no rule of the calendar knows."""
+    s = schedule()
+    s.add_sources(THE_DAY_AFTER)
+    _reading_a_holiday_optional_source(s, extra_closed_days=f"2026-12-24, {THE_DAY_AFTER}")
+
+    r = s.run("--data-date", THE_DAY_AFTER)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (f"left out: s3a://{_filings_key(THE_DAY_AFTER)}: 2026-10-13 is a federal "
+            "closing named in PYG_EXTRA_CLOSED_DAYS") in s.log()
+
+
+@pytest.mark.parametrize("days", ["2026-13-01", "Oct 13"])
+def test_an_extra_closed_day_that_is_not_a_date_is_refused(schedule, days):
+    """A typo would otherwise drop the closing unseen, and the day would skip."""
+    s = schedule()
+    s.add_sources(THE_DAY_AFTER)
+    _reading_a_holiday_optional_source(s, extra_closed_days=days)
+
+    assert s.run("--data-date", THE_DAY_AFTER).returncode == 2
+    assert "PYG_EXTRA_CLOSED_DAYS" in s.log()
+
+
+def test_a_missing_required_source_still_skips_a_holiday(schedule):
+    """Only a holiday-optional source may be missing. On Thanksgiving the market is shut
+    too, and its missing quotes skip the day as before."""
+    s = schedule()
+    s.put("bucket/raw/source=a/year=2026/month=11/26.snappy.parquet")
+    s.put("bucket/raw/source=b/feed=x/2025.snappy.parquet")
+    _reading_a_holiday_optional_source(s)
+
+    assert s.run("--data-date", "2026-11-26").returncode == 3
+    assert "missing: s3a://bucket/quotes/year=2026/month=11/day=26/" in s.log()
+    assert s.recorded("launcher") == ""
+
+
+def test_check_says_which_source_a_holiday_leaves_out(schedule):
+    s = schedule()
+    s.add_sources(COLUMBUS_DAY)
+    _reading_a_holiday_optional_source(s)
+
+    r = s.run("--check", "--data-date", COLUMBUS_DAY)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (f"left out: s3a://{_filings_key(COLUMBUS_DAY)}: 2026-10-12 is Columbus Day, "
+            "a federal holiday") in s.log()
+    assert s.recorded("launcher") == ""
+
+
+# --------------------------------------------------------------------------- #
 # The prune: only what this schedule made
 # --------------------------------------------------------------------------- #
 

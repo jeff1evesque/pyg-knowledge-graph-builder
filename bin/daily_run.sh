@@ -20,7 +20,8 @@
 #
 # IN ORDER
 #   refuse a checkout with uncommitted changes, and log the commit that runs
-#   check that every source is there; a missing one skips the day
+#   check that every source is there; a missing one skips the day, unless it is a
+#   holiday-optional source and the day is a federal holiday
 #   wait for an idle cluster
 #   stage the sources when the run reads a local mirror, then remove the local copies
 #   this schedule downloaded that today's run does not read
@@ -63,6 +64,18 @@
 #                                   hold numbers its market data could not have seen.
 #   PYG_LATEST_SOURCE_LOOKBACK_DAYS optional. How many days before the data day such
 #                                   a file may be from, 1 or more; default 7.
+#   PYG_HOLIDAY_OPTIONAL_SOURCE_PATHS
+#                                   optional, comma separated. Day files written like
+#                                   PYG_SOURCE_PATHS that are published only on federal
+#                                   workdays, such as the SEC filings day file: EDGAR
+#                                   takes no filings on a federal holiday, though the
+#                                   market may trade. Each is required like the others,
+#                                   except on a federal holiday (bin/federal_holidays.py),
+#                                   when a missing one is left out and the day builds
+#                                   from the rest.
+#   PYG_EXTRA_CLOSED_DAYS           optional, comma separated YYYY-MM-DD. One-off
+#                                   federal closings, such as by executive order, that
+#                                   count as federal holidays for the setting above.
 #   PYG_MEMFREE_GATE_GB             optional. MemFree every node must reach first.
 #   PYG_EXPECTED_WORKERS            optional. ALIVE workers on an idle cluster;
 #                                   default, the number of PYG_STAGE_NODES.
@@ -84,11 +97,15 @@
 #   2  refused before the run started: a setting, a dirty checkout, sources that
 #      could not be listed, a busy cluster, or memory that would not come free
 #   3  skipped: a source is not there, because upstream is late or the day has
-#      none, as on a market holiday. Kept apart from 1 so that a late upstream
+#      none, as on a market holiday, or a holiday-optional source is missing on a
+#      day that is not a federal holiday. Kept apart from 1 so that a late upstream
 #      write does not make the failure signal mean nothing.
 #
 # Nothing in this file names a host, a bucket or a path.
 set -uo pipefail
+
+# This script's own folder, for bin/federal_holidays.py beside it.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   echo "usage: $(basename "$0") [--check] [--data-date YYYY-MM-DD] <schedule-dir>" >&2
@@ -251,19 +268,36 @@ fi
 # ---------------------------------------------------------------------------
 # The sources: every one there, or the day is skipped
 # ---------------------------------------------------------------------------
+# On a federal holiday, or a closing named in PYG_EXTRA_CLOSED_DAYS, a holiday-optional
+# source may be missing. CLOSED says which, for the log, and is empty on any other day.
+CLOSED=""
+IFS=',' read -ra extra_days <<< "${PYG_EXTRA_CLOSED_DAYS:-}"
+for extra in "${extra_days[@]}"; do
+  extra="${extra//[[:space:]]/}"
+  [[ -n "$extra" ]] || continue
+  valid_date "$extra" \
+    || refuse "PYG_EXTRA_CLOSED_DAYS must list dates written YYYY-MM-DD, got '$extra'"
+  [[ "$extra" == "$DATA_DATE" ]] && CLOSED="a federal closing named in PYG_EXTRA_CLOSED_DAYS"
+done
+if [[ -z "$CLOSED" ]]; then
+  holiday="$(python3 "$HERE/federal_holidays.py" "$DATA_DATE")" \
+    || refuse "bin/federal_holidays.py could not read the day $DATA_DATE"
+  [[ -z "$holiday" ]] || CLOSED="$holiday, a federal holiday"
+fi
+
 SOURCES=()
 LOOKBACK="${PYG_LATEST_SOURCE_LOOKBACK_DAYS:-7}"
 [[ "$LOOKBACK" =~ ^[1-9][0-9]*$ ]] \
   || refuse "PYG_LATEST_SOURCE_LOOKBACK_DAYS must be a whole number of days, 1 or more, got '$LOOKBACK'"
-listed="$(python3 - "$DATA_DATE" "${PYG_SOURCE_PATHS:-}" "${PYG_YEARLY_SOURCE_PREFIXES:-}" \
-  "${PYG_LATEST_SOURCE_PREFIXES:-}" "$LOOKBACK" <<'PY'
+listed="$(python3 - "$DATA_DATE" "${PYG_SOURCE_PATHS:-}" "${PYG_HOLIDAY_OPTIONAL_SOURCE_PATHS:-}" \
+  "$CLOSED" "${PYG_YEARLY_SOURCE_PREFIXES:-}" "${PYG_LATEST_SOURCE_PREFIXES:-}" "$LOOKBACK" <<'PY'
 import datetime
 import json
 import re
 import subprocess
 import sys
 
-day, dated, yearly, latest, lookback = sys.argv[1:6]
+day, dated, optional, closed, yearly, latest, lookback = sys.argv[1:8]
 year = int(day[:4])
 
 
@@ -284,16 +318,30 @@ def keys(bucket, prefix):
     return [item["Key"] for item in body.get("Contents") or []]
 
 
-missing = 0
-for uri in filter(None, (p.strip() for p in dated.split(","))):
+def there(uri):
     scheme, bucket, key = split(uri)
     found = keys(bucket, key)
     # A path ending in / is a directory and needs something under it. Any other path
     # names one object, and a key that only starts with it, such as a .tmp upload,
     # is not that object.
-    there = bool(found) if uri.endswith("/") else key in found
-    if there:
+    return bool(found) if uri.endswith("/") else key in found
+
+
+missing = 0
+for uri in filter(None, (p.strip() for p in dated.split(","))):
+    if there(uri):
         print(f"SOURCE {uri}")
+    else:
+        print(f"missing: {uri}")
+        missing += 1
+
+# Published only on federal workdays: on a federal holiday a missing one will not come,
+# and the day builds without it. On any other day it is required like the rest.
+for uri in filter(None, (p.strip() for p in optional.split(","))):
+    if there(uri):
+        print(f"SOURCE {uri}")
+    elif closed:
+        print(f"left out: {uri}: {day} is {closed}")
     else:
         print(f"missing: {uri}")
         missing += 1
