@@ -14,7 +14,6 @@ picked source's date predicates, or its period collector, from the same specs:
     - Temporal sequences (precedes links)
     - Sector classification (belongsToSector)
     - Cross-dataset correlations (correlatesWith)
-    - Hierarchical enrichment (hasParent chains)
 - **SEC Intra-Source Enricher**
     - Company unification (owl:sameAs by CIK)
     - Person unification (owl:sameAs by CIK)
@@ -60,7 +59,6 @@ Discovers and creates relationships within each data source family:
 
 **Within BLS Economic Data** (10 categories, ~100 mappers)
 - Links related indicators across CPI, PPI, ECI, EMPSIT, JOLTS, LAUS, METRO, REALER, WKYENG, XIMPIM
-- Connects hierarchical category structures (e.g., All Items → Food → Food at Home)
 - Establishes temporal sequences within each indicator
 - Correlates related measurements (e.g., CPI Food ↔ PPI Food Manufacturing)
 
@@ -324,19 +322,24 @@ laus:UnemploymentRate a bls:RateMeasurement .
 
 ```turtle
 # ============================================
-# Pattern 1: Hierarchical Relationships
+# Pattern 1: Category Trees (upstream states them; enrichment adds none)
 # ============================================
-# CPI category hierarchy (captured in raw RDF by mappers)
-cpi:AllItems_Entity a cpi:AllItems ;
-    rdfs:label "All items" .
-
-cpi:AllItems_Food_Entity a cpi:Food ;
+# A category's local name is its own name only, so the parent cannot be
+# read off the name. The mappers state it in the raw RDF.
+cpi:Food_Entity a cpi:Category ;
     rdfs:label "Food" ;
-    cpi:hasParent cpi:AllItems_Entity .
+    cpi:hasParent cpi:Food_and_beverages_Entity .
 
-cpi:AllItems_Food_FoodAtHome_Entity a cpi:FoodAtHome ;
+cpi:Food_at_home_Entity a cpi:Category ;
     rdfs:label "Food at home" ;
-    cpi:hasParent cpi:AllItems_Food_Entity .
+    cpi:hasParent cpi:Food_Entity .
+
+cpi:Cereals_and_bakery_products_Entity a cpi:Category ;
+    rdfs:label "Cereals and bakery products" ;
+    cpi:hasParent cpi:Food_at_home_Entity .
+
+# The other trees: ppi:hasParentCommodity, jolts:hasParent (industries) and
+# empsit:hasParentIndustry. All of them reach the graph unchanged.
 
 # ============================================
 # Pattern 2: Temporal Sequences (enrichment adds)
