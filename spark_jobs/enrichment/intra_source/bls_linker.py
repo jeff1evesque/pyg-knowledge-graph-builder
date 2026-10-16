@@ -11,7 +11,10 @@ Enrichment steps:
 1. Link temporal sequences (delegated to per-dataset sub-enrichers)
 2. Apply sector patterns (keyword matching against category URIs)
 3. Apply known correlations (cross-dataset economic relationships)
-4. Link category hierarchies (parent-child from URI path structure)
+
+Category parents are not made here. Upstream states them (cpi:hasParent,
+ppi:hasParentCommodity, jolts:hasParent, empsit:hasParentIndustry), and they
+reach the graph as they are. #450
 
 Note: Temporal unification (Step 1 of the old rdflib orchestrator) is now
 handled by the standalone TemporalUnifier in pipeline.py Phase 2.
@@ -48,7 +51,6 @@ logger = logging.getLogger(__name__)
 _RDF_TYPE = str(RDF.type)
 _RDFS_LABEL = str(RDFS.label)
 _BELONGS_TO_SECTOR = str(BLS_ENRICHMENT.belongsToSector)
-_HAS_PARENT = str(BLS_ENRICHMENT.hasParent)
 
 # IDENTIFIER prefixes for dataset detection and filtering.
 #
@@ -103,8 +105,8 @@ class BLSIntraSourceLinker:
     """
     PySpark-based BLS intra-source enrichment orchestrator.
 
-    Handles orchestrator-level enrichment (sectors, correlations, hierarchies)
-    and delegates temporal sequence linking to per-dataset sub-enrichers.
+    Handles orchestrator-level enrichment (sectors, correlations) and
+    delegates temporal sequence linking to per-dataset sub-enrichers.
 
     All methods:
     1. Read from self._bls_triples (cached BLS subset)
@@ -152,21 +154,23 @@ class BLSIntraSourceLinker:
 
         new_dfs: List[DataFrame] = []
 
+        # Three steps, not four. The fourth guessed each category's parent by
+        # dropping the last word or two of its local name. Upstream names no
+        # longer spell out the path, so on the 2026-10-15 data it made 36 cpi
+        # links: 7 agreed with upstream's parent and 9 pointed the wrong way.
+        # Upstream states every parent itself; see the module docstring. #450
+
         # Step 1: Link temporal sequences (delegated to sub-enrichers)
-        logger.info("\n[Step 1/4] Linking temporal sequences...")
-        self._append(new_dfs, self._link_temporal_sequences(), "[Step 1/4]")
+        logger.info("\n[Step 1/3] Linking temporal sequences...")
+        self._append(new_dfs, self._link_temporal_sequences(), "[Step 1/3]")
 
         # Step 2: Apply sector patterns
-        logger.info("\n[Step 2/4] Applying sector patterns...")
-        self._append(new_dfs, self._apply_sector_patterns(), "[Step 2/4]")
+        logger.info("\n[Step 2/3] Applying sector patterns...")
+        self._append(new_dfs, self._apply_sector_patterns(), "[Step 2/3]")
 
         # Step 3: Apply known correlations
-        logger.info("\n[Step 3/4] Applying known correlations...")
-        self._append(new_dfs, self._apply_known_correlations(), "[Step 3/4]")
-
-        # Step 4: Link category hierarchies
-        logger.info("\n[Step 4/4] Linking category hierarchies...")
-        self._append(new_dfs, self._link_category_hierarchies(), "[Step 4/4]")
+        logger.info("\n[Step 3/3] Applying known correlations...")
+        self._append(new_dfs, self._apply_known_correlations(), "[Step 3/3]")
 
         if not new_dfs:
             self._bls_triples.unpersist()
@@ -180,7 +184,7 @@ class BLSIntraSourceLinker:
         all_new = all_new.cache()
         total = all_new.count()
 
-        # Unpersist after the count, not before it. Steps 1-4 only build lazy
+        # Unpersist after the count, not before it. Steps 1-3 only build lazy
         # frames, so this count is the first thing that reads them; dropping the
         # cache above it meant the count rebuilt the subset from the source
         # frame instead of reading what we had just cached. #380
@@ -207,7 +211,7 @@ class BLSIntraSourceLinker:
 
         Naming the dataset in one column and taking the distinct values reads
         the data once, collects at most one row per dataset, and fills the
-        cache the four steps below need anyway.
+        cache the steps below need anyway.
         """
         names = list(DATASET_NS_MAP)
         dataset = F.when(
@@ -486,170 +490,3 @@ class BLSIntraSourceLinker:
         result = reduce(DataFrame.unionAll, new_dfs)
         logger.info("  Correlation triples prepared (lazy)")
         return result
-
-    # ================================================================
-    # Step 4: Category hierarchies
-    # ================================================================
-
-    def _link_category_hierarchies(self) -> Optional[DataFrame]:
-        """
-        Link category hierarchies based on URI path structure.
-
-        BLS category URIs encode hierarchy in their path:
-            cpi:All_items_Food_Food_at_home_Entity
-                → hasParent → cpi:All_items_Food_Entity
-            cpi:All_items_Food_Entity
-                → hasParent → cpi:All_items_Entity
-
-        Strategy:
-        1. Collect all _Entity URIs
-        2. For each, extract the path (remove namespace + _Entity suffix)
-        3. Generate candidate parent paths by progressively removing trailing segments
-        4. Join candidates against existing entities to find actual parents
-        5. Keep only the immediate parent (longest matching parent path)
-        """
-        # Get all category entities across all BLS datasets
-        all_categories = (
-            self._bls_triples
-            .select("subject")
-            .distinct()
-            .filter(F.col("subject").endswith("_Entity"))
-        )
-
-        if all_categories.head(1) == []:
-            return None
-
-        # Extract namespace and local path
-        # URI format: {namespace}{path}_Entity
-        # We need to split into namespace + path
-        # substring_index, not a regex. RAPIDS cannot put "([^/]+)$" on the GPU
-        # -- it rejects an end anchor after a variable-length match -- and one
-        # rejected expression puts the whole Project on the CPU. Same answer:
-        # everything after the last "/". #380
-        all_categories = all_categories.withColumn(
-            "local_name",
-            F.substring_index(F.col("subject"), "/", -1)
-        ).withColumn(
-            "namespace",
-            F.regexp_extract(F.col("subject"), r"^(.+/)", 1)
-        ).withColumn(
-            "path",
-            F.regexp_replace(F.col("local_name"), "_Entity$", "")
-        ).filter(
-            F.length(F.col("path")) > 0
-        )
-
-        # Count path segments to determine hierarchy depth
-        all_categories = all_categories.withColumn(
-            "segment_count",
-            F.size(F.split(F.col("path"), "_"))
-        )
-
-        # Only entities with >1 segment can have parents
-        children = all_categories.filter(F.col("segment_count") > 1)
-
-        if children.head(1) == []:
-            return None
-
-        # Generate candidate parent paths by removing trailing segments
-        # For path "A_B_C_D", candidates are: "A_B_C", "A_B", "A"
-        # We want the longest match (immediate parent)
-        #
-        # Strategy: explode each child into multiple candidate rows,
-        # one per possible parent depth, then join against existing entities.
-
-        # First, build a lookup of all existing (namespace, path) pairs
-        existing_paths = (
-            all_categories
-            .select(
-                F.col("namespace").alias("parent_ns"),
-                F.col("path").alias("parent_path"),
-                F.col("subject").alias("parent_uri"),
-            )
-        )
-
-        # For children, generate the immediate parent candidate (remove last segment)
-        # This handles the most common case. For deeper gaps, we'd need iteration,
-        # but the rdflib version also only linked to the immediate parent
-        # (break after first match).
-        # Keep all but the last "_" segment. segment_count is already on the
-        # frame, so substring_index can say how many to keep and we drop the
-        # "_[^_]+$" regex RAPIDS will not run on the GPU. #380
-        children_with_parent_path = children.withColumn(
-            "parent_path_candidate",
-            F.expr("substring_index(path, '_', segment_count - 1)")
-        ).filter(
-            # Ensure we actually removed something
-            F.col("parent_path_candidate") != F.col("path")
-        )
-
-        # Join against existing entities to find actual parents
-        # Try immediate parent first (one segment removed)
-        depth1_matched = (
-            children_with_parent_path
-            .join(
-                existing_paths,
-                on=(
-                    (children_with_parent_path.namespace == existing_paths.parent_ns) &
-                    (children_with_parent_path.parent_path_candidate == existing_paths.parent_path)
-                ),
-                how="inner",
-            )
-            .select(
-                F.col("subject"),
-                F.col("parent_uri"),
-                F.lit(1).alias("depth"),
-            )
-        )
-
-        # Entities that didn't match at depth 1
-        unmatched_at_d1 = (
-            children_with_parent_path
-            .join(
-                depth1_matched.select("subject").distinct(),
-                on="subject",
-                how="left_anti",
-            )
-        )
-
-        # Try removing two segments for entities where immediate parent doesn't exist
-        # Same rewrite as above, one segment deeper. The length guard is new:
-        # the old regex left a single-segment candidate untouched, so the "!="
-        # filter dropped it, while substring_index with a count of 0 returns an
-        # empty string that would pass. #380
-        depth2_candidates = unmatched_at_d1.withColumn(
-            "parent_path_d2",
-            F.expr("substring_index(parent_path_candidate, '_', segment_count - 2)")
-        ).filter(
-            (F.col("parent_path_d2") != F.col("parent_path_candidate")) &
-            (F.length(F.col("parent_path_d2")) > 0)
-        )
-
-        depth2_matched = (
-            depth2_candidates
-            .join(
-                existing_paths,
-                on=(
-                    (depth2_candidates.namespace == existing_paths.parent_ns) &
-                    (depth2_candidates.parent_path_d2 == existing_paths.parent_path)
-                ),
-                how="inner",
-            )
-            .select(
-                F.col("subject"),
-                F.col("parent_uri"),
-                F.lit(2).alias("depth"),
-            )
-        )
-
-        # Union both depths, keeping the closest parent (depth-1 preferred)
-        all_matched = depth1_matched.unionAll(depth2_matched)
-
-        hierarchy_triples = all_matched.select(
-            F.col("subject"),
-            F.lit(_HAS_PARENT).alias("predicate"),
-            F.col("parent_uri").alias("object"),
-        )
-
-        logger.info("  Hierarchy triples prepared (lazy)")
-        return hierarchy_triples

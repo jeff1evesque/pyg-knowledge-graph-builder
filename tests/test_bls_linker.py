@@ -10,7 +10,8 @@ Covered:
   - normalize_keyword_for_uri_matching (pure helper)
   - BLSDatasetEnricher.link_temporal_sequences (precedes chains, per-category
     partitioning, chronological ordering)
-  - BLSIntraSourceLinker.enrich end-to-end (temporal + sector + hierarchy)
+  - BLSIntraSourceLinker.enrich end-to-end (temporal + sector)
+  - enrich does not guess category parents from names (#450)
   - BLS is still found when another source outnumbers it
   - No-BLS input short-circuits to an empty result
   - The per-dataset config maps agree with each other, and detection names
@@ -41,6 +42,7 @@ CPI_INDEX = str(CPI.Index)
 HAS_CATEGORY = str(CPI.hasCategory)
 HAS_MONTH = str(CPI.hasMonth)
 HAS_YEAR = str(CPI.hasYear)
+CPI_HAS_PARENT = str(CPI.hasParent)
 
 PRECEDES = str(BLS_ENRICHMENT.precedes)
 BELONGS_TO_SECTOR = str(BLS_ENRICHMENT.belongsToSector)
@@ -272,24 +274,21 @@ def test_a_measurement_dated_twice_does_not_precede_itself(spark, make_triples):
 # BLSIntraSourceLinker.enrich (end-to-end orchestration)
 # ======================================================================
 
-def test_enrich_produces_temporal_sector_and_hierarchy(spark, make_triples):
+def test_enrich_produces_temporal_and_sector(spark, make_triples):
     """
     One enrich() pass over a small CPI graph should yield:
       - precedes chain across the temporal measurements
       - belongsToSector link for the Food category entity
-      - hasParent link from the child category to its parent
     """
-    parent = _cpi("All_items_Entity")
-    child = _cpi("All_items_Food_Entity")
+    category = _cpi("All_items_Food_Entity")
 
     rows = [
-        # Category entities must appear as subjects to be seen by the
-        # sector / hierarchy steps (they scan subjects ending in _Entity).
-        (parent, RDFS_LABEL, "All items"),
-        (child, RDFS_LABEL, "Food"),
+        # A category entity must appear as a subject to be seen by the sector
+        # step (it scans subjects ending in _Entity).
+        (category, RDFS_LABEL, "Food"),
     ]
-    _index_entity(rows, "Food_Nov2024_Index", child, "November", "2024")
-    _index_entity(rows, "Food_Dec2024_Index", child, "December", "2024")
+    _index_entity(rows, "Food_Nov2024_Index", category, "November", "2024")
+    _index_entity(rows, "Food_Dec2024_Index", category, "December", "2024")
 
     result = BLSIntraSourceLinker(spark).enrich(make_triples(rows))
     triples = {(r["subject"], r["predicate"], r["object"]) for r in result.collect()}
@@ -297,50 +296,37 @@ def test_enrich_produces_temporal_sector_and_hierarchy(spark, make_triples):
     # Temporal
     assert (_cpi("Food_Nov2024_Index"), PRECEDES, _cpi("Food_Dec2024_Index")) in triples
     # Sector: "All_items_Food_Entity" contains the "Food" keyword.
-    assert (child, BELONGS_TO_SECTOR, FOOD_SECTOR) in triples
-    # Hierarchy: child -> parent (immediate parent via path structure).
-    assert (child, HAS_PARENT, parent) in triples
+    assert (category, BELONGS_TO_SECTOR, FOOD_SECTOR) in triples
 
 
-def test_hierarchy_skips_a_missing_generation(spark, make_triples):
+def test_enrich_does_not_guess_category_parents(spark, make_triples):
+    """No category parent is made up from names (#450).
+
+    The removed fourth step dropped the last word or two of a category's
+    local name, and when another category had the shorter name it wrote that
+    one as the parent. These are real cpi categories, and upstream puts Food
+    under Food_and_beverages. Dropping two words from Food_and_beverages
+    leaves Food, so the guess put Food_and_beverages under Food, the wrong
+    way round. Upstream states each parent itself, so enrich adds none.
     """
-    A child whose immediate parent does not exist links to its grandparent,
-    and a child with no ancestor at all links to nothing.
-
-    This pins the depth-2 branch of _link_category_hierarchies, which nothing
-    reached before. #380 rewrote that branch from a "_[^_]+$" regexp_replace to
-    substring_index so it can run on the GPU, and the point of the test is that
-    the output does not move: it passes on both spellings.
-
-    It does NOT exercise the length guard on parent_path_d2. Removing that guard
-    and re-running this test still passes, because an empty candidate path is
-    already dropped by the inner join against existing paths -- no entity has an
-    empty path. The guard stays as cheap insurance, not as a behaviour change.
-    """
-    grandparent = _cpi("All_items_Entity")            # path All_items
-    child = _cpi("All_items_Food_Home_Entity")        # path All_items_Food_Home
-    orphan = _cpi("Housing_Rent_Entity")              # path Housing_Rent
+    food = _cpi("Food_Entity")
+    food_and_beverages = _cpi("Food_and_beverages_Entity")
 
     rows = [
-        (grandparent, RDFS_LABEL, "All items"),
-        (child, RDFS_LABEL, "Food at home"),
-        (orphan, RDFS_LABEL, "Rent"),
+        (food, RDFS_LABEL, "Food"),
+        (food_and_beverages, RDFS_LABEL, "Food and beverages"),
+        (food, CPI_HAS_PARENT, food_and_beverages),
     ]
-    # All_items_Food_Entity is deliberately absent, so depth 1 finds nothing
-    # for `child`. Housing_Entity is absent too, and `orphan` has no second
-    # generation to fall back to.
-    _index_entity(rows, "Home_Nov2024_Index", child, "November", "2024")
+    _index_entity(rows, "Food_Nov2024_Index", food, "November", "2024")
+    _index_entity(rows, "Food_Dec2024_Index", food, "December", "2024")
 
     result = BLSIntraSourceLinker(spark).enrich(make_triples(rows))
-    parents = {
-        (r["subject"], r["object"])
-        for r in result.collect()
-        if r["predicate"] == HAS_PARENT
-    }
+    triples = {(r["subject"], r["predicate"], r["object"]) for r in result.collect()}
 
-    assert (child, grandparent) in parents
-    assert not [p for p in parents if p[0] == orphan]
-    assert not [p for p in parents if p[1] == ""]
+    assert not [t for t in triples if t[1] == HAS_PARENT]
+    # The other steps still ran on the same input.
+    assert (food, BELONGS_TO_SECTOR, FOOD_SECTOR) in triples
+    assert (_cpi("Food_Nov2024_Index"), PRECEDES, _cpi("Food_Dec2024_Index")) in triples
 
 
 def test_enrich_finds_bls_behind_a_wall_of_market_rows(spark, make_triples):
@@ -348,22 +334,20 @@ def test_enrich_finds_bls_behind_a_wall_of_market_rows(spark, make_triples):
 
     Dataset detection used to read the first 200,000 rows of the frame and
     decide from those. Market is 99.5% of a four-source run, so no BLS row was
-    ever in that sample: the linker logged "No BLS data detected", skipped all
-    four steps, and left the cross-source causal step nothing to read (#350).
+    ever in that sample: the linker logged "No BLS data detected", skipped
+    every step, and left the cross-source causal step nothing to read (#350).
 
     The wall below is one row longer than that old sample, and the BLS rows sit
     behind it, so this fails on the sampling version and passes on the one that
     reads every row.
     """
-    parent = _cpi("All_items_Entity")
-    child = _cpi("All_items_Food_Entity")
+    category = _cpi("All_items_Food_Entity")
 
     bls_rows = [
-        (parent, RDFS_LABEL, "All items"),
-        (child, RDFS_LABEL, "Food"),
+        (category, RDFS_LABEL, "Food"),
     ]
-    _index_entity(bls_rows, "Food_Nov2024_Index", child, "November", "2024")
-    _index_entity(bls_rows, "Food_Dec2024_Index", child, "December", "2024")
+    _index_entity(bls_rows, "Food_Nov2024_Index", category, "November", "2024")
+    _index_entity(bls_rows, "Food_Dec2024_Index", category, "December", "2024")
 
     market = spark.range(200_001).selectExpr(
         f"concat('{MARKET_ID}', id) AS subject",
@@ -375,8 +359,7 @@ def test_enrich_finds_bls_behind_a_wall_of_market_rows(spark, make_triples):
     result = BLSIntraSourceLinker(spark).enrich(df)
     triples = {(r["subject"], r["predicate"], r["object"]) for r in result.collect()}
 
-    assert (child, BELONGS_TO_SECTOR, FOOD_SECTOR) in triples
-    assert (child, HAS_PARENT, parent) in triples
+    assert (category, BELONGS_TO_SECTOR, FOOD_SECTOR) in triples
     assert (_cpi("Food_Nov2024_Index"), PRECEDES, _cpi("Food_Dec2024_Index")) in triples
 
 
