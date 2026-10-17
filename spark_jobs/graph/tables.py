@@ -94,6 +94,7 @@ from spark_jobs.utils.rdf_utils import (
     classify_edge_origin,
 )
 from spark_jobs.utils.spark_rdf_utils import (
+    IDENTIFIER_PREDICATES,
     NUMERIC_PREDICATE_MIN_SHARE,
     collect_sorted,
     numeric_literal_expr,
@@ -494,7 +495,13 @@ def literals(triples_df: DataFrame, node_id_df: DataFrame) -> DataFrame:
             F.col("predicate"),
             prefixed_local_name_expr("predicate").alias("predicate_name"),
             F.col("object").alias("value"),
-            numeric_literal_expr("object").isNotNull().alias("is_numeric"),
+            # An ID is never a number, however it parses, so a CUSIP stays a
+            # string in snapshots/ instead of a double that drops its letters
+            # and leading zeros (#456).
+            (
+                numeric_literal_expr("object").isNotNull()
+                & ~F.col("predicate").isin(sorted(IDENTIFIER_PREDICATES))
+            ).alias("is_numeric"),
         )
     )
 
