@@ -612,6 +612,27 @@ def get_sub_industries(
     return []
 
 
+def count_constituents(
+    bucket: str = "",
+    prefix: str = "",
+    s3_client=None,
+    data_day: str = "",
+) -> Optional[int]:
+    """How many stocks the day's constituents CSV lists, or None when it is
+    unavailable: the number a day's market coverage is read against. #452
+    """
+    rows, key = _read_constituents(
+        bucket, prefix, {SYMBOL_COLUMN}, s3_client, data_day
+    )
+    if rows is None:
+        return None
+
+    symbols = {row.get(SYMBOL_COLUMN, "").strip().upper() for row in rows}
+    symbols.discard("")
+    logger.info(f"Loaded {len(symbols)} constituents from s3://{bucket}/{key}")
+    return len(symbols)
+
+
 # ============================================
 # DEFAULT HARDCODED PATTERNS (fallback)
 # ============================================
