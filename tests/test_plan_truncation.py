@@ -53,6 +53,7 @@ from pyspark.sql import functions as F
 from spark_jobs.settle import settle
 from spark_jobs.pyg_builder.edge_feature_extractor import EdgeFeatureExtractor
 from spark_jobs.pyg_builder.edge_mapper import EdgeMapper
+from spark_jobs.pyg_builder.feature_extractor import FeatureExtractor
 from spark_jobs.pyg_builder.node_mapper import NodeMapper
 
 CPI_INDEX = "https://jefflevesque.com/ontology/bls/cpi/Index"
@@ -147,6 +148,15 @@ def _max_consumed_plan(spark, triples, monkeypatch):
         triples, node_id_df, counts
     )
 
+    # What a build hands the edge side: the node features' numeric predicates
+    # (#456). Classified before the spy goes in, because classifying is a
+    # one-off pass over the input that the node features make, not a plan the
+    # per-edge-type loop runs.
+    fx = FeatureExtractor(spark, cfg)
+    numeric_predicates = fx._classify_literal_predicates(
+        fx._literal_triples(triples, node_id_df)
+    )
+
     seen = []
     original_collect = DataFrame.collect
     original_iter = DataFrame.toLocalIterator
@@ -165,7 +175,8 @@ def _max_consumed_plan(spark, triples, monkeypatch):
     monkeypatch.setattr(DataFrame, "toLocalIterator", spy_iter)
 
     features = EdgeFeatureExtractor(spark, cfg).build_edge_features(
-        triples, node_id_df, edges_final, edge_indices
+        triples, node_id_df, edges_final, edge_indices,
+        numeric_predicates=numeric_predicates,
     )
 
     monkeypatch.undo()
