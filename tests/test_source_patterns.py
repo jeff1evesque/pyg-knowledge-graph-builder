@@ -208,6 +208,32 @@ def test_each_reader_requires_only_the_columns_it_uses():
     assert market.load_sub_industries_from_s3("b", "k", no_cik) is not None
 
 
+def test_the_constituents_csv_counts_its_stocks_once_each():
+    """The number a day's market coverage is read against. A symbol listed
+    twice is one stock, and a row with no symbol is none. #452"""
+    client = _constituents_csv([
+        "AAPL,Apple Inc.,Information Technology,Technology Hardware,320193",
+        "MSFT,Microsoft,Information Technology,Application Software,789019",
+        "aapl,Apple Inc.,Information Technology,Technology Hardware,320193",
+        ",Nobody,,,",
+    ])
+
+    assert market.count_constituents("b", "k", client) == 2
+
+
+def test_counting_constituents_needs_only_the_symbol_column():
+    """The count must not fail on an export that lacks a column the other
+    readers use."""
+    client = _constituents_csv(["AAPL,Apple Inc."], header="Symbol,Security")
+
+    assert market.count_constituents("b", "k", client) == 1
+
+
+def test_no_csv_means_no_count_rather_than_zero():
+    """Zero would read as a day with no constituents. #452"""
+    assert market.count_constituents() is None
+
+
 def test_no_csv_means_no_map_rather_than_a_guessed_one():
     """get_sector_patterns falls back to defaults; these two must not.
 
@@ -503,6 +529,7 @@ def test_no_csv_at_any_key_is_a_warning_naming_the_keys_tried(caplog):
     "load_sector_patterns_from_s3",
     "load_ticker_cik_map_from_s3",
     "load_sub_industries_from_s3",
+    "count_constituents",
 ])
 @pytest.mark.parametrize("served", [
     "ref/tickers/year=2026/month=09/09.csv",
