@@ -104,6 +104,7 @@ import boto3
 # Project imports
 # ============================================
 from spark_jobs.enrichment.pipeline import EnrichmentPipeline
+from spark_jobs.enrichment.intra_source.market.patterns import count_constituents
 
 # Getting triples in, and the per-source accounting that goes with it. The
 # Turtle parsing under it runs on executors and lives in graph/turtle.py, whose
@@ -125,7 +126,7 @@ from spark_jobs.graph.persistence import (
 # The day-partitioned tables a downstream service queries. Written from the
 # enriched triples, in the leg that produces them, and over everything the
 # sources carried rather than the subset the .pt is built from.
-from spark_jobs.graph.tables import write_query_tables
+from spark_jobs.graph.tables import market_coverage, write_query_tables
 
 # What the job was asked to do. The PyG availability flag comes from here too:
 # JobConfig has to reject a pyg-requiring mode before the job starts, so the
@@ -215,6 +216,48 @@ def run_enrichment(
     return enriched_df, stats
 
 
+def measure_market_coverage(
+    config: JobConfig, enriched_df: DataFrame
+) -> Optional[Dict[str, Any]]:
+    """How complete the day's market data was, or None when the run read no
+    market source.
+
+    Measured before the dataset descriptor is written, so it reaches the graph
+    leg the way the day does, and whether or not the run writes query tables:
+    it describes what the run read, not its tables. #452
+    """
+    read = source_registry.sources_read(
+        config.source_paths, config.registered_specs
+    )
+    if "market" not in read:
+        return None
+
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("PHASE: MARKET COVERAGE")
+    logger.info("=" * 80)
+    start_time = time.time()
+
+    coverage = market_coverage(
+        enriched_df,
+        constituents=count_constituents(
+            bucket=config.market_sector_definitions_bucket,
+            prefix=config.market_sector_definitions_key,
+            data_day=config.source_data_day,
+        ),
+    )
+
+    constituents = coverage["constituents"]
+    logger.info(
+        f"  {coverage['snapshots']} snapshots; the thinnest has "
+        f"{coverage['stocks']} stocks, {coverage['stocks_with_options']} with "
+        f"options, and {coverage['option_rows']:,} option rows"
+        f"{'' if constituents is None else f'; {constituents} constituents'} "
+        f"[{time.time() - start_time:.1f}s]"
+    )
+    return coverage
+
+
 def run_pyg_construction(
     spark: SparkSession,
     triples_df: DataFrame,
@@ -223,6 +266,7 @@ def run_pyg_construction(
     dataset: str = "",
     sources: Optional[List[str]] = None,
     day: str = "",
+    market_coverage: Optional[Dict[str, Any]] = None,
 ) -> Tuple:
     """
     Run PyG HeteroData construction from enriched triples DataFrame.
@@ -263,6 +307,7 @@ def run_pyg_construction(
     hetero_data, metadata, node_index_df = build_hetero_data(
         spark, triples_df, config, time_period=time_period,
         dataset=dataset, sources=sources, day=day,
+        market_coverage=market_coverage,
     )
 
     elapsed = time.time() - start_time
@@ -397,7 +442,8 @@ def execute_full_pipeline(
     save_enriched_parquet(
         enriched_df, config.enriched_parquet_path, config.parquet_partitions
     )
-    save_dataset_descriptor(config, spark)
+    coverage = measure_market_coverage(config, enriched_df)
+    save_dataset_descriptor(config, spark, market_coverage=coverage)
 
     # Step 3b: Query tables, from the same enriched frame and before any of the
     # PyG node filters narrow it.
@@ -412,6 +458,7 @@ def execute_full_pipeline(
             config.source_paths, config.registered_specs
         ),
         day=config.source_data_day,
+        market_coverage=coverage,
     )
 
     # Step 5: Save final artifacts (local + optional S3)
@@ -484,7 +531,10 @@ def execute_enrichment_only(
     save_enriched_parquet(
         enriched_df, config.enriched_parquet_path, config.parquet_partitions
     )
-    save_dataset_descriptor(config, spark)
+    save_dataset_descriptor(
+        config, spark,
+        market_coverage=measure_market_coverage(config, enriched_df),
+    )
 
     # Step 3b: Query tables, from the same enriched frame. This mode builds no
     # PyG object at all, which changes nothing here -- the tables never
@@ -630,6 +680,7 @@ def execute_pyg_only(
         dataset=config.dataset or descriptor.get("dataset", ""),
         sources=descriptor.get("sources"),
         day=day,
+        market_coverage=descriptor.get("market_coverage"),
     )
 
     # Step 3: Save final artifacts (local + optional S3)
