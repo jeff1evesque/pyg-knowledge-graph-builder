@@ -1869,6 +1869,78 @@ def test_the_property_is_still_present_and_still_a_data_predicate(spark):
     assert coverage["data_predicates"] >= 2
 
 
+from spark_jobs.pyg_builder.feature_extractor import (  # noqa: E402
+    classify_literal_predicates,
+)
+from spark_jobs.utils.rdf_utils import MARKET_QUOTES  # noqa: E402
+
+MARKET_CUSIP = str(MARKET_QUOTES.cusip)
+
+# Four of the five read as finite numbers -- 03073E105 as 3.073 x 10^108 --
+# and 46120E602 as infinity. 80% clears the majority rule (#456).
+CUSIP_ROWS = [
+    row
+    for i, cusip in enumerate(
+        ["037833100", "594918104", "03073E105", "023135106", "46120E602"]
+    )
+    for row in (
+        (f"https://ex/s{i}", RDF_TYPE, CPI_INDEX),
+        (f"https://ex/s{i}", MARKET_CUSIP, cusip),
+        (f"https://ex/s{i}", METRIC, str(i)),
+    )
+]
+
+
+def test_a_cusip_is_kept_out_of_both_value_segments(spark):
+    """A CUSIP is a 9-character ID, but most of them parse, so the majority
+    rule alone makes it a number. That put noise in the node features and
+    infinity in the edge features (#456). Like a SIC code, its value is kept
+    out of the numeric and categorical segments, and the node still records
+    that it has one."""
+    triples = spark.createDataFrame(
+        CUSIP_ROWS, schema="subject STRING, predicate STRING, object STRING"
+    )
+
+    # The rule on its own calls it a number, so the list is what stops it.
+    assert MARKET_CUSIP in classify_literal_predicates(
+        triples.filter(F.col("predicate") != RDF_TYPE), 0.5
+    )
+
+    node_id_df, _counts = NodeMapper(spark, CONFIG).build_node_id_table(triples)
+    fx = FeatureExtractor(spark, CONFIG)
+
+    reaching = {
+        row["predicate"]
+        for row in fx._literal_triples(triples, node_id_df)
+        .select("predicate").distinct().collect()
+    }
+    assert MARKET_CUSIP not in reaching
+
+    present = {
+        row["predicate"]
+        for row in fx._compute_node_properties(triples, node_id_df)
+        .select("predicate").distinct().collect()
+    }
+    assert MARKET_CUSIP in present
+
+
+def test_build_features_reports_its_numeric_predicates(spark):
+    """The edge features read endpoint numbers through this, so it has to name
+    what the node features actually classed as numeric -- a real number in,
+    the CUSIP out (#456)."""
+    triples = spark.createDataFrame(
+        CUSIP_ROWS, schema="subject STRING, predicate STRING, object STRING"
+    )
+    node_id_df, counts = NodeMapper(spark, CONFIG).build_node_id_table(triples)
+    fx = FeatureExtractor(spark, CONFIG)
+    assert fx.numeric_predicates() is None
+
+    fx.build_features(triples, node_id_df, counts)
+
+    assert METRIC in fx.numeric_predicates()
+    assert MARKET_CUSIP not in fx.numeric_predicates()
+
+
 # ======================================================================
 # Trimmed node types — x keeps only the listed positions (#443)
 # ======================================================================
