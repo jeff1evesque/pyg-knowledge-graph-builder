@@ -1231,12 +1231,26 @@ class EdgeFeatureExtractor:
         # the frame it replaces, and any positional read of a row -- here
         # or in anything that later reads one of these frames -- silently
         # takes the wrong field.
+        #
+        # One partition (#454). The small-type union reads this frame 1,082
+        # times on an October 2026 day, one task per partition each time.
+        # Left alone it keeps the full frame's partition count, which AQE
+        # sets from the full edge total: 14 or 15 on a normal day, but 19 on
+        # 2026-10-16, a 20,612-task stage that ran the driver out of heap.
+        # The frame is about 70,000 rows, easy work for one task.
+        #
+        # repartition, not coalesce. coalesce(1) would pull the join into
+        # that one task, which would then read the whole edge frame alone.
+        # repartition(1) runs the join over the full frame's partitions as
+        # before and moves only the rows it keeps.
         narrow = settle(
             edges_with_idx.join(
                 F.broadcast(keys_df),
                 on=["src_type", "relation", "dst_type"],
                 how="left_semi",
-            ).select(*edges_with_idx.columns)
+            )
+            .select(*edges_with_idx.columns)
+            .repartition(1)
         )
 
         kept = narrow.count()
