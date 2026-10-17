@@ -214,10 +214,14 @@ class Run:
     def add_splits(self, part: bytes = b"splits rows", day: str = DAY) -> set:
         return self.add_feed_table("splits", part, day)
 
-    def set_recorded_dataset(self, name: str, sources=("a", "b"), day=None) -> None:
+    def set_recorded_dataset(self, name: str, sources=("a", "b"), day=None,
+                             **recorded) -> None:
+        """dataset.json as the job writes it; ``recorded`` adds fields such as
+        market_coverage."""
         body = {"dataset": name, "sources": list(sources), "time_period": f"{YEAR}-{MONTH}"}
         if day is not None:
             body["day"] = day
+        body.update(recorded)
         _write(self.enriched / "dataset.json", json.dumps(body))
 
     def set_graph_schema(self, graph: str, body) -> None:
@@ -638,6 +642,52 @@ def test_the_day_marker_keeps_its_other_fields(run):
     assert marker["files"] == len(expected)
 
 
+# --------------------------------------------------------------------------- #
+# The day marker's market coverage
+#
+# How complete the day's market data was, as the job recorded it in dataset.json.
+# A partial day publishes like any other, so this is where a reader of the
+# markers sees one (#452).
+# --------------------------------------------------------------------------- #
+
+COVERAGE = {
+    "constituents": 503,
+    "snapshots": 20,
+    "stocks": 503,
+    "stocks_with_options": 138,
+    "option_rows": 161232,
+    "by_snapshot": [
+        {"capture_time": "2026-10-16T13:40:40.100Z", "stocks": 503,
+         "stocks_with_options": 138, "option_rows": 161232},
+    ],
+}
+
+
+def test_the_day_marker_carries_the_market_coverage_the_run_recorded(run):
+    """The day's three counts after its sources; the per-snapshot list stays in
+    graph_schema.json."""
+    run.set_recorded_dataset("", ["market"], market_coverage=COVERAGE)
+    run.add_tables()
+    assert run.publish("--upload").returncode == 0
+
+    marker = _marker(run)
+    assert marker["market_coverage"] == {
+        "snapshots": 20, "stocks": 503, "stocks_with_options": 138,
+    }
+    assert list(marker) == ["day", "run_id", "published", "sources",
+                            "market_coverage", "tables", "files"]
+
+
+def test_a_run_that_recorded_no_market_coverage_leaves_it_off_the_marker(run):
+    """A run that read no market source records null; one from before #452
+    records nothing. Neither marker has the field."""
+    run.set_recorded_dataset("", ["sec"], market_coverage=None)
+    run.add_tables()
+    assert run.publish("--upload").returncode == 0
+
+    assert "market_coverage" not in _marker(run)
+
+
 def test_the_publisher_runs_on_a_python_with_no_packages(run):
     """The nightly runs it on the system python, which has no pyarrow. It
     imports the feeds' names from spark_jobs/graph/splits.py and
@@ -917,6 +967,19 @@ def test_the_archives_tables_root_reads_like_the_published_one(run, tmp_path):
     archived.pop("published")
     published.pop("published")
     assert archived == published
+
+
+def test_the_archives_day_marker_carries_the_same_market_coverage(run, tmp_path):
+    """The archive's marker comes from the same day_marker(), so a trainer
+    reading the archive sees what a reader of the published tables sees. #452"""
+    run.set_recorded_dataset("", ["market"], market_coverage=COVERAGE)
+    run.add_tables()
+    root = _archive_root(tmp_path)
+    assert run.publish("--upload").returncode == 0
+    assert run.publish("--archive", str(root)).returncode == 0
+
+    archived = json.loads((_archived_tables(root) / "_days" / f"{DAY}.json").read_text())
+    assert archived["market_coverage"] == _marker(run)["market_coverage"]
 
 
 def test_the_day_marker_is_the_last_file_the_archive_writes(run, tmp_path):
