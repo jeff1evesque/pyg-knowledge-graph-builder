@@ -475,8 +475,13 @@ def test_graph_schema_version_is_bumped_for_the_new_semantics():
     vector_dim, which since #443 is not the width of the option type's x, 98%
     of the nightly's nodes. The version tells a consumer whether to read a
     type's width here or go to feature_spec.json for it.
+
+    1.8 adds build_metadata.market_coverage. Additive: at 1.7 a day whose
+    options covered a fraction of its stocks reads like one where the rest had
+    none, and the version tells a consumer whether the counts are there to
+    tell them apart.
     """
-    assert _fully_registered_collector()._build_graph_schema()["version"] == "1.7"
+    assert _fully_registered_collector()._build_graph_schema()["version"] == "1.8"
 
 
 # ======================================================================
@@ -525,6 +530,40 @@ def test_graph_schema_node_feature_dim_is_the_layouts_width(vector_dim):
     meta = c._build_graph_schema()["build_metadata"]
     assert meta["node_feature_dim"] == vector_dim
     assert meta["node_feature_dim"] == c._build_feature_spec()["node_features"]["total_dim"]
+
+
+def test_graph_schema_records_the_market_coverage_it_is_given():
+    """As the enriched output's dataset.json recorded it, unchanged. #452"""
+    coverage = {
+        "constituents": 503,
+        "snapshots": 2,
+        "stocks": 503,
+        "stocks_with_options": 138,
+        "option_rows": 161232,
+        "by_snapshot": [
+            {"capture_time": "2026-10-16T13:40:40.100Z", "stocks": 503,
+             "stocks_with_options": 138, "option_rows": 161232},
+            {"capture_time": "2026-10-16T14:00:40.100Z", "stocks": 503,
+             "stocks_with_options": 138, "option_rows": 161232},
+        ],
+    }
+    c = MetadataCollector(
+        "2026-10", 1024, 64, True, {}, market_coverage=coverage
+    )
+
+    meta = c._build_graph_schema()["build_metadata"]
+    assert meta["market_coverage"] == coverage
+    json.dumps(meta)
+
+
+def test_graph_schema_market_coverage_absent_is_null_not_guessed():
+    """A build given none records null, present rather than absent, as `day`
+    is: absent would read as a build before 1.8. #452"""
+    meta = MetadataCollector(
+        "2099-01", 1024, 64, True, {}
+    )._build_graph_schema()["build_metadata"]
+    assert "market_coverage" in meta
+    assert meta["market_coverage"] is None
 
 
 # ======================================================================
