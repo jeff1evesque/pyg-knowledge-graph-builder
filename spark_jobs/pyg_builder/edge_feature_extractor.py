@@ -92,6 +92,15 @@ from pyspark.sql.window import Window
 from spark_jobs import sources
 from spark_jobs.settle import settle
 from spark_jobs.pyg_builder.sparse_scatter import scatter_sparse_entries
+# What counts as a number is decided once, by the node features (#456).
+from spark_jobs.pyg_builder.feature_extractor import (
+    _UNENCODED_VALUE_PREDICATES,
+    classify_literal_predicates,
+)
+from spark_jobs.utils.spark_rdf_utils import (
+    NUMERIC_PREDICATE_MIN_SHARE,
+    numeric_literal_expr,
+)
 # The three segments themselves, plus the shapes of the endpoint property
 # frames this module builds for them to read.
 from spark_jobs.pyg_builder.edge_encoders import (
@@ -135,6 +144,11 @@ _NON_FEATURE_PREDICATES = {
     "http://www.w3.org/2002/07/owl#equivalentClass",
     "http://www.w3.org/2002/07/owl#equivalentProperty",
 }
+
+# The largest number an edge feature can hold. The features are float32, so
+# an endpoint value above this turns into infinity at the final cast even
+# though it is a finite double (#456).
+_FLOAT32_MAX = float(np.finfo(np.float32).max)
 
 # ============================================
 # Edge type classification
@@ -423,6 +437,11 @@ class EdgeFeatureExtractor:
         self._max_types_per_batch = edge_feat_config.get(
             "max_edge_types_per_batch", _MAX_EDGE_TYPES_PER_BATCH
         )
+        # The node features' setting, for the rare build that hands this no
+        # numeric predicates and has it classify them itself.
+        self._numeric_min_share = config.get("feature_config", {}).get(
+            "numeric_predicate_min_share", NUMERIC_PREDICATE_MIN_SHARE
+        )
         # (edge_vector_dim, budget) from the last _max_edges_per_collect call.
         # The split loop asks once per edge type -- hundreds of py4j round
         # trips to read a conf value that cannot change mid-build.
@@ -627,6 +646,7 @@ class EdgeFeatureExtractor:
         node_id_df: DataFrame,
         edges_final_df: DataFrame,
         edge_indices: Dict[Tuple[str, str, str], torch.Tensor],
+        numeric_predicates: Optional[Set[str]] = None,
     ) -> Dict[Tuple[str, str, str], torch.Tensor]:
         """
         Build edge feature vectors for eligible edge types.
@@ -649,6 +669,10 @@ class EdgeFeatureExtractor:
                 (src_type, relation, dst_type) -> LongTensor[2, N].
                 Used only for edge counts and eligibility checking,
                 not pushed back to Spark.
+            numeric_predicates: The literal predicates the node features
+                classed as numeric (FeatureExtractor.numeric_predicates()).
+                Endpoint numbers come from these and no others. None makes
+                this classify them itself, by the same rule.
 
         Returns:
             Dict mapping (src_type, relation, dst_type) ->
@@ -779,7 +803,7 @@ class EdgeFeatureExtractor:
         logger.info("  Extracting endpoint literal properties...")
 
         numeric_props_df = self._extract_node_numeric_properties(
-            triples_df, node_id_df
+            triples_df, node_id_df, numeric_predicates
         )
         label_df = self._extract_node_labels(triples_df, node_id_df)
 
@@ -974,6 +998,7 @@ class EdgeFeatureExtractor:
         self,
         triples_df: DataFrame,
         node_id_df: DataFrame,
+        numeric_predicates: Optional[Set[str]] = None,
     ) -> DataFrame:
         """
         Extract numeric literal properties for all nodes, keyed by
@@ -982,13 +1007,21 @@ class EdgeFeatureExtractor:
         Used to derive numeric contrast signals between edge endpoints.
 
         Isolates literal triples via anti-join against node URIs (same
-        pattern as feature_extractor.py), then parses numeric values
-        via cast("double"). Aggregates multiple values per
+        pattern as feature_extractor.py), then keeps the values of the
+        predicates the node features classed as numeric, read the way the
+        node features read them. Aggregates multiple values per
         (node, predicate) pair by mean.
+
+        This used to read every literal that cast to a double. The node
+        features' majority rule and finite check never applied, so the stock
+        snapshots' CUSIPs arrived as numbers -- 46120E602 as infinity -- and
+        put 190 infinite values and 19 NaN into one edge type (#456).
 
         Returns a cached DataFrame on executors.
         """
-        excluded_list = list(_NON_FEATURE_PREDICATES)
+        excluded_list = list(
+            _NON_FEATURE_PREDICATES | _UNENCODED_VALUE_PREDICATES
+        )
 
         # Isolate literal triples via anti-join against node URIs.
         # Triples where the object is a known node URI are edge triples,
@@ -999,11 +1032,20 @@ class EdgeFeatureExtractor:
             "left_anti",
         ).filter(~F.col("predicate").isin(excluded_list))
 
-        # Parse numeric values — strip datatype suffix before casting
-        candidates = literal_triples.withColumn(
-            "numeric_value",
-            F.split(F.col("object"), r"\^\^").getItem(0).cast("double"),
-        ).filter(F.col("numeric_value").isNotNull())
+        if numeric_predicates is None:
+            numeric_predicates = classify_literal_predicates(
+                literal_triples, self._numeric_min_share
+            )
+
+        candidates = (
+            literal_triples
+            .filter(F.col("predicate").isin(sorted(numeric_predicates)))
+            .withColumn("numeric_value", numeric_literal_expr("object"))
+            .filter(
+                F.col("numeric_value").isNotNull()
+                & (F.abs(F.col("numeric_value")) <= F.lit(_FLOAT32_MAX))
+            )
+        )
 
         node_lookup = node_id_df.select(
             F.col("uri").alias("_node_uri"),
