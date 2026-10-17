@@ -17,11 +17,15 @@ property frame, on the other frame the encoders scan.
 
 These tests pin what it has to keep: the narrow frame holds the right edges and
 all of them, reading it does not go back to the full frame, a large type still
-reads the full frame, and narrowing changes no feature value.
+reads the full frame, and narrowing changes no feature value. Since #454 the
+narrow frame is also one partition, and building it still reads the full frame
+in all of its partitions.
 """
 import pytest
 import torch
 
+from pyspark import TaskContext
+from pyspark.accumulators import AddingAccumulatorParam
 from pyspark.sql import functions as F
 
 from spark_jobs.pyg_builder.edge_feature_extractor import EdgeFeatureExtractor
@@ -55,10 +59,19 @@ LARGE_EDGES = 6
 SPLIT_AT_TWO = {"edge_feature_config": {"chunk_edge_threshold": 2}}
 
 
-def _edges(spark, rows):
-    """A stand-in for the resolved edge frame EdgeMapper hands over."""
+def _edges(spark, rows, partitions=None):
+    """A stand-in for the resolved edge frame EdgeMapper hands over.
+
+    partitions sets how many partitions it comes in. On a cluster AQE sets that
+    from the full edge total, 14 to 19 in October 2026. parallelize splits the
+    rows evenly, so every partition has rows for its task to read.
+    """
+    data = (
+        rows if partitions is None
+        else spark.sparkContext.parallelize(rows, partitions)
+    )
     return spark.createDataFrame(
-        rows,
+        data,
         schema="src_type STRING, src_id LONG, relation STRING, "
                "dst_type STRING, dst_id LONG, edge_idx LONG",
     )
@@ -95,6 +108,33 @@ class _CountingEdges:
     @property
     def ticks(self) -> int:
         return self.accumulator.value
+
+
+class _ReadingTasks:
+    """The edge frame, recording which tasks read it.
+
+    Built like _CountingEdges, but the UDF records the partition id of the task
+    reading each row instead of counting rows. A read spread over the frame's
+    partitions records every one of them. A read pulled into one task records
+    one.
+    """
+
+    def __init__(self, spark, df):
+        self.accumulator = spark.sparkContext.accumulator(
+            [], AddingAccumulatorParam([])
+        )
+        acc = self.accumulator
+
+        def _record(v):
+            acc.add([TaskContext.get().partitionId()])
+            return v
+
+        record = F.udf(_record, "long").asNondeterministic()
+        self.df = df.withColumn("src_id", record(F.col("src_id")))
+
+    @property
+    def tasks(self) -> int:
+        return len(set(self.accumulator.value))
 
 
 def _mixed_graph():
@@ -227,6 +267,65 @@ def test_per_type_filters_do_not_rescan_the_full_edge_frame(
         f"the per-type filters read the full frame again "
         f"({counting.ticks - after_narrowing} extra row scans); the settle did "
         f"not truncate the lineage, so the scans still multiply by edge type"
+    )
+
+
+def test_narrow_frame_is_one_partition_whatever_the_full_frame_has(
+    spark, edge_rows
+):
+    """Every read of the narrow frame runs one task per partition (#454).
+
+    The small-type union reads it about a thousand times in one stage, so its
+    partition count multiplies that stage. It used to keep the full frame's
+    count, and on 2026-10-16 that was 19: a 20,612-task stage that ran the
+    driver out of heap. One partition holds the stage to one task per read,
+    whatever the day's count.
+    """
+    efe = EdgeFeatureExtractor(spark, {})
+    full = _edges(spark, edge_rows, partitions=4)
+    assert full.rdd.getNumPartitions() == 4
+
+    narrow = efe._narrow_edges_for_small_types(
+        full,
+        [("small_a", "rel", "small_a_dst"), ("small_b", "rel", "small_b_dst")],
+        small_edges=2,
+        total_edges=8,
+    )
+
+    assert narrow.rdd.getNumPartitions() == 1
+
+    # ...and the same rows the full frame holds for those types.
+    expected = sorted(
+        tuple(r) for r in full.filter(
+            F.col("src_type").isin(["small_a", "small_b"])
+        ).collect()
+    )
+    assert sorted(tuple(r) for r in narrow.collect()) == expected
+
+
+def test_narrowing_reads_the_full_frame_in_all_its_partitions(
+    spark, edge_rows
+):
+    """One partition at the end, not one task doing the whole read.
+
+    coalesce(1) also ends in one partition, but it pulls the join into a single
+    task, and on a cluster that one task reads the whole edge frame alone: 25
+    to 84 million rows in October 2026. repartition(1) leaves the read spread
+    over the full frame's partitions and moves only the rows it keeps.
+    """
+    efe = EdgeFeatureExtractor(spark, {})
+    reading = _ReadingTasks(spark, _edges(spark, edge_rows, partitions=4))
+
+    efe._narrow_edges_for_small_types(
+        reading.df,
+        [("small_a", "rel", "small_a_dst"), ("small_b", "rel", "small_b_dst")],
+        small_edges=2,
+        total_edges=8,
+    )
+
+    assert reading.tasks == 4, (
+        f"the full frame was read by {reading.tasks} task(s), not one per "
+        f"partition; a coalesce pulls the whole read into one task"
     )
 
 
