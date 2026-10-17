@@ -98,6 +98,47 @@ def test_the_writer_records_the_day_the_sources_were_cut_from(spark, tmp_path):
     assert descriptor["sources"] == ["sec"]
 
 
+def _enrichment_config(tmp_path):
+    return JobConfig({
+        "mode": "enrichment_only",
+        "source_paths": (
+            "s3a://b/quotes/year=2026/month=10/day=16/"
+        ),
+        "source_format": "turtle_parquet",
+        "local_work_dir": str(tmp_path),
+        "time_period": "2026-10",
+    })
+
+
+def test_the_writer_records_the_market_coverage_it_is_given(spark, tmp_path):
+    """Beside the day, for the graph leg to copy into graph_schema.json and
+    the publish into the day's marker. #452"""
+    config = _enrichment_config(tmp_path)
+    coverage = {
+        "constituents": 503, "snapshots": 1, "stocks": 503,
+        "stocks_with_options": 138, "option_rows": 161232,
+        "by_snapshot": [{"capture_time": "2026-10-16T13:40:40.100Z",
+                         "stocks": 503, "stocks_with_options": 138,
+                         "option_rows": 161232}],
+    }
+
+    save_dataset_descriptor(config, spark, market_coverage=coverage)
+
+    descriptor = load_dataset_descriptor(spark, config.enriched_parquet_path)
+    assert descriptor["market_coverage"] == coverage
+    assert descriptor["day"] == "2026-10-16"
+
+
+def test_a_run_given_no_market_coverage_records_null(spark, tmp_path):
+    config = _enrichment_config(tmp_path)
+
+    save_dataset_descriptor(config, spark)
+
+    descriptor = load_dataset_descriptor(spark, config.enriched_parquet_path)
+    assert "market_coverage" in descriptor
+    assert descriptor["market_coverage"] is None
+
+
 def test_missing_descriptor_reads_as_empty_rather_than_raising(spark, tmp_path):
     """Absent is the normal case, not a failure.
 

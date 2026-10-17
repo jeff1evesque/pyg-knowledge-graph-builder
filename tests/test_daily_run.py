@@ -69,6 +69,10 @@ printf "%s\\n" "$PYG_SOURCE_PATHS" > "$FAKE_CALLS/launcher-sources.txt"
 printf "%s\\n" "${PYG_PUBLISH_DATA_DAY:-}" > "$FAKE_CALLS/launcher-day.txt"
 mkdir -p "$PYG_WORK_DIR"
 printf "run id      : %s\\nwork dir    : %s\\n" "$RUN_ID" "$PYG_WORK_DIR" > "$rd/run-config.txt"
+if [ -n "${FAKE_DATASET_JSON:-}" ]; then
+  enriched="$PYG_WORK_DIR/enriched/year=$PYG_DATA_YEAR/month=$PYG_DATA_MONTH"
+  mkdir -p "$enriched" && printf "%s" "$FAKE_DATASET_JSON" > "$enriched/dataset.json"
+fi
 echo "${FAKE_RUN_RC:-0}" > "$rd/run.done"
 '''
 
@@ -625,6 +629,50 @@ def test_a_run_that_did_not_finish_is_not_published(schedule):
 
     assert s.run(FAKE_RUN_RC="1").returncode == 1
     assert s.recorded("publish") == ""
+
+
+def test_the_log_says_how_complete_the_market_day_was(schedule):
+    """A partial day publishes like any other, so the night's log says so, from
+    the coverage the job recorded in its dataset.json. #452"""
+    s = schedule()
+    s.add_sources("2026-09-30")
+    coverage = {"constituents": 503, "snapshots": 20, "stocks": 503,
+                "stocks_with_options": 138, "option_rows": 161232, "by_snapshot": []}
+
+    r = s.run(FAKE_DATASET_JSON=json.dumps({"day": "2026-09-30",
+                                            "market_coverage": coverage}))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert ("market 2026-09-30: 20 snapshots; the thinnest has 503 stocks, "
+            "138 with options; 503 constituents") in s.log()
+    assert "is published" in s.log()
+
+
+def test_the_market_line_leaves_out_a_constituents_count_it_lacks(schedule):
+    s = schedule()
+    s.add_sources("2026-09-30")
+    coverage = {"constituents": None, "snapshots": 1, "stocks": 3,
+                "stocks_with_options": 0, "option_rows": 6, "by_snapshot": []}
+
+    assert s.run(FAKE_DATASET_JSON=json.dumps({"market_coverage": coverage})).returncode == 0
+    assert ("market 2026-09-30: 1 snapshots; the thinnest has 3 stocks, "
+            "0 with options\n") in s.log()
+
+
+@pytest.mark.parametrize("dataset_json", [
+    None,
+    json.dumps({"market_coverage": None}),
+    "{not json",
+], ids=["no-dataset-json", "no-market-read", "unreadable"])
+def test_no_market_coverage_means_no_market_line_and_the_night_goes_on(
+        schedule, dataset_json):
+    """The line reports; it never fails a night whose run already finished."""
+    s = schedule()
+    s.add_sources("2026-09-30")
+
+    r = s.run(FAKE_DATASET_JSON=dataset_json)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "market 2026-09-30" not in s.log()
+    assert "is published" in s.log()
 
 
 def test_only_the_local_copies_this_schedule_downloaded_are_removed(schedule):

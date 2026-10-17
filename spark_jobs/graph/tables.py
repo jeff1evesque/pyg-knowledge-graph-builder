@@ -65,7 +65,7 @@ The period days only its facts were dated to go with them, as nothing else
 points at them (days_only_left_out_nodes_dated).
 """
 import logging
-from typing import Any, Callable, Dict, List, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession
@@ -697,6 +697,94 @@ def write_snapshots(snapshot_df: DataFrame, root: str, day: str) -> str:
     ] + ["uri"]
 
     return _write(typed.orderBy(*sort_keys), root, "snapshots", day)
+
+
+# ============================================
+# Market coverage
+# ============================================
+_STOCK_SNAPSHOT = str(MARKET_QUOTES.EquitySnapshot)
+_OPTION_SNAPSHOT = str(MARKET_QUOTES.OptionSnapshot)
+_CAPTURE_TIME = str(MARKET_QUOTES.captureTime)
+_UNDERLYING_SYMBOL = str(MARKET_QUOTES.underlyingSymbol)
+
+
+def market_coverage(
+    triples_df: DataFrame, constituents: Optional[int] = None
+) -> Dict[str, Any]:
+    """How complete the day's market data was. #452
+
+    A market day passes the nightly's source check with one snapshot under its
+    folder, so a partial day builds and publishes like any other. On 2026-10-16
+    upstream fetched the option chains of 138 of the 503 stocks, and in that
+    day's graph the other 365 look like stocks that have no options. These
+    counts are where the difference shows. What is too thin is a reader's call,
+    so there is no threshold here.
+
+    A snapshot is one capture time, which the stock and option rows taken in it
+    share. For each: ``stocks``, the stock rows; ``stocks_with_options``, the
+    distinct underlying symbols its options name, so an option naming none
+    counts in ``option_rows`` only; and ``option_rows``. The day's three are
+    each the lowest across its snapshots, which is what the day marker carries.
+    ``constituents`` is how many stocks the day's constituents CSV lists, to
+    read the others against, or None when the CSV was not read.
+
+    One pass over three predicates, collected at one row per snapshot: 20 on a
+    full day.
+    """
+    snapshots = (
+        triples_df
+        .filter(
+            (
+                (F.col("predicate") == RDF_TYPE)
+                & F.col("object").isin(_STOCK_SNAPSHOT, _OPTION_SNAPSHOT)
+            )
+            | F.col("predicate").isin(_CAPTURE_TIME, _UNDERLYING_SYMBOL)
+        )
+        .groupBy("subject")
+        .agg(*[
+            F.max(F.when(F.col("predicate") == predicate, F.col("object")))
+            .alias(name)
+            for name, predicate in (
+                ("kind", RDF_TYPE),
+                ("capture_time", _CAPTURE_TIME),
+                ("underlying", _UNDERLYING_SYMBOL),
+            )
+        ])
+        .filter(F.col("kind").isNotNull() & F.col("capture_time").isNotNull())
+    )
+
+    option = F.col("kind") == _OPTION_SNAPSHOT
+    by_snapshot = [
+        {
+            "capture_time": row["capture_time"],
+            "stocks": row["stocks"],
+            "stocks_with_options": row["stocks_with_options"],
+            "option_rows": row["option_rows"],
+        }
+        for row in collect_sorted(
+            snapshots
+            .groupBy("capture_time")
+            .agg(
+                F.sum((F.col("kind") == _STOCK_SNAPSHOT).cast("long"))
+                .alias("stocks"),
+                F.countDistinct(F.when(option, F.col("underlying")))
+                .alias("stocks_with_options"),
+                F.sum(option.cast("long")).alias("option_rows"),
+            )
+        )
+    ]
+
+    def lowest(name):
+        return min((snapshot[name] for snapshot in by_snapshot), default=0)
+
+    return {
+        "constituents": constituents,
+        "snapshots": len(by_snapshot),
+        "stocks": lowest("stocks"),
+        "stocks_with_options": lowest("stocks_with_options"),
+        "option_rows": lowest("option_rows"),
+        "by_snapshot": by_snapshot,
+    }
 
 
 SPLITS_SCHEMA = (

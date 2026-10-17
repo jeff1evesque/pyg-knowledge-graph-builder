@@ -20,7 +20,7 @@ import hashlib
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from pyspark.sql import SparkSession, DataFrame
 
@@ -105,7 +105,11 @@ def dataset_descriptor_path(enriched_parquet_path: str) -> str:
     return f"{parent}/{DATASET_DESCRIPTOR_NAME}"
 
 
-def save_dataset_descriptor(config: JobConfig, spark: SparkSession) -> None:
+def save_dataset_descriptor(
+    config: JobConfig,
+    spark: SparkSession,
+    market_coverage: Optional[Dict[str, Any]] = None,
+) -> None:
     """Record which sources produced this enriched output, beside the output.
 
     The enriched Parquet is subject/predicate/object only -- SOURCE_COLUMN is
@@ -123,6 +127,10 @@ def save_dataset_descriptor(config: JobConfig, spark: SparkSession) -> None:
     The day the sources were cut from goes here too, beside the Parquet cut
     from it, so a pyg_only graph built from this output is stamped with this
     day and no other.
+
+    So does how complete the day's market data was (tables.market_coverage),
+    None when the run read no market source. The graph leg reads it from here
+    into graph_schema.json, and the publish into the day's marker. #452
     """
     labels = source_registry.sources_read(
         config.source_paths, config.registered_specs
@@ -132,6 +140,7 @@ def save_dataset_descriptor(config: JobConfig, spark: SparkSession) -> None:
         "sources": labels,
         "time_period": config.time_period,
         "day": config.source_data_day,
+        "market_coverage": market_coverage,
         "written": utcnow().isoformat(),
     }, indent=2).encode("utf-8")
 

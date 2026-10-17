@@ -86,8 +86,9 @@ holding a run can find them.
 
 ## The day marker
 
-A day's marker says the day is complete, which run published it and when, and
-which sources its tables hold. The public knowledge graph api on
+A day's marker says the day is complete, which run published it and when,
+which sources its tables hold, and how complete its market data was. The public
+knowledge graph api on
 jefflevesque.com reads `run_id` and `published` from every marker, so treat the
 following as the contract:
 
@@ -97,11 +98,13 @@ following as the contract:
 | `run_id` | the run that published the day, as its id: the UTC time it started, `YYYYMMDDTHHMMSSZ`. It is the same id the run's builds are [published](outputs.md#published-runs) under |
 | `published` | when the upload that finished the day started, in UTC, as `YYYY-MM-DDTHH:MM:SSZ`. The day became readable later, once that upload was checked and the marker went up |
 | `sources` | the name of every source whose data the day's tables hold, sorted. It has each source the run read, which for the four-source run is `bls`, `market`, `noaa` and `sec`, and `sec-companyfacts` beside `sec` when the run read the [SEC company facts snapshot](sources.md#sec-company-facts). It has `stock-split` when the day has a [`splits/`](#splits) partition, and `sec-companyfacts` when it has a [`companyfacts/`](#companyfacts) partition, even an empty one. Neither feed is a source of the graph, but their rows are in the tables. A feed read into a table of its own later is listed the same way, by its name |
+| `market_coverage` | how complete the day's market data was: `snapshots`, how many the day has, and `stocks` and `stocks_with_options`, the stocks and the stocks with an option quoted in the thinnest of them. Counts, not a verdict: a partial day publishes like any other, and this is where it shows. Present only when the run read a market source and recorded its coverage. The run's [`graph_schema.json`](outputs.md#what-the-graph-is-made-of) has every snapshot's counts |
 | written | once and last, after every table of the day; never rewritten |
 
-A marker published before `sources` was added has none, because markers are
-never rewritten. The marker also lists the day's `tables` and counts its
-`files`. They describe the upload and carry no guarantee.
+A marker published before `sources` or `market_coverage` was added lacks that
+field, because markers are never rewritten. The marker also lists the day's
+`tables` and counts its `files`. They describe the upload and carry no
+guarantee.
 
 ## Reading them
 

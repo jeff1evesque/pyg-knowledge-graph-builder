@@ -108,6 +108,9 @@ RUN_ID_NAME = re.compile(r"\d{8}T\d{6}Z")
 # Tables read from a feed rather than built from the triples, and the feed's
 # name. A day's marker lists the feed among its sources when the day has the table.
 FEED_TABLES = {"splits": splits.FEED_NAME, "companyfacts": companyfacts.FEED_NAME}
+# What a day's marker carries of the job's market coverage: the day's snapshots,
+# and the stocks and stocks with options in the thinnest of them. #452
+MARKET_COVERAGE_SUMMARY = ("snapshots", "stocks", "stocks_with_options")
 
 # A day-level source path: .../year=2026/month=09/09.snappy.parquet or .../day=09/
 DAY_IN_PATH = re.compile(r"year=(\d{4})/month=(\d{2})/(?:day=)?(\d{2})(?:\.[\w.]+)?/?$")
@@ -309,6 +312,17 @@ def recorded_day(enriched: Path) -> str:
     return str(recorded.get("day") or "").strip()
 
 
+def recorded_coverage(enriched: Path):
+    """The day marker's summary of the market coverage the job recorded in
+    dataset.json, or None when it recorded none. #452"""
+    descriptor = enriched / "dataset.json"
+    recorded = json.loads(descriptor.read_text()) if descriptor.exists() else {}
+    coverage = recorded.get("market_coverage")
+    if not coverage:
+        return None
+    return {name: coverage[name] for name in MARKET_COVERAGE_SUMMARY}
+
+
 def data_day(work: Path, enriched: Path, env) -> str:
     """The path's month= segment cannot tell two runs apart, so index.json names the day.
 
@@ -431,21 +445,25 @@ def day_sources(run_sources, tables) -> list:
     return sorted(set(run_sources) | feeds)
 
 
-def day_marker(day: str, run_id: str, sources, items) -> dict:
+def day_marker(day: str, run_id: str, sources, items, market_coverage=None) -> dict:
     """A day's marker, the same in the published tables and in the archive.
 
     day, run_id, published and sources are a contract another service reads; see
-    documentation/reference/tables.md.
+    documentation/reference/tables.md. market_coverage is recorded_coverage's
+    summary, and the marker has the field only when the job recorded one.
     """
     tables = sorted({name.split("/", 1)[0] for name, _ in items})
-    return {
+    marker = {
         "day": day,
         "run_id": run_id,
         "published": utc_now(),
         "sources": day_sources(sources, tables),
-        "tables": tables,
-        "files": len(items),
     }
+    if market_coverage is not None:
+        marker["market_coverage"] = market_coverage
+    marker["tables"] = tables
+    marker["files"] = len(items)
+    return marker
 
 
 def variant_entry(graph: str, labels: dict, in_graph: dict) -> dict:
@@ -595,7 +613,7 @@ def check_upload(items, tree: Path, dst: str, log: Log, marker: str = INDEX,
 
 
 def publish_tables(rd: Path, items, dst: str, day: str, run_id: str, sources,
-                   upload: bool, log: Log) -> int:
+                   upload: bool, log: Log, market_coverage=None) -> int:
     """Send one day of tables to the tables root. Returns an exit code.
 
     Its own destination, its own guard and its own completion marker, because
@@ -611,7 +629,7 @@ def publish_tables(rd: Path, items, dst: str, day: str, run_id: str, sources,
     """
     marker = f"{TABLES_MARKER}/{day}.json"
     tree = rd / TABLES_TREE
-    index = day_marker(day, run_id, sources, items)
+    index = day_marker(day, run_id, sources, items, market_coverage)
     build_tree(tree, items, index, marker)
 
     log(f"tables tree {tree}:")
@@ -667,6 +685,7 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
         raise Refused(f"{enriched / 'triples'} has no _SUCCESS")
     graphs = find_graphs(pyg)
     dataset, sources = dataset_name(enriched, f"{year}-{month}", env)
+    coverage = recorded_coverage(enriched)
     day = data_day(work, enriched, env)
     dst = f"{publish_root(env)}/{dataset}/{period_dirs}/{run_id}"
 
@@ -697,7 +716,8 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
         # tables, when they failed after the run went up.
         log(f"{dst}/{INDEX} already exists, so the run is published. Resuming its tables.")
         try:
-            rc = publish_tables(rd, tables, tables_dst, day, run_id, sources, upload, log)
+            rc = publish_tables(rd, tables, tables_dst, day, run_id, sources, upload, log,
+                                coverage)
         except Failed as why:
             raise Refused(str(why))  # nothing has been sent yet
         if not upload:
@@ -732,7 +752,8 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
         log(f"dry run: {count} files would be uploaded, then index.json. Nothing was written.")
         if tables:
             try:
-                publish_tables(rd, tables, tables_dst, day, run_id, sources, False, log)
+                publish_tables(rd, tables, tables_dst, day, run_id, sources, False, log,
+                               coverage)
             except Failed as why:
                 raise Refused(str(why))
         log("Run again with --upload to publish.")
@@ -760,7 +781,8 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
     # already published is still a refusal (2).
     if tables:
         try:
-            rc = publish_tables(rd, tables, tables_dst, day, run_id, sources, True, log)
+            rc = publish_tables(rd, tables, tables_dst, day, run_id, sources, True, log,
+                                coverage)
         except Refused as why:
             log(f"the tables were refused: {why}")
             rc = 2
@@ -979,7 +1001,8 @@ def archive(rd: Path, root: Path, env, log: Log, keep_days=None) -> int:
             marker.parent.mkdir(parents=True, exist_ok=True)
             partial = marker.with_name(f".{marker.name}.partial")
             with open(partial, "w") as fh:
-                fh.write(json.dumps(day_marker(day, run_id, sources, table_items), indent=2) + "\n")
+                fh.write(json.dumps(day_marker(day, run_id, sources, table_items,
+                                               recorded_coverage(enriched)), indent=2) + "\n")
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(partial, marker)

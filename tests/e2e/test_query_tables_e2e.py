@@ -148,6 +148,40 @@ def test_edges_holds_the_edges_the_graph_schema_counted(spark, run):
     assert counted == schema["summary"]["total_edges"]
 
 
+def test_the_graph_schema_counts_the_snapshots_the_tables_hold(spark, run):
+    """market_coverage is counted off the enriched triples and snapshots/ is
+    pivoted from the same rows, so the two must agree snapshot by snapshot.
+    #452"""
+    config, _ = run
+    coverage = _schema(config)["build_metadata"]["market_coverage"]
+
+    counted = {}
+    for row in _rows(spark, config, "snapshots"):
+        quote = row.asDict()
+        snapshot = counted.setdefault(
+            quote["market_quotes_captureTime"],
+            {"stocks": 0, "underlyings": set(), "option_rows": 0},
+        )
+        if quote["node_type"] == "market_quotes_EquitySnapshot":
+            snapshot["stocks"] += 1
+        elif quote["node_type"] == "market_quotes_OptionSnapshot":
+            snapshot["option_rows"] += 1
+            # The fixtures' options name no underlying, so the column may be absent.
+            if quote.get("market_quotes_underlyingSymbol"):
+                snapshot["underlyings"].add(quote["market_quotes_underlyingSymbol"])
+
+    assert counted, "the fixtures carry no market snapshots to count"
+    assert coverage["snapshots"] == len(counted)
+    assert coverage["by_snapshot"] == [
+        {"capture_time": captured, "stocks": c["stocks"],
+         "stocks_with_options": len(c["underlyings"]),
+         "option_rows": c["option_rows"]}
+        for captured, c in sorted(counted.items())
+    ]
+    # No constituents CSV is configured for the fixtures.
+    assert coverage["constituents"] is None
+
+
 def test_edge_types_describes_every_edge_type_the_schema_names(spark, run):
     config, _ = run
     schema = _schema(config)

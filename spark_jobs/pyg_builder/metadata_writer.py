@@ -96,6 +96,7 @@ class MetadataCollector:
         dataset: str = "",
         sources: Optional[List[str]] = None,
         day: str = "",
+        market_coverage: Optional[Dict[str, Any]] = None,
     ):
         self._time_period = time_period
         self._vector_dim = vector_dim
@@ -111,6 +112,10 @@ class MetadataCollector:
         # The day the data was cut from, YYYY-MM-DD. Empty for the same reason,
         # and when the run had no single day.
         self._day = day or ""
+        # How complete the day's market data was (tables.market_coverage). None
+        # when the run read no market source, or its enriched output was written
+        # before the dataset descriptor carried it. #452
+        self._market_coverage = market_coverage
         self._build_timestamp = datetime.now(timezone.utc).isoformat()
 
         # Populated by register_* methods during construction
@@ -517,6 +522,12 @@ class MetadataCollector:
         edge_types_with_features = len(self._edge_types_with_features)
 
         return {
+            # 1.8: adds `build_metadata.market_coverage`: the day's market
+            # snapshots, and in each the stocks, the stocks with options and the
+            # option rows. Additive only. Through 1.7 a day whose options covered
+            # 138 of its 503 stocks, as 2026-10-16's did, read like one where 365
+            # stocks had none. #452
+            #
             # 1.7: adds each node type's `stored_dim` and
             # `build_metadata.node_feature_dim`. Additive only. Since #443 one
             # node type's x is narrower than the layout (on the nightly's,
@@ -555,7 +566,7 @@ class MetadataCollector:
             # features". Through 1.0 it was `count > 0` -- the node count --
             # which made it, and summary.node_types_with_literal_features,
             # true/total for every build. See _build_graph_schema's docstring.
-            "version": "1.7",
+            "version": "1.8",
             "build_metadata": {
                 "time_period": self._time_period,
                 # The same value as the query tables' day= partition and
@@ -592,6 +603,11 @@ class MetadataCollector:
                 "excluded_node_types": sorted(
                     self._config.get("exclude_node_types") or []
                 ),
+                # How complete the day's market data was. Counts, not a verdict:
+                # what is too thin is the reader's call. None when the run read
+                # no market source, or when its enriched output predates this
+                # field; `sources` names market only in the second case.
+                "market_coverage": self._market_coverage,
                 # The node layout's width, feature_spec.json's total_dim. A
                 # type whose stored_dim is below it is trimmed. Always present;
                 # pipeline_config's vector_dim stays the echo of what the job

@@ -39,7 +39,7 @@ from spark_jobs.enrichment.temporal_unifier import (
     UNIFIED_MONTH_TYPE,
 )
 from spark_jobs.graph.config import JobConfig
-from spark_jobs.graph.tables import table_path, write_query_tables
+from spark_jobs.graph.tables import market_coverage, table_path, write_query_tables
 from split_feed import feed_client, month_object
 from spark_jobs.pyg_builder.naming import RDF_TYPE
 from spark_jobs.utils.rdf_utils import (
@@ -615,6 +615,104 @@ def test_a_run_with_no_market_writes_no_snapshots(spark, tmp_path):
     paths = write_query_tables(spark, triples, _config(tmp_path))
     assert "snapshots" not in paths
     assert paths["facts"]
+
+
+# ======================================================================
+# market coverage
+# ======================================================================
+#
+# How complete the day's market data was (#452). A partial day publishes like
+# any other, so these counts are where it shows.
+
+EQUITY_SNAPSHOT = str(MARKET_QUOTES.EquitySnapshot)
+CAPTURE_TIME = str(MARKET_QUOTES.captureTime)
+NINE_FORTY = "2026-10-16T13:40:40.100Z"
+TEN = "2026-10-16T14:00:40.100Z"
+
+
+def _snapshot(uri, kind, captured, underlying=None):
+    """A snapshot's type and capture time, and the underlying an option names."""
+    rows = [(uri, RDF_TYPE, kind), (uri, CAPTURE_TIME, captured)]
+    if underlying is not None:
+        rows.append((uri, UNDERLYING_SYMBOL, underlying))
+    return rows
+
+
+def _coverage(spark, rows, constituents=None):
+    return market_coverage(
+        spark.createDataFrame(
+            rows, "subject string, predicate string, object string"
+        ),
+        constituents,
+    )
+
+
+def test_market_coverage_counts_each_snapshots_stocks_and_options(spark):
+    """Per capture time: the stock rows, the distinct underlyings the options
+    name, and the option rows. Two options on one stock are one stock with
+    options. The day's three are the thinnest snapshot's, in time order."""
+    rows = (
+        _snapshot("s/msft/1", EQUITY_SNAPSHOT, NINE_FORTY)
+        + _snapshot("s/aapl/1", EQUITY_SNAPSHOT, NINE_FORTY)
+        + _snapshot("o/msft-c/1", OPTION_SNAPSHOT, NINE_FORTY, "MSFT")
+        + _snapshot("o/msft-p/1", OPTION_SNAPSHOT, NINE_FORTY, "MSFT")
+        + _snapshot("o/aapl-c/1", OPTION_SNAPSHOT, NINE_FORTY, "AAPL")
+        # Ten o'clock lost AAPL's options, as 2026-10-16 lost 365 stocks'.
+        + _snapshot("s/msft/2", EQUITY_SNAPSHOT, TEN)
+        + _snapshot("s/aapl/2", EQUITY_SNAPSHOT, TEN)
+        + _snapshot("o/msft-c/2", OPTION_SNAPSHOT, TEN, "MSFT")
+    )
+
+    assert _coverage(spark, rows, constituents=503) == {
+        "constituents": 503,
+        "snapshots": 2,
+        "stocks": 2,
+        "stocks_with_options": 1,
+        "option_rows": 1,
+        "by_snapshot": [
+            {"capture_time": NINE_FORTY, "stocks": 2,
+             "stocks_with_options": 2, "option_rows": 3},
+            {"capture_time": TEN, "stocks": 2,
+             "stocks_with_options": 1, "option_rows": 1},
+        ],
+    }
+
+
+def test_an_option_naming_no_underlying_counts_only_as_an_option_row(spark):
+    rows = (
+        _snapshot("s/msft/1", EQUITY_SNAPSHOT, NINE_FORTY)
+        + _snapshot("o/msft-c/1", OPTION_SNAPSHOT, NINE_FORTY)
+    )
+
+    assert _coverage(spark, rows)["by_snapshot"] == [
+        {"capture_time": NINE_FORTY, "stocks": 1,
+         "stocks_with_options": 0, "option_rows": 1},
+    ]
+
+
+def test_market_coverage_counts_only_snapshots_with_a_capture_time(spark):
+    """Every other node, market's hub nodes included, is not a snapshot, and
+    a quote with no capture time belongs to no snapshot. TRIPLES' two quotes
+    have none."""
+    rows = TRIPLES + _snapshot("s/msft/1", EQUITY_SNAPSHOT, NINE_FORTY)
+
+    assert _coverage(spark, rows)["by_snapshot"] == [
+        {"capture_time": NINE_FORTY, "stocks": 1,
+         "stocks_with_options": 0, "option_rows": 0},
+    ]
+
+
+def test_a_day_with_no_snapshots_counts_none(spark):
+    rows = [t for t in TRIPLES if "quote" not in t[0]]
+
+    assert _coverage(spark, rows) == {
+        "constituents": None,
+        "snapshots": 0,
+        "stocks": 0,
+        "stocks_with_options": 0,
+        "option_rows": 0,
+        "by_snapshot": [],
+    }
 
 
 # ======================================================================
