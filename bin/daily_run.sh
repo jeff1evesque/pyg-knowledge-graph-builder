@@ -606,6 +606,32 @@ run_rc="$(cat "$RD/run.done" 2>/dev/null || echo missing)"
   || fail "the run did not finish cleanly (launcher rc=$launcher_rc, run.done=$run_rc), so it is not published. See $RD/outcome.txt"
 log "the run finished"
 
+# How complete the day's market data was, as the job recorded it in its dataset.json.
+# A partial day builds and publishes like any other, so this line is where the night
+# says so. It reports and never fails the night. #452
+coverage="$(python3 - "$DATA_DATE" "$(sed -n 's/^work dir *: *//p' "$RD/run-config.txt" 2>/dev/null | head -1)" <<'PY'
+import glob
+import json
+import sys
+
+day, work = sys.argv[1:3]
+for path in sorted(glob.glob(f"{work}/enriched/year=*/month=*/dataset.json")) if work else []:
+    try:
+        with open(path) as fh:
+            c = json.load(fh)["market_coverage"]
+        line = (f"market {day}: {c['snapshots']} snapshots; the thinnest has "
+                f"{c['stocks']} stocks, {c['stocks_with_options']} with options")
+        if c.get("constituents") is not None:
+            line += f"; {c['constituents']} constituents"
+        print(line)
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
+PY
+)"
+if [[ -n "$coverage" ]]; then
+  log "$coverage"
+fi
+
 log "publishing; see $RD/publish.log"
 python3 "$REPO/bin/publish_run.py" "$RD" --upload > "$RD/publish.out" 2>&1
 publish_rc=$?
