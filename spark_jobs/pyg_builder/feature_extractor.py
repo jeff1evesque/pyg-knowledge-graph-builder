@@ -80,6 +80,7 @@ from spark_jobs.utils.rdf_utils import (
     PROV_ROUTE_DATATYPE_RANGE,
 )
 from spark_jobs.utils.spark_rdf_utils import (
+    IDENTIFIER_PREDICATES,
     NUMERIC_PREDICATE_MIN_SHARE,
     collect_sorted,
     is_finite,
@@ -184,6 +185,10 @@ _NON_FEATURE_PREDICATES = {
 # filed at the mean time -- and upstream fetches the timestamp for at most 60
 # filings per run, so unstamped rows are the normal state on a fresh day.
 #
+# The IDs in spark_rdf_utils.IDENTIFIER_PREDICATES are kept out the same way
+# (#456). A CUSIP is not a magnitude, and as a label it would only repeat the
+# stock's ticker, which already is one.
+#
 # Named from the vocabulary rather than spelled out, so a re-homed namespace
 # moves the term and this together instead of leaving a filter that matches
 # nothing.
@@ -191,7 +196,7 @@ _UNENCODED_VALUE_PREDICATES = {
     str(SEC_FILINGS.hasSic),
     str(SEC_FILINGS.hasIssuerSic),
     str(SEC_FILINGS.hasAcceptanceDateTime),
-}
+} | IDENTIFIER_PREDICATES
 
 # Predicates whose presence proves the ontology-mapping phase ran over the
 # triples this build was handed.
@@ -409,6 +414,56 @@ def _categorical_key():
     )
 
 
+def classify_literal_predicates(
+    literal_triples: DataFrame,
+    min_share: float,
+) -> Set[str]:
+    """
+    Decide, per predicate, whether it is numeric or categorical.
+
+    A predicate is numeric when more than ``min_share`` of its literal values
+    parse as a number. The two classes are mutually exclusive, so a property
+    never lands in both the numeric and the categorical segment.
+
+    A function rather than a method because the edge features read endpoint
+    numbers by the same answer (#456), and run it themselves when no node
+    feature build handed them one.
+
+    Returns the set of numeric predicates. Small driver-side collect — one row
+    per distinct literal predicate (typically <200).
+    """
+    shares = (
+        literal_triples
+        .withColumn("_is_numeric", numeric_literal_expr("object").isNotNull())
+        .groupBy("predicate")
+        .agg(
+            F.count("*").alias("total"),
+            F.sum(F.col("_is_numeric").cast("int")).alias("numeric"),
+        )
+        .collect()
+    )
+
+    numeric_predicates = set()
+    for row in shares:
+        share = row["numeric"] / row["total"] if row["total"] else 0.0
+        if share > min_share:
+            numeric_predicates.add(row["predicate"])
+        elif row["numeric"]:
+            # Mixed, but not numeric enough — the parseable minority is
+            # treated as labels rather than magnitudes.
+            logger.info(
+                f"    {row['predicate']}: {row['numeric']}/{row['total']} "
+                f"values parse as numeric ({share:.1%}) — "
+                f"classified categorical"
+            )
+
+    logger.info(
+        f"    Literal predicates: {len(numeric_predicates)} numeric, "
+        f"{len(shares) - len(numeric_predicates)} categorical"
+    )
+    return numeric_predicates
+
+
 def _local_name(uri: str) -> str:
     """The trailing name of a URI, after the last ``/`` or ``#``."""
     return uri.rsplit("/", 1)[-1].rsplit("#", 1)[-1]
@@ -528,6 +583,8 @@ class FeatureExtractor:
         self._numeric_min_share = feat_config.get(
             "numeric_predicate_min_share", NUMERIC_PREDICATE_MIN_SHARE
         )
+        # What build_features() classed as numeric. None until it has run.
+        self._numeric_predicates: Optional[frozenset] = None
         self._class_identity_dim = feat_config.get(
             "class_identity_dim", None
         )
@@ -622,6 +679,15 @@ class FeatureExtractor:
             }
             for node_type, check in sorted(self._trim_checks.items())
         }
+
+    def numeric_predicates(self) -> Optional[frozenset]:
+        """The literal predicates build_features() classed as numeric.
+
+        The edge features read endpoint numbers through this, so the node and
+        edge sides cannot disagree about what a number is (#456). None before
+        build_features() has run.
+        """
+        return self._numeric_predicates
 
     def get_encoding_config(self) -> Dict[str, Any]:
         """
@@ -841,6 +907,7 @@ class FeatureExtractor:
             triples_df, node_id_df
         ).persist(StorageLevel.DISK_ONLY)
         numeric_predicates = self._classify_literal_predicates(literal_triples)
+        self._numeric_predicates = frozenset(numeric_predicates)
 
         numeric_df = self._extract_numeric_literals(
             literal_triples, node_id_df, numeric_predicates
@@ -1345,47 +1412,10 @@ class FeatureExtractor:
         self,
         literal_triples: DataFrame,
     ) -> Set[str]:
-        """
-        Decide, per predicate, whether it is numeric or categorical.
-
-        A predicate is numeric when more than ``self._numeric_min_share`` of
-        its literal values parse as a number. The two classes are mutually
-        exclusive, so a property never lands in both the numeric and the
-        categorical segment.
-
-        Returns the set of numeric predicates. Small driver-side collect —
-        one row per distinct literal predicate (typically <200).
-        """
-        shares = (
-            literal_triples
-            .withColumn("_is_numeric", numeric_literal_expr("object").isNotNull())
-            .groupBy("predicate")
-            .agg(
-                F.count("*").alias("total"),
-                F.sum(F.col("_is_numeric").cast("int")).alias("numeric"),
-            )
-            .collect()
+        """classify_literal_predicates at this build's numeric_predicate_min_share."""
+        return classify_literal_predicates(
+            literal_triples, self._numeric_min_share
         )
-
-        numeric_predicates = set()
-        for row in shares:
-            share = row["numeric"] / row["total"] if row["total"] else 0.0
-            if share > self._numeric_min_share:
-                numeric_predicates.add(row["predicate"])
-            elif row["numeric"]:
-                # Mixed, but not numeric enough — the parseable minority is
-                # treated as labels rather than magnitudes.
-                logger.info(
-                    f"    {row['predicate']}: {row['numeric']}/{row['total']} "
-                    f"values parse as numeric ({share:.1%}) — "
-                    f"classified categorical"
-                )
-
-        logger.info(
-            f"    Literal predicates: {len(numeric_predicates)} numeric, "
-            f"{len(shares) - len(numeric_predicates)} categorical"
-        )
-        return numeric_predicates
 
     def _extract_numeric_literals(
         self,
