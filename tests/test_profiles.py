@@ -198,6 +198,21 @@ def test_assembly_slots_leave_each_one_a_usable_pool(pyg_assembly):
     )
 
 
+def test_assembly_driver_heap_has_room_for_its_largest_stage(pyg_assembly):
+    """The driver keeps notes on every task of a stage while it runs.
+
+    The graph half runs about 700 stages. Its largest, the small-edge-type
+    step, had 20,612 tasks on 2026-10-16, and 8g ran out about 14,700 tasks in
+    (#454). #454 cut that stage to about 1,100 tasks, and 16g stays as room for
+    the next stage that grows. It takes nothing from the tensors up front:
+    -Xmx is a cap, not a reservation.
+    """
+    assert int(pyg_assembly["DRIVER_MEMORY"].rstrip("gG")) >= 16, (
+        "8g ran out of heap on 2026-10-16's 20,612-task stage, because the "
+        "driver keeps notes on every task of a running stage (#454)"
+    )
+
+
 def test_large_run_is_not_for_assembly(large_run):
     """The assembly leg needs the host for the driver, not the executors.
 
