@@ -19,6 +19,8 @@ from rdflib.namespace import RDF
 from typing import Optional, List, Set, Tuple
 import logging
 
+from spark_jobs.utils.namespaces import MARKET_QUOTES
+
 logger = logging.getLogger(__name__)
 
 TRIPLES_SCHEMA = StructType([
@@ -108,6 +110,17 @@ def numeric_literal_expr(col: str = "object"):
     """
     parsed = F.split(F.col(col), r"\^\^").getItem(0).cast("double")
     return F.when(is_finite(parsed), parsed)
+
+
+# Properties whose values are IDs: never a number, whatever share of them
+# parses. A CUSIP is 9 characters, and 56.9% of the stock snapshots' CUSIPs
+# parse anyway -- 037833100 as an integer, 46120E602 as 46120 x 10^602 -- so
+# the majority rule made it a measurement. That put noise in the node
+# features, infinity and NaN in the edge features, and a double column in
+# snapshots/ that lost 43% of the CUSIPs (#456).
+IDENTIFIER_PREDICATES = frozenset({
+    str(MARKET_QUOTES.cusip),
+})
 
 
 def literal_datatype_observations(
