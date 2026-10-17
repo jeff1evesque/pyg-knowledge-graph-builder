@@ -98,8 +98,12 @@ def _generic_edge_rows(year=2020):
     ]
 
 
-def _edge_features(spark, rows, config=None):
-    """Run the real edge-feature path; return (features, edge_indices, layout)."""
+def _edge_features(spark, rows, config=None, numeric_predicates=None):
+    """Run the real edge-feature path; return (features, edge_indices, layout).
+
+    numeric_predicates stands in for the node features' answer, which a build
+    hands the edge side; None has the edge side classify them itself.
+    """
     cfg = config or {}
     triples = spark.createDataFrame(
         rows, schema="subject STRING, predicate STRING, object STRING"
@@ -110,7 +114,8 @@ def _edge_features(spark, rows, config=None):
     )
     efe = EdgeFeatureExtractor(spark, cfg)
     feats = efe.build_edge_features(
-        triples, node_id_df, edges_final, edge_indices
+        triples, node_id_df, edges_final, edge_indices,
+        numeric_predicates=numeric_predicates,
     )
     return feats, edge_indices, efe.get_layout()
 
@@ -382,6 +387,91 @@ def test_temporal_direction_sign_reverses_when_dst_earlier(spark):
     assert row[L.seg1_direction_start] == pytest.approx(-1.0)
     if L.seg1_period_flags_dim >= 2:
         assert row[L.seg1_period_flags_start + 1] == pytest.approx(0.0)
+
+
+# ======================================================================
+# Endpoint numbers are read the way the node features read them (#456)
+# ======================================================================
+
+CUSIP = f"{MARKET_QUOTES}cusip"
+HUGE = "https://example.org/hugeMeasure"
+CODE = "https://example.org/code"
+
+# (1+2)/2 + (2020+2020)/2 from hasMonth and hasYear alone.
+TEMPORAL_MAGNITUDE = 2021.5
+
+
+def _precedes_row(feats):
+    return feats[("cpi_Index", PRECEDES_REL, "cpi_Series")]
+
+
+@pytest.mark.parametrize("cusip", ["46120E602", "03073E105"])
+def test_a_cusip_puts_no_infinity_or_nan_in_the_edge_features(spark, cusip):
+    """46120E602 reads as infinity, and 03073E105 as 3 x 10^108, which is too
+    big for float32. Read as numbers, they put 190 infinite values and 19 NaN
+    into the stock snapshots' precedes links. A CUSIP is an ID, so it reaches
+    no arithmetic, and the hasMonth/hasYear contrast is what it was."""
+    feats, _ei, L = _edge_features(spark, _temporal_rows(1, 2) + [
+        ("https://ex/src", CUSIP, cusip),
+        ("https://ex/dst", CUSIP, cusip),
+    ])
+    attr = _precedes_row(feats)
+
+    assert bool(torch.isfinite(attr).all())
+    row = attr.numpy()[0]
+    assert _subsum(row, L.seg2_magnitude_start, L.seg2_magnitude_dim) == (
+        pytest.approx(TEMPORAL_MAGNITUDE, rel=1e-5)
+    )
+
+
+def test_a_number_too_big_for_float32_is_dropped_not_made_infinite(spark):
+    """A finite double above 3.4 x 10^38 still becomes infinity at the final
+    cast to float32. It is dropped, the way a value that does not parse is."""
+    feats, _ei, L = _edge_features(spark, _temporal_rows(1, 2) + [
+        ("https://ex/src", HUGE, "1e300"),
+        ("https://ex/dst", HUGE, "2e300"),
+    ])
+    attr = _precedes_row(feats)
+
+    assert bool(torch.isfinite(attr).all())
+    row = attr.numpy()[0]
+    assert _subsum(row, L.seg2_magnitude_start, L.seg2_magnitude_dim) == (
+        pytest.approx(TEMPORAL_MAGNITUDE, rel=1e-5)
+    )
+
+
+def test_a_property_the_node_side_treats_as_a_label_adds_nothing(spark):
+    """Half of these values parse, which is not more than half, so the node
+    features make the property a label. The edge side used to do arithmetic on
+    every value that parsed regardless, and add 9 - 5 to the difference."""
+    feats, _ei, L = _edge_features(spark, _temporal_rows(1, 2) + [
+        ("https://ex/src", CODE, "5"),
+        ("https://ex/dst", CODE, "9"),
+        ("https://ex/other0", RDF_TYPE, CPI_INDEX),
+        ("https://ex/other0", CODE, "A-1"),
+        ("https://ex/other1", RDF_TYPE, CPI_INDEX),
+        ("https://ex/other1", CODE, "B-2"),
+    ])
+    row = _precedes_row(feats).numpy()[0]
+
+    # (2-1) + (2020-2020), with nothing from the label
+    assert _subsum(row, L.seg2_difference_start, L.seg2_difference_dim) == (
+        pytest.approx(1.0, abs=1e-4)
+    )
+
+
+def test_only_the_node_sides_numeric_predicates_reach_the_contrast(spark):
+    """A build hands the edge side the node features' numeric predicates, so
+    the two cannot disagree. Handed hasMonth alone, hasYear's share goes."""
+    feats, _ei, L = _edge_features(
+        spark, _temporal_rows(1, 2), numeric_predicates={HAS_MONTH}
+    )
+    row = _precedes_row(feats).numpy()[0]
+
+    # (1+2)/2, without hasYear's (2020+2020)/2
+    assert _subsum(row, L.seg2_magnitude_start, L.seg2_magnitude_dim) == (
+        pytest.approx(1.5, abs=1e-4)
+    )
 
 
 # ======================================================================
