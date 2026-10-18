@@ -1941,6 +1941,122 @@ def test_build_features_reports_its_numeric_predicates(spark):
     assert MARKET_CUSIP not in fx.numeric_predicates()
 
 
+from spark_jobs.utils.rdf_utils import PPI, SEC_ENRICHMENT, WEATHER  # noqa: E402
+from spark_jobs.utils.spark_rdf_utils import (  # noqa: E402
+    CODE_PREDICATES,
+    IDENTIFIER_PREDICATES,
+)
+
+# Each ID with values as they arrive, enough of them parsing that the majority
+# rule alone makes it a number (#460). The 13F CUSIP and the other-manager
+# number are at two of three, the share that tipped the CUSIP on 2026-10-06.
+ID_VALUES = {
+    str(SEC_FILINGS.hasIssuerCik): ["0000320193", "0001707919", "0000001800"],
+    str(SEC_FILINGS.hasReportingOwnerCik): ["0000070858", "0000059478", "0000314984"],
+    str(SEC_ENRICHMENT.hasCik): ["0000320193", "0000002186", "0000002488"],
+    str(SEC_FILINGS.hasRptOwnerZipCode): ["06375", "28255", "00936-2708"],
+    str(SEC_FILINGS.hasCusip): ["494368103", "037833100", "20825C104"],
+    str(SEC_FILINGS.hasOtherManager): ["01", "02", "*,1"],
+    str(WEATHER.hasCountyFIPS): ["001", "003", "005"],
+    str(WEATHER.hasFIPSCode): ["001001", "001003", "001005"],
+    str(WEATHER.hasSAMECode): ["001001", "001003", "001005"],
+    str(WEATHER.hasStateFIPS): ["01", "02", "04"],
+}
+
+# Every value a digit, so the majority rule alone makes each a number.
+CODE_VALUES = {
+    str(SEC_FILINGS.hasDocumentType): ["4", "144", "4"],
+    str(SEC_FILINGS.hasFileType): ["4", "144", "3"],
+    str(SEC_FILINGS.hasSubmissionType): ["4", "144", "25"],
+    str(SEC_FILINGS.hasTransactionFormType): ["4", "5", "4"],
+    str(PPI.hasGroupCode): ["01", "02", "05"],
+    str(PPI.hasItemCode): ["1101", "11", "1102"],
+}
+
+
+def _value_rows(values_by_predicate):
+    """Three typed nodes per predicate, each with one value and a real number."""
+    return [
+        row
+        for p, (predicate, values) in enumerate(sorted(values_by_predicate.items()))
+        for i, value in enumerate(values)
+        for row in (
+            (f"https://ex/p{p}/n{i}", RDF_TYPE, CPI_INDEX),
+            (f"https://ex/p{p}/n{i}", predicate, value),
+            (f"https://ex/p{p}/n{i}", METRIC, str(i)),
+        )
+    ]
+
+
+def test_the_lists_cover_every_id_and_code_and_never_overlap():
+    """An ID's value is kept out and a code's is a label, so no property can
+    be both, and every listed one has a case below."""
+    assert IDENTIFIER_PREDICATES == set(ID_VALUES) | {MARKET_CUSIP}
+    assert CODE_PREDICATES == set(CODE_VALUES)
+    assert not IDENTIFIER_PREDICATES & CODE_PREDICATES
+
+
+def test_an_id_is_kept_out_of_both_value_segments(spark):
+    """A CIK, a ZIP code, a 13F CUSIP or a county code names something; it is
+    not an amount, and most of their values parse (#460). Like the stock
+    CUSIP, the value stays out of the numeric and categorical segments, and
+    the node still records that it has one."""
+    triples = spark.createDataFrame(
+        _value_rows(ID_VALUES), schema="subject STRING, predicate STRING, object STRING"
+    )
+    ids = set(ID_VALUES)
+
+    # The rule on its own calls them numbers, so the list is what stops them.
+    assert ids <= classify_literal_predicates(
+        triples.filter(F.col("predicate") != RDF_TYPE), 0.5
+    )
+
+    node_id_df, _counts = NodeMapper(spark, CONFIG).build_node_id_table(triples)
+    fx = FeatureExtractor(spark, CONFIG)
+
+    reaching = {
+        row["predicate"]
+        for row in fx._literal_triples(triples, node_id_df)
+        .select("predicate").distinct().collect()
+    }
+    assert not ids & reaching
+
+    present = {
+        row["predicate"]
+        for row in fx._compute_node_properties(triples, node_id_df)
+        .select("predicate").distinct().collect()
+    }
+    assert ids <= present
+
+
+def test_a_code_is_a_label_whatever_share_of_it_parses(spark):
+    """A form type or a PPI code means the same thing wherever it appears, so
+    unlike an ID its value is encoded, as a label. On a day of nothing but
+    Form 4s and 144s the majority rule alone would z-score Form 144 as 36
+    Form 4s (#460)."""
+    triples = spark.createDataFrame(
+        _value_rows(CODE_VALUES), schema="subject STRING, predicate STRING, object STRING"
+    )
+    codes = set(CODE_VALUES)
+
+    numeric = classify_literal_predicates(
+        triples.filter(F.col("predicate") != RDF_TYPE), 0.5
+    )
+    assert METRIC in numeric
+    assert not codes & numeric
+
+    node_id_df, counts = NodeMapper(spark, CONFIG).build_node_id_table(triples)
+    fx = FeatureExtractor(spark, CONFIG)
+    fx.build_features(triples, node_id_df, counts)
+
+    slots = fx.get_metadata_artifacts()["slot_mapping"]
+    numeric_slots = {p["predicate_uri"] for p in slots["numeric_properties"]}
+    categorical = {p["predicate_uri"] for p in slots["categorical_properties"]}
+    assert codes <= categorical
+    assert not codes & numeric_slots
+    assert METRIC in numeric_slots
+
+
 # ======================================================================
 # Trimmed node types — x keeps only the listed positions (#443)
 # ======================================================================
