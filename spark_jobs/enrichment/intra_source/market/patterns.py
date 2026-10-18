@@ -57,6 +57,22 @@ SYMBOL_COLUMN = "Symbol"
 SECTOR_COLUMN = "GICS Sector"
 SUB_INDUSTRY_COLUMN = "GICS Sub-Industry"
 CIK_COLUMN = "CIK"
+# The symbol as the quote feed spells it. The index spells two share classes
+# otherwise: its BRK.B and BF.B are BRK/B and BF/B in every quote. Optional,
+# like every column a reader does not require.
+QUOTE_SYMBOL_COLUMN = "quote_symbol"
+
+
+def _spellings(symbol: str, row: Dict[str, str], normalise=str) -> List[str]:
+    """``symbol``, then the row's ``quote_symbol`` when it spells the stock
+    differently.
+
+    A reader that keys quotes on this CSV takes both, so a quote finds its
+    company and its sector however the index spells the share. An export
+    without the column gives ``symbol`` alone, as before. #461
+    """
+    quote = normalise((row.get(QUOTE_SYMBOL_COLUMN) or "").strip())
+    return [symbol, quote] if quote and quote != symbol else [symbol]
 
 # ============================================
 # GICS Sector → enrichment naming conventions
@@ -395,7 +411,7 @@ def load_sector_patterns_from_s3(
 
         if gics_sector not in sector_tickers:
             sector_tickers[gics_sector] = []
-        sector_tickers[gics_sector].append(symbol)
+        sector_tickers[gics_sector].extend(_spellings(symbol, row))
 
     if not sector_tickers:
         logger.warning(
@@ -467,7 +483,8 @@ def load_ticker_cik_map_from_s3(
         if not symbol or cik is None:
             continue
 
-        ticker_cik[symbol] = cik
+        for spelling in _spellings(symbol, row, str.upper):
+            ticker_cik[spelling] = cik
 
     logger.info(
         f"Loaded {len(ticker_cik)} ticker->CIK pairs from "
