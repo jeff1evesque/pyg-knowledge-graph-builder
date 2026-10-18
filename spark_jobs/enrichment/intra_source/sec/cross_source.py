@@ -19,7 +19,7 @@ from spark_jobs.enrichment.intra_source.market.symbols import equity_symbol
 from spark_jobs.enrichment.sector_crosswalk import SIC_DIVISIONS
 from spark_jobs.sources.spec import CompanyKeys
 from spark_jobs.utils.rdf_utils import BLS_ENRICHMENT, SEC_FILINGS
-from spark_jobs.utils.spark_rdf_utils import extract_property
+from spark_jobs.utils.spark_rdf_utils import extract_entities_by_type, extract_property
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,8 @@ _FILINGS_HAS_ISSUER_CIK = str(SEC_FILINGS.hasIssuerCik)
 _FILINGS_HAS_ISSUER_TRADING_SYMBOL = str(SEC_FILINGS.hasIssuerTradingSymbol)
 _FILINGS_HAS_ISSUER = str(SEC_FILINGS.hasIssuer)
 _FILINGS_HAS_SIC = str(SEC_FILINGS.hasSic)
+_FILINGS_HAS_CUSIP = str(SEC_FILINGS.hasCusip)
+_INSTITUTIONAL_HOLDING = str(SEC_FILINGS.InstitutionalHolding)
 
 
 def issuer_ciks(triples_df: DataFrame) -> DataFrame:
@@ -71,9 +73,22 @@ def issuer_ciks(triples_df: DataFrame) -> DataFrame:
     ).filter(F.length(F.col("cik")) > 0).dropDuplicates()
 
 
+def holding_cusips(triples_df: DataFrame) -> DataFrame:
+    """(entity, cusip) for every 13F holding: the security it names (#458).
+
+    A holding is one line of a fund's quarterly report, and the CUSIP is the
+    only thing on it that says which security. Like the CIK, it arrives padded
+    to its full nine characters from the loader, and it is compared as text.
+    """
+    return extract_entities_by_type(triples_df, _INSTITUTIONAL_HOLDING).join(
+        extract_property(triples_df, _FILINGS_HAS_CUSIP, "cusip"),
+        on=F.col("entity") == F.col("subject"),
+    ).select("entity", "cusip").filter(F.length(F.col("cusip")) > 0)
+
+
 def company_keys(context: CrossSourceContext) -> CompanyKeys:
-    """The issuers, by the CIK each states, and the ticker pairings the filings
-    carry.
+    """The issuers, by the CIK each states, the ticker pairings the filings
+    carry, and the 13F holdings, by the CUSIP each names.
 
     An ownership-form issuer states both its ticker and its CIK, so the graph
     already carries the pairing for every issuer whose filings were ingested.
@@ -99,6 +114,7 @@ def company_keys(context: CrossSourceContext) -> CompanyKeys:
     return CompanyKeys(
         entities=issuers.select(F.col("issuer_uri").alias("entity"), F.col("cik")),
         symbol_ciks=symbol_ciks,
+        cusips=holding_cusips(context.triples_df),
     )
 
 
