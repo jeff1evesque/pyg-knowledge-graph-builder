@@ -658,6 +658,26 @@ def test_the_market_line_leaves_out_a_constituents_count_it_lacks(schedule):
             "0 with options\n") in s.log()
 
 
+@pytest.mark.parametrize("without, said", [
+    ([], "; 503 constituents\n"),
+    (["BF/B", "BRK/B"], "; 503 constituents; 2 without a company: BF/B, BRK/B\n"),
+    ([f"T{i:02d}" for i in range(12)],
+     "; 12 without a company: T00, T01, T02, T03, T04, T05, T06, T07, T08, T09 and 2 more\n"),
+], ids=["none", "two", "past-ten"])
+def test_the_market_line_names_the_stocks_that_reached_no_company(schedule, without, said):
+    """A ticker the company map could not resolve shows nowhere else, so the
+    night's log names the stocks; past ten, it says how many more. #461"""
+    s = schedule()
+    s.add_sources("2026-09-30")
+    coverage = {"constituents": 503, "snapshots": 20, "stocks": 503,
+                "stocks_with_options": 502, "option_rows": 550054,
+                "stocks_without_company": without, "by_snapshot": []}
+
+    r = s.run(FAKE_DATASET_JSON=json.dumps({"market_coverage": coverage}))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert said in s.log()
+
+
 @pytest.mark.parametrize("dataset_json", [
     None,
     json.dumps({"market_coverage": None}),

@@ -163,6 +163,13 @@ Discovers and creates relationships across different data source families:
 > fallback for the company-ID map: guessing a regulator's ID would silently merge
 > two unrelated companies into one node, which is worse than an absent link.
 >
+> The company and sector links take a quote's symbol in either of the CSV's
+> spellings: `Symbol`, the index's, and `quote_symbol`, the quote feed's. They
+> differ for two share classes, BRK.B and BF.B, which every quote spells BRK/B
+> and BF/B; while only `Symbol` was read, neither stock reached its company or
+> its sector. The day's `market_coverage` names any stock that still reaches no
+> company ([outputs](../reference/outputs.md#what-the-graph-is-made-of)).
+>
 > A second limit is upstream and not fixable here: a filing reaches an economic
 > sector through `filings:hasSic`, and the SEC leaves that code blank on most
 > filings — 15 of 40 on the committed fixtures. So roughly four companies in ten

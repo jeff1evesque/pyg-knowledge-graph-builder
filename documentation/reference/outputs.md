@@ -158,10 +158,11 @@ for name, entry in record["artifacts"].items():
 
 Complete inventory of every node type and edge type in the graph. The entry point for any consumer of the graph.
 
-**Schema version: `1.8`.** Every step since 1.1 has been additive: each field keeps the name and meaning it had, so the version says what is *there*.
+**Schema version: `1.9`.** Every step since 1.1 has been additive: each field keeps the name and meaning it had, so the version says what is *there*.
 
 | Version | What it changed |
 |---|---|
+| `1.9` | adds `build_metadata.market_coverage.stocks_without_company`, the stocks none of whose snapshots links to a company. See [What the graph is made of](#what-the-graph-is-made-of) |
 | `1.8` | adds `build_metadata.market_coverage`, how complete the day's market data was: its snapshots, and the stocks, stocks with options and option rows in each. See [What the graph is made of](#what-the-graph-is-made-of) |
 | `1.7` | adds each node type's `stored_dim`, how many columns its `x` has, and `build_metadata.node_feature_dim`, the layout's width. Since [#443](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/issues/443) one type's `x` is narrower than the layout |
 | `1.6` | `build_metadata.sources` and `sources_in_graph` may name a feed beside its source: `sec-companyfacts` beside `sec`. See [What the graph is made of](#what-the-graph-is-made-of) |
@@ -230,9 +231,10 @@ The run published on 2026-09-18 is that graph: 149 node types and 822 edge types
 - **`constituents`**: how many stocks the day's constituents CSV lists, the number to read the others against. `null` when the run read no CSV.
 - **`snapshots`**: how many snapshots the day has.
 - **`stocks`**, **`stocks_with_options`** and **`option_rows`**: each the lowest across the day's snapshots. `stocks_with_options` counts the distinct underlying symbols the options name, so an option that names none counts only in `option_rows`.
+- **`stocks_without_company`** (1.9): the stocks none of whose snapshots links to a company, by symbol and sorted; `[]` when every one does. A ticker the company map cannot resolve shows nowhere else. Until the map read the constituents CSV's `quote_symbol`, BRK/B and BF/B were two: the CSV's `Symbol` spells them BRK.B and BF.B, and on 2026-10-16 none of their 40 snapshots had a company link. The nightly's log names them on its market line.
 - **`by_snapshot`**: the same three for each snapshot, with its `capture_time`, in time order.
 
-They are counts, not a verdict: how thin is too thin depends on what a reader wants. The field is `null` when the run read no market source, or when its enriched output was written before 1.8; `sources` names `market` only in the second case. The day's [marker](tables.md#the-day-marker) carries `snapshots`, `stocks` and `stocks_with_options`. 2026-10-15 measured this way:
+They are counts, not a verdict: how thin is too thin depends on what a reader wants. The field is `null` when the run read no market source, or when its enriched output was written before 1.8; `sources` names `market` only in the second case. Coverage recorded before 1.9 has no `stocks_without_company`. The day's [marker](tables.md#the-day-marker) carries `snapshots`, `stocks` and `stocks_with_options`. 2026-10-15 measured this way:
 
 ```json
 "market_coverage": {

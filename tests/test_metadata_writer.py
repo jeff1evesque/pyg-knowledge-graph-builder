@@ -480,8 +480,13 @@ def test_graph_schema_version_is_bumped_for_the_new_semantics():
     options covered a fraction of its stocks reads like one where the rest had
     none, and the version tells a consumer whether the counts are there to
     tell them apart.
+
+    1.9 adds build_metadata.market_coverage.stocks_without_company. Additive:
+    at 1.8 a stock whose ticker the company map could not resolve, as BRK/B's
+    and BF/B's could not, shows nowhere, and the version tells a consumer
+    whether an absent list means none or not measured.
     """
-    assert _fully_registered_collector()._build_graph_schema()["version"] == "1.8"
+    assert _fully_registered_collector()._build_graph_schema()["version"] == "1.9"
 
 
 # ======================================================================
@@ -533,13 +538,15 @@ def test_graph_schema_node_feature_dim_is_the_layouts_width(vector_dim):
 
 
 def test_graph_schema_records_the_market_coverage_it_is_given():
-    """As the enriched output's dataset.json recorded it, unchanged. #452"""
+    """As the enriched output's dataset.json recorded it, unchanged, the
+    stocks that reached no company included (1.9). #452 #461"""
     coverage = {
         "constituents": 503,
         "snapshots": 2,
         "stocks": 503,
         "stocks_with_options": 138,
         "option_rows": 161232,
+        "stocks_without_company": ["BF/B", "BRK/B"],
         "by_snapshot": [
             {"capture_time": "2026-10-16T13:40:40.100Z", "stocks": 503,
              "stocks_with_options": 138, "option_rows": 161232},

@@ -623,6 +623,12 @@ for path in sorted(glob.glob(f"{work}/enriched/year=*/month=*/dataset.json")) if
                 f"{c['stocks']} stocks, {c['stocks_with_options']} with options")
         if c.get("constituents") is not None:
             line += f"; {c['constituents']} constituents"
+        # Stocks that reached no company, by name: a ticker the company map
+        # could not resolve shows nowhere else. Older runs have no list. #461
+        without = c.get("stocks_without_company") or []
+        if without:
+            more = f" and {len(without) - 10} more" if len(without) > 10 else ""
+            line += f"; {len(without)} without a company: {', '.join(without[:10])}{more}"
         print(line)
     except (OSError, ValueError, TypeError, KeyError):
         pass

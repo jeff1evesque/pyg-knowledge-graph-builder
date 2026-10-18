@@ -182,6 +182,36 @@ def test_the_graph_schema_counts_the_snapshots_the_tables_hold(spark, run):
     assert coverage["constituents"] is None
 
 
+def test_the_stocks_without_a_company_are_the_ones_edges_leaves_unlinked(spark, run):
+    """market_coverage names them off the enriched triples, and edges/ holds
+    the company links themselves, so the two must agree. #461"""
+    config, _ = run
+    coverage = _schema(config)["build_metadata"]["market_coverage"]
+    stock = "market_quotes_EquitySnapshot"
+
+    symbols = {
+        row["uri"]: row["market_quotes_symbol"]
+        for row in _rows(spark, config, "snapshots")
+        if row["node_type"] == stock
+    }
+    uris = {
+        row["node_id"]: row["uri"]
+        for row in _rows(spark, config, "nodes")
+        if row["node_type"] == stock
+    }
+    linked = {
+        symbols.get(uris.get(row["src_id"]))
+        for row in _rows(spark, config, "edges")
+        if row["src_type"] == stock
+        and row["relation"] == "bls_enrichment_refersToCompany"
+    } - {None}
+
+    assert symbols, "the fixtures carry no stock snapshots"
+    assert coverage["stocks_without_company"] == sorted(
+        set(symbols.values()) - linked
+    )
+
+
 def test_edge_types_describes_every_edge_type_the_schema_names(spark, run):
     config, _ = run
     schema = _schema(config)
