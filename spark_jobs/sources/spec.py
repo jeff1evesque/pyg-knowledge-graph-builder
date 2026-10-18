@@ -55,6 +55,11 @@ class CompanyKeys:
     # (symbol, cik, priority): ticker pairings the source knows. Where two
     # pairings disagree about a ticker, the lower priority wins.
     symbol_ciks: Any = None
+    # (entity, cusip): entities that name a security by its CUSIP, like a 13F
+    # holding (#458).
+    cusips: Any = None
+    # (cusip, symbol): the ticker of each security the source knows by CUSIP.
+    cusip_symbols: Any = None
 
 
 @dataclass(frozen=True)
