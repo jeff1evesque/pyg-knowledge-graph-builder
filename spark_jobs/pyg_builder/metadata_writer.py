@@ -522,6 +522,11 @@ class MetadataCollector:
         edge_types_with_features = len(self._edge_types_with_features)
 
         return {
+            # 1.9: adds `build_metadata.market_coverage.stocks_without_company`:
+            # the stocks none of whose snapshots links to a company. Additive
+            # only. Through 1.8 a stock the company map could not resolve, as
+            # BRK/B and BF/B were, showed nowhere. #461
+            #
             # 1.8: adds `build_metadata.market_coverage`: the day's market
             # snapshots, and in each the stocks, the stocks with options and the
             # option rows. Additive only. Through 1.7 a day whose options covered
@@ -566,7 +571,7 @@ class MetadataCollector:
             # features". Through 1.0 it was `count > 0` -- the node count --
             # which made it, and summary.node_types_with_literal_features,
             # true/total for every build. See _build_graph_schema's docstring.
-            "version": "1.8",
+            "version": "1.9",
             "build_metadata": {
                 "time_period": self._time_period,
                 # The same value as the query tables' day= partition and
