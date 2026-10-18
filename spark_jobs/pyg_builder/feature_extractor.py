@@ -80,6 +80,7 @@ from spark_jobs.utils.rdf_utils import (
     PROV_ROUTE_DATATYPE_RANGE,
 )
 from spark_jobs.utils.spark_rdf_utils import (
+    CODE_PREDICATES,
     IDENTIFIER_PREDICATES,
     NUMERIC_PREDICATE_MIN_SHARE,
     collect_sorted,
@@ -186,8 +187,8 @@ _NON_FEATURE_PREDICATES = {
 # filings per run, so unstamped rows are the normal state on a fresh day.
 #
 # The IDs in spark_rdf_utils.IDENTIFIER_PREDICATES are kept out the same way
-# (#456). A CUSIP is not a magnitude, and as a label it would only repeat the
-# stock's ticker, which already is one.
+# (#456, #460). A CUSIP or a CIK is not a magnitude, and as a label it would
+# only name what the graph already links to.
 #
 # Named from the vocabulary rather than spelled out, so a re-homed namespace
 # moves the term and this together instead of leaving a filter that matches
@@ -422,8 +423,9 @@ def classify_literal_predicates(
     Decide, per predicate, whether it is numeric or categorical.
 
     A predicate is numeric when more than ``min_share`` of its literal values
-    parse as a number. The two classes are mutually exclusive, so a property
-    never lands in both the numeric and the categorical segment.
+    parse as a number, unless it is a code (``CODE_PREDICATES``), which is
+    always categorical (#460). The two classes are mutually exclusive, so a
+    property never lands in both the numeric and the categorical segment.
 
     A function rather than a method because the edge features read endpoint
     numbers by the same answer (#456), and run it themselves when no node
@@ -446,7 +448,7 @@ def classify_literal_predicates(
     numeric_predicates = set()
     for row in shares:
         share = row["numeric"] / row["total"] if row["total"] else 0.0
-        if share > min_share:
+        if share > min_share and row["predicate"] not in CODE_PREDICATES:
             numeric_predicates.add(row["predicate"])
         elif row["numeric"]:
             # Mixed, but not numeric enough — the parseable minority is
