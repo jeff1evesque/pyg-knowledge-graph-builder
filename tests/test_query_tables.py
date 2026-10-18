@@ -664,13 +664,20 @@ EQUITY_SNAPSHOT = str(MARKET_QUOTES.EquitySnapshot)
 CAPTURE_TIME = str(MARKET_QUOTES.captureTime)
 NINE_FORTY = "2026-10-16T13:40:40.100Z"
 TEN = "2026-10-16T14:00:40.100Z"
+# The company link the cross-source hub draws from a stock snapshot.
+COMPANY_LINK = str(BLS_ENRICHMENT.refersToCompany)
 
 
-def _snapshot(uri, kind, captured, underlying=None):
-    """A snapshot's type and capture time, and the underlying an option names."""
+def _snapshot(uri, kind, captured, underlying=None, symbol=None, company=None):
+    """A snapshot's type and capture time, the underlying an option names, and
+    a stock's symbol and the company it links to."""
     rows = [(uri, RDF_TYPE, kind), (uri, CAPTURE_TIME, captured)]
     if underlying is not None:
         rows.append((uri, UNDERLYING_SYMBOL, underlying))
+    if symbol is not None:
+        rows.append((uri, CONTRACT_SYMBOL, symbol))
+    if company is not None:
+        rows.append((uri, COMPANY_LINK, company))
     return rows
 
 
@@ -705,6 +712,7 @@ def test_market_coverage_counts_each_snapshots_stocks_and_options(spark):
         "stocks": 2,
         "stocks_with_options": 1,
         "option_rows": 1,
+        "stocks_without_company": [],
         "by_snapshot": [
             {"capture_time": NINE_FORTY, "stocks": 2,
              "stocks_with_options": 2, "option_rows": 3},
@@ -747,8 +755,38 @@ def test_a_day_with_no_snapshots_counts_none(spark):
         "stocks": 0,
         "stocks_with_options": 0,
         "option_rows": 0,
+        "stocks_without_company": [],
         "by_snapshot": [],
     }
+
+
+def test_market_coverage_names_the_stocks_that_reach_no_company(spark):
+    """A stock is named when none of its snapshots links to a company, as
+    BRK/B's and BF/B's did not while only the CSV's BRK.B and BF.B had a CIK.
+    One linked snapshot is enough, and an option is not a stock. #461"""
+    rows = (
+        _snapshot("s/aapl/1", EQUITY_SNAPSHOT, NINE_FORTY, symbol="AAPL",
+                  company="c/0000320193")
+        + _snapshot("s/aapl/2", EQUITY_SNAPSHOT, TEN, symbol="AAPL")
+        + _snapshot("s/brkb/1", EQUITY_SNAPSHOT, NINE_FORTY, symbol="BRK/B")
+        + _snapshot("s/brkb/2", EQUITY_SNAPSHOT, TEN, symbol="BRK/B")
+        + _snapshot("s/bfb/2", EQUITY_SNAPSHOT, TEN, symbol="BF/B")
+        + _snapshot("o/brkb-c/1", OPTION_SNAPSHOT, NINE_FORTY, "BRK/B",
+                    symbol="BRKB  261120C00500000")
+    )
+
+    assert _coverage(spark, rows)["stocks_without_company"] == ["BF/B", "BRK/B"]
+
+
+def test_no_stock_is_named_when_every_one_reaches_a_company(spark):
+    rows = (
+        _snapshot("s/aapl/1", EQUITY_SNAPSHOT, NINE_FORTY, symbol="AAPL",
+                  company="c/0000320193")
+        + _snapshot("s/brkb/1", EQUITY_SNAPSHOT, NINE_FORTY, symbol="BRK/B",
+                    company="c/0001067983")
+    )
+
+    assert _coverage(spark, rows)["stocks_without_company"] == []
 
 
 # ======================================================================
