@@ -434,8 +434,11 @@ is here, so the sections above describe the tables alone.
 - **What counts as a number.** `is_numeric` in `facts/` uses the same test the
   feature extractor types the `.pt`'s numeric segment by, and `snapshots/` types
   its columns by the same majority rule, so the tables and the `.pt` agree. The
-  exception is an ID such as the CUSIP: it is never a number in either table,
-  and the `.pt` keeps its value out of the vector entirely.
+  exceptions are IDs and codes, listed in `spark_jobs/utils/spark_rdf_utils.py`.
+  An ID, such as a CUSIP, a CIK or a ZIP code, is never a number in either
+  table, and the `.pt` keeps its value out of the vector entirely. A code, such
+  as a form type or a PPI item code, is never a number either, but the `.pt`
+  encodes it as a label: Form 4 and Form 144 are two forms, not two amounts.
 - **Splits and the company facts history.** `splits/` and `companyfacts/` are in
   no `.pt`, and not in `graph/`. They are read from their feeds rather than
   built from the triples, so a run's graph is the same whether or not it read
