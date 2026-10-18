@@ -199,6 +199,16 @@ export PYG_TIME_PERIOD=YYYY-MM
 # export PYG_SCHEDULE_ARCHIVE_ROOT=/mnt/DRIVE/FOLDER
 # export PYG_SCHEDULE_ARCHIVE_DAYS=100
 #
+# A local store of each day's source files (bin/stage_sources.sh --store). Staging reads
+# a day from it before S3 and, with SAVE, saves each new day there, so a day built again
+# later reads the files its first build read. A folder on a mounted drive; when it is
+# not there, staging downloads from S3 and saves nothing. The store keeps the newest
+# PYG_SCHEDULE_SOURCE_STORE_DAYS days (default 250). PYG_SOURCE_STORE_SKIP=true
+# downloads from S3 even for a day the store holds.
+# export PYG_SOURCE_STORE_ROOT=/mnt/DRIVE/FOLDER
+# export PYG_SOURCE_STORE_SAVE=true
+# export PYG_SCHEDULE_SOURCE_STORE_DAYS=250
+#
 # PYG_PUBLISH_DATASET is read at run time as well: the notebook passes it as
 # --dataset, so the enriched descriptor and every graph_schema.json record the name
 # index.json publishes. Set it before the run, not just before the publish.
