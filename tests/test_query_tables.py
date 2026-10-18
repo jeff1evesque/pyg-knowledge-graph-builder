@@ -592,6 +592,42 @@ def test_a_numeric_property_is_a_number_and_a_symbol_is_not(written):
     assert isinstance(row["market_quotes_underlyingSymbol"], str)
 
 
+# Three of the five read as finite numbers, which clears the majority rule:
+# the column used to be a double, so 17275R102 and 46120E602 came out null
+# and 037833100 lost its leading zero (#456).
+CUSIPS = ["037833100", "594918104", "023135106", "46120E602", "17275R102"]
+
+
+def test_a_cusip_stays_a_string_exactly_as_written(spark, tmp_path):
+    """A CUSIP is an ID, and its text is what joins a stock to the 13F
+    holdings that name it, letters and leading zeros included."""
+    stock = str(MARKET_QUOTES.EquitySnapshot)
+    cusip = str(MARKET_QUOTES.cusip)
+    rows = TRIPLES + [
+        row
+        for i, value in enumerate(CUSIPS)
+        for row in (
+            (f"https://ex/quote/stock{i}", RDF_TYPE, stock),
+            (f"https://ex/quote/stock{i}", cusip, value),
+        )
+    ]
+    triples = spark.createDataFrame(
+        rows, "subject string, predicate string, object string"
+    )
+    paths = write_query_tables(spark, triples, _config(tmp_path))
+    snapshots = spark.read.parquet(paths["snapshots"])
+
+    assert dict(snapshots.dtypes)["market_quotes_cusip"] == "string"
+    written = {
+        row["uri"]: row["market_quotes_cusip"]
+        for row in snapshots.collect()
+        if row["uri"].startswith("https://ex/quote/stock")
+    }
+    assert written == {
+        f"https://ex/quote/stock{i}": value for i, value in enumerate(CUSIPS)
+    }
+
+
 def test_snapshots_are_sorted_by_the_underlying_ticker(spark, tmp_path):
     """Sorted partitions are what let Parquet prune row groups: a single-ticker
     filter wants 0.14% of a day, and unsorted every ticker is in every group."""

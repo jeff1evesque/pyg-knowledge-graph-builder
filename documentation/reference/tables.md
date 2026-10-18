@@ -240,7 +240,9 @@ sorted by the underlying ticker.
 Wide earns its keep here and nowhere else — two node types, 10.2M rows a day, 45
 stable columns, 77.8% populated (measured 2026-09-17). Numeric properties are
 `double` columns and the rest are strings, decided per property: a property is
-numeric when more than half of its values parse as numbers. A snapshot missing a
+numeric when more than half of its values parse as numbers. IDs are strings
+however many of them parse: `market_quotes_cusip` holds each CUSIP exactly as
+upstream wrote it, letters and leading zeros included. A snapshot missing a
 property gets a null, not a dropped row.
 
 **Quotes only, not everything in a market namespace.** Market enrichment mints
@@ -431,7 +433,9 @@ is here, so the sections above describe the tables alone.
   rather than over the node types the `.pt` holds.
 - **What counts as a number.** `is_numeric` in `facts/` uses the same test the
   feature extractor types the `.pt`'s numeric segment by, and `snapshots/` types
-  its columns by the same majority rule, so the tables and the `.pt` agree.
+  its columns by the same majority rule, so the tables and the `.pt` agree. The
+  exception is an ID such as the CUSIP: it is never a number in either table,
+  and the `.pt` keeps its value out of the vector entirely.
 - **Splits and the company facts history.** `splits/` and `companyfacts/` are in
   no `.pt`, and not in `graph/`. They are read from their feeds rather than
   built from the triples, so a run's graph is the same whether or not it read

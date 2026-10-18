@@ -342,9 +342,12 @@ def build_hetero_data(
     edge_feature_extractor = EdgeFeatureExtractor(spark, config)
 
     if edge_features_enabled:
+        # The node features' numeric predicates, so the two sides agree on
+        # what a number is without the edge side classifying them again.
         edge_feature_tensors = (
             edge_feature_extractor.build_edge_features(
-                triples_df, node_id_df, edges_final_df, edge_indices
+                triples_df, node_id_df, edges_final_df, edge_indices,
+                numeric_predicates=feature_extractor.numeric_predicates(),
             )
         )
 
