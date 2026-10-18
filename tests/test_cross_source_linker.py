@@ -243,6 +243,114 @@ def test_the_filings_win_when_the_constituents_csv_disagrees(spark, make_triples
     )
 
 
+# A 13F holding is one line of a fund's quarterly report. It names its security
+# by CUSIP alone, so it reaches a company through the stock that carries the
+# same CUSIP (#458).
+
+def _holding_rows(holding, cusip):
+    return [
+        (holding, RDF_TYPE, str(SEC_FILINGS.InstitutionalHolding)),
+        (holding, str(SEC_FILINGS.hasCusip), cusip),
+    ]
+
+
+def _stock_rows(snapshot, symbol, cusip):
+    return _snapshot_rows(snapshot, symbol) + [
+        (snapshot, str(MARKET_QUOTES.cusip), cusip),
+    ]
+
+
+def _company_links(spark, make_triples, rows, ticker_ciks):
+    triples = _triple_set(
+        CrossSourceLinker(
+            spark, make_triples(rows), ticker_cik_map=ticker_ciks
+        ).enrich()
+    )
+    return {(s, o) for s, p, o in triples if p == REFERS_TO_COMPANY}
+
+
+def test_a_13f_holding_links_to_the_company_of_the_stock_it_names(
+    spark, make_triples
+):
+    """Before #458 a holding linked only to its filing, so no ownership reached
+    a stock. The stock's CUSIP gives the ticker, the ticker the CIK, and the
+    holding lands on the node the stock's snapshots already point at."""
+    snapshot = str(MARKET_QUOTES) + "snapshot/AAPL/2026-10-16"
+    holding = str(SEC_FILINGS) + "Holding_0000950123-26-000001_1"
+    rows = _stock_rows(snapshot, "AAPL", "037833100") + _holding_rows(
+        holding, "037833100"
+    )
+
+    links = _company_links(spark, make_triples, rows, {"AAPL": "0000320193"})
+
+    company = str(UNIFIED) + "Company_0000320193"
+    assert (holding, company) in links
+    assert (snapshot, company) in links
+
+
+def test_a_holding_whose_cusip_names_no_stock_links_to_nothing(
+    spark, make_triples
+):
+    """Most of a day's holdings are securities with no node in the graph, and
+    they stay as they are. A CUSIP is text: 37833100, the same digits without
+    the leading zero, is a different CUSIP, not a near match."""
+    snapshot = str(MARKET_QUOTES) + "snapshot/AAPL/2026-10-16"
+    other = str(SEC_FILINGS) + "Holding_0000950123-26-000001_2"
+    unpadded = str(SEC_FILINGS) + "Holding_0000950123-26-000001_3"
+    rows = (
+        _stock_rows(snapshot, "AAPL", "037833100")
+        + _holding_rows(other, "88579Y101")
+        + _holding_rows(unpadded, "37833100")
+    )
+
+    links = _company_links(spark, make_triples, rows, {"AAPL": "0000320193"})
+
+    assert not {s for s, _o in links} & {other, unpadded}
+
+
+def test_a_cusip_two_tickers_claim_links_a_holding_to_one_company(
+    spark, make_triples
+):
+    """Two tickers stating one CUSIP would otherwise link the holding to two
+    companies -- the split the company hub exists to prevent. The first ticker
+    in order wins, the way a ticker gets one CIK."""
+    first = str(MARKET_QUOTES) + "snapshot/AAA/2026-10-16"
+    second = str(MARKET_QUOTES) + "snapshot/BBB/2026-10-16"
+    holding = str(SEC_FILINGS) + "Holding_0000950123-26-000001_4"
+    rows = (
+        _stock_rows(first, "AAA", "000000AA1")
+        + _stock_rows(second, "BBB", "000000AA1")
+        + _holding_rows(holding, "000000AA1")
+    )
+
+    links = _company_links(
+        spark, make_triples, rows, {"AAA": "0000000001", "BBB": "0000000002"}
+    )
+
+    assert {o for s, o in links if s == holding} == {
+        str(UNIFIED) + "Company_0000000001"
+    }
+
+
+def test_holdings_stay_unlinked_without_market_data(spark, make_triples):
+    """With no stock to carry the CUSIP there is no ticker to follow, so a run
+    without the market source leaves holdings as they were."""
+    issuer = str(SEC_FILINGS) + "Issuer_0000320193"
+    holding = str(SEC_FILINGS) + "Holding_0000950123-26-000001_5"
+    # A second source, so the linker runs at all.
+    _alert, weather = _alert_rows("06")
+    rows = (
+        _issuer_rows(issuer, "0000320193", "AAPL")
+        + _holding_rows(holding, "037833100")
+        + weather
+    )
+
+    links = _company_links(spark, make_triples, rows, {"AAPL": "0000320193"})
+
+    assert holding not in {s for s, _o in links}
+    assert (issuer, str(UNIFIED) + "Company_0000320193") in links
+
+
 def test_an_unpadded_constituent_cik_fails_loudly(spark, make_triples):
     """An unpadded key must raise, not yield an empty bridge.
 

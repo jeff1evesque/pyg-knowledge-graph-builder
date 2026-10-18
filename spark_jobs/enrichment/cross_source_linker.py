@@ -468,10 +468,12 @@ class CrossSourceLinker:
         already mints:
 
             Filing -> Issuer -> Company <- Snapshot
+                                Company <- 13F holding
 
         A source gives its side through its spec's company_keys: entities that
-        state a CIK, entities that name a ticker, and the ticker -> CIK pairings
-        it knows. A ticker resolves to ONE CIK, the pairing with the lowest
+        state a CIK, entities that name a ticker, entities that name a security
+        by CUSIP, and the ticker -> CIK and CUSIP -> ticker pairings it knows.
+        A ticker resolves to ONE CIK, the pairing with the lowest
         priority, so a snapshot links to one company rather than to two -- which
         would rebuild, on the ticker side, exactly the split this removes. The
         hub uses whatever keys the present sources give, so a run keeps every
@@ -494,7 +496,7 @@ class CrossSourceLinker:
         concept across two node types in the PyG schema even where the URIs
         did match.
         """
-        entities, symbols, pairings = [], [], []
+        entities, symbols, pairings, cusips, cusip_symbols = [], [], [], [], []
         for spec in self.detected_specs:
             if spec.company_keys is None:
                 continue
@@ -505,6 +507,10 @@ class CrossSourceLinker:
                 symbols.append(keys.symbols)
             if keys.symbol_ciks is not None:
                 pairings.append(keys.symbol_ciks)
+            if keys.cusips is not None:
+                cusips.append(keys.cusips)
+            if keys.cusip_symbols is not None:
+                cusip_symbols.append(keys.cusip_symbols)
 
         symbol_ciks = None
         if pairings:
@@ -540,6 +546,29 @@ class CrossSourceLinker:
                 _union(entities).select(
                     "entity", "cik", F.lit(None).cast("string").alias("symbol")
                 )
+            )
+        # A 13F holding names its security only by CUSIP (#458). The stock that
+        # carries the CUSIP gives the ticker, and the ticker its one CIK, so the
+        # holding lands on the node the stock's snapshots already point at. One
+        # ticker per CUSIP, the first in order, for the reason a ticker gets one
+        # CIK: two would link one holding to two companies.
+        if cusips and cusip_symbols and symbol_ciks is not None:
+            cusip_symbol = (
+                _union(cusip_symbols)
+                .withColumn(
+                    "_rank",
+                    F.row_number().over(
+                        Window.partitionBy("cusip").orderBy(F.col("symbol").asc())
+                    ),
+                )
+                .filter(F.col("_rank") == 1)
+                .select("cusip", "symbol")
+            )
+            references.append(
+                _union(cusips)
+                .join(cusip_symbol, "cusip", "inner")
+                .join(symbol_ciks, "symbol", "inner")
+                .select("entity", "cik", "symbol")
             )
         if not references:
             self._context.company_ciks = None

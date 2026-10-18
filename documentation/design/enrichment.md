@@ -288,12 +288,19 @@ sec:EnergyCompanyFiling bls:belongsToSector unified:EnergySector .
 
 2. **Company/Ticker-Based Linking** — Links entities referencing same companies
 ```turtle
-unified:Company_AAPL a bls:UnifiedCompany ;
+unified:Company_0000320193 a sec:UnifiedCompany ;
+    sec:hasCik "0000320193" ;
     bls:ticker "AAPL" .
 
-sec:AAPL_10K_Filing bls:refersToCompany unified:Company_AAPL .
-market:AAPL_20241115T143000Z bls:refersToCompany unified:Company_AAPL .
+sec:Issuer_0000320193 bls:refersToCompany unified:Company_0000320193 .
+market:AAPL_20241115T143000Z bls:refersToCompany unified:Company_0000320193 .
+sec:Holding_0000950123-26-000001_1 bls:refersToCompany unified:Company_0000320193 .
 ```
+
+A company is keyed on its CIK. An issuer states the CIK, a quote reaches it
+through its ticker, and a 13F holding through its CUSIP: the stock that carries
+the same CUSIP gives the ticker, and the ticker the CIK. CUSIPs are compared as
+text. A holding of a security with no stock in the graph links to nothing.
 
 3. **Geographic/Regional Linking** — Links entities by geographic region
 ```turtle
