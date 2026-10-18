@@ -19,7 +19,13 @@ from rdflib.namespace import RDF
 from typing import Optional, List, Set, Tuple
 import logging
 
-from spark_jobs.utils.namespaces import MARKET_QUOTES
+from spark_jobs.utils.namespaces import (
+    MARKET_QUOTES,
+    PPI,
+    SEC_ENRICHMENT,
+    SEC_FILINGS,
+    WEATHER,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -118,8 +124,36 @@ def numeric_literal_expr(col: str = "object"):
 # the majority rule made it a measurement. That put noise in the node
 # features, infinity and NaN in the edge features, and a double column in
 # snapshots/ that lost 43% of the CUSIPs (#456).
+#
+# The rest are the same mistake (#460). Every CIK parses, so 0000320193 was the
+# amount 320,193, and ZIP 06375 was 6,375. The 13F CUSIP sits near half, so it
+# changed sides by day: a number on 2026-10-06 and 2026-10-07 only. A 13F's
+# other-manager number counts managers within that one filing. NOAA's county
+# codes are not in the .pt; listing them keeps facts/ from calling them numbers.
 IDENTIFIER_PREDICATES = frozenset({
     str(MARKET_QUOTES.cusip),
+    str(SEC_FILINGS.hasCusip),
+    str(SEC_FILINGS.hasIssuerCik),
+    str(SEC_FILINGS.hasReportingOwnerCik),
+    str(SEC_ENRICHMENT.hasCik),
+    str(SEC_FILINGS.hasRptOwnerZipCode),
+    str(SEC_FILINGS.hasOtherManager),
+    str(WEATHER.hasCountyFIPS),
+    str(WEATHER.hasFIPSCode),
+    str(WEATHER.hasSAMECode),
+    str(WEATHER.hasStateFIPS),
+})
+
+# Properties whose values are codes: never a number either, whatever share of
+# them parses, but unlike an ID the value stays a label, because a code means
+# the same thing wherever it appears. Form 144 is not 36 Form 4s (#460).
+CODE_PREDICATES = frozenset({
+    str(SEC_FILINGS.hasDocumentType),
+    str(SEC_FILINGS.hasFileType),
+    str(SEC_FILINGS.hasSubmissionType),
+    str(SEC_FILINGS.hasTransactionFormType),
+    str(PPI.hasGroupCode),
+    str(PPI.hasItemCode),
 })
 
 

@@ -628,6 +628,39 @@ def test_a_cusip_stays_a_string_exactly_as_written(spark, tmp_path):
     }
 
 
+def test_an_id_or_a_code_is_never_a_number_in_facts(spark, tmp_path):
+    """is_numeric asks the feature extractor's question, so it makes the same
+    exceptions: a CIK and a ZIP code are IDs and a form type is a code, names
+    written in digits rather than amounts (#460). The text stays as written."""
+    issuer = "https://ex/filings/issuer/1"
+    owner = "https://ex/filings/owner/1"
+    filing = "https://ex/filings/filing/1"
+    listed = {
+        (issuer, str(SEC_FILINGS.hasIssuerCik)): "0000320193",
+        (owner, str(SEC_FILINGS.hasRptOwnerZipCode)): "06375",
+        (filing, str(SEC_FILINGS.hasDocumentType)): "4",
+    }
+    rows = TRIPLES + [
+        (issuer, RDF_TYPE, str(SEC_FILINGS.Issuer)),
+        (owner, RDF_TYPE, str(SEC_FILINGS.ReportingOwner)),
+        (filing, RDF_TYPE, str(SEC_FILINGS.SECFiling)),
+    ] + [(subject, predicate, value) for (subject, predicate), value in listed.items()]
+    triples = spark.createDataFrame(
+        rows, "subject string, predicate string, object string"
+    )
+    paths = write_query_tables(spark, triples, _config(tmp_path))
+    facts = {
+        (row["uri"], row["predicate"]): row
+        for row in spark.read.parquet(paths["facts"]).collect()
+    }
+
+    for key, value in listed.items():
+        assert facts[key]["value"] == value
+        assert facts[key]["is_numeric"] is False
+    # A real amount on the same day still is one.
+    assert facts[(INDEX_A, CPI_VALUE)]["is_numeric"] is True
+
+
 def test_snapshots_are_sorted_by_the_underlying_ticker(spark, tmp_path):
     """Sorted partitions are what let Parquet prune row groups: a single-ticker
     filter wants 0.14% of a day, and unsorted every ticker is in every group."""
