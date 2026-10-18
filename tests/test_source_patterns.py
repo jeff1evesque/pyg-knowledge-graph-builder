@@ -179,6 +179,48 @@ def test_the_constituents_csv_yields_a_padded_ticker_cik_map():
     }
 
 
+_QUOTE_HEADER = "Symbol,Security,GICS Sector,GICS Sub-Industry,CIK,quote_symbol"
+
+
+def test_the_quote_feeds_spelling_reaches_the_same_cik_and_sector():
+    """The CSV's Symbol is the index's spelling and quote_symbol the quote
+    feed's: BRK.B is BRK/B in every quote. Both reach Berkshire's CIK and its
+    sector, so its quotes link to them. The sub-industry pairs stay on Symbol:
+    the peer step reaches the company through the CIK. #461"""
+    client = _constituents_csv([
+        "BRK.B,Berkshire Hathaway,Financials,Multi-Sector Holdings,1067983,BRK/B",
+        "AAPL,Apple Inc.,Information Technology,Technology Hardware,320193,AAPL",
+    ], header=_QUOTE_HEADER)
+
+    assert market.load_ticker_cik_map_from_s3("b", "k", client) == {
+        "BRK.B": "0001067983",
+        "BRK/B": "0001067983",
+        "AAPL": "0000320193",
+    }
+    patterns = market.load_sector_patterns_from_s3("b", "k", client)
+    assert sorted(p["tickers"] for p in patterns.values()) == [
+        ["AAPL"], ["BRK.B", "BRK/B"],
+    ]
+    assert market.load_sub_industries_from_s3("b", "k", client) == [
+        ("BRK.B", "Multi-Sector Holdings"),
+        ("AAPL", "Technology Hardware"),
+    ]
+
+
+@pytest.mark.parametrize("header, row", [
+    (None, "BRK.B,Berkshire Hathaway,Financials,Multi-Sector Holdings,1067983"),
+    (_QUOTE_HEADER, "BRK.B,Berkshire Hathaway,Financials,Multi-Sector Holdings,1067983,"),
+], ids=["no-column", "empty-cell"])
+def test_an_export_without_a_quote_spelling_reads_as_before(header, row):
+    client = _constituents_csv([row], header=header)
+
+    assert market.load_ticker_cik_map_from_s3("b", "k", client) == {
+        "BRK.B": "0001067983"
+    }
+    patterns = market.load_sector_patterns_from_s3("b", "k", client)
+    assert [p["tickers"] for p in patterns.values()] == [["BRK.B"]]
+
+
 def test_the_constituents_csv_yields_sub_industry_pairs():
     client = _constituents_csv([
         "NVDA,NVIDIA,Information Technology,Semiconductors,1045810",
