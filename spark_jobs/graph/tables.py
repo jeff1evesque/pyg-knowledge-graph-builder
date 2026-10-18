@@ -713,6 +713,8 @@ _STOCK_SNAPSHOT = str(MARKET_QUOTES.EquitySnapshot)
 _OPTION_SNAPSHOT = str(MARKET_QUOTES.OptionSnapshot)
 _CAPTURE_TIME = str(MARKET_QUOTES.captureTime)
 _UNDERLYING_SYMBOL = str(MARKET_QUOTES.underlyingSymbol)
+_SYMBOL = str(MARKET_QUOTES.symbol)
+_REFERS_TO_COMPANY = str(BLS_ENRICHMENT.refersToCompany)
 
 
 def market_coverage(
@@ -735,7 +737,13 @@ def market_coverage(
     ``constituents`` is how many stocks the day's constituents CSV lists, to
     read the others against, or None when the CSV was not read.
 
-    One pass over three predicates, collected at one row per snapshot: 20 on a
+    ``stocks_without_company`` names, sorted, the stocks none of whose
+    snapshots links to a company: a ticker the company map could not resolve,
+    which nothing else in a run shows. BRK/B and BF/B were two on every day
+    checked, 2026-10-05 and 2026-10-16, because the CSV's Symbol spells them
+    BRK.B and BF.B. #461
+
+    One pass over five predicates, collected at one row per snapshot: 20 on a
     full day.
     """
     snapshots = (
@@ -745,7 +753,9 @@ def market_coverage(
                 (F.col("predicate") == RDF_TYPE)
                 & F.col("object").isin(_STOCK_SNAPSHOT, _OPTION_SNAPSHOT)
             )
-            | F.col("predicate").isin(_CAPTURE_TIME, _UNDERLYING_SYMBOL)
+            | F.col("predicate").isin(
+                _CAPTURE_TIME, _UNDERLYING_SYMBOL, _SYMBOL, _REFERS_TO_COMPANY
+            )
         )
         .groupBy("subject")
         .agg(*[
@@ -755,12 +765,29 @@ def market_coverage(
                 ("kind", RDF_TYPE),
                 ("capture_time", _CAPTURE_TIME),
                 ("underlying", _UNDERLYING_SYMBOL),
+                ("symbol", _SYMBOL),
+                ("company", _REFERS_TO_COMPANY),
             )
         ])
         .filter(F.col("kind").isNotNull() & F.col("capture_time").isNotNull())
     )
 
     option = F.col("kind") == _OPTION_SNAPSHOT
+    stock = F.col("kind") == _STOCK_SNAPSHOT
+    rows = collect_sorted(
+        snapshots
+        .groupBy("capture_time")
+        .agg(
+            F.sum(stock.cast("long")).alias("stocks"),
+            F.countDistinct(F.when(option, F.col("underlying")))
+            .alias("stocks_with_options"),
+            F.sum(option.cast("long")).alias("option_rows"),
+            F.collect_set(F.when(stock, F.col("symbol"))).alias("named"),
+            F.collect_set(
+                F.when(stock & F.col("company").isNotNull(), F.col("symbol"))
+            ).alias("linked"),
+        )
+    )
     by_snapshot = [
         {
             "capture_time": row["capture_time"],
@@ -768,18 +795,10 @@ def market_coverage(
             "stocks_with_options": row["stocks_with_options"],
             "option_rows": row["option_rows"],
         }
-        for row in collect_sorted(
-            snapshots
-            .groupBy("capture_time")
-            .agg(
-                F.sum((F.col("kind") == _STOCK_SNAPSHOT).cast("long"))
-                .alias("stocks"),
-                F.countDistinct(F.when(option, F.col("underlying")))
-                .alias("stocks_with_options"),
-                F.sum(option.cast("long")).alias("option_rows"),
-            )
-        )
+        for row in rows
     ]
+    named = {symbol for row in rows for symbol in row["named"]}
+    linked = {symbol for row in rows for symbol in row["linked"]}
 
     def lowest(name):
         return min((snapshot[name] for snapshot in by_snapshot), default=0)
@@ -790,6 +809,7 @@ def market_coverage(
         "stocks": lowest("stocks"),
         "stocks_with_options": lowest("stocks_with_options"),
         "option_rows": lowest("option_rows"),
+        "stocks_without_company": sorted(named - linked),
         "by_snapshot": by_snapshot,
     }
 
