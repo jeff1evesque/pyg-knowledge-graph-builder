@@ -72,9 +72,35 @@ def symbol_bearers(triples_df: DataFrame) -> DataFrame:
     ).filter(F.length(F.col("symbol")) > 0).dropDuplicates()
 
 
+def cusip_symbols(triples_df: DataFrame) -> DataFrame:
+    """(cusip, symbol) for every stock snapshot that states both.
+
+    A stock's snapshots all carry the same pair, so this is one row a stock.
+    It is how a 13F holding, which names its security only by CUSIP, reaches
+    the stock's company: through the ticker (#458). The CUSIP is compared as
+    the text upstream wrote, so 037833100 and 37833100 never meet.
+    """
+    stocks = extract_entities_by_type(triples_df, str(MARKET_QUOTES.EquitySnapshot))
+    return (
+        stocks
+        .join(
+            extract_property(triples_df, str(MARKET_QUOTES.cusip), "cusip"),
+            on=F.col("entity") == F.col("subject"),
+        )
+        .drop("subject")
+        .join(
+            extract_property(triples_df, str(MARKET_QUOTES.symbol), "raw_symbol"),
+            on=F.col("entity") == F.col("subject"),
+        )
+        .select(F.col("cusip"), equity_symbol(F.col("raw_symbol")).alias("symbol"))
+        .filter((F.length(F.col("cusip")) > 0) & (F.length(F.col("symbol")) > 0))
+        .dropDuplicates()
+    )
+
+
 def company_keys(context: CrossSourceContext) -> CompanyKeys:
-    """The snapshots, by the ticker each names, and the constituents CSV's
-    ticker pairings.
+    """The snapshots, by the ticker each names, the constituents CSV's ticker
+    pairings, and each stock's CUSIP and ticker.
 
     The CSV pairs the symbol with the CIK for index members whose filings may
     not have been ingested at all, which is how a quote reaches a company no
@@ -96,6 +122,7 @@ def company_keys(context: CrossSourceContext) -> CompanyKeys:
     return CompanyKeys(
         symbols=symbol_bearers(context.triples_df),
         symbol_ciks=symbol_ciks,
+        cusip_symbols=cusip_symbols(context.triples_df),
     )
 
 
