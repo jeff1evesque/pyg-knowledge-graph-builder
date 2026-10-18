@@ -255,6 +255,11 @@ def measure_market_coverage(
         f"{'' if constituents is None else f'; {constituents} constituents'} "
         f"[{time.time() - start_time:.1f}s]"
     )
+    without = coverage["stocks_without_company"]
+    if without:
+        logger.warning(
+            f"  {len(without)} stock(s) reach no company: {', '.join(without)}"
+        )
     return coverage
 
 
