@@ -61,9 +61,34 @@
 # same day cost one transfer and nine listings. Pass --force for a prefix that gets
 # rewritten in place rather than added to.
 #
-# Environment fallbacks for every flag, so a run profile can carry them:
+# A LOCAL STORE OF EACH DAY'S FILES
+#
+#   bin/stage_sources.sh ... --store /mnt/drive/pyg-sources --day 2026-10-16 --save
+#
+# The store is a folder, on a drive of the host that runs this, that keeps each day's
+# files in <store>/day=YYYY-MM-DD/<bucket>/<key>. Beside them, _sources.json lists each
+# source with its file count and total size. It is written after the files, so a day
+# folder without it is incomplete.
+#
+# A source that list names, whose files still match it, comes from the store: this
+# host copies it, and the other nodes copy it from this host over ssh. S3 is not
+# asked. Any other source is downloaded from S3 as before. With --save, a source this
+# host downloaded, or already held, is copied into the store and added to the list,
+# and the other nodes copy it from this host instead of downloading it again. When a
+# store is set, this host goes first.
+#
+# A new day comes from S3, so it gets the newest yearly files. A day staged again
+# later gets the files it got the first time, even a yearly file S3 has overwritten
+# since. --no-store reads nothing from the store, for a day upstream fixed after it
+# was saved; with --save, the fresh download replaces the saved copy. With no --day,
+# or no store folder (a drive that is not mounted), staging prints a note, downloads
+# from S3 and saves nothing.
+#
+# Environment fallbacks for the flags, so a run profile can carry them:
 #   PYG_LOCAL_SOURCE_ROOT, PYG_STAGE_NODES, PYG_STAGE_CONCURRENCY,
-#   PYG_STAGE_RTT_LIMIT_MS, PYG_STAGE_VERIFY, PYG_STAGE_FORCE
+#   PYG_STAGE_RTT_LIMIT_MS, PYG_STAGE_VERIFY, PYG_STAGE_FORCE,
+#   PYG_SOURCE_STORE_ROOT (--store), PYG_SOURCE_STORE_SAVE=true (--save),
+#   PYG_SOURCE_STORE_SKIP=true (--no-store)
 #
 # Nothing in this file names a host, a bucket, an address or a path. Keep it
 # that way -- it is tracked in a public repository.
@@ -75,9 +100,15 @@ CONCURRENCY="${PYG_STAGE_CONCURRENCY:-4}"
 RTT_LIMIT_MS="${PYG_STAGE_RTT_LIMIT_MS:-40}"
 VERIFY="${PYG_STAGE_VERIFY:-true}"
 FORCE="${PYG_STAGE_FORCE:-false}"
+STORE="${PYG_SOURCE_STORE_ROOT:-}"
+STORE_SAVE="${PYG_SOURCE_STORE_SAVE:-false}"
+STORE_SKIP="${PYG_SOURCE_STORE_SKIP:-false}"
+DAY=""
 DRY_RUN=false
 SOURCES=()
 staged_skipped=0
+from_store=0
+saved_sources=0
 
 # Reads the USAGE block out of the header rather than repeating it, and finds it
 # by content so the two cannot drift apart as this file is edited.
@@ -97,6 +128,10 @@ while [[ $# -gt 0 ]]; do
     --verify)       VERIFY=true; shift ;;
     --no-verify)    VERIFY=false; shift ;;
     --force)        FORCE=true; shift ;;
+    --store)        STORE="$2"; shift 2 ;;
+    --day)          DAY="$2"; shift 2 ;;
+    --save)         STORE_SAVE=true; shift ;;
+    --no-store)     STORE_SKIP=true; shift ;;
     --dry-run)      DRY_RUN=true; shift ;;
     -h|--help)      usage 0 ;;
     *) echo "ERROR: unknown argument '$1'" >&2; usage 2 ;;
@@ -142,6 +177,23 @@ if ! [[ "$CONCURRENCY" =~ ^[0-9]+$ ]] || (( CONCURRENCY < 1 || CONCURRENCY > 16 
   echo "       The ceiling is deliberate. This transfer exists because" >&2
   echo "       unbounded read concurrency took the network down; a knob that" >&2
   echo "       can be set back to unbounded is not a fix." >&2
+  exit 2
+fi
+
+for setting in "PYG_SOURCE_STORE_SAVE=$STORE_SAVE" "PYG_SOURCE_STORE_SKIP=$STORE_SKIP"; do
+  if [[ "${setting#*=}" != true && "${setting#*=}" != false ]]; then
+    echo "ERROR: ${setting%%=*} must be true or false, got '${setting#*=}'." >&2
+    exit 2
+  fi
+done
+if [[ -n "$STORE" && "$STORE" != /?* ]]; then
+  echo "ERROR: --store must be an absolute path below /, got '$STORE'." >&2
+  exit 2
+fi
+STORE="${STORE%/}"
+if [[ -n "$DAY" ]] && ! { [[ "$DAY" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
+                          && [[ "$(date -d "$DAY" +%F 2>/dev/null)" == "$DAY" ]]; }; then
+  echo "ERROR: --day must be a real date written YYYY-MM-DD, got '$DAY'." >&2
   exit 2
 fi
 
@@ -276,6 +328,184 @@ is_local_node() {
   grep -qw "$n" <<< "$addrs"
 }
 
+# One walk of a path: its file count and total size. That pair is how a copy is
+# judged complete, in the store and on every node alike.
+local_tally_cmd() {
+  printf 'find %q -type f -printf "%%s\\n" 2>/dev/null | awk "{n++; b+=\\$1} END{print n+0, b+0}"' "$1"
+}
+
+node_tally() {   # node_tally <node> <path>
+  if is_local_node "$1"; then
+    bash -c "$(local_tally_cmd "$2")"
+  else
+    ssh -o BatchMode=yes "$1" "bash -c $(printf '%q' "$(local_tally_cmd "$2")")" 2>/dev/null || echo "0 0"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# The store: each day's files, kept on this host and read before S3. See the
+# USAGE notes at the top.
+# ---------------------------------------------------------------------------
+DAY_DIR=""          # <store>/day=<day>, when the store is in use
+USE_STORE=false     # copy what the day's list names instead of downloading it
+SAVE=false          # save what this host downloads or already holds
+save_failed=""
+LOCAL_NODE=""
+for node in "${NODE_LIST[@]}"; do
+  if is_local_node "$node"; then LOCAL_NODE="$node"; break; fi
+done
+if [[ -n "$STORE" && -z "$DAY" ]]; then
+  echo "NOTE: no --day given, so the store at $STORE is not used." >&2
+  echo "      Every source comes from S3, and nothing is saved." >&2
+elif [[ -n "$STORE" && ! -d "$STORE" ]]; then
+  echo "NOTE: the store $STORE is not there. Is its drive mounted?" >&2
+  echo "      Every source comes from S3, and nothing is saved." >&2
+elif [[ -n "$STORE" ]]; then
+  command -v python3 >/dev/null || { echo "ERROR: the store needs python3 on PATH" >&2; exit 2; }
+  DAY_DIR="$STORE/day=$DAY"
+  $STORE_SKIP || USE_STORE=true
+  if $STORE_SAVE && [[ -z "$LOCAL_NODE" ]]; then
+    echo "NOTE: this host is not one of the nodes, so nothing is saved to the store." >&2
+  elif $STORE_SAVE && [[ ! -w "$STORE" ]]; then
+    echo "NOTE: $STORE is not writable by $(id -un), so nothing is saved to it." >&2
+  else
+    SAVE="$STORE_SAVE"
+  fi
+
+  # A copy from the store replaces a node's copy whole, so a path that could point
+  # outside its own folder is refused before anything is removed.
+  for uri in "${SOURCES[@]}"; do
+    key="$(local_path_for "$uri")"
+    IFS='/' read -ra parts <<< "${key#"$DEST"/}"
+    for part in "${parts[@]}"; do
+      if [[ -z "$part" || "$part" == . || "$part" == .. ]]; then
+        echo "ERROR: $uri has an empty, '.' or '..' part, so the store cannot hold it." >&2
+        exit 2
+      fi
+    done
+  done
+
+  # This host first, so the other nodes can copy from it what it saves.
+  if [[ -n "$LOCAL_NODE" ]]; then
+    ordered=("$LOCAL_NODE")
+    for node in "${NODE_LIST[@]}"; do
+      [[ "$node" == "$LOCAL_NODE" ]] || ordered+=("$node")
+    done
+    NODE_LIST=("${ordered[@]}")
+  fi
+fi
+
+# The day's list: "<files> <bytes>" for each <bucket>/<key> it names.
+declare -A LISTED=()
+if $USE_STORE && [[ -f "$DAY_DIR/_sources.json" ]]; then
+  listed="$(python3 - "$DAY_DIR/_sources.json" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1]) as fh:
+        sources = json.load(fh)["sources"]
+    lines = [f"{uri.split('://', 1)[-1].rstrip('/')}\t{int(entry['files'])} {int(entry['bytes'])}"
+             for uri, entry in sources.items()]
+except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+    sys.exit(f"NOTE: {sys.argv[1]} cannot be read ({exc!r}), so nothing comes from it")
+print("\n".join(lines))
+PY
+)" || true
+  while IFS=$'\t' read -r key counts; do
+    if [[ -n "$key" ]]; then LISTED["$key"]="$counts"; fi
+  done <<< "$listed"
+fi
+
+# Names source $1 in the day's list with its file count $2 and total size $3, or with
+# no counts takes it out. The list is replaced whole, so it is never seen half written.
+list_source() {
+  python3 - "$DAY" "$DAY_DIR/_sources.json" "$@" <<'PY'
+import json
+import os
+import sys
+import tempfile
+
+day, path, uri, *counts = sys.argv[1:]
+
+
+def where(u):
+    return u.split("://", 1)[-1].rstrip("/")
+
+
+try:
+    with open(path) as fh:
+        sources = dict(json.load(fh)["sources"])
+except FileNotFoundError:
+    sources = {}
+except (OSError, ValueError, KeyError, TypeError):
+    # Unreadable: start a new list. What it named is saved again when next downloaded.
+    sources = {}
+if not counts and not any(where(k) == where(uri) for k in sources):
+    sys.exit()
+sources = {k: v for k, v in sources.items() if where(k) != where(uri)}
+if counts:
+    sources[uri] = {"files": int(counts[0]), "bytes": int(counts[1])}
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".sources-", suffix=".json")
+with os.fdopen(fd, "w") as fh:
+    json.dump({"day": day, "sources": dict(sorted(sources.items()))}, fh, indent=2)
+    fh.write("\n")
+    fh.flush()
+    os.fsync(fh.fileno())
+os.chmod(tmp, 0o644)
+os.replace(tmp, path)
+PY
+}
+
+# Saves source $1 from this host's copy. The list drops the source before its files
+# change and names it again only once they are all in place, so a save that stops
+# partway leaves it out. A save that fails stops the saving, not the staging: the
+# other nodes then download the source themselves.
+save_to_store() {
+  local i="$1" target saved
+  $SAVE && ! ${FROM_STORE[$i]} && ! $DRY_RUN || return 0
+  target="$(local_path_for "${SOURCES[$i]}")"
+  saved="$DAY_DIR/${target#"$DEST"/}"
+  if list_source "${SOURCES[$i]}" \
+      && rm -rf -- "$saved" \
+      && mkdir -p -- "$(dirname -- "$saved")" \
+      && cp -R --preserve=timestamps -- "$target" "$saved" \
+      && [[ "$(bash -c "$(local_tally_cmd "$saved")")" == "${REMOTE_OBJECTS[$i]} ${REMOTE_BYTES[$i]}" ]] \
+      && sync -f -- "$saved" \
+      && list_source "${SOURCES[$i]}" "${REMOTE_OBJECTS[$i]}" "${REMOTE_BYTES[$i]}"; then
+    FROM_STORE[i]=true
+    saved_sources=$((saved_sources + 1))
+    echo "    saved to the store"
+  else
+    echo "WARNING: could not save ${SOURCES[$i]} to $DAY_DIR, so nothing more is saved." >&2
+    echo "         The other nodes download it from S3." >&2
+    rm -rf -- "$saved" 2>/dev/null || true
+    SAVE=false
+    save_failed="${SOURCES[$i]}"
+  fi
+}
+
+# Copies source $2 from the store onto node $1, replacing whatever copy the node
+# held, then checks the copy against the day's list.
+copy_from_store() {
+  local node="$1" i="$2" target key
+  target="$(local_path_for "${SOURCES[$i]}")"
+  key="${target#"$DEST"/}"
+  echo "    copying from the store"
+  if is_local_node "$node"; then
+    rm -rf -- "$target" && mkdir -p -- "$(dirname -- "$target")" \
+      && cp -R --preserve=timestamps -- "$DAY_DIR/$key" "$target"
+  else
+    # shellcheck disable=SC2029  # the remote command is built here on purpose
+    tar -C "$DAY_DIR" -cf - "$key" | ssh -o BatchMode=yes "$node" \
+      "rm -rf -- $(printf '%q' "$target") && mkdir -p -- $(printf '%q' "$DEST") && tar -C $(printf '%q' "$DEST") -xf -"
+  fi || { echo "ERROR: copying $key from the store to $node failed." >&2; exit 1; }
+  if [[ "$(node_tally "$node" "$target")" != "${REMOTE_OBJECTS[$i]} ${REMOTE_BYTES[$i]}" ]]; then
+    echo "ERROR: the copy of $key on $node does not match $DAY_DIR/_sources.json." >&2
+    exit 1
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Transfer. Nodes run one at a time on purpose: two nodes syncing at once puts
 # twice the load on the one link this is trying to protect.
@@ -284,6 +514,11 @@ echo "staging ${#SOURCES[@]} source(s) to ${#NODE_LIST[@]} node(s)"
 echo "  destination root : $DEST"
 echo "  concurrency      : $CONCURRENCY request(s) per transfer, one node at a time"
 echo "  gateway watchdog : ${GATEWAY:-(disabled)} at ${RTT_LIMIT_MS}ms"
+if [[ -n "$DAY_DIR" ]]; then
+  if $USE_STORE; then reads="read first"; else reads="not read (--no-store)"; fi
+  if $SAVE; then saves="downloads saved"; else saves="nothing saved"; fi
+  echo "  store            : $DAY_DIR, $reads, $saves"
+fi
 echo
 
 # Preflight: one LIST per source, before any transfer. It costs a single
@@ -291,11 +526,34 @@ echo
 # and fails here rather than mid-copy when credentials or the prefix are wrong.
 gb() { awk -v b="$1" 'BEGIN{printf "%.2f", b/1000000000}'; }
 total_bytes=0
+in_store=0
 REMOTE_OBJECTS=()
 REMOTE_BYTES=()
 IS_OBJECT=()
-for uri in "${SOURCES[@]}"; do
+FROM_STORE=()
+for i in "${!SOURCES[@]}"; do
+  uri="${SOURCES[$i]}"
   s3_uri="s3://${uri#*://}"
+  FROM_STORE[i]=false
+
+  # In the store when the day's list names it and its files there still match. The
+  # count and size then come from the list, and S3 is not asked.
+  if $USE_STORE; then
+    key="$(local_path_for "$uri")"
+    key="${key#"$DEST"/}"
+    if [[ -n "${LISTED[$key]:-}" ]] \
+        && [[ "$(bash -c "$(local_tally_cmd "$DAY_DIR/$key")")" == "${LISTED[$key]}" ]]; then
+      FROM_STORE[i]=true
+      IS_OBJECT[i]=false
+      REMOTE_OBJECTS[i]="${LISTED[$key]% *}"
+      REMOTE_BYTES[i]="${LISTED[$key]#* }"
+      in_store=$((in_store + 1))
+      total_bytes=$((total_bytes + REMOTE_BYTES[i]))
+      printf '  %s\n    %s objects, %s GB (in the store)\n' \
+        "$s3_uri" "${REMOTE_OBJECTS[$i]}" "$(gb "${REMOTE_BYTES[$i]}")"
+      continue
+    fi
+  fi
 
   # A source path may name one object rather than a prefix -- four of the five
   # sources in a full run are single .parquet files. The distinction has to be
@@ -306,9 +564,9 @@ for uri in "${SOURCES[@]}"; do
   rest="${uri#*://}"
   if aws s3api head-object --bucket "${rest%%/*}" --key "${rest#*/}" \
        >/dev/null 2>&1; then
-    IS_OBJECT+=(true)
+    IS_OBJECT[i]=true
   else
-    IS_OBJECT+=(false)
+    IS_OBJECT[i]=false
   fi
   summary="$(AWS_CONFIG_FILE="$AWS_CFG" aws s3 ls --recursive --summarize "$s3_uri" 2>&1 | tail -3)" || {
     echo "ERROR: cannot list $s3_uri" >&2
@@ -321,10 +579,10 @@ for uri in "${SOURCES[@]}"; do
     echo "ERROR: $s3_uri matched nothing. Check the prefix." >&2
     exit 1
   fi
-  REMOTE_OBJECTS+=("$objects")
-  REMOTE_BYTES+=("$bytes")
+  REMOTE_OBJECTS[i]="$objects"
+  REMOTE_BYTES[i]="$bytes"
   total_bytes=$((total_bytes + bytes))
-  if ${IS_OBJECT[-1]}; then kind="single object"; else kind="prefix"; fi
+  if ${IS_OBJECT[$i]}; then kind="single object"; else kind="prefix"; fi
   printf '  %s\n    %s objects, %s GB (%s)\n' "$s3_uri" "$objects" "$(gb "$bytes")" "$kind"
 done
 printf '  total per node: %s GB (x%d nodes, transferred one node at a time)\n\n' \
@@ -348,28 +606,17 @@ printf '  total per node: %s GB (x%d nodes, transferred one node at a time)\n\n'
 # for a prefix that gets rewritten in place, which puts the per-object
 # comparison back in charge.
 # ---------------------------------------------------------------------------
-local_tally_cmd() {
-  printf 'find %q -type f -printf "%%s\\n" 2>/dev/null | awk "{n++; b+=\\$1} END{print n+0, b+0}"' "$1"
-}
-
 already_staged() {
-  local node="$1" target="$2" want_objects="$3" want_bytes="$4" tally
+  local node="$1" target="$2" want_objects="$3" want_bytes="$4"
   $FORCE && return 1
-  if is_local_node "$node"; then
-    tally="$(bash -c "$(local_tally_cmd "$target")")"
-  else
-    tally="$(ssh -o BatchMode=yes "$node" "bash -c $(printf '%q' "$(local_tally_cmd "$target")")" 2>/dev/null || echo "0 0")"
-  fi
-  [[ "$tally" == "$want_objects $want_bytes" ]]
+  [[ "$(node_tally "$node" "$target")" == "$want_objects $want_bytes" ]]
 }
 
 for node in "${NODE_LIST[@]}"; do
   echo "== $node =="
   remote_cfg=""
-  if ! is_local_node "$node"; then
-    remote_cfg="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$node" 'mktemp')"
-    scp -o BatchMode=yes -q "$AWS_CFG" "$node:$remote_cfg"
-  fi
+  on_this_host=false
+  if is_local_node "$node"; then on_this_host=true; fi
 
   for i in "${!SOURCES[@]}"; do
     uri="${SOURCES[$i]}"
@@ -381,11 +628,19 @@ for node in "${NODE_LIST[@]}"; do
     if already_staged "$node" "$target" "${REMOTE_OBJECTS[$i]}" "${REMOTE_BYTES[$i]}"; then
       echo "    already staged (${REMOTE_OBJECTS[$i]} objects, $(gb "${REMOTE_BYTES[$i]}") GB) -- nothing to download"
       staged_skipped=$((staged_skipped + 1))
+      # Matches S3's count and size, so it is saved as a download would be.
+      if $on_this_host; then save_to_store "$i"; fi
       continue
     fi
 
     if $DRY_RUN; then
       echo "    (dry run, nothing transferred)"
+      continue
+    fi
+
+    if ${FROM_STORE[$i]}; then
+      copy_from_store "$node" "$i"
+      from_store=$((from_store + 1))
       continue
     fi
 
@@ -399,10 +654,15 @@ for node in "${NODE_LIST[@]}"; do
       make_dir="$target"
     fi
 
-    if is_local_node "$node"; then
+    if $on_this_host; then
       mkdir -p "$make_dir"
       AWS_CONFIG_FILE="$AWS_CFG" "${transfer_cmd[@]}" &
     else
+      # The transfer settings, sent once to a node that downloads anything at all.
+      if [[ -z "$remote_cfg" ]]; then
+        remote_cfg="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$node" 'mktemp')"
+        scp -o BatchMode=yes -q "$AWS_CFG" "$node:$remote_cfg"
+      fi
       # shellcheck disable=SC2029  # the remote command is built here on purpose
       ssh -o BatchMode=yes "$node" \
         "mkdir -p $(printf '%q' "$make_dir") && env AWS_CONFIG_FILE='$remote_cfg' ${FORWARD_ENV[*]} \
@@ -419,6 +679,7 @@ for node in "${NODE_LIST[@]}"; do
       exit 1
     fi
     wait "$sync_pid"
+    if $on_this_host; then save_to_store "$i"; fi
   done
 
   if [[ -n "$remote_cfg" ]]; then
@@ -473,8 +734,28 @@ fi
 expected=$(( ${#SOURCES[@]} * ${#NODE_LIST[@]} ))
 if (( staged_skipped == expected )); then
   echo "nothing to download -- every source was already on every node."
+elif (( from_store > 0 )); then
+  echo "staged. $((expected - staged_skipped)) of $expected node/source pairs transferred, $from_store of them from the store."
 else
   echo "staged. $((expected - staged_skipped)) of $expected node/source pairs transferred."
+fi
+# One line on the store, which bin/daily_run.sh copies into its log.
+if [[ -n "$DAY_DIR" ]]; then
+  if $USE_STORE; then
+    line="store: $DAY_DIR held $in_store of the ${#SOURCES[@]} sources"
+  else
+    line="store: $DAY_DIR was not read (--no-store)"
+  fi
+  if [[ -n "$save_failed" ]]; then
+    line+="; saved $saved_sources, then could not save $save_failed"
+  elif $STORE_SAVE; then
+    line+="; saved $saved_sources"
+  fi
+  echo "$line"
+elif [[ -n "$STORE" && -z "$DAY" ]]; then
+  echo "store: not used, no --day given"
+elif [[ -n "$STORE" ]]; then
+  echo "store: $STORE is not there, so nothing was read from it or saved"
 fi
 echo "pass these to the job:"
 echo "  --input_mode local --local_source_root $DEST"

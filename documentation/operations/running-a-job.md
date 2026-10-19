@@ -489,6 +489,24 @@ Points worth knowing:
   one transfer and nine listings — measured at 4.5s cold and 0.49s warm on an
   89-object prefix. Immutable snapshots are the assumption; pass `--force` for a
   prefix that gets rewritten in place.
+- **A local store keeps each day's files, so a day can be staged again without S3.**
+  `--store <folder> --day YYYY-MM-DD` reads the day from a folder on a local drive
+  before going to S3, and `--save` fills it. Each day has its own folder,
+  `<store>/day=YYYY-MM-DD/`, laid out like the mirror, with a `_sources.json` that lists
+  each source's file count and total size and is written after the files
+  ([The source store](../reference/layout.md#the-source-store)). A source the list names,
+  whose files still match it, is copied to every node: the host running the script
+  copies it itself, and the other nodes copy it from that host over ssh. S3 is not asked
+  at all. With `--save`, a source that host downloads is saved once it has it, and the
+  other nodes copy it from there, so a new day is downloaded once instead of once per
+  node. A day staged again later gets the files it got the first time: the yearly BLS
+  files are overwritten with each release, so a day rebuilt from S3 a week later would
+  read releases that came out after it. `--no-store` ignores the store, for a day
+  upstream fixed after it was saved, and with `--save` the fresh download replaces the
+  saved copy. With no `--day`, or no store folder (a drive that is not mounted), staging
+  prints a note, downloads from S3 and saves nothing. `PYG_SOURCE_STORE_ROOT`,
+  `PYG_SOURCE_STORE_SAVE=true` and `PYG_SOURCE_STORE_SKIP=true` stand in for the three
+  flags.
 - **`s3` stays the default.** Nothing changes for a deployment that has not staged,
   and reading object storage directly remains correct where compute sits beside
   the bucket.
@@ -673,9 +691,10 @@ installs a systemd user timer that starts it. The schedule is configuration in a
 directory of its own; none of it is in the code.
 
 A day, in order: refuse a checkout with uncommitted changes, check that every source for
-the day is there, wait for an idle cluster, stage the sources, bring free memory up on
-every node, run `bin/run_cluster_notebook.sh --data-date`, publish with
-`bin/publish_run.py`, copy the day into the local archive when one is set, and only
+the day is there, wait for an idle cluster, stage the sources (from the store first,
+when one is set), bring free memory up on every node, run
+`bin/run_cluster_notebook.sh --data-date`, publish with `bin/publish_run.py`, copy the
+day into the local archive when one is set, trim the store when one is set, and only
 after that publish (and that archive) went through, prune. The launcher and the publish
 step are the ones in [Testing](testing.md#driving-a-real-cluster-run).
 
@@ -734,6 +753,23 @@ written so that one file serves every day:
   more than `PYG_SCHEDULE_RETAIN_RUNS`. A missing or unmounted drive fails the night
   after its publish: the run stays and nothing is pruned. Unset, nothing changes; unset
   later, nothing more is copied or trimmed, and the drive keeps what it already holds.
+- **A store of each day's source files, for staging a day again without S3.** Set
+  `PYG_SOURCE_STORE_ROOT` to a folder on a local drive, and `PYG_SOURCE_STORE_SAVE=true`.
+  Staging then reads the day from `<root>/day=YYYY-MM-DD/` before S3 and saves what it
+  downloads (see [Reading sources from local disk](#reading-sources-from-local-disk)), so
+  a day built again later, such as a rebuild after a fix, reads the files its first
+  build read. The store keeps the newest `PYG_SCHEDULE_SOURCE_STORE_DAYS` days, `250`
+  unless set, about a year of trading days. A full October day is about 8.5 GB, so that
+  is about 2.1 TB. An older day loses its `_sources.json` first, then its folder.
+  `PYG_SOURCE_STORE_SKIP=true` downloads from S3 even for a day the store holds, for a day
+  upstream fixed after it was saved. A missing or unmounted drive fails nothing: staging
+  notes it, downloads from S3 and saves nothing. With a store set, the run's `env.sh`
+  gets `PYG_STAGE_ENABLED=false`, because the job's own staging checks the copies
+  against S3 rather than the store, and would download over a saved yearly file that S3
+  has overwritten since. Unset, nothing changes. `--check` says how many of the day's
+  sources the store holds. The files the job reads straight from S3 (the company facts
+  history, the constituents CSV and the splits files) are not staged, so they are not
+  stored.
 - **A checkout of its own.** Each day builds from the checkout `PYG_REPO_ROOT` names, and
   the assembly leg packages it more than an hour into the run. Give the schedule a
   detached worktree that nothing else checks out, and move it forward on purpose. The
@@ -759,7 +795,7 @@ bin/schedule_run.sh ~/pyg-daily            # turns on linger, installs, starts t
 ```
 
 `--check` reads the settings, the checkout, the kernel and every source for the day, logs
-what the day would read, and stops.
+what the day would read and how many of its sources the store holds, and stops.
 
 A user's systemd timer fires only while that user has a login session, unless *linger* is
 on for the user. `bin/schedule_run.sh` turns linger on (`loginctl enable-linger`) before it
@@ -790,7 +826,8 @@ runs it, with `bin/daily_run.sh --data-date YYYY-MM-DD <schedule-dir>`.
   schedule keeps its own list of the copies its staging downloaded,
   `<schedule-dir>/mirror-downloads.tsv`, and removes only those, once no day it runs reads
   them. Runs started by hand, their work directories and whatever they staged are never
-  touched, and are cleaned up by hand.
+  touched, and are cleaned up by hand. The store, when one is set, drops its days past
+  the newest `PYG_SCHEDULE_SOURCE_STORE_DAYS`, whichever staging saved them.
 
 ### Timing and cost
 
@@ -799,6 +836,8 @@ runs it, with `bin/daily_run.sh --data-date YYYY-MM-DD <schedule-dir>`.
   days missed in between by hand, with `--data-date`.
 - **Staging a new day downloads it once per node.** Where object-storage egress is billed,
   that download is what a day costs; a day already staged on a node is not fetched again.
+  With a store set and `PYG_SOURCE_STORE_SAVE=true`, a new day is downloaded once, by the
+  host that runs the schedule, and a day the store holds costs no download at all.
 - **The hour matters less than it did.** The constituents CSV is read from the data day's
   dated copy first, so what time the run starts only matters when that copy is missing.
 

@@ -14,21 +14,24 @@
 # PYG_SCHEDULE_DATA_LAG_DAYS; PYG_SCHEDULE_TODAY stands in for today, for tests.
 #
 # --check stops once the sources are checked. It checks the settings, the checkout, the
-# notebook kernel and every source for the day, logs what the day would read, and exits
-# 0, or 3 when a source is not there. It waits for nothing, and stages, runs, publishes
-# and removes nothing.
+# notebook kernel and every source for the day, logs what the day would read and how
+# many of its sources the store holds, and exits 0, or 3 when a source is not there. It
+# waits for nothing, and stages, runs, publishes and removes nothing.
 #
 # IN ORDER
 #   refuse a checkout with uncommitted changes, and log the commit that runs
 #   check that every source is there; a missing one skips the day, unless it is a
 #   holiday-optional source and the day is a federal holiday
 #   wait for an idle cluster
-#   stage the sources when the run reads a local mirror, then remove the local copies
-#   this schedule downloaded that today's run does not read
+#   stage the sources when the run reads a local mirror, from the store first when one
+#   is set, then remove the local copies this schedule downloaded that today's run does
+#   not read
 #   bring MemFree up to PYG_MEMFREE_GATE_GB on every node, when that is set
 #   bin/run_cluster_notebook.sh --data-date <day> <run-dir>
 #   bin/publish_run.py <run-dir> --upload
 #   bin/publish_run.py <run-dir> --archive <root> --keep-days <N>, when an archive is set
+#   remove the store's days past the newest PYG_SCHEDULE_SOURCE_STORE_DAYS, when a store
+#   is set
 #   prune, only after that publish (and that archive) went through
 #
 # WHAT IT REMOVES
@@ -44,6 +47,9 @@
 #     day is not there stays, to be archived by hand with --archive.
 #   - Archived days. The archive keeps the newest PYG_SCHEDULE_ARCHIVE_DAYS data days;
 #     an older day loses its marker first, then its tables and its run.
+#   - Stored days. The store keeps the newest PYG_SCHEDULE_SOURCE_STORE_DAYS days,
+#     whichever staging saved them; an older day loses its _sources.json first, then
+#     its folder.
 #   - Local source copies. The mirror is shared with runs started by hand, so the
 #     schedule lists the copies its own staging fetched in
 #     <schedule-dir>/mirror-downloads.tsv, leaving out any a node already held, and
@@ -89,6 +95,16 @@
 #   PYG_SCHEDULE_ARCHIVE_DAYS       optional. How many of the newest data days the
 #                                   archive keeps; default 100. More than
 #                                   PYG_SCHEDULE_RETAIN_RUNS.
+#   PYG_SOURCE_STORE_ROOT           optional. A folder on a local drive that keeps each
+#                                   day's source files (bin/stage_sources.sh --store).
+#                                   Staging reads the day from it before S3, so a day
+#                                   staged again gets the files it got the first time.
+#                                   Unset, nothing is read from it or saved to it.
+#   PYG_SOURCE_STORE_SAVE           optional. true saves each day's downloads into it.
+#   PYG_SOURCE_STORE_SKIP           optional. true downloads from S3 even when the store
+#                                   holds the day, for a day upstream fixed later.
+#   PYG_SCHEDULE_SOURCE_STORE_DAYS  optional. How many of the newest days the store
+#                                   keeps; default 250, about a year of trading days.
 #
 # EXIT CODES
 #   0  published (and archived), then pruned
@@ -233,6 +249,19 @@ if [[ -n "$ARCHIVE_ROOT" ]]; then
   # the run would never go.
   [[ "$ARCHIVE_DAYS" =~ ^[1-9][0-9]*$ ]] && (( ARCHIVE_DAYS > RETAIN )) \
     || refuse "PYG_SCHEDULE_ARCHIVE_DAYS must be more than PYG_SCHEDULE_RETAIN_RUNS ($RETAIN), got '$ARCHIVE_DAYS'"
+fi
+STORE="${PYG_SOURCE_STORE_ROOT:-}"
+STORE="${STORE%/}"
+STORE_DAYS="${PYG_SCHEDULE_SOURCE_STORE_DAYS:-250}"
+if [[ -n "$STORE" ]]; then
+  [[ "$STORE" == /?* ]] \
+    || refuse "PYG_SOURCE_STORE_ROOT must be an absolute path, got '${PYG_SOURCE_STORE_ROOT}'"
+  [[ "$STORE_DAYS" =~ ^[1-9][0-9]*$ ]] \
+    || refuse "PYG_SCHEDULE_SOURCE_STORE_DAYS must be a whole number of days, 1 or more, got '$STORE_DAYS'"
+  for name in PYG_SOURCE_STORE_SAVE PYG_SOURCE_STORE_SKIP; do
+    [[ "${!name:-false}" == true || "${!name:-false}" == false ]] \
+      || refuse "$name must be true or false, got '${!name}'"
+  done
 fi
 RETRY="${PYG_SCHEDULE_RETRY_SECONDS:-60}"
 IDLE_WAIT="${PYG_SCHEDULE_IDLE_WAIT_SECONDS:-600}"
@@ -416,6 +445,51 @@ if [[ -n "$CHECK" ]]; then
   elif [[ -n "$ARCHIVE_ROOT" ]]; then
     log "  the archive root $ARCHIVE_ROOT is not there, so the archive step would fail; is its drive mounted?"
   fi
+  if [[ -n "$STORE" && -d "$STORE" ]]; then
+    # Counted the way bin/stage_sources.sh reads the store: the day's list names the
+    # source, and its files there still have the listed count and total size.
+    held="$(python3 - "$STORE/day=$DATA_DATE" "${SOURCES[@]}" <<'PY'
+import json
+import os
+import sys
+
+day_dir, uris = sys.argv[1], sys.argv[2:]
+
+
+def where(uri):
+    return uri.split("://", 1)[-1].rstrip("/")
+
+
+def tally(path):
+    if os.path.isfile(path) and not os.path.islink(path):
+        return 1, os.path.getsize(path)
+    files = size = 0
+    for root, _, names in os.walk(path):
+        for name in names:
+            p = os.path.join(root, name)
+            if os.path.isfile(p) and not os.path.islink(p):
+                files, size = files + 1, size + os.path.getsize(p)
+    return files, size
+
+
+try:
+    with open(os.path.join(day_dir, "_sources.json")) as fh:
+        listed = {where(uri): (int(entry["files"]), int(entry["bytes"]))
+                  for uri, entry in json.load(fh)["sources"].items()}
+except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    listed = {}
+print(sum(where(u) in listed and tally(os.path.join(day_dir, where(u))) == listed[where(u)]
+          for u in uris))
+PY
+)"
+    line="the store $STORE holds ${held:-0} of the day's ${#SOURCES[@]} sources"
+    if [[ "${PYG_SOURCE_STORE_SKIP:-false}" == true ]]; then
+      line+=", but PYG_SOURCE_STORE_SKIP=true downloads them all from S3"
+    fi
+    log "  $line"
+  elif [[ -n "$STORE" ]]; then
+    log "  the store $STORE is not there, so staging would download every source and save nothing; is its drive mounted?"
+  fi
   log "checked: nothing was staged, run, published or removed"
   exit 0
 fi
@@ -541,9 +615,26 @@ if [[ -n "$MIRROR" ]]; then
 fi
 
 if [[ "${PYG_INPUT_MODE:-s3}" == "local" ]]; then
+  stage_args=(--sources "$PYG_SOURCE_PATHS")
+  if [[ -n "$STORE" ]]; then
+    stage_args+=(--store "$STORE" --day "$DATA_DATE")
+    if [[ "${PYG_SOURCE_STORE_SAVE:-false}" == true ]]; then stage_args+=(--save); fi
+    if [[ "${PYG_SOURCE_STORE_SKIP:-false}" == true ]]; then stage_args+=(--no-store); fi
+  fi
   log "staging the sources; see $RD/stage.log"
-  "$REPO/bin/stage_sources.sh" --sources "$PYG_SOURCE_PATHS" > "$RD/stage.log" 2>&1 \
+  "$REPO/bin/stage_sources.sh" "${stage_args[@]}" > "$RD/stage.log" 2>&1 \
     || fail "staging failed; see $RD/stage.log"
+  if [[ -n "$STORE" ]]; then
+    # What staging read from the store and saved to it.
+    while IFS= read -r line; do
+      log "  $line"
+    done < <(grep '^store: ' "$RD/stage.log")
+    # The job stages again unless told not to, and its staging checks the copies
+    # against S3, not the store. It would download over a saved yearly file that S3
+    # has overwritten since.
+    printf '%s\n' "# Added by bin/daily_run.sh: the sources were staged before the run." \
+      "export PYG_STAGE_ENABLED=false" >> "$RD/env.sh"
+  fi
 fi
 
 if [[ -n "$MIRROR" ]]; then
@@ -655,6 +746,28 @@ if [[ -n "$ARCHIVE_ROOT" ]]; then
   [[ "$archive_rc" == "0" ]] \
     || fail "the archive step exited $archive_rc; the run stays and nothing is pruned. See $RD/publish.log"
   log "archived"
+fi
+
+# The store keeps the newest PYG_SCHEDULE_SOURCE_STORE_DAYS days. An older day loses its
+# _sources.json first, so a day removed only in part reads as incomplete. A day that
+# cannot be removed is logged, and the night goes on.
+if [[ -n "$STORE" && -d "$STORE" ]]; then
+  stored=()
+  for dir in "$STORE"/day=*/; do
+    dir="${dir%/}"
+    if [[ "${dir##*/day=}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ && ! -L "$dir" ]]; then
+      stored+=("${dir##*/day=}")
+    fi
+  done
+  for old_day in $(printf '%s\n' "${stored[@]}" | sort -r | tail -n "+$((STORE_DAYS + 1))"); do
+    if rm -f -- "$STORE/day=$old_day/_sources.json" && rm -rf -- "$STORE/day=$old_day"; then
+      log "  removed the stored day $old_day"
+    else
+      log "  could not remove the stored day $old_day from $STORE"
+    fi
+  done
+elif [[ -n "$STORE" ]]; then
+  log "  the store $STORE is not there, so no stored day was removed"
 fi
 
 # ---------------------------------------------------------------------------

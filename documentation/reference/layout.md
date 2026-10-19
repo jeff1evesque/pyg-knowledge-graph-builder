@@ -27,7 +27,8 @@ pyg-knowledge-graph-builder/
 │   ├── run_tests.sh                        # the fast suite, parallel (sibling of run_e2e_tests.sh)
 │   ├── schedule_run.sh                     # install the user timer that runs daily_run.sh
 │   ├── selfloops.py                        # count nodes that are their own object
-│   ├── stage_sources.sh                    # mirror source prefixes onto each worker's disk
+│   ├── stage_sources.sh                    # mirror source prefixes onto each worker's disk,
+│   │                                       # from the local source store when it has them
 │   ├── stall_watchdog.py                   # catch a stalled stage, dump the executors
 │   └── submit_spark_job.sh                 # spark-submit launcher (RAPIDS/GPU)
 ├── conf/
@@ -204,6 +205,38 @@ real files rather than links:
   Measured on 2026-10-09: the `.pt` is 12.15 GB, its node index and metadata 0.15 GB, and
   the tables 1.23 GB in 674 files. On an exFAT drive with 2 MB clusters every small file
   is rounded up, and the tables take 2.1 GB, so 100 days take about 1.44 TB.
+
+## The source store
+
+`bin/stage_sources.sh --store <root> --day YYYY-MM-DD --save` keeps a copy of each day's
+source files on a local drive, and reads a day from it before going to S3.
+`bin/daily_run.sh` does it every night when `PYG_SOURCE_STORE_ROOT` is set (see
+[Scheduled runs](../operations/running-a-job.md#scheduled-runs)). Each day has a folder
+of its own, laid out the way the files are under `PYG_LOCAL_SOURCE_ROOT`:
+
+```
+<root>/
+└── day=YYYY-MM-DD/
+    ├── <bucket>/<key>                      # the day's files, as the run read them
+    └── _sources.json                       # each source's file count and total size,
+                                            # written after the files
+```
+
+- **A day folder without `_sources.json` is incomplete.** Staging takes a source from the
+  store only when the list names it and its files there still have the listed count and
+  total size. Anything else comes from S3.
+- **The files the day read, not the files S3 holds now.** A day's folder is filled once,
+  from its first download, so a day staged again later gets the same files, even the
+  yearly BLS files upstream overwrites with each release. The files keep the times S3
+  gave them.
+- **Only what staging downloads.** The company facts history, the constituents CSV and
+  the splits files are read by the job straight from S3, about 0.1 GB together, so they
+  are not in the store.
+- **About 8.5 GB a trading day.** Nearly all of it is the day's market snapshots. On
+  2026-10-18, S3 listed 8.31, 8.45 and 8.51 GB for the 14 sources of 2026-10-13, 10-14
+  and 10-15. The schedule keeps the newest `PYG_SCHEDULE_SOURCE_STORE_DAYS` days, `250`
+  unless set, about 2.1 TB at that size, removing each older day's `_sources.json` first
+  and then its folder.
 
 ## Module Roles
 

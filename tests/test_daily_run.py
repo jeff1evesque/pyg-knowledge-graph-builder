@@ -18,6 +18,7 @@ tests/test_publish_run.py, and the mirror is a folder standing for this node's d
 so nothing here touches a cluster, a bucket or the network.
 """
 
+import datetime
 import fcntl
 import json
 import os
@@ -67,6 +68,7 @@ export PYG_RUN_DIR="$rd" PYG_DATA_YEAR="${day:0:4}" PYG_DATA_MONTH="${day:5:2}" 
 . "$rd/env.sh"
 printf "%s\\n" "$PYG_SOURCE_PATHS" > "$FAKE_CALLS/launcher-sources.txt"
 printf "%s\\n" "${PYG_PUBLISH_DATA_DAY:-}" > "$FAKE_CALLS/launcher-day.txt"
+printf "%s\\n" "${PYG_STAGE_ENABLED:-}" > "$FAKE_CALLS/launcher-stage-enabled.txt"
 mkdir -p "$PYG_WORK_DIR"
 printf "run id      : %s\\nwork dir    : %s\\n" "$RUN_ID" "$PYG_WORK_DIR" > "$rd/run-config.txt"
 if [ -n "${FAKE_DATASET_JSON:-}" ]; then
@@ -80,6 +82,7 @@ echo "${FAKE_RUN_RC:-0}" > "$rd/run.done"
 # the mirror, as a download would leave it.
 STUB_STAGE = '''#!/usr/bin/env bash
 printf "%s\\n" "$*" >> "$FAKE_CALLS/stage.txt"
+[ -z "${FAKE_STAGE_SAYS:-}" ] || printf "%s\\n" "$FAKE_STAGE_SAYS"
 [ "${FAKE_STAGE_RC:-0}" = 0 ] || exit "$FAKE_STAGE_RC"
 IFS=, read -ra uris <<< "$2"
 for uri in "${uris[@]}"; do
@@ -928,3 +931,207 @@ def test_check_names_the_archive_and_says_when_it_is_not_there(schedule):
     root.rmdir()
     assert s.run("--check").returncode == 0
     assert f"the archive root {root} is not there" in s.log()
+
+
+# --------------------------------------------------------------------------- #
+# The store: each day's source files on a local drive, read before S3. #464
+# --------------------------------------------------------------------------- #
+
+def _with_a_store(s, make=True, **settings) -> Path:
+    """A store folder on a drive, named in env.sh with these settings."""
+    root = s.tmp / "drive" / "sources"
+    if make:
+        root.mkdir(parents=True, exist_ok=True)
+    lines = [f'export PYG_SOURCE_STORE_ROOT="{root}"']
+    lines += [f"export {name}={value}" for name, value in settings.items()]
+    with open(s.sd / "env.sh", "a") as fh:
+        fh.write("\n".join(lines) + "\n")
+    return root
+
+
+def _stored_day(root: Path, day: str, files: dict) -> Path:
+    """A day the store holds: one-file sources, each named in the day's list with its
+    count and size."""
+    folder = root / f"day={day}"
+    for key, data in files.items():
+        path = folder / key
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    sources = {f"s3a://{key}": {"files": 1, "bytes": len(data)} for key, data in files.items()}
+    (folder / "_sources.json").write_text(json.dumps({"day": day, "sources": sources}))
+    return folder
+
+
+@pytest.mark.parametrize("settings, flags", [
+    ({}, []),
+    ({"PYG_SOURCE_STORE_SAVE": "true"}, ["--save"]),
+    ({"PYG_SOURCE_STORE_SAVE": "false"}, []),
+    ({"PYG_SOURCE_STORE_SKIP": "true"}, ["--no-store"]),
+], ids=["read", "save", "save-off", "skip"])
+def test_with_a_store_set_staging_is_given_the_store_and_the_day(schedule, settings, flags):
+    s = schedule()
+    s.add_sources("2026-09-30")
+    root = _with_a_store(s, **settings)
+
+    r = s.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert s.recorded("stage").split()[2:] == ["--store", str(root), "--day", "2026-09-30", *flags]
+
+
+def test_with_a_store_set_the_job_does_not_stage_again(schedule):
+    """The job's own staging checks the copies against S3, not the store, so it would
+    download over a saved yearly file that S3 has overwritten since."""
+    s = schedule()
+    s.add_sources("2026-09-30")
+    _with_a_store(s, PYG_SOURCE_STORE_SAVE="true")
+
+    r = s.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert s.recorded("launcher-stage-enabled") == "false\n"
+
+
+def test_the_night_logs_what_staging_read_from_the_store(schedule):
+    s = schedule()
+    s.add_sources("2026-09-30")
+    _with_a_store(s)
+    said = "store: /drive/sources/day=2026-09-30 held 2 of the 3 sources; saved 1"
+
+    r = s.run(FAKE_STAGE_SAYS=said)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"  {said}\n" in s.log()
+
+
+def test_with_no_store_set_the_nightly_runs_as_before(schedule):
+    s = schedule()
+    s.add_sources("2026-09-30")
+
+    r = s.run(FAKE_STAGE_SAYS="store: not used, no --day given")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert s.recorded("stage").split() == [
+        "--sources", s.recorded("launcher-sources").strip()]
+    assert s.recorded("launcher-stage-enabled") == "\n"
+    assert "PYG_STAGE_ENABLED" not in (s.sd / "runs" / RUN_ID / "env.sh").read_text()
+    assert "store: " not in s.log()
+    assert "stored day" not in s.log()
+
+
+@pytest.mark.parametrize("days, kept", [(None, 250), ("3", 3)], ids=["default", "three"])
+def test_the_store_keeps_the_newest_days(schedule, days, kept):
+    s = schedule()
+    s.add_sources("2026-09-30")
+    root = _with_a_store(s, **({} if days is None else {"PYG_SCHEDULE_SOURCE_STORE_DAYS": days}))
+    first = datetime.date(2025, 6, 1)
+    stored = [(first + datetime.timedelta(days=n)).isoformat() for n in range(kept + 2)]
+    for day in stored:
+        _stored_day(root, day, {"bucket/raw/x.snappy.parquet": b"x"})
+    (root / "notes.txt").write_text("not a day, so left alone")
+
+    r = s.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert sorted(p.name for p in root.iterdir()) == sorted(
+        [f"day={day}" for day in stored[-kept:]] + ["notes.txt"])
+    assert f"removed the stored day {stored[0]}" in s.log()
+    assert f"removed the stored day {stored[1]}" in s.log()
+
+
+def test_a_stored_day_loses_its_list_before_its_folder(schedule):
+    """So a day removed only in part reads as incomplete."""
+    s = schedule()
+    s.add_sources("2026-09-30")
+    root = _with_a_store(s, PYG_SCHEDULE_SOURCE_STORE_DAYS="1")
+    old = _stored_day(root, "2026-09-01", {"bucket/raw/x.snappy.parquet": b"x"})
+    _stored_day(root, "2026-09-02", {"bucket/raw/x.snappy.parquet": b"x"})
+    _stub(s.bin / "rm", f'printf "%s\\n" "$*" >> "$FAKE_CALLS/rm.txt"\nexec {shutil.which("rm")} "$@"\n')
+
+    r = s.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert [line for line in s.recorded("rm").splitlines() if "day=2026-09-01" in line] == [
+        f"-f -- {old}/_sources.json", f"-rf -- {old}"]
+    assert not old.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root removes a file in a read-only folder")
+def test_a_stored_day_that_cannot_be_removed_is_logged_and_the_night_goes_on(schedule):
+    s = schedule()
+    s.add_sources("2026-09-30")
+    root = _with_a_store(s, PYG_SCHEDULE_SOURCE_STORE_DAYS="1")
+    old = _stored_day(root, "2026-09-01", {"bucket/raw/x.snappy.parquet": b"x"})
+    _stored_day(root, "2026-09-02", {"bucket/raw/x.snappy.parquet": b"x"})
+    locked = old / "bucket" / "raw"
+    locked.chmod(0o555)
+    try:
+        r = s.run()
+    finally:
+        locked.chmod(0o755)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not (old / "_sources.json").exists()
+    assert "could not remove the stored day 2026-09-01" in s.log()
+    assert "is published" in s.log()
+
+
+def test_a_store_that_is_not_there_removes_nothing_and_the_night_goes_on(schedule):
+    s = schedule()
+    s.add_sources("2026-09-30")
+    root = _with_a_store(s, make=False)
+
+    r = s.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"the store {root} is not there, so no stored day was removed" in s.log()
+
+
+@pytest.mark.parametrize("days", ["many", "0", "2.5"])
+def test_a_store_day_count_that_is_not_a_whole_number_is_refused(schedule, days):
+    s = schedule()
+    s.add_sources("2026-09-30")
+    _with_a_store(s, PYG_SCHEDULE_SOURCE_STORE_DAYS=days)
+
+    assert s.run().returncode == 2
+    assert "PYG_SCHEDULE_SOURCE_STORE_DAYS must be a whole number of days" in s.log()
+    assert s.recorded("launcher") == ""
+
+
+@pytest.mark.parametrize("line, said", [
+    ("export PYG_SOURCE_STORE_ROOT=drive/sources",
+     "PYG_SOURCE_STORE_ROOT must be an absolute path"),
+    ("export PYG_SOURCE_STORE_ROOT=/drive/sources PYG_SOURCE_STORE_SAVE=yes",
+     "PYG_SOURCE_STORE_SAVE must be true or false"),
+], ids=["relative-root", "save-yes"])
+def test_a_store_setting_that_cannot_work_is_refused(schedule, line, said):
+    s = schedule()
+    s.add_sources("2026-09-30")
+    with open(s.sd / "env.sh", "a") as fh:
+        fh.write(line + "\n")
+
+    assert s.run().returncode == 2
+    assert said in s.log()
+    assert s.recorded("stage") == ""
+
+
+@pytest.mark.parametrize("cut_short, held", [(False, 2), (True, 1)], ids=["whole", "one-cut-short"])
+def test_check_says_how_much_of_the_day_the_store_holds(schedule, cut_short, held):
+    """Counted as staging reads the store: named in the day's list, with the files
+    still at the listed count and size."""
+    s = schedule()
+    s.add_sources("2026-09-30")
+    root = _with_a_store(s)
+    yearly = "bucket/raw/source=b/feed=x/2025.snappy.parquet"
+    folder = _stored_day(root, "2026-09-30", {
+        "bucket/raw/source=a/year=2026/month=09/30.snappy.parquet": b"the day file",
+        yearly: b"the yearly file",
+    })
+    if cut_short:
+        (folder / yearly).write_bytes(b"the yearly")
+
+    r = s.run("--check")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"the store {root} holds {held} of the day's 3 sources\n" in s.log()
+    assert s.recorded("stage") == ""
+
+
+def test_check_says_when_the_store_is_not_there(schedule):
+    s = schedule()
+    s.add_sources("2026-09-30")
+    root = _with_a_store(s, make=False)
+
+    assert s.run("--check").returncode == 0
+    assert f"the store {root} is not there, so staging would download every source" in s.log()
