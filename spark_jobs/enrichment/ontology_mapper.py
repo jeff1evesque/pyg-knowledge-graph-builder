@@ -13,6 +13,7 @@ Use cases:
 
 All operations run as PySpark DataFrame transformations.
 """
+from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from functools import reduce
@@ -561,7 +562,8 @@ class OntologyMapper:
             logger.info("No ontology mapping triples produced")
             return empty
 
-        result = reduce(DataFrame.unionAll, new_dfs).cache()
+        # DISK_ONLY -- no cached frame in this job stays in memory; see #466.
+        result = reduce(DataFrame.unionAll, new_dfs).persist(StorageLevel.DISK_ONLY)
         count = result.count()
 
         logger.info("=" * 60)
