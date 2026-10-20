@@ -97,12 +97,16 @@ export PYG_TIME_PERIOD=YYYY-MM
 
 # --------------------------------------------------------------------------- #
 # Stall watchdog. Started by bin/submit_spark_job.sh once per submit; the launcher
-# watches this directory and stops the run with rc=99 when a capture lands in it.
+# watches this directory. When a capture lands in it, the launcher stops waiting and
+# exits 99, and leaves the job running to be looked at. With PYG_STALL_KEEP_WAITING=true
+# it notes the capture and waits for the job instead; bin/daily_run.sh sets that for
+# every scheduled run.
 # --------------------------------------------------------------------------- #
 # export PYG_STALL_DUMP_DIR="$PYG_RUN_DIR/stalls"
 # export PYG_STALL_SECONDS=300
 # export PYG_STALL_FACTOR=2.0
 # export PYG_STALL_MAX_CAPTURES=1
+# export PYG_STALL_KEEP_WAITING=false
 
 # --------------------------------------------------------------------------- #
 # Notebook runner. The runner venv needs nbformat and nbclient, which the job's own
