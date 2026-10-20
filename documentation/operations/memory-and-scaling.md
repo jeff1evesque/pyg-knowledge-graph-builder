@@ -122,6 +122,16 @@ numpy circular references that CPython's reference counting alone may not free.
 
 **Edge feature tensors are much smaller than node features**: At 32 dims × 4 bytes per edge vs. 1024 dims × 4 bytes per node, edge feature tensors are ~32× smaller per element. A 2M-edge type's tensor is ~256 MB at 32-d, compared to ~8 GB for a 2M-node type at 1024-d.
 
+## Cached Frames Stay on Disk
+
+Both Spark jobs keep the frames they reuse with `persist(StorageLevel.DISK_ONLY)`, not `.cache()`. The only exceptions are `all_hierarchy` and `schema_df` in `feature_extractor.py`, which hold thousands of rows.
+
+This avoids a lock-up in the RAPIDS Accelerator, seen with rapids-4-spark 25.02.0. When an executor stores a cached block in memory and its memory for cached blocks is full, Spark pushes other blocks out to make room. If the block it picks is a GPU broadcast, writing it out needs the GPU. The storing task then holds the memory lock and waits for the GPU, while the tasks holding the GPU wait for the memory lock. The executor's heartbeat waits for the same lock, so the executor goes silent until the driver drops it, and Spark redoes its work on a new executor.
+
+The graph job froze this way on 2026-09-06 (#380). The enrichment job froze on 2026-10-18, twice, once on each node, for about 10 minutes each time, and took about 25 minutes longer than its first build of the same day. The first of those freezes was at the cached count in `temporal_unifier.py`, and the enrichment job froze at that same step again on 2026-10-20. A `DISK_ONLY` frame writes its blocks straight to the executor's local disk and never asks for room in memory, so it cannot start this.
+
+A new `.cache()` in either job, or a `.persist()` with a level that uses memory, can bring the freeze back. `tests/test_caches_stay_on_disk.py` fails on one. Spark still keeps the GPU broadcasts themselves in executor memory, so this removes the triggers this repository controls, not every possible one.
+
 ## Scaling Characteristics
 
 | Component | Where it runs | Memory model |
