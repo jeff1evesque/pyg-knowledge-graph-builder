@@ -18,6 +18,10 @@ it need not belong to this run.
 The other half is that a trace which IS this run's must survive both checks. It
 starts before Spark does -- the launcher starts tracing, then submits -- so a rule
 that wants every sample inside the window would throw away every good trace.
+
+The header's stall line is pinned too. A run whose launcher waited a stall out
+finishes like any other (#467), so that line is the one place its report says a
+stall was captured, and when.
 """
 
 import datetime
@@ -78,6 +82,10 @@ def _report(rd: Path) -> str:
 def _network_section(text: str) -> str:
     body = text.split("--- network during the run", 1)[1]
     return body.split("--- errors ---", 1)[0]
+
+
+def _header(text: str) -> str:
+    return text.split("--- per submission ---", 1)[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -143,3 +151,23 @@ def test_without_a_recorded_run_id_the_window_still_applies(run_dir):
 
     assert "STALE" in section
     assert "internet in" not in section
+
+
+# --------------------------------------------------------------------------- #
+# The stall line
+# --------------------------------------------------------------------------- #
+
+def test_each_captured_stall_is_named_in_the_header_with_when(run_dir):
+    """One line per capture, as the launcher wrote them: the watchdog captures at
+    most once per leg by default, so a run can have one for each leg."""
+    (run_dir / "stalls-captured").write_text(
+        f"2026-01-01T12:30:00Z {run_dir}/stalls/stall-20260101T123000Z-stage9\n"
+        f"2026-01-01T13:10:00Z {run_dir}/stalls/stall-20260101T131000Z-stage41\n")
+    header = _header(_report(run_dir))
+
+    assert "STALL    : captured 2026-01-01T12:30:00Z, stall-20260101T123000Z-stage9\n" in header
+    assert "STALL    : captured 2026-01-01T13:10:00Z, stall-20260101T131000Z-stage41\n" in header
+
+
+def test_without_a_capture_the_header_names_no_stall(run_dir):
+    assert "STALL" not in _header(_report(run_dir))

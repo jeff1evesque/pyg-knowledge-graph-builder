@@ -38,6 +38,7 @@ directory is what let a killed attempt's cleanup overwrite a live run's report.
 
 import fcntl
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -50,6 +51,7 @@ LAUNCHER = REPO_ROOT / "bin" / "run_cluster_notebook.sh"
 RUN_ID = "20260101T000000Z"
 LOCAL = "node-a"
 REMOTE = "node-b"
+CAPTURE = "stall-20260101T000001Z-stage9"
 
 pytestmark = [
     pytest.mark.launcher,
@@ -136,15 +138,25 @@ class Harness:
 
 @pytest.fixture
 def harness(tmp_path):
-    def build(work_dir=None, runner_body="exit 0\n", stalls=False):
+    def build(work_dir=None, runner_body="exit 0\n", stalls=False, exits_after_stall=None,
+              keep_waiting=None):
         wd = work_dir if work_dir is not None else str(tmp_path / "work" / RUN_ID)
+        cap = tmp_path / "run" / "stalls" / CAPTURE
         if stalls:
             # The watchdog fires DURING the run, so the stub notebook is what drops
             # the capture. Pre-creating it in the test would not reach the wait loop:
             # the launcher moves earlier captures aside before the notebook starts.
-            cap = tmp_path / "run" / "stalls" / "stall-20260101T000001Z-stage9"
             runner_body = f'mkdir -p "{cap}"\nsleep 30\n'
+        if exits_after_stall is not None:
+            # A stall that clears: the job runs on past the launcher's next look,
+            # which comes every 10 s, then exits with this code.
+            runner_body = (f'mkdir -p "{cap}"\nsleep 15\n'
+                           f'touch "{tmp_path}/calls/runner-finished"\n'
+                           f"exit {exits_after_stall}\n")
         h = Harness(tmp_path, wd, runner_body)
+        if keep_waiting is not None:
+            with open(h.rd / "env.sh", "a") as fh:
+                fh.write(f"export PYG_STALL_KEEP_WAITING={keep_waiting}\n")
         (Path(wd) / "checkpoints").mkdir(parents=True)
         return h
     return build
@@ -251,14 +263,17 @@ def test_outcome_is_recorded_on_the_success_path(harness):
     assert (h.rd / "run.done").read_text().strip() == "0"
 
 
-def test_outcome_is_recorded_when_a_stall_is_captured(harness):
+@pytest.mark.parametrize("keep_waiting", [None, "false"], ids=["unset", "false"])
+def test_outcome_is_recorded_when_a_stall_is_captured(harness, keep_waiting):
     """The run whose harness gave up is the run whose report is worth having."""
-    h = harness(stalls=True)
+    h = harness(stalls=True, keep_waiting=keep_waiting)
 
     r = h.run()
     assert r.returncode == 99
     assert (h.rd / "run.done").read_text().strip() == "99"
     assert h.recorded("record").splitlines() == [str(h.rd), h.work_dir]
+    # outcome.txt reads when, and which, from this file.
+    assert (h.rd / "stalls-captured").read_text().split()[1] == str(h.rd / "stalls" / CAPTURE)
 
 
 def test_an_earlier_run_s_capture_does_not_end_this_one(harness):
@@ -289,6 +304,60 @@ def test_a_failing_notebook_still_records_its_outcome(harness):
     assert h.run().returncode == 0        # the launcher reports, it does not fail
     assert (h.rd / "run.done").read_text().strip() == "1"
     assert h.recorded("record").splitlines() == [str(h.rd), h.work_dir]
+
+
+# --------------------------------------------------------------------------- #
+# Waiting out a stall. #467
+#
+# A frozen executor that Spark drops lets the job recover: on 2026-10-18 one finished
+# cleanly two hours after its capture. With PYG_STALL_KEEP_WAITING=true the launcher
+# notes the capture and waits, so a scheduled run is not lost at the capture.
+# --------------------------------------------------------------------------- #
+
+def test_keep_waiting_waits_for_a_job_that_recovers(harness):
+    """Then it finishes as after any run, and says when the stall was captured."""
+    h = harness(exits_after_stall=0, keep_waiting="true")
+    checkpoints = Path(h.work_dir) / "checkpoints"
+
+    r = h.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (h.calls / "runner-finished").exists()
+    assert (h.rd / "run.done").read_text().strip() == "0"
+    assert (h.rd / f"STOP-{RUN_ID}").exists()
+    assert f"touch '{h.rd}/STOP-{RUN_ID}'" in h.recorded("ssh")
+    assert h.recorded("record").splitlines() == [str(h.rd), h.work_dir]
+    assert not checkpoints.exists()
+
+    when, capture = (h.rd / "stalls-captured").read_text().split()
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", when)
+    assert capture == str(h.rd / "stalls" / CAPTURE)
+    log = (h.rd / "run.log").read_text()
+    assert f"STALL CAPTURED: {capture}" in log
+    assert "the job ran on after 1 stall capture(s)" in log
+
+
+def test_keep_waiting_reports_a_job_that_fails_after_a_stall(harness):
+    """Reported, not raised, as after any run: run.done carries the notebook's code,
+    and that file is what bin/daily_run.sh reads, not the launcher's exit code."""
+    h = harness(exits_after_stall=1, keep_waiting="true")
+
+    r = h.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (h.calls / "runner-finished").exists()
+    assert (h.rd / "run.done").read_text().strip() == "1"
+    assert h.recorded("record").splitlines() == [str(h.rd), h.work_dir]
+
+
+@pytest.mark.parametrize("value", ["yes", "1", "TRUE"])
+def test_a_keep_waiting_value_other_than_true_or_false_is_refused(harness, value):
+    """A typo would otherwise quietly choose how a stall is handled."""
+    h = harness(keep_waiting=value)
+
+    r = h.run()
+    assert r.returncode == 2
+    assert "PYG_STALL_KEEP_WAITING" in r.stderr
+    assert not (h.rd / "run.done").exists()
+    assert h.recorded("netsample") == ""
 
 
 # --------------------------------------------------------------------------- #

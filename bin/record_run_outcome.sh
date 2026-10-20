@@ -145,6 +145,14 @@ echo "harness  : $([ -f "$RD/run.done" ] && echo "runner rc=$(cat "$RD/run.done"
 echo "state    : $(nbdigest state)"
 echo "read from: $([ -n "$NB" ] && basename "$NB" || echo '(no executed notebook)')"
 [ -f "$RD/killed-by" ] && echo "KILLED BY: $(cat "$RD/killed-by")"
+# One line per stall the watchdog captured, "<when> <capture>", written by the
+# launcher. A run that waited a stall out finishes like any other, so this is where
+# its report says so.
+if [ -s "$RD/stalls-captured" ]; then
+  while read -r when capture; do
+    echo "STALL    : captured $when, ${capture##*/}"
+  done < "$RD/stalls-captured"
+fi
 
 echo
 echo "--- per submission ---"

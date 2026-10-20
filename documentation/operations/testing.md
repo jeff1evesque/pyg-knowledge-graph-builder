@@ -234,7 +234,9 @@ runs the notebook through [`bin/execute_notebook.py`](https://github.com/jeff1ev
 which rewrites the executed `.ipynb` after every cell, so a run that dies in the
 seed still leaves a report — kills the run if the round trip to the gateway
 starts climbing, stops early if the stall watchdog captures a stalled stage, and
-records the outcome on both paths before sweeping this run's checkpoints.
+records the outcome on both paths before sweeping this run's checkpoints. With
+`PYG_STALL_KEEP_WAITING=true` it notes a capture and keeps waiting for the job instead,
+as scheduled runs do (see [When the job stalls](running-a-job.md#when-the-job-stalls)).
 [`bin/mem_reclaim.py`](https://github.com/jeff1evesque/pyg-knowledge-graph-builder/blob/master/bin/mem_reclaim.py) is the gate to run before it, on a
 unified-memory host: RAPIDS sizes its pool from `MemFree`, which a previous run's
 file cache holds near zero for hours while `MemAvailable` still reads over 100 GB.
@@ -266,7 +268,8 @@ bin/record_run_outcome.sh <run-dir> [work-dir]
 It flattens the executed notebook into text first, then reports each
 submission's status, the phases the job logged, how many tasks each stage really
 ran at once (from the event log — the only place that exists), a ranked error
-scan, executor memory-pool pressure per node, and the network traces. A trace
+scan, executor memory-pool pressure per node, and the network traces. Its header
+names each stall the launcher captured, and when. A trace
 whose samples fall outside the run window is called out as stale rather than
 summarised, because a leftover file from an earlier attempt otherwise produces a
 confident set of numbers about a different run.
