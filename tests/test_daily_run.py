@@ -69,12 +69,14 @@ export PYG_RUN_DIR="$rd" PYG_DATA_YEAR="${day:0:4}" PYG_DATA_MONTH="${day:5:2}" 
 printf "%s\\n" "$PYG_SOURCE_PATHS" > "$FAKE_CALLS/launcher-sources.txt"
 printf "%s\\n" "${PYG_PUBLISH_DATA_DAY:-}" > "$FAKE_CALLS/launcher-day.txt"
 printf "%s\\n" "${PYG_STAGE_ENABLED:-}" > "$FAKE_CALLS/launcher-stage-enabled.txt"
+printf "%s\\n" "${PYG_STALL_KEEP_WAITING:-}" > "$FAKE_CALLS/launcher-keep-waiting.txt"
 mkdir -p "$PYG_WORK_DIR"
 printf "run id      : %s\\nwork dir    : %s\\n" "$RUN_ID" "$PYG_WORK_DIR" > "$rd/run-config.txt"
 if [ -n "${FAKE_DATASET_JSON:-}" ]; then
   enriched="$PYG_WORK_DIR/enriched/year=$PYG_DATA_YEAR/month=$PYG_DATA_MONTH"
   mkdir -p "$enriched" && printf "%s" "$FAKE_DATASET_JSON" > "$enriched/dataset.json"
 fi
+[ -z "${FAKE_STALLS_CAPTURED:-}" ] || printf "%s\\n" "$FAKE_STALLS_CAPTURED" > "$rd/stalls-captured"
 echo "${FAKE_RUN_RC:-0}" > "$rd/run.done"
 '''
 
@@ -631,6 +633,48 @@ def test_a_run_that_did_not_finish_is_not_published(schedule):
     s.add_sources("2026-09-30")
 
     assert s.run(FAKE_RUN_RC="1").returncode == 1
+    assert s.recorded("publish") == ""
+
+
+# --------------------------------------------------------------------------- #
+# A stall the launcher waited out. #467
+# --------------------------------------------------------------------------- #
+
+CAPTURE = "/runs/r/stalls/stall-20261001T060439Z-stage5509"
+
+
+def test_scheduled_runs_wait_out_a_stall_capture(schedule):
+    """A frozen executor that Spark drops lets the job recover, so a capture alone
+    must not cost the night."""
+    s = schedule()
+    s.add_sources("2026-09-30")
+
+    r = s.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert s.recorded("launcher-keep-waiting") == "true\n"
+    assert "stall was captured" not in s.log()
+
+
+def test_a_run_that_recovered_from_a_stall_is_published_and_the_log_says_so(schedule):
+    s = schedule()
+    s.add_sources("2026-09-30")
+
+    r = s.run(FAKE_STALLS_CAPTURED=f"2026-10-01T06:04:41Z {CAPTURE}", TZ="UTC")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (f"a stall was captured at 06:04:41 and the launcher waited for the job; "
+            f"see {CAPTURE}\n") in s.log()
+    assert f"{RUN_ID} --upload" in s.recorded("publish")
+    assert "is published" in s.log()
+
+
+def test_a_run_that_failed_after_a_stall_still_says_so(schedule):
+    s = schedule()
+    s.add_sources("2026-09-30")
+
+    r = s.run(FAKE_STALLS_CAPTURED=f"2026-10-01T06:04:41Z {CAPTURE}", FAKE_RUN_RC="1",
+              TZ="UTC")
+    assert r.returncode == 1
+    assert "a stall was captured at 06:04:41" in s.log()
     assert s.recorded("publish") == ""
 
 
