@@ -22,6 +22,7 @@ Cross-dataset correlations were removed with the datasets they correlated: all
 26 in KNOWN_CORRELATIONS paired filings with administrative proceedings,
 litigation or trading suspensions, and none paired filings with itself.
 """
+from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from functools import reduce
@@ -235,7 +236,10 @@ class SECIntraSourceLinker:
         logger.info("=" * 60)
 
         # Cache the SEC-relevant subset for performance
-        self._sec_triples = self._filter_sec_triples().cache()
+        # DISK_ONLY -- no cached frame in this job stays in memory; see #466.
+        self._sec_triples = self._filter_sec_triples().persist(
+            StorageLevel.DISK_ONLY
+        )
 
         new_dfs: List[DataFrame] = []
 
@@ -273,7 +277,8 @@ class SECIntraSourceLinker:
         all_new = all_new.dropDuplicates(["subject", "predicate", "object"])
         all_new = deduplicate_against_existing(all_new, triples_df)
 
-        all_new = all_new.cache()
+        # DISK_ONLY -- no cached frame in this job stays in memory; see #466.
+        all_new = all_new.persist(StorageLevel.DISK_ONLY)
         total = all_new.count()
 
         # Unpersist after the count, not before it. The four steps only build
