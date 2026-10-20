@@ -19,6 +19,7 @@ direct datatype properties (lastPrice, strikePrice, delta, etc.).
 No intermediate entity resolution is needed — the enricher works
 directly with the snapshot subjects.
 """
+from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
@@ -224,7 +225,8 @@ class MarketIntraSourceLinker:
         logger.info("Starting Market Intra-Source Enrichment (PySpark)")
         logger.info("=" * 60)
 
-        triples_df.cache()
+        # DISK_ONLY -- no cached frame in this job stays in memory; see #466.
+        triples_df.persist(StorageLevel.DISK_ONLY)
 
         new_dfs: List[DataFrame] = []
 
@@ -511,7 +513,8 @@ class MarketIntraSourceLinker:
             logger.info("  No fully-specified option snapshots found")
             return None
 
-        options_df.cache()
+        # DISK_ONLY -- no cached frame in this job stays in memory; see #466.
+        options_df.persist(StorageLevel.DISK_ONLY)
 
         new_dfs: List[DataFrame] = []
 
