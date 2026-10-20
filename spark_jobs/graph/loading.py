@@ -607,10 +607,12 @@ def load_source_triples(
     # statistics below, the enrichment phases, the Parquet write -- would
     # otherwise run it again. One parse and one shuffle, against the two parses
     # and one shuffle this replaces.
+    #
+    # DISK_ONLY -- no cached frame in this job stays in memory; see #466.
     if "object_datatype" in triples_df.columns:
         markers = literal_datatype_observations(
             triples_df, carry=[SOURCE_COLUMN]
-        ).cache()
+        ).persist(StorageLevel.DISK_ONLY)
         count += markers.count()
         triples_df = triples_df.drop("object_datatype").unionByName(markers)
 
