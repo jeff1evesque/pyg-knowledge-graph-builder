@@ -20,6 +20,7 @@ Note: Temporal unification (Step 1 of the old rdflib orchestrator) is now
 handled by the standalone TemporalUnifier in pipeline.py Phase 2.
 It no longer runs inside the BLS intra-source enricher.
 """
+from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from functools import reduce
@@ -136,7 +137,10 @@ class BLSIntraSourceLinker:
         # Filter BEFORE detecting. Detection reads the filtered frame, so it
         # cannot report a dataset the steps below would find nothing for, and
         # it cannot miss one they would.
-        self._bls_triples = self._filter_bls_triples().cache()
+        # DISK_ONLY -- no cached frame in this job stays in memory; see #466.
+        self._bls_triples = self._filter_bls_triples().persist(
+            StorageLevel.DISK_ONLY
+        )
 
         self.available_datasets = self._detect_datasets()
         if not self.available_datasets:
@@ -181,7 +185,8 @@ class BLSIntraSourceLinker:
         all_new = all_new.dropDuplicates(["subject", "predicate", "object"])
         all_new = deduplicate_against_existing(all_new, triples_df)
 
-        all_new = all_new.cache()
+        # DISK_ONLY -- no cached frame in this job stays in memory; see #466.
+        all_new = all_new.persist(StorageLevel.DISK_ONLY)
         total = all_new.count()
 
         # Unpersist after the count, not before it. Steps 1-3 only build lazy
