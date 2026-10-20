@@ -16,7 +16,8 @@
 #   start a network trace on every node and a cluster sampler locally
 #   run the notebook headlessly, teeing every cell as it arrives
 #   kill the run if the local network starts collapsing
-#   stop early if the stall watchdog captures a stalled stage
+#   stop early if the stall watchdog captures a stalled stage, or with
+#   PYG_STALL_KEEP_WAITING=true note the capture and keep waiting for the job
 #   record the outcome either way, then sweep this run's checkpoints
 #
 # WHAT IT DELIBERATELY DOES NOT DO
@@ -115,6 +116,7 @@ NOTEBOOK="${PYG_NOTEBOOK:-$REPO/notebook/multi_experiment.ipynb}"
 KERNEL="${PYG_NOTEBOOK_KERNEL:-pyg-notebook-runner}"
 RUNNER="${PYG_RUNNER_PYTHON:-$RD/runner-venv/bin/python}"   # needs nbformat + nbclient
 STALL_DIR="${PYG_STALL_DUMP_DIR:-$RD/stalls}"
+KEEP_WAITING="${PYG_STALL_KEEP_WAITING:-false}"
 RTT_LIMIT_MS="${PYG_GATEWAY_RTT_LIMIT_MS:-60}"
 RTT_STRIKES="${PYG_GATEWAY_STRIKES:-6}"
 
@@ -136,11 +138,19 @@ if [[ ! -x "$RUNNER" ]]; then
   echo "  or point PYG_RUNNER_PYTHON at one that already exists." >&2
   exit 2
 fi
+# Checked here too: a typo would otherwise quietly choose how a stall is handled.
+if [[ "$KEEP_WAITING" != true && "$KEEP_WAITING" != false ]]; then
+  echo "PYG_STALL_KEEP_WAITING must be true or false, got '$KEEP_WAITING'" >&2
+  exit 2
+fi
 
 # Everything this run owns carries its run id, so nothing it writes can be mistaken
 # for another run's and nothing another run does can stop it.
 STOP="$RD/STOP-$RUN_ID"
 DONE="$RD/run.done"
+# One line per stall the watchdog captured, "<when> <capture>", for outcome.txt and
+# bin/daily_run.sh.
+CAPTURED="$RD/stalls-captured"
 
 log() { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$RD/run.log"; }
 
@@ -156,7 +166,7 @@ done
 SSH=(ssh -o BatchMode=yes -o ConnectTimeout=5)
 
 : > "$RD/run.log"
-rm -f "$DONE" "$RD/killed-by"
+rm -f "$DONE" "$RD/killed-by" "$CAPTURED"
 
 # Spark refuses to start when the event log directory is missing, which is how one
 # run died 50 seconds in: every earlier run dir inherited the directory from a copy,
@@ -284,9 +294,28 @@ WD_PID=$!
 # Wait for whichever comes first: the notebook finishing, or a captured stall. A
 # stalled leg does not exit -- it sits until its cap -- so waiting on the notebook
 # alone would burn hours to learn the run was already dead.
+#
+# With PYG_STALL_KEEP_WAITING=true a capture is noted and the wait goes on. A frozen
+# executor that Spark drops lets the job recover: on 2026-10-18 one finished cleanly
+# two hours after its capture. The leg caps still end a leg that never recovers.
+declare -A SEEN=()
+note_captures() {
+  local capture
+  for capture in "$STALL_DIR"/stall-*; do
+    [[ -e "$capture" && -z "${SEEN[$capture]:-}" ]] || continue
+    SEEN["$capture"]=1
+    printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$capture" >> "$CAPTURED"
+    log "STALL CAPTURED: $capture"
+    if [[ "$KEEP_WAITING" == true ]]; then
+      log "PYG_STALL_KEEP_WAITING=true, so waiting for the job to finish or reach its cap"
+    fi
+  done
+}
+
 STALLED=""
 while kill -0 "$NB_PID" 2>/dev/null; do
-  if compgen -G "$STALL_DIR/stall-*" > /dev/null 2>&1; then
+  note_captures
+  if [[ -s "$CAPTURED" && "$KEEP_WAITING" != true ]]; then
     STALLED=1
     break
   fi
@@ -298,7 +327,6 @@ record() { bash "$REPO/bin/record_run_outcome.sh" "$RD" "$PYG_WORK_DIR" > /dev/n
 if [[ -n "$STALLED" ]]; then
   rc=99
   echo "$rc" > "$DONE"
-  log "STALL CAPTURED: $(ls -d "$STALL_DIR"/stall-* 2>/dev/null | tail -1)"
   log "the job is STILL RUNNING and deliberately not killed -- inspect it, then:"
   log "  pkill -f execute_notebook.py && touch $STOP"
   # Record what the run had done by this point. A capture that turned out to be
@@ -317,6 +345,8 @@ if [[ -n "$STALLED" ]]; then
 fi
 
 wait "$NB_PID"; rc=$?
+# A capture can land after the loop's last look.
+note_captures
 echo "$rc" > "$DONE"
 touch "$STOP"
 for h in "${REMOTE_NODES[@]}"; do
@@ -331,6 +361,9 @@ done
 kill "$WD_PID" 2>/dev/null
 
 log "notebook exited rc=$rc$( [[ -f "$RD/killed-by" ]] && echo ' (KILLED BY WATCHDOG)' )"
+if [[ -s "$CAPTURED" ]]; then
+  log "the job ran on after $(wc -l < "$CAPTURED") stall capture(s); see $CAPTURED"
+fi
 log "artifacts: $RD/executed-$RUN_ID.ipynb, $RD/notebook.log, $RD/samples.jsonl, $RD/net-*-$RUN_ID.tsv"
 record
 log "outcome recorded -> $RD/outcome.txt"
