@@ -10,7 +10,7 @@ ExecStart="@DAILY_RUN@" "@SCHEDULE_DIR@"
 SuccessExitStatus=3
 # A run takes hours, and a oneshot unit's start timeout would otherwise end it.
 TimeoutStartSec=infinity
-# Stopping the unit stops every process of the run, the Spark driver included. A job
-# that the launcher leaves running after a stall capture stops with the unit too,
-# which frees the cluster for the next day; the capture stays in the run directory.
+# Stopping the unit stops every process of the run, the Spark driver included, which
+# frees the cluster for the next day. A scheduled run waits out a stall capture
+# (PYG_STALL_KEEP_WAITING=true), so its job has ended by the time the run does.
 KillMode=control-group
