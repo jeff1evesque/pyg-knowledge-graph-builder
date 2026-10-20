@@ -27,7 +27,8 @@
 #   is set, then remove the local copies this schedule downloaded that today's run does
 #   not read
 #   bring MemFree up to PYG_MEMFREE_GATE_GB on every node, when that is set
-#   bin/run_cluster_notebook.sh --data-date <day> <run-dir>
+#   bin/run_cluster_notebook.sh --data-date <day> <run-dir>, which waits out a stall
+#   capture instead of failing the night; the log names each capture
 #   bin/publish_run.py <run-dir> --upload
 #   bin/publish_run.py <run-dir> --archive <root> --keep-days <N>, when an archive is set
 #   remove the store's days past the newest PYG_SCHEDULE_SOURCE_STORE_DAYS, when a store
@@ -560,6 +561,11 @@ joined="$(IFS=,; printf '%s' "${SOURCES[*]}")"
   printf 'export PYG_PUBLISH_DATA_DAY=%q\n' "$DATA_DATE"
 } >> "$RD/env.sh"
 export PYG_SOURCE_PATHS="$joined"
+# A frozen executor that Spark drops lets the job recover, so a stall capture alone
+# does not fail the night. The leg caps in env.sh still end a leg that never
+# recovers. #467
+printf '%s\n' "# Added by bin/daily_run.sh: wait out a stall capture." \
+  "export PYG_STALL_KEEP_WAITING=true" >> "$RD/env.sh"
 
 # ---------------------------------------------------------------------------
 # Staging, and the local copies this schedule downloaded
@@ -692,6 +698,13 @@ fi
 log "running; see $RD/run.log"
 "$REPO/bin/run_cluster_notebook.sh" --data-date "$DATA_DATE" "$RD" > "$RD/launcher.log" 2>&1
 launcher_rc=$?
+# A night that recovered from a stall publishes like any other, so this line is where
+# its log says a stall happened. #467
+if [[ -s "$RD/stalls-captured" ]]; then
+  while read -r when capture; do
+    log "a stall was captured at $(date -d "$when" '+%T' 2>/dev/null || echo "$when") and the launcher waited for the job; see $capture"
+  done < "$RD/stalls-captured"
+fi
 run_rc="$(cat "$RD/run.done" 2>/dev/null || echo missing)"
 [[ "$run_rc" == "0" ]] \
   || fail "the run did not finish cleanly (launcher rc=$launcher_rc, run.done=$run_rc), so it is not published. See $RD/outcome.txt"
