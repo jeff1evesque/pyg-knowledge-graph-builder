@@ -693,7 +693,8 @@ directory of its own; none of it is in the code.
 A day, in order: refuse a checkout with uncommitted changes, check that every source for
 the day is there, wait for an idle cluster, stage the sources (from the store first,
 when one is set), bring free memory up on every node, run
-`bin/run_cluster_notebook.sh --data-date`, publish with `bin/publish_run.py`, copy the
+`bin/run_cluster_notebook.sh --data-date` (which waits out a stall; see
+[When the job stalls](#when-the-job-stalls)), publish with `bin/publish_run.py`, copy the
 day into the local archive when one is set, trim the store when one is set, and only
 after that publish (and that archive) went through, prune. The launcher and the publish
 step are the ones in [Testing](testing.md#driving-a-real-cluster-run).
@@ -828,6 +829,37 @@ runs it, with `bin/daily_run.sh --data-date YYYY-MM-DD <schedule-dir>`.
   them. Runs started by hand, their work directories and whatever they staged are never
   touched, and are cleaned up by hand. The store, when one is set, drops its days past
   the newest `PYG_SCHEDULE_SOURCE_STORE_DAYS`, whichever staging saved them.
+
+### When the job stalls
+
+The [stall watchdog](testing.md#watching-a-long-run-for-a-stall) saves thread dumps when
+a stage stops finishing tasks. When one of its captures lands, the launcher does one of
+two things:
+
+- **It stops waiting**, by default. It writes `99` to `run.done`, records the outcome so
+  far and exits. The job is left running, so someone can look at it while it is stuck.
+  This suits a run started by hand that someone is watching.
+- **It keeps waiting**, with `PYG_STALL_KEEP_WAITING=true` in `env.sh`. It logs the
+  capture and waits for the job to finish. Then it finishes as it does after any run:
+  `run.done` gets the notebook's exit code, the outcome is recorded and the run's
+  checkpoints are removed. The leg caps, `PYG_SEED_TIMEOUT` and `PYG_EXPERIMENT_TIMEOUT`,
+  still end a leg that never recovers.
+
+Either way, `run.log` and `outcome.txt` say when each stall was captured, and
+`<run-dir>/stalls-captured` lists them, one line each.
+
+Scheduled runs keep waiting: `bin/daily_run.sh` writes `PYG_STALL_KEEP_WAITING=true` into
+each run's `env.sh`. A stall can clear on its own. When an executor freezes, Spark drops
+it once its heartbeat times out, and the job carries on without it. In a rebuild of
+2026-10-15, the watchdog captured a stall 55 minutes into the enrichment job, Spark
+dropped the frozen executor 5 minutes later, and the job finished with both submissions
+ok. Stopping at the capture would have cost the day, because the unit stops everything
+still running when `bin/daily_run.sh` exits. A day whose run had a capture says so in
+`daily.log`, whether or not it went on to publish:
+
+```text
+a stall was captured at 02:04:41 and the launcher waited for the job; see <run-dir>/stalls/stall-20261020T060439Z-stage5509
+```
 
 ### Timing and cost
 
