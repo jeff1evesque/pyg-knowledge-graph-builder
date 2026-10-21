@@ -16,6 +16,7 @@ All methods:
 """
 from dataclasses import dataclass
 
+from pyspark import StorageLevel
 from pyspark.sql import Column, DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
@@ -279,14 +280,15 @@ class CrossSourceLinker:
         # Each step above is a join over triples_df, so this union carries many of
         # those subtrees; feeding it straight into dropDuplicates + the anti-join
         # against triples_df makes Catalyst's constraint inference blow the driver
-        # heap while *planning* (OutOfMemoryError inside .cache(), before any task
+        # heap while *planning* (OutOfMemoryError inside .persist(), before any task
         # runs). Materializing here replaces the subtrees with one scan.
         all_new = settle(all_new)
 
         all_new = all_new.dropDuplicates(["subject", "predicate", "object"])
         all_new = deduplicate_against_existing(all_new, self.triples_df)
 
-        all_new = all_new.cache()
+        # DISK_ONLY -- no cached frame in this job stays in memory; see #466.
+        all_new = all_new.persist(StorageLevel.DISK_ONLY)
         total = all_new.count()
 
         logger.info(f"\nCross-source enrichment produced {total} new triples")

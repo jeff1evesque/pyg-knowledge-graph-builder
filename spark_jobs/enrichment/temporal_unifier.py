@@ -58,6 +58,7 @@ three sources that are intraday or event-timed -- market quotes, SEC filings and
 weather alerts -- which are exactly the sources that reach
 _collect_date_based_temporals, so the routing needs no source list.
 """
+from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from functools import reduce
@@ -217,7 +218,8 @@ class TemporalUnifier:
         logger.info("Starting Temporal Unification (PySpark)")
         logger.info("=" * 60)
 
-        triples_df.cache()
+        # DISK_ONLY -- no cached frame in this job stays in memory; see #466.
+        triples_df.persist(StorageLevel.DISK_ONLY)
 
         # Collect (temporal_uri, normalized_name, kind) from the picked sources.
         # kind is "day", "month", "year", or "quarter".
@@ -268,7 +270,7 @@ class TemporalUnifier:
         # three _create_unified_* branches below each build on it, so without this its
         # whole subtree is re-planned into all three and Catalyst's constraint
         # inference blows the driver heap while *planning* (OutOfMemoryError inside
-        # .cache(), before a single task runs). It survives a 1-source run and OOMs a
+        # .persist(), before a single task runs). It survives a 1-source run and OOMs a
         # 7-source one. Eager, so it is materialized once and shared by the branches.
         all_temporals = settle(
             reduce(DataFrame.unionAll, temporal_dfs).dropDuplicates(
@@ -319,7 +321,8 @@ class TemporalUnifier:
             logger.info("No unified temporal triples produced")
             return empty
 
-        result = reduce(DataFrame.unionAll, new_dfs).cache()
+        # DISK_ONLY -- no cached frame in this job stays in memory; see #466.
+        result = reduce(DataFrame.unionAll, new_dfs).persist(StorageLevel.DISK_ONLY)
         count = result.count()
 
         logger.info("=" * 60)

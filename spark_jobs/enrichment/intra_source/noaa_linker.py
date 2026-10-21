@@ -32,6 +32,7 @@ Enrichment strategies:
 Note: Temporal unification is handled separately by TemporalUnifier
 in pipeline.py Phase 2 — not called from here.
 """
+from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from functools import reduce
@@ -187,7 +188,8 @@ class NOAAIntraSourceLinker:
         # NOAA's own triples, as a set, read once. Everything below joins
         # against this rather than the whole graph -- see _noaa_triples for why
         # the deduplication is what makes the joins finish at all.
-        noaa_df = self._noaa_triples(triples_df).cache()
+        # DISK_ONLY -- no cached frame in this job stays in memory; see #466.
+        noaa_df = self._noaa_triples(triples_df).persist(StorageLevel.DISK_ONLY)
 
         # Build the denormalized alert info table once — used by multiple steps.
         # Structure: (alert, info, sent_time, event, severity_uri, urgency_uri)
@@ -198,7 +200,8 @@ class NOAAIntraSourceLinker:
             noaa_df.unpersist()
             return empty
 
-        alert_info_df.cache()
+        # DISK_ONLY -- no cached frame in this job stays in memory; see #466.
+        alert_info_df.persist(StorageLevel.DISK_ONLY)
 
         # Materialized and counted HERE, before any step reads it. Six steps
         # join against this table, so if it is wrong every one of them is, and
@@ -212,7 +215,8 @@ class NOAAIntraSourceLinker:
         # Where each alert applies, as structured codes. Steps 1, 2 and 4 all
         # read it, so it is derived once and cached rather than rebuilt per
         # step -- the walk is four filters and three joins.
-        alert_geo_df = self._alert_geocodes(noaa_df).cache()
+        # DISK_ONLY -- no cached frame in this job stays in memory; see #466.
+        alert_geo_df = self._alert_geocodes(noaa_df).persist(StorageLevel.DISK_ONLY)
 
         new_dfs: List[DataFrame] = []
 
@@ -255,7 +259,8 @@ class NOAAIntraSourceLinker:
             logger.info("No enrichment triples produced")
             return empty
 
-        result = reduce(DataFrame.unionAll, new_dfs).cache()
+        # DISK_ONLY -- no cached frame in this job stays in memory; see #466.
+        result = reduce(DataFrame.unionAll, new_dfs).persist(StorageLevel.DISK_ONLY)
         count = result.count()
 
         logger.info("=" * 60)
