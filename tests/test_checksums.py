@@ -19,14 +19,17 @@ Content-level assertions about the six metadata files stay in
 ``test_metadata_writer.py``; the manifest's ``artifacts`` block is pinned in
 ``test_job_manifest.py``.
 """
+import copy
 import hashlib
 import json
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from spark_jobs.graph import persistence
 from spark_jobs.graph.persistence import (
     _HashingWriter,
     _save_hetero_data,
@@ -40,7 +43,12 @@ from spark_jobs.pyg_builder.metadata_writer import (
 
 
 METADATA_FILES = {
-    "graph_schema.json": {"version": "1.2", "node_types": {"thing": {"count": 3}}},
+    "graph_schema.json": {
+        "version": "1.2",
+        # As the collector leaves it: the finish is stamped once the .pt is down.
+        "build_metadata": {"build_finished_timestamp": None},
+        "node_types": {"thing": {"count": 3}},
+    },
     "feature_spec.json": {"version": "1.0"},
     "normalization.json": {"version": "1.0"},
     "encoding_config.json": {"version": "1.0"},
@@ -81,7 +89,9 @@ class _Metadata:
     """Stands in for MetadataCollector: save_final_artifacts only asks for this."""
 
     def to_metadata_files(self):
-        return dict(METADATA_FILES)
+        # A fresh copy each call: the save stamps graph_schema.json in place, and
+        # one test's stamp must not reach the next through the shared constant.
+        return copy.deepcopy(METADATA_FILES)
 
 
 class _FakeS3:
@@ -415,3 +425,70 @@ def test_s3_is_asked_to_verify_the_transfer(archived):
     assert all(
         obj.get("ChecksumAlgorithm") == "SHA256" for obj in s3.objects.values()
     ), "a metadata put was sent without a checksum"
+
+
+# ======================================================================
+# When the build finished (#471)
+#
+# graph_schema.json's build_finished_timestamp. The metadata files are built
+# before the .pt is written, so the save stamps the finish into them once the
+# .pt is down, and writes every copy from that one stamped dict.
+# ======================================================================
+
+def _finish(schema_bytes) -> str:
+    return json.loads(schema_bytes)["build_metadata"]["build_finished_timestamp"]
+
+
+def test_the_finish_is_stamped_once_the_pt_is_written(tmp_path, monkeypatch):
+    """Finished means written, not assembled: writing is the slow part, and a
+    build that dies writing has not finished."""
+    written_at = []
+
+    def save_then_note(*args, **kwargs):
+        record = save_pyg_local(*args, **kwargs)
+        written_at.append(datetime.now(timezone.utc))
+        return record
+
+    monkeypatch.setattr(persistence, "save_pyg_local", save_then_note)
+    config = _config(str(tmp_path))
+    save_final_artifacts(config, None, _hetero(), _Metadata())
+
+    schema = Path(derive_metadata_prefix(config.pyg_output_path)) / "graph_schema.json"
+    finished = datetime.fromisoformat(_finish(schema.read_bytes()))
+    assert finished >= written_at[0]
+
+
+def test_every_copy_of_graph_schema_carries_the_one_finish_checksums_digests(
+    tmp_path,
+):
+    """The work directory's copy, the latest alias and the S3 mirror's describe
+    one build, so they carry one value, and each checksums.json digests the
+    bytes that carry it."""
+    config = _config(
+        str(tmp_path),
+        archive_to_s3=True,
+        s3_archive_bucket="test-bucket",
+        s3_pyg_key="pyg/year=2099/month=01/hetero_data.pt",
+    )
+    s3 = _FakeS3()
+    save_final_artifacts(config, s3, _hetero(), _Metadata())
+
+    metadata_dir = Path(derive_metadata_prefix(config.pyg_output_path))
+    local = (metadata_dir / "graph_schema.json").read_bytes()
+    alias = (
+        Path(derive_metadata_prefix(config.latest_pyg_path)) / "graph_schema.json"
+    ).read_bytes()
+    mirrored = s3.objects["pyg/year=2099/month=01/metadata/graph_schema.json"]["body"]
+
+    stamps = {_finish(local), _finish(alias), _finish(mirrored)}
+    assert len(stamps) == 1, f"the copies disagree on the finish: {stamps}"
+    assert None not in stamps
+
+    recorded = json.loads((metadata_dir / CHECKSUMS_FILE).read_text())["artifacts"]
+    assert recorded["metadata/graph_schema.json"]["sha256"] == (
+        hashlib.sha256(local).hexdigest()
+    )
+    mirror_record = json.loads(
+        s3.objects["pyg/year=2099/month=01/metadata/checksums.json"]["body"]
+    )["artifacts"]["metadata/graph_schema.json"]
+    assert mirror_record["sha256"] == hashlib.sha256(mirrored).hexdigest()
