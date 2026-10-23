@@ -223,7 +223,11 @@ def test_manifest_carries_the_digests_of_what_the_run_produced(spark, tmp_path):
 
     class _Metadata:
         def to_metadata_files(self):
-            return {"graph_schema.json": {"version": "1.2"}}
+            # build_metadata as the collector leaves it, for the save to stamp.
+            return {"graph_schema.json": {
+                "version": "1.2",
+                "build_metadata": {"build_finished_timestamp": None},
+            }}
 
     data = HeteroData()
     data["thing"].x = torch.zeros(2, 3)

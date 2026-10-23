@@ -2608,14 +2608,17 @@ def _is_jolts(node_type):
 
 
 def _load_metadata(path, name):
-    """Parse a metadata JSON, dropping the one field allowed to differ per run.
+    """Parse a metadata JSON, dropping the two fields allowed to differ per run.
 
-    graph_schema.json embeds a build_timestamp that legitimately changes between
-    runs; every other field (and every other file) must be reproducible.
+    graph_schema.json embeds when the build started and when it finished
+    (build_timestamp, build_finished_timestamp), which legitimately change
+    between runs; every other field (and every other file) must be reproducible.
     """
     obj = json.loads(Path(path).read_bytes())
     if name == "graph_schema.json":
-        obj.get("build_metadata", {}).pop("build_timestamp", None)
+        build = obj.get("build_metadata", {})
+        build.pop("build_timestamp", None)
+        build.pop("build_finished_timestamp", None)
     return obj
 
 
@@ -2718,7 +2721,8 @@ def test_output_is_reproducible(twin_runs):
 
     Full-strength determinism guard: node/edge inventory, per-type counts, every
     edge_index, edge features, the feature tensors of EVERY node type, and every
-    metadata file compared exactly (modulo the allow-listed build_timestamp).
+    metadata file compared exactly (modulo the allow-listed build_timestamp and
+    build_finished_timestamp).
 
     This used to carry two concessions to a known bug — jolts_* feature tensors
     were skipped, and metadata was compared order-insensitively because list
@@ -2803,7 +2807,7 @@ def test_jolts_features_reproducible(twin_runs):
     # (ontology_schema.json), on top of list ordering (slot_mapping.json). Both
     # drifted before #221 — the unordered collect() in the metadata builders fed
     # dict insertion order as well as list order. Together the two tests assert
-    # the full "byte-reproducible modulo build_timestamp" property.
+    # the full "byte-reproducible modulo the two build times" property.
     m1, m2 = _metadata_by_name(twin_runs.run1), _metadata_by_name(twin_runs.run2)
     for name in METADATA_FILES:
         s1 = json.dumps(_load_metadata(m1[name], name))

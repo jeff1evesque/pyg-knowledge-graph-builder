@@ -483,6 +483,12 @@ def execute_full_pipeline(
         "enrichment": enrichment_stats,
         "enriched_parquet_location": config.enriched_parquet_path,
         "query_tables": query_tables,
+        # When the tables were written, for the day's marker. They go here
+        # because bin/publish_run.py reads the job manifest, which is written
+        # after the tables; dataset.json is written before them. None when the
+        # run wrote no tables. #471
+        "tables_started": query_tables.started,
+        "tables_finished": query_tables.finished,
         **locations,
     }
 
@@ -558,6 +564,10 @@ def execute_enrichment_only(
         "enrichment": enrichment_stats,
         "enriched_parquet_location": config.enriched_parquet_path,
         "query_tables": query_tables,
+        # As in execute_full_pipeline: the seed leg is the one that writes the
+        # tables.
+        "tables_started": query_tables.started,
+        "tables_finished": query_tables.finished,
     }
 
 

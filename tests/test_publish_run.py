@@ -34,6 +34,9 @@ GRAPHS = ("no_edge_features", "1024d")
 LABELS = {"no_edge_features": "no_edge_features", "1024d": "baseline_1024d"}
 METADATA = ("encoding_config.json", "feature_spec.json", "graph_schema.json",
             "normalization.json", "ontology_schema.json", "slot_mapping.json")
+# When the seed leg wrote the day's tables, as its job manifest records them (#471).
+TABLES_STARTED, TABLES_FINISHED = "2026-01-01T12:20:00Z", "2026-01-01T12:45:00Z"
+TIMES = ("tables_started", "tables_finished")
 
 pytestmark = pytest.mark.launcher
 
@@ -155,6 +158,7 @@ class Run:
             "s3a://BUCKET/raw/source=b/2026.snappy.parquet",
             "s3a://BUCKET/quotes/year=2026/month=01/day=02/",
         ]
+        self.tables_times = (TABLES_STARTED, TABLES_FINISHED)
         self._write_manifests()
         # Written by the job, never published.
         _write(self.work / "pyg" / "latest" / "hetero_data_1024d_metadata" / "graph_schema.json",
@@ -251,9 +255,18 @@ class Run:
         self.source_paths.append(path)
         self._write_manifests()
 
+    def set_tables_times(self, times) -> None:
+        """(started, finished) for the seed leg's manifest, or None for a run
+        whose manifests record neither, as every run before #471."""
+        self.tables_times = times
+        self._write_manifests()
+
     def _write_manifests(self) -> None:
-        _write(self.manifests / "enrichment_only_1.json",
-               json.dumps({"config": {"source_paths": self.source_paths}}))
+        seed = {"config": {"source_paths": self.source_paths}}
+        if self.tables_times is not None:
+            # The seed leg writes the tables; the .pt legs record no times.
+            seed["result"] = dict(zip(TIMES, self.tables_times))
+        _write(self.manifests / "enrichment_only_1.json", json.dumps(seed))
         _write(self.manifests / "pyg_only_1.json", json.dumps({"config": {"source_paths": []}}))
 
     def publish(self, *args: str, python_flags=(), **env_changes):
@@ -636,7 +649,8 @@ def test_the_day_marker_keeps_its_other_fields(run):
     expected = run.add_tables() | run.add_splits()
     assert run.publish("--upload").returncode == 0
     marker = _marker(run)
-    assert set(marker) == {"day", "run_id", "published", "sources", "tables", "files"}
+    assert set(marker) == {"day", "run_id", "tables_started", "tables_finished",
+                           "published", "sources", "tables", "files"}
     assert (marker["day"], marker["run_id"]) == (DAY, RUN_ID)
     assert marker["tables"] == ["edges", "facts", "graph", "nodes", "splits"]
     assert marker["files"] == len(expected)
@@ -674,8 +688,8 @@ def test_the_day_marker_carries_the_market_coverage_the_run_recorded(run):
     assert marker["market_coverage"] == {
         "snapshots": 20, "stocks": 503, "stocks_with_options": 138,
     }
-    assert list(marker) == ["day", "run_id", "published", "sources",
-                            "market_coverage", "tables", "files"]
+    assert list(marker) == ["day", "run_id", "tables_started", "tables_finished",
+                            "published", "sources", "market_coverage", "tables", "files"]
 
 
 def test_a_run_that_recorded_no_market_coverage_leaves_it_off_the_marker(run):
@@ -686,6 +700,49 @@ def test_a_run_that_recorded_no_market_coverage_leaves_it_off_the_marker(run):
     assert run.publish("--upload").returncode == 0
 
     assert "market_coverage" not in _marker(run)
+
+
+# --------------------------------------------------------------------------- #
+# When the day's tables were written
+#
+# published is when the upload started, so it says nothing about when the
+# tables were made. The seed leg's job manifest records that, and the marker
+# carries it after run_id, in the order things happened (#471).
+# --------------------------------------------------------------------------- #
+
+def test_the_day_marker_says_when_the_run_wrote_the_tables(run):
+    run.add_tables()
+    assert run.publish("--upload").returncode == 0
+
+    marker = _marker(run)
+    assert [marker[key] for key in TIMES] == [TABLES_STARTED, TABLES_FINISHED]
+    assert list(marker)[:5] == ["day", "run_id", *TIMES, "published"]
+
+
+def test_a_run_that_recorded_no_times_leaves_both_off_the_marker(run):
+    """A run from before #471 has manifests with neither. Its marker says
+    nothing rather than guess, and keeps the fields it always had."""
+    run.set_tables_times(None)
+    run.add_tables()
+    assert run.publish("--upload").returncode == 0
+
+    marker = _marker(run)
+    assert not set(TIMES) & set(marker)
+    assert list(marker)[:3] == ["day", "run_id", "published"]
+
+
+def test_two_legs_that_recorded_times_give_the_later_finish(run):
+    """One leg writes the tables in practice. Were two to, the tables on disk
+    are the later one's, so its times are the ones that describe them."""
+    later = ("2026-01-01T13:05:00Z", "2026-01-01T13:30:00Z")
+    _write(run.manifests / "full_2.json", json.dumps({
+        "config": {"source_paths": run.source_paths},
+        "result": dict(zip(TIMES, later)),
+    }))
+    run.add_tables()
+    assert run.publish("--upload").returncode == 0
+
+    assert [_marker(run)[key] for key in TIMES] == list(later)
 
 
 def test_the_publisher_runs_on_a_python_with_no_packages(run):
@@ -980,6 +1037,18 @@ def test_the_archives_day_marker_carries_the_same_market_coverage(run, tmp_path)
 
     archived = json.loads((_archived_tables(root) / "_days" / f"{DAY}.json").read_text())
     assert archived["market_coverage"] == _marker(run)["market_coverage"]
+
+
+def test_the_archives_day_marker_carries_the_same_tables_times(run, tmp_path):
+    """Both markers come from day_marker() and the same manifest. #471"""
+    run.add_tables()
+    root = _archive_root(tmp_path)
+    assert run.publish("--upload").returncode == 0
+    assert run.publish("--archive", str(root)).returncode == 0
+
+    archived = json.loads((_archived_tables(root) / "_days" / f"{DAY}.json").read_text())
+    assert [archived[key] for key in TIMES] == [_marker(run)[key] for key in TIMES]
+    assert list(archived)[:5] == ["day", "run_id", *TIMES, "published"]
 
 
 def test_the_day_marker_is_the_last_file_the_archive_writes(run, tmp_path):

@@ -36,6 +36,7 @@ from spark_jobs.pyg_builder.metadata_writer import (
     derive_metadata_prefix,
     derive_node_index_prefix,
     metadata_dir_name,
+    stamp_build_finished,
     write_checksums_to_local,
     write_latest_alias,
     write_metadata_to_local,
@@ -485,8 +486,45 @@ def test_graph_schema_version_is_bumped_for_the_new_semantics():
     at 1.8 a stock whose ticker the company map could not resolve, as BRK/B's
     and BF/B's could not, shows nowhere, and the version tells a consumer
     whether an absent list means none or not measured.
+
+    1.10 adds build_metadata.build_finished_timestamp. Additive: at 1.9 the
+    only time in the file is build_timestamp, the start, and the version tells
+    a consumer whether a finish was recorded. It is the first two-digit minor
+    version, so it has to compare as 1.10 > 1.9 a part at a time, not as text.
     """
-    assert _fully_registered_collector()._build_graph_schema()["version"] == "1.9"
+    version = _fully_registered_collector()._build_graph_schema()["version"]
+    assert version == "1.10"
+    assert tuple(int(part) for part in version.split(".")) > (1, 9)
+
+
+# ======================================================================
+# graph_schema.json — when the build finished (1.10)
+# ======================================================================
+
+def test_graph_schema_build_finished_timestamp_waits_for_the_stamp():
+    """The files are built before the .pt is written, so the finish is not
+    known yet. The key is there, after build_timestamp, holding None until
+    save_final_artifacts stamps it."""
+    meta = _fully_registered_collector()._build_graph_schema()["build_metadata"]
+    keys = list(meta)
+
+    assert meta["build_finished_timestamp"] is None
+    assert keys.index("build_finished_timestamp") == keys.index("build_timestamp") + 1
+
+
+def test_stamp_build_finished_records_a_finish_with_its_offset():
+    """Written the way build_timestamp is, with its UTC offset, and never
+    before it: the build cannot finish before it starts."""
+    files = _fully_registered_collector().to_metadata_files()
+
+    stamped = stamp_build_finished(files)
+
+    meta = files["graph_schema.json"]["build_metadata"]
+    assert meta["build_finished_timestamp"] == stamped
+    finished = datetime.fromisoformat(stamped)
+    assert finished.utcoffset() is not None
+    assert finished.utcoffset().total_seconds() == 0
+    assert finished >= datetime.fromisoformat(meta["build_timestamp"])
 
 
 # ======================================================================

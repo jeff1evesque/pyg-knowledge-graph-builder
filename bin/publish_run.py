@@ -323,6 +323,27 @@ def recorded_coverage(enriched: Path):
     return {name: coverage[name] for name in MARKET_COVERAGE_SUMMARY}
 
 
+def recorded_tables_times(work: Path):
+    """(tables_started, tables_finished) as the job recorded them, or None.
+
+    They are in the job manifest of the leg that wrote the tables, because the
+    manifest is written after them and dataset.json before. None when no leg
+    recorded both: the run wrote no tables, or it ran before #471. Were two legs
+    to record them, the later finish is taken, as the tables on disk are the
+    ones it wrote.
+    """
+    found = None
+    for manifest in sorted(work.glob("manifests/year=*/month=*/*.json")):
+        try:
+            result = json.loads(manifest.read_text()).get("result") or {}
+        except ValueError:
+            continue
+        started, finished = result.get("tables_started"), result.get("tables_finished")
+        if started and finished and (found is None or finished > found[1]):
+            found = (started, finished)
+    return found
+
+
 def data_day(work: Path, enriched: Path, env) -> str:
     """The path's month= segment cannot tell two runs apart, so index.json names the day.
 
@@ -445,20 +466,23 @@ def day_sources(run_sources, tables) -> list:
     return sorted(set(run_sources) | feeds)
 
 
-def day_marker(day: str, run_id: str, sources, items, market_coverage=None) -> dict:
+def day_marker(day: str, run_id: str, sources, items, market_coverage=None,
+               tables_times=None) -> dict:
     """A day's marker, the same in the published tables and in the archive.
 
     day, run_id, published and sources are a contract another service reads; see
     documentation/reference/tables.md. market_coverage is recorded_coverage's
     summary, and the marker has the field only when the job recorded one.
+    tables_times is recorded_tables_times', on the same terms. Its two fields
+    follow run_id in the order things happened: the run started, wrote the
+    tables, then published them.
     """
     tables = sorted({name.split("/", 1)[0] for name, _ in items})
-    marker = {
-        "day": day,
-        "run_id": run_id,
-        "published": utc_now(),
-        "sources": day_sources(sources, tables),
-    }
+    marker = {"day": day, "run_id": run_id}
+    if tables_times is not None:
+        marker["tables_started"], marker["tables_finished"] = tables_times
+    marker["published"] = utc_now()
+    marker["sources"] = day_sources(sources, tables)
     if market_coverage is not None:
         marker["market_coverage"] = market_coverage
     marker["tables"] = tables
@@ -613,7 +637,8 @@ def check_upload(items, tree: Path, dst: str, log: Log, marker: str = INDEX,
 
 
 def publish_tables(rd: Path, items, dst: str, day: str, run_id: str, sources,
-                   upload: bool, log: Log, market_coverage=None) -> int:
+                   upload: bool, log: Log, market_coverage=None,
+                   tables_times=None) -> int:
     """Send one day of tables to the tables root. Returns an exit code.
 
     Its own destination, its own guard and its own completion marker, because
@@ -629,7 +654,7 @@ def publish_tables(rd: Path, items, dst: str, day: str, run_id: str, sources,
     """
     marker = f"{TABLES_MARKER}/{day}.json"
     tree = rd / TABLES_TREE
-    index = day_marker(day, run_id, sources, items, market_coverage)
+    index = day_marker(day, run_id, sources, items, market_coverage, tables_times)
     build_tree(tree, items, index, marker)
 
     log(f"tables tree {tree}:")
@@ -686,6 +711,7 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
     graphs = find_graphs(pyg)
     dataset, sources = dataset_name(enriched, f"{year}-{month}", env)
     coverage = recorded_coverage(enriched)
+    times = recorded_tables_times(work)
     day = data_day(work, enriched, env)
     dst = f"{publish_root(env)}/{dataset}/{period_dirs}/{run_id}"
 
@@ -717,7 +743,7 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
         log(f"{dst}/{INDEX} already exists, so the run is published. Resuming its tables.")
         try:
             rc = publish_tables(rd, tables, tables_dst, day, run_id, sources, upload, log,
-                                coverage)
+                                coverage, times)
         except Failed as why:
             raise Refused(str(why))  # nothing has been sent yet
         if not upload:
@@ -753,7 +779,7 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
         if tables:
             try:
                 publish_tables(rd, tables, tables_dst, day, run_id, sources, False, log,
-                               coverage)
+                               coverage, times)
             except Failed as why:
                 raise Refused(str(why))
         log("Run again with --upload to publish.")
@@ -782,7 +808,7 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
     if tables:
         try:
             rc = publish_tables(rd, tables, tables_dst, day, run_id, sources, True, log,
-                                coverage)
+                                coverage, times)
         except Refused as why:
             log(f"the tables were refused: {why}")
             rc = 2
@@ -1002,7 +1028,9 @@ def archive(rd: Path, root: Path, env, log: Log, keep_days=None) -> int:
             partial = marker.with_name(f".{marker.name}.partial")
             with open(partial, "w") as fh:
                 fh.write(json.dumps(day_marker(day, run_id, sources, table_items,
-                                               recorded_coverage(enriched)), indent=2) + "\n")
+                                               recorded_coverage(enriched),
+                                               recorded_tables_times(work)),
+                                    indent=2) + "\n")
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(partial, marker)

@@ -65,6 +65,7 @@ The period days only its facts were dated to go with them, as nothing else
 points at them (days_only_left_out_nodes_dated).
 """
 import logging
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from pyspark import StorageLevel
@@ -870,24 +871,51 @@ def write_companyfacts(
 # ============================================
 # The whole set
 # ============================================
+def _utc_stamp() -> str:
+    """Now, as YYYY-MM-DDTHH:MM:SSZ: the way the day marker's `published` is."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class WrittenTables(dict):
+    """What write_query_tables wrote: table -> path, and when it wrote them.
+
+    A dict, so every reader of the table -> path map reads it as before.
+    ``started`` and ``finished`` are when the run began writing the day's tables
+    and when it had written the last, or None when it wrote none. The job
+    manifest carries them to the day's marker, beside a ``published`` that
+    belongs to the upload, not to the tables. #471
+    """
+
+    def __init__(
+        self,
+        paths: Optional[Dict[str, str]] = None,
+        started: Optional[str] = None,
+        finished: Optional[str] = None,
+    ):
+        super().__init__(paths or {})
+        self.started = started
+        self.finished = finished
+
+
 def write_query_tables(
     spark: SparkSession,
     triples_df: DataFrame,
     config: JobConfig,
     s3_client=None,
-) -> Dict[str, str]:
+) -> WrittenTables:
     """Write every query table for this run's day. Returns table -> path.
 
-    Returns an empty dict, and writes nothing, when the run asked for no tables
-    or cannot say which day its data describes. Neither is a failure: the graph
-    the run builds is unaffected either way.
+    Returns an empty map with no times, and writes nothing, when the run asked
+    for no tables or cannot say which day its data describes. Neither is a
+    failure: the graph the run builds is unaffected either way. Otherwise the
+    map's ``started`` and ``finished`` bracket the writes.
 
     ``s3_client`` is for the split feed's and the company facts history's
     reads, and tests pass a stub.
     """
     if not config.enable_query_tables:
         logger.info("Query tables disabled (--enable_query_tables false)")
-        return {}
+        return WrittenTables()
 
     if not config.source_data_day:
         logger.warning(
@@ -895,8 +923,10 @@ def write_query_tables(
             "--source_data_day was given, so there is no day to write them "
             "under"
         )
-        return {}
+        return WrittenTables()
 
+    # Past the guards, so a run that writes no tables records no times.
+    started = _utc_stamp()
     day = config.source_data_day
     root = config.query_tables_path
 
@@ -1015,13 +1045,14 @@ def write_query_tables(
     )
     if facts is not None:
         written["companyfacts"] = write_companyfacts(spark, facts, root, day)
+    finished = _utc_stamp()
 
     logger.info(
         f"Wrote {len(written)} query tables for {day} "
         f"({sum(node_counts.values()):,} nodes across "
-        f"{len(node_counts)} types)"
+        f"{len(node_counts)} types), {started} to {finished}"
     )
     for table, path in written.items():
         logger.info(f"    {table}: {path}")
 
-    return written
+    return WrittenTables(written, started, finished)

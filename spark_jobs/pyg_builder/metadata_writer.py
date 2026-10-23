@@ -522,6 +522,11 @@ class MetadataCollector:
         edge_types_with_features = len(self._edge_types_with_features)
 
         return {
+            # 1.10: adds `build_metadata.build_finished_timestamp`, when the
+            # build finished: once its .pt was written. Additive only. Through
+            # 1.9 the file had only `build_timestamp`, the start, whose name
+            # reads like a finish. #471
+            #
             # 1.9: adds `build_metadata.market_coverage.stocks_without_company`:
             # the stocks none of whose snapshots links to a company. Additive
             # only. Through 1.8 a stock the company map could not resolve, as
@@ -571,7 +576,7 @@ class MetadataCollector:
             # features". Through 1.0 it was `count > 0` -- the node count --
             # which made it, and summary.node_types_with_literal_features,
             # true/total for every build. See _build_graph_schema's docstring.
-            "version": "1.9",
+            "version": "1.10",
             "build_metadata": {
                 "time_period": self._time_period,
                 # The same value as the query tables' day= partition and
@@ -619,6 +624,10 @@ class MetadataCollector:
                 # was handed, as with excluded_node_types above.
                 "node_feature_dim": self._vector_dim,
                 "build_timestamp": self._build_timestamp,
+                # Schema 1.10. None here: these files are built before the .pt
+                # is written, and the build has not finished until it is.
+                # save_final_artifacts stamps it then (stamp_build_finished).
+                "build_finished_timestamp": None,
                 "pipeline_config": _sanitize_config(self._config),
             },
             "node_types": node_types,
@@ -1103,6 +1112,24 @@ def _integrity_record(body: bytes) -> Dict[str, Any]:
     consumer can rule it out from a listing without reading a byte.
     """
     return {"bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
+
+
+def stamp_build_finished(metadata_files: Dict[str, Dict[str, Any]]) -> str:
+    """Record now in graph_schema.json as when the build finished, and return it.
+
+    Called once the .pt is written. Finished means written, not assembled in
+    memory: writing is the slow part (a day of four sources is ~53 GiB of
+    tensors), and a build that dies writing has not finished. The files are
+    built before the .pt is written, so the time goes into them here, in place,
+    and every copy written from this one dict -- the work directory's, the
+    `latest` alias, the S3 mirror's -- carries the value checksums.json digests.
+    Written the way build_timestamp is: ISO 8601 with its UTC offset. #471
+    """
+    finished = datetime.now(timezone.utc).isoformat()
+    metadata_files["graph_schema.json"]["build_metadata"][
+        "build_finished_timestamp"
+    ] = finished
+    return finished
 
 
 def write_metadata_to_s3(

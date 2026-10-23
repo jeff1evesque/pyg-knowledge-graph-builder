@@ -35,6 +35,7 @@ from spark_jobs.pyg_builder.metadata_writer import (
     derive_metadata_prefix,
     derive_node_index_prefix,
     metadata_dir_name,
+    stamp_build_finished,
 )
 
 # The job's logger, not this module's -- see the note in config.py.
@@ -496,6 +497,11 @@ def save_final_artifacts(
     logger.info("PHASE: SAVING PyG HETERODATA + METADATA")
     logger.info("=" * 80)
     pt_record = save_pyg_local(hetero_data, config.pyg_output_path, spark=spark)
+    # The build has finished once its .pt is written. The metadata files were
+    # built above, before it, so the time goes into them now and only once: every
+    # copy below, the S3 mirror's included, carries the value checksums.json
+    # digests. #471
+    stamp_build_finished(metadata_files)
     local_metadata_dir = derive_metadata_prefix(config.pyg_output_path)
     metadata_records = write_metadata_to_local(
         metadata_files, local_metadata_dir, spark=spark

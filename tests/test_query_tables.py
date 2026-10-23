@@ -25,6 +25,7 @@ about what must NOT reach them:
 Tier 4: real Spark, small frames, no cluster.
 """
 import os
+import re
 from datetime import date, datetime, timezone
 
 import pytest
@@ -495,6 +496,44 @@ def test_a_uri_written_on_two_days_keeps_both_rows(spark, tmp_path):
 
 
 # ======================================================================
+# When they were written (#471)
+# ======================================================================
+
+def test_the_times_bracket_the_writes(spark, tmp_path):
+    """started is taken before the first table is written and finished after
+    the last, as YYYY-MM-DDTHH:MM:SSZ, the way the day marker's published is.
+    Compared a whole second at a time, which is as fine as the stamps are.
+
+    Its own write rather than the module's: other tests open that graph/
+    store, and opening a store may leave files of its own beside the tables.
+    """
+    triples = spark.createDataFrame(
+        TRIPLES, "subject string, predicate string, object string"
+    )
+    paths = write_query_tables(spark, triples, _config(tmp_path))
+
+    stamp = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+    assert stamp.fullmatch(paths.started), paths.started
+    assert stamp.fullmatch(paths.finished), paths.finished
+
+    mtimes = [
+        os.path.getmtime(os.path.join(folder, name))
+        for path in paths.values()
+        for folder, _, names in os.walk(path)
+        for name in names
+    ]
+    assert mtimes, "no written files to hold the times against"
+
+    def second(mtime):
+        return datetime.fromtimestamp(mtime, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+
+    assert paths.started <= second(min(mtimes))
+    assert second(max(mtimes)) <= paths.finished
+
+
+# ======================================================================
 # When nothing is written
 # ======================================================================
 
@@ -504,8 +543,11 @@ def test_the_flag_off_writes_nothing(spark, tmp_path):
     )
     config = _config(tmp_path, enable_query_tables="false")
 
-    assert write_query_tables(spark, triples, config) == {}
+    written = write_query_tables(spark, triples, config)
+    assert written == {}
     assert not (tmp_path / "tables").exists()
+    # Nor any times: the marker must not say tables were written that were not.
+    assert (written.started, written.finished) == (None, None)
 
 
 def test_no_day_writes_nothing_rather_than_guessing_one(spark, tmp_path):
@@ -518,8 +560,10 @@ def test_no_day_writes_nothing_rather_than_guessing_one(spark, tmp_path):
     config = _config(tmp_path, source_paths="s3a://b/raw/sec/")
     assert config.source_data_day == ""
 
-    assert write_query_tables(spark, triples, config) == {}
+    written = write_query_tables(spark, triples, config)
+    assert written == {}
     assert not (tmp_path / "tables").exists()
+    assert (written.started, written.finished) == (None, None)
 
 
 def test_a_stated_day_supplies_the_partition_the_paths_lack(spark, tmp_path):
