@@ -22,6 +22,7 @@ VectorLayout(128), so nothing depends on the production 1024 default.
 """
 import itertools
 import json
+import re
 
 import numpy as np
 import pytest
@@ -2374,3 +2375,111 @@ def test_a_trimmed_chunk_is_planned_without_the_gpu_plugin(spark, monkeypatch):
     # Two chunks of "opt" with the plugin off, then the "other" batch with it on.
     assert seen == ["false", "false", "true"]
     assert after == "true"
+
+
+# ======================================================================
+# The sorted cache — a chunk skips the batches outside its range (#470)
+# ======================================================================
+#
+# Spark keeps each cached batch's smallest and largest node_id. With every
+# partition sorted by node_type and node_id, a chunk's node_id filter skips
+# the batches outside its range; unsorted, every batch spans most of the
+# range and each chunk decodes the whole frame.
+
+
+def _cached_scan_filters(plan: str) -> str:
+    """The filters a plan hands its cached scan: the second [...] on the
+    InMemoryTableScan line, or "" when there are none."""
+    for line in plan.splitlines():
+        if "InMemoryTableScan" in line:
+            return line.split("], [", 1)[1] if "], [" in line else ""
+    return ""
+
+
+def test_the_cache_sums_each_entry_and_sorts_each_partition(spark):
+    keys = [(t, n, d) for t in ("b", "a") for n in range(6) for d in (3, 1)]
+    order = np.random.default_rng(470).permutation(len(keys))
+    first = [(*keys[i], 1.0) for i in order]
+    second = [(*keys[i], 2.0) for i in order[: len(keys) // 2]]
+
+    cached = FeatureExtractor(spark, CONFIG)._cache_sparse_entries([
+        spark.createDataFrame(first, schema=_SPARSE_SCHEMA),
+        spark.createDataFrame(second, schema=_SPARSE_SCHEMA),
+    ])
+    try:
+        partitions = cached.rdd.glom().collect()
+    finally:
+        cached.unpersist()
+
+    for rows in partitions:
+        seen = [(r.node_type, r.node_id) for r in rows]
+        assert seen == sorted(seen)
+    values = {
+        (r.node_type, r.node_id, r.dim): r.value
+        for rows in partitions for r in rows
+    }
+    in_second = {keys[i] for i in order[: len(keys) // 2]}
+    assert values == {k: 3.0 if k in in_second else 1.0 for k in keys}
+
+
+def test_each_chunk_hands_its_node_id_range_to_the_cached_scan(
+    spark, monkeypatch
+):
+    """Nothing is skipped unless the chunk's filter reaches the cached scan,
+    on both chunk paths: the trimmed one and the plain one."""
+    plans = []
+    original = DataFrame.toPandas
+
+    def spy(self, *args, **kwargs):
+        if "node_type" not in self.columns:   # a chunk, not a batch of small types
+            plans.append(self._jdf.queryExecution().executedPlan().toString())
+        return original(self, *args, **kwargs)
+
+    extractor = FeatureExtractor(
+        spark,
+        {"feature_config": {"vector_dim": VDIM, "chunk_node_threshold": 2}},
+        trims={"opt": _opt_spec()},
+    )
+    rows = _CLEAN_OPT_ROWS + [("plain", n, 3, 1.0) for n in range(3)]
+    cached = extractor._cache_sparse_entries(
+        [spark.createDataFrame(rows, schema=_SPARSE_SCHEMA)]
+    )
+    monkeypatch.setattr(DataFrame, "toPandas", spy)
+    try:
+        extractor._scatter_all_types(
+            cached, [("opt", 4), ("plain", 3), ("other", 1)], VDIM,
+            {}, {}, ["seg"],
+        )
+    finally:
+        monkeypatch.undo()
+        cached.unpersist()
+
+    # Two chunks each: "opt" is trimmed, "plain" has 3 nodes against a 2-node chunk.
+    assert len(plans) == 4
+    for plan in plans:
+        filters = _cached_scan_filters(plan)
+        assert re.search(r"node_id#\d+L? >= ", filters), plan
+        assert re.search(r"node_id#\d+L? < ", filters), plan
+
+
+def test_chunks_that_skip_cached_batches_give_the_same_tensors_and_counts(spark):
+    """Two rows per cached batch, so every chunk skips most of the cache. The
+    tensors and the trimmed type's counts match those from the default batch
+    size, where each partition is one batch."""
+    _, full = _trim_build(spark)
+    spec = _spec_from(full["cpi_Index"], "cpi_Index")
+    whole, whole_x = _trim_build(spark, trims={"cpi_Index": spec})
+
+    key = "spark.sql.inMemoryColumnarStorage.batchSize"
+    spark.conf.set(key, "2")
+    try:
+        small, small_x = _trim_build(spark, trims={"cpi_Index": spec})
+    finally:
+        spark.conf.unset(key)
+
+    assert set(small_x) == set(whole_x)
+    for node_type in whole_x:
+        np.testing.assert_array_equal(small_x[node_type], whole_x[node_type])
+    check = small.get_trimmed_node_types()["cpi_Index"]["check"]
+    assert check == whole.get_trimmed_node_types()["cpi_Index"]["check"]
+    assert check["rows_checked"] == 5 and check["violations"] == []
