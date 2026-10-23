@@ -1039,27 +1039,7 @@ class FeatureExtractor:
                     self._trim_checks[node_type] = check
                     _log_trim_check(node_type, check)
         else:
-            combined = all_parts[0]
-            for p in all_parts[1:]:
-                combined = combined.unionAll(p)
-
-            # Aggregate on executors: sum values at same (node_type, node_id,
-            # dim). Cache the single result so the bounded per-batch collects
-            # below read from cache instead of recomputing the encode plan.
-            combined = (
-                combined
-                .groupBy("node_type", "node_id", "dim")
-                .agg(F.sum("value").alias("value"))
-                .select(
-                    F.col("node_type"),
-                    F.col("node_id").cast("long"),
-                    F.col("dim").cast("int"),
-                    F.col("value").cast("float"),
-                )
-                # DISK_ONLY -- nothing in this leg stays resident; see
-                # execute_pyg_only.
-                .persist(StorageLevel.DISK_ONLY)
-            )
+            combined = self._cache_sparse_entries(all_parts)
 
             self._scatter_all_types(
                 combined, active_types, vector_dim,
@@ -1078,6 +1058,38 @@ class FeatureExtractor:
                     pass
 
         return feature_tensors, feature_names
+
+    def _cache_sparse_entries(self, parts: List[DataFrame]) -> DataFrame:
+        """
+        Union the encoded segments, sum the values at the same (node_type,
+        node_id, dim) on the executors, and cache the result once, so the
+        bounded collects in _scatter_all_types read the cache instead of
+        recomputing the encode plan.
+
+        Each partition is sorted by node_type and node_id before it is
+        cached (#470). Spark keeps every cached batch's smallest and largest
+        values, so a chunk's node_id range then skips the batches outside it
+        instead of decoding the whole frame once per chunk.
+        """
+        combined = parts[0]
+        for p in parts[1:]:
+            combined = combined.unionAll(p)
+
+        return (
+            combined
+            .groupBy("node_type", "node_id", "dim")
+            .agg(F.sum("value").alias("value"))
+            .select(
+                F.col("node_type"),
+                F.col("node_id").cast("long"),
+                F.col("dim").cast("int"),
+                F.col("value").cast("float"),
+            )
+            .sortWithinPartitions("node_type", "node_id")
+            # DISK_ONLY -- nothing in this leg stays resident; see
+            # execute_pyg_only.
+            .persist(StorageLevel.DISK_ONLY)
+        )
 
     def _scatter_all_types(
         self,
