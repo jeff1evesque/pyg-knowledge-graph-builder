@@ -701,6 +701,18 @@ day into the local archive when one is set, trim the store when one is set, and 
 after that publish (and that archive) went through, prune. The launcher and the publish
 step are the ones in [Testing](testing.md#driving-a-real-cluster-run).
 
+**The day's tables go up while the graph is built.** Once the leg that writes the
+[query tables](../reference/tables.md) has finished, its job manifest records
+`tables_started` and `tables_finished`, and the schedule sends the tables with
+`bin/publish_run.py --upload-tables` while the launcher carries on. It looks for that
+manifest every `PYG_SCHEDULE_RETRY_SECONDS`. The day 2026-10-22's tables were finished
+at 07:19 UTC the next morning and went up at 09:41, after the build; now they go up the
+next time the schedule looks. If that publish fails, the publish after the run sends them. If the
+build fails after they went up, the night still fails and the run stays, but the day's
+tables stay published. A day is published once, so a second run of that day publishes
+its `.pt` and skips the tables, and the log says so. For about two hours each night the
+newest day of tables is a day ahead of the newest `.pt`.
+
 ### Setting one up
 
 A schedule directory holds an untracked `env.sh`, the same contract as a run
@@ -813,7 +825,8 @@ runs it, with `bin/daily_run.sh --data-date YYYY-MM-DD <schedule-dir>`.
   `runs/<RUN_ID>/`, holds its copy of `env.sh` and everything the launcher and the
   publish step leave. Under the timer, `journalctl --user -u pyg-daily` has the same lines.
 - **Exit codes.** `0` published (and archived); `1` the staging, the run, the publish or
-  the archive failed, and the run stays; `2` refused before the run started; `3` skipped,
+  the archive failed, and the run stays, though tables that went up before that stay
+  published; `2` refused before the run started; `3` skipped,
   because a source is not there — upstream is late, the market was shut, or a
   holiday-optional source is missing on a day that isn't a federal holiday. The unit counts `3` as success, so a
   late upstream write does not read as a failed unit.
