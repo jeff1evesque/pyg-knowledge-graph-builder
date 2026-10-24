@@ -58,8 +58,9 @@ export PYG_TIME_PERIOD=YYYY-MM
 # export PYG_COMPANYFACTS_HISTORY_PREFIX=raw/source=sec/feed=companyfacts
 
 # Node types left out of the .pt. The query tables keep them. The scheduled run leaves
-# out NOAA weather and the filings feed's XBRL facts; see running-a-job.md.
-# export PYG_EXCLUDE_NODE_TYPES=cap_Area,cap_Geocode,cap_Info,weather_WeatherAlert,filings_XbrlFact,filings_XbrlDimension
+# out NOAA weather, the filings feed's XBRL facts and the concepts they measure; see
+# running-a-job.md.
+# export PYG_EXCLUDE_NODE_TYPES=cap_Area,cap_Geocode,cap_Info,weather_WeatherAlert,filings_XbrlFact,filings_XbrlDimension,sec_codes_XbrlConcept
 
 # --------------------------------------------------------------------------- #
 # Reading a staged local mirror instead of object storage
