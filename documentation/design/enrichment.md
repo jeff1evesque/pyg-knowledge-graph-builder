@@ -21,6 +21,7 @@ picked source's date predicates, or its period collector, from the same specs:
     - Transaction sequences (precedes by transaction date, within a reporting owner and instrument class)
     - Sector classification (belongsToSector)
     - Violation type linking (hasViolationType)
+    - Types for the 8-K items and XBRL concepts filings link to (Form8KItem with hasItemNumber, XbrlConcept with hasConceptName)
 - **Market Intra-Source Enricher**
     - Snapshot temporal sequences (precedes by captureTime)
     - Option-to-underlying equity linking (hasUnderlyingEquity)
