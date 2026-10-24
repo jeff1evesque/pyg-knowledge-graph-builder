@@ -771,17 +771,19 @@ def test_index_json_names_the_tables_and_where_they_went(run):
     assert "day-scoped" in tables["note"]
 
 
-def test_a_day_already_published_is_refused_but_the_run_still_goes(run):
+def test_a_day_another_run_published_is_skipped_and_the_run_still_goes(run):
     """The destination has no delete, so a rewritten day whose part count went
     down would leave the old parts behind and a reader would see their rows
-    twice. The run itself is published either way and says so."""
+    twice. So the tables are not sent, the log says why, and the run is
+    published (#473)."""
     run.add_tables()
     _write(run.published_tables / "_days" / f"{DAY}.json", "{}")
 
     r = run.publish("--upload")
-    assert r.returncode != 0
-    assert "already published" in r.stdout
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"another run of {DAY} sent them" in r.stdout
     assert (run.published / "index.json").exists()
+    assert files(run.published_tables) == {f"_days/{DAY}.json"}
 
 
 def test_a_second_day_is_not_refused_for_the_first_one_being_there(run):
@@ -903,6 +905,92 @@ def test_a_tables_root_that_cannot_be_listed_in_a_dry_run_is_a_refusal(run):
     r = run.publish(FAKE_S3_DENY_LIST="tables/")
     assert r.returncode == 2
     assert "NOT PUBLISHED" in r.stdout
+
+
+# --------------------------------------------------------------------------- #
+# --upload-tables: the day's tables while the graph is still being built (#473)
+# --------------------------------------------------------------------------- #
+
+def _mid_run(run: Run) -> None:
+    """The run as it stands once the leg that writes the tables has finished: no
+    .pt legs yet, and no run.done or outcome.txt."""
+    shutil.rmtree(run.work / "pyg")
+    (run.rd / "run.done").unlink()
+    (run.rd / "outcome.txt").unlink()
+
+
+def test_the_tables_go_up_before_the_run_has_finished(run):
+    expected = run.add_tables()
+    _mid_run(run)
+
+    r = run.publish("--upload-tables")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert files(run.published_tables) == expected | {f"_days/{DAY}.json"}
+    marker = _marker(run)
+    assert marker["run_id"] == RUN_ID
+    assert (marker["tables_started"], marker["tables_finished"]) == (
+        TABLES_STARTED, TABLES_FINISHED)
+    assert not run.published.exists()
+    assert (run.rd / "publish-tables.done").read_text().strip() == "0"
+
+
+def test_tables_no_leg_has_recorded_are_not_sent(run):
+    """Until the leg's manifest records them, the tables may be half written."""
+    run.add_tables()
+    run.set_tables_times(None)
+
+    r = run.publish("--upload-tables")
+    assert r.returncode == 2
+    assert "no leg has recorded writing the tables yet" in r.stdout
+    assert "s3 sync" not in run.calls_text()
+    assert (run.rd / "publish-tables.done").read_text().strip() == "2"
+
+
+def test_the_publish_after_the_run_skips_the_tables_this_run_sent(run):
+    run.add_tables()
+    assert run.publish("--upload-tables").returncode == 0
+    mark = len(run.calls_text().splitlines())
+
+    r = run.publish("--upload")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "this run sent them before its graph build finished" in r.stdout
+    assert (run.published / "index.json").exists()
+    assert not [call for call in _calls_after(run, mark)
+                if call.startswith(("s3 sync", "s3 cp")) and "s3://bucket/tables/" in call]
+
+
+def test_a_failed_tables_publish_is_finished_by_the_publish_after_the_run(run):
+    expected = run.add_tables()
+    lost = f"nodes/day={DAY}/part-00000.zstd.parquet"
+    assert run.publish("--upload-tables", FAKE_S3_DROP=lost).returncode == 1
+    assert not (run.published_tables / "_days" / f"{DAY}.json").exists()
+
+    r = run.publish("--upload")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (run.published / "index.json").exists()
+    assert files(run.published_tables) == expected | {f"_days/{DAY}.json"}
+
+
+def test_a_rerun_of_a_day_an_earlier_run_published_skips_its_tables(run, tmp_path):
+    """The earlier run's build failed after its tables went up. The rerun publishes
+    its .pt, and the day's tables stay the earlier run's."""
+    run.add_tables()
+    assert run.publish("--upload-tables").returncode == 0
+    marker = (run.published_tables / "_days" / f"{DAY}.json").read_bytes()
+    nodes = run.published_tables / "nodes" / f"day={DAY}" / "part-00000.zstd.parquet"
+
+    rerun = _second_run_of_the_day(tmp_path)
+    rerun.add_tables()
+    # The rerun's parts are its own write, as Spark names and sizes them.
+    _write(rerun.work / "tables" / "nodes" / f"day={DAY}" / "part-00000.zstd.parquet",
+           b"the rerun's nodes rows")
+    r = rerun.publish("--upload", FAKE_S3=str(run.s3))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"another run of {DAY} sent them" in r.stdout
+    assert (run.s3 / "bucket" / "runs" / "all-sources" / f"year={YEAR}" / f"month={MONTH}"
+            / rerun.run_id / "index.json").exists()
+    assert (run.published_tables / "_days" / f"{DAY}.json").read_bytes() == marker
+    assert nodes.read_bytes() == b"nodes rows"
 
 
 # --------------------------------------------------------------------------- #
