@@ -325,12 +325,21 @@ prefix, which is why a dry run is the default.
 
 The [query tables](../reference/tables.md) go to a second destination in the
 same command. They are keyed by day rather than by run, so they get their own
-root, their own sync and their own per-day marker under `_days/`; a day that
-already has its marker is refused, because the destination cannot delete and a
-rewritten day would leave its old part files behind. They are published after
-the run's `index.json`, and a table failure says so rather than reading as "the
-run did not go up". A run that wrote tables and has no `PYG_TABLES_ROOT`, or no
-sources in its `dataset.json`, is refused before anything is written.
+root, their own sync and their own per-day marker under `_days/`. A day that
+already has its marker is not sent again, because the destination cannot delete
+and a rewritten day would leave its old part files behind: the tables are
+skipped, and the log says whether this run sent them earlier or another run of
+the day did. They are published after the run's `index.json`, and a table failure
+says so rather than reading as "the run did not go up". A run that wrote tables
+and has no `PYG_TABLES_ROOT`, or no sources in its `dataset.json`, is refused
+before anything is written.
+
+`bin/publish_run.py <run-dir> --upload-tables` sends the day's tables alone, while
+the run is still going; a [scheduled run](running-a-job.md#scheduled-runs) uses it
+as soon as the leg that writes them has finished. It needs no `.pt` and no
+`run.done`, only that leg's job manifest, which records `tables_started` and
+`tables_finished` once the tables are written. Until then it refuses. Its exit code
+goes to `<run-dir>/publish-tables.done`, with the same meanings as below.
 
 `PYG_PUBLISH_DATA_DAY` names the day the sources were cut from. Unset, the
 publish takes the day the job recorded in `dataset.json`, and then the one day
@@ -342,7 +351,7 @@ code goes to `<run-dir>/publish.done` and the output to `<run-dir>/publish.log`:
 `0` published; `1` the upload or its check failed, including a tables root that
 cannot be listed once the run is up, and running again resumes it; `2` refused,
 and running again as it is will not change that. A refusal writes nothing, except
-when the run went up and its day of tables was already published. The layout it
+when the run went up and its tables were then refused. The layout it
 writes is under
 [Published Runs](../reference/outputs.md#published-runs), and
 `tests/test_publish_run.py` runs it against a stub `aws` CLI.
