@@ -3,6 +3,9 @@
 
     bin/publish_run.py <run-dir>              dry run: lay the upload out and show it
     bin/publish_run.py <run-dir> --upload     upload, check the listing, then index.json
+    bin/publish_run.py <run-dir> --upload-tables
+                                              upload the day's tables alone, once the
+                                              leg that writes them has finished
     bin/publish_run.py <run-dir> --published  exit 0 only if the destination lists it all
     bin/publish_run.py <run-dir> --archive <root> [--keep-days N]
                                               copy it into a local archive, marker last
@@ -38,6 +41,13 @@ the shortest expiration where two prefix rules overlap, so a table under the run
 prefix would be deleted with it. They get their own root, their own sync and their own
 per-day marker under _days/.
 
+--upload-tables sends the day's tables while the run is still going: a scheduled run
+calls it as soon as the leg that writes them has finished, so they do not wait for the
+graph build, and a build that fails does not hold them back (#473). That leg's job
+manifest is written after the tables, and its tables_started and tables_finished say
+they are complete. A day is published once, so --upload then skips a day whose marker
+is there, whether this run sent its tables early or an earlier run of the day did.
+
 --archive copies the same layout, less the enriched triples and index.json, onto a
 local drive as real files, for a reader that needs more days than the work disk keeps
 and cannot read the published copies back:
@@ -67,10 +77,10 @@ Environment:
                         graph_schema.json names another day is refused.
 
 Writes <run-dir>/publish/ (symlinks plus index.json) and appends to publish.log there.
-An --upload also writes its exit code to publish.done: 0 published; 1 the upload or
-its check failed, and running again resumes it; 2 refused, and running again as it is
-will not change that. A refusal writes nothing, except when the run went up and its
-day of tables was already published.
+An --upload also writes its exit code to publish.done, and an --upload-tables to
+publish-tables.done: 0 published; 1 the upload or its check failed, and running again
+resumes it; 2 refused, and running again as it is will not change that. A refusal
+writes nothing, except when the run went up and its tables were then refused.
 """
 
 import argparse
@@ -97,6 +107,8 @@ INDEX = "index.json"
 TREE = "publish"
 TABLES = "tables"
 TABLES_TREE = "publish-tables"
+# The exit code of an --upload-tables, beside publish.done.
+TABLES_DONE = "publish-tables.done"
 # The marker saying a day's tables finished publishing, under the dataset. Its
 # own name is a day rather than a run, because that is what the tables are
 # keyed by -- two runs over the same day publish the same day.
@@ -194,10 +206,15 @@ def check_succeeded(rd: Path) -> None:
                       "If outcome.txt is missing, run bin/record_run_outcome.sh first.")
 
 
-def find_period(work: Path):
-    months = [p for p in (work / "pyg").glob("year=*/month=*") if p.is_dir()]
+def find_period(work: Path, under: str = "pyg"):
+    """The run's year and month, from its one year=/month= folder under ``under``.
+
+    The tables are published before the .pt legs have written pyg/, so that
+    publish reads the period from enriched/ instead.
+    """
+    months = [p for p in (work / under).glob("year=*/month=*") if p.is_dir()]
     if len(months) != 1:
-        raise Refused(f"expected one year=/month= folder under {work / 'pyg'}, "
+        raise Refused(f"expected one year=/month= folder under {work / under}, "
                       f"found {len(months)}")
     year = months[0].parent.name.partition("=")[2]
     month = months[0].name.partition("=")[2]
@@ -700,6 +717,69 @@ def publish_tables(rd: Path, items, dst: str, day: str, run_id: str, sources,
     return 0
 
 
+def day_published_by(items, dst: str, day: str):
+    """Who published the day's tables: None when its marker is not listed, "this
+    run" when every file this run wrote for the day is listed at its size, and
+    "another run" otherwise. A part file's name carries the id of the write that
+    made it, so another run's parts never pass for this run's.
+    """
+    have = published(dst)
+    if f"{TABLES_MARKER}/{day}.json" not in have:
+        return None
+    mine = all(have.get(name, (None,))[0] == path.stat().st_size for name, path in items)
+    return "this run" if mine else "another run"
+
+
+def tables_unless_published(rd: Path, items, dst: str, day: str, run_id: str, sources,
+                            upload: bool, log: Log, market_coverage=None,
+                            tables_times=None) -> int:
+    """publish_tables, unless the day's tables are already published. A day is
+    published once, so they are skipped then, and the log says by whom."""
+    who = day_published_by(items, dst, day)
+    if who is None:
+        return publish_tables(rd, items, dst, day, run_id, sources, upload, log,
+                              market_coverage, tables_times)
+    if who == "this run":
+        log(f"the day's tables are already at {dst}/: this run sent them before its "
+            f"graph build finished. They are not sent again.")
+    else:
+        log(f"the day's tables are already at {dst}/: another run of {day} sent them. "
+            f"A day is published once, so this run's tables are not sent, and the "
+            f"day's .pt and tables come from different runs.")
+    return 0
+
+
+def publish_day_tables(rd: Path, env, log: Log) -> int:
+    """Send the day's tables before the run has finished. Returns an exit code.
+
+    Needs only what the leg that writes the tables leaves: no .pt, no run.done.
+    That leg's job manifest is written after the tables, so the times it records
+    are what say the tables are complete, and without them nothing is sent.
+    """
+    run_id, work = read_run(rd)
+    times = recorded_tables_times(work)
+    if times is None:
+        raise Refused("no leg has recorded writing the tables yet: the job manifest of "
+                      "the leg that writes them names tables_started and "
+                      "tables_finished once they are complete")
+    year, month = find_period(work, "enriched")
+    enriched = work / "enriched" / f"year={year}/month={month}"
+    dataset, sources = dataset_name(enriched, f"{year}-{month}", env)
+    day = data_day(work, enriched, env)
+    tables = tables_plan(work, day)
+    if not tables:
+        raise Refused(f"the run wrote no tables for day={day}")
+    if not sources:
+        raise Refused(f"the run recorded no sources in {enriched / 'dataset.json'}, "
+                      "so the day's marker could not say what its tables hold")
+    dst = tables_destination(env, dataset)
+
+    log(f"run {run_id}, the tables for {day}, dataset {dataset}, before the run has finished")
+    log(f"from {work / TABLES}")
+    return tables_unless_published(rd, tables, dst, day, run_id, sources, True, log,
+                                   recorded_coverage(enriched), times)
+
+
 def publish(rd: Path, upload: bool, env, log: Log) -> int:
     run_id, work = read_run(rd)
     check_succeeded(rd)
@@ -778,8 +858,8 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
         log(f"dry run: {count} files would be uploaded, then index.json. Nothing was written.")
         if tables:
             try:
-                publish_tables(rd, tables, tables_dst, day, run_id, sources, False, log,
-                               coverage, times)
+                tables_unless_published(rd, tables, tables_dst, day, run_id, sources, False,
+                                        log, coverage, times)
             except Failed as why:
                 raise Refused(str(why))
         log("Run again with --upload to publish.")
@@ -803,12 +883,13 @@ def publish(rd: Path, upload: bool, env, log: Log) -> int:
 
     # After the run, and reported separately: the run is published either way, and
     # a table failure must not read as "the run did not go up". A tables root that
-    # cannot be listed is a failure that running again resumes (1); a day that is
-    # already published is still a refusal (2).
+    # cannot be listed is a failure that running again resumes (1). A day already
+    # published, by this run before its build finished or by another run of the day,
+    # is skipped (#473).
     if tables:
         try:
-            rc = publish_tables(rd, tables, tables_dst, day, run_id, sources, True, log,
-                                coverage, times)
+            rc = tables_unless_published(rd, tables, tables_dst, day, run_id, sources, True,
+                                         log, coverage, times)
         except Refused as why:
             log(f"the tables were refused: {why}")
             rc = 2
@@ -1070,11 +1151,14 @@ def check_archived(rd: Path, root: Path, env) -> int:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description="Publish a finished cluster run. Without --upload or --archive "
-                    "nothing is written.")
+        description="Publish a finished cluster run. Without --upload, --upload-tables "
+                    "or --archive nothing is written.")
     parser.add_argument("run_dir")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--upload", action="store_true", help="write to the destination")
+    mode.add_argument("--upload-tables", action="store_true",
+                      help="write only the day's tables, once the leg that writes them "
+                           "has finished; the run need not have")
     mode.add_argument("--published", action="store_true",
                       help="only say whether the run is published; exit 0 if it is")
     mode.add_argument("--archive", metavar="ROOT",
@@ -1115,6 +1199,19 @@ def main(argv=None) -> int:
         except Failed as why:
             log(f"ARCHIVE FAILED: {why}")
             rc = 1
+        log(f"==== finished rc={rc} {utc_now()} ====")
+        return rc
+    if args.upload_tables:
+        log(f"==== tables upload started {utc_now()} ====")
+        try:
+            rc = publish_day_tables(rd, os.environ, log)
+        except Refused as why:
+            log(f"TABLES NOT PUBLISHED: {why}")
+            rc = 2
+        except Failed as why:
+            log(f"TABLES FAILED: {why}")
+            rc = 1
+        (rd / TABLES_DONE).write_text(f"{rc}\n")
         log(f"==== finished rc={rc} {utc_now()} ====")
         return rc
     log(f"==== {'upload' if args.upload else 'dry run'} started {utc_now()} ====")
