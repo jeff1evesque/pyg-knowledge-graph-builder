@@ -260,7 +260,7 @@ The `.pt` and the query tables take a company's numbers from different SEC feeds
 | SEC data | In the `.pt` | In the query tables |
 |---|---|---|
 | Filings, issuers, 8-K items, insider transactions and acceptance times, from `feed=filings` | yes | yes |
-| The XBRL facts inside a 10-K or 10-Q, from `feed=filings` (`filings_XbrlFact`, `filings_XbrlDimension`) | no, in the scheduled run | yes |
+| The XBRL facts inside a 10-K or 10-Q, from `feed=filings` (`filings_XbrlFact`, `filings_XbrlDimension`, and the concepts they measure, `sec_codes_XbrlConcept`) | no, in the scheduled run | yes |
 | Each company's latest numbers, from `feed=companyfacts_snapshot` (`companyfacts_CompanyFact`) | yes, from the snapshot dated the day before | no |
 | Every number as it was filed, from `feed=companyfacts` | no | yes, in [`companyfacts/`](tables.md#companyfacts), on the day it was filed |
 
@@ -290,8 +290,8 @@ On 2026-10-05 its 2,209 numeric values ran from −355,647,000 to
 same scale as revenue of about $100B. They also reach a `.pt` only on the day
 their filing was filed: Apple's newest 10-Q was filed 2026-07-31, so a 10-day
 window that misses that day holds no Apple numbers from the filings feed. So the
-scheduled run leaves `filings_XbrlFact` and `filings_XbrlDimension` out of the
-`.pt` (see
+scheduled run leaves `filings_XbrlFact`, `filings_XbrlDimension` and the
+concepts the facts measure, `sec_codes_XbrlConcept`, out of the `.pt` (see
 [`PYG_EXCLUDE_NODE_TYPES`](../operations/running-a-job.md#node-types-kept-out-of-the-pt)),
 and the snapshot gives every company's numbers every day.
 
