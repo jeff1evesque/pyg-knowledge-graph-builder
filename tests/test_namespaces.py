@@ -33,6 +33,7 @@ from spark_jobs.utils.rdf_utils import (
     MARKET_ENRICHMENT,
     MARKET_QUOTES,
     NOAA_ENRICHMENT,
+    SEC_CODES,
     SEC_COMPANYFACTS,
     SEC_ENRICHMENT,
     SEC_FILINGS,
@@ -62,6 +63,7 @@ MINTED = {
     "MARKET_ENRICHMENT": str(MARKET_ENRICHMENT),
     "UNIFIED": str(UNIFIED),
     "SOURCE_TEMPORAL": str(SOURCE_TEMPORAL),
+    "SEC_CODES": str(SEC_CODES),
     "PROVENANCE": str(PROVENANCE),
     # Keyed on the whole path under the base, not the last segment: bls/common/
     # and sec/common/ both end in common, so keying on that would collapse the
@@ -582,3 +584,23 @@ def test_a_source_temporal_endpoint_is_not_called_pipeline_inferred():
         src_type="cpi_Index",
         dst_type="temporal_SourceMonth",
     ) == rdf_utils.ORIGIN_RAW
+
+
+def test_an_sec_code_endpoint_is_not_called_pipeline_inferred():
+    """The same hazard for the SEC codes.
+
+    An 8-K's link to its items, and a fact's to its concept, are reported by the
+    filings; only the type on the item or concept is ours. So the SEC codes are
+    no enrichment namespace, and the links read as raw in edge_types/. Nor are
+    they a source vocabulary, which the drift check would hold to what upstream
+    emits.
+    """
+    assert str(SEC_CODES) not in ENRICHMENT_NAMESPACES
+    assert str(SEC_CODES) not in SOURCE_VOCABULARIES
+    for predicate, src_type, dst_type in (
+        (SEC_FILINGS.hasForm8KItem, "filings_SECFiling", "sec_codes_Form8KItem"),
+        (SEC_FILINGS.hasConcept, "filings_XbrlFact", "sec_codes_XbrlConcept"),
+    ):
+        assert rdf_utils.classify_edge_origin(
+            str(predicate), src_type=src_type, dst_type=dst_type,
+        ) == rdf_utils.ORIGIN_RAW

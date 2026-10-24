@@ -22,6 +22,7 @@ import logging
 from spark_jobs.utils.namespaces import (
     MARKET_QUOTES,
     PPI,
+    SEC_CODES,
     SEC_ENRICHMENT,
     SEC_FILINGS,
     WEATHER,
@@ -146,7 +147,9 @@ IDENTIFIER_PREDICATES = frozenset({
 
 # Properties whose values are codes: never a number either, whatever share of
 # them parses, but unlike an ID the value stays a label, because a code means
-# the same thing wherever it appears. Form 144 is not 36 Form 4s (#460).
+# the same thing wherever it appears. Form 144 is not 36 Form 4s (#460), and
+# 8-K item 5.02 is not 2.5 times item 2.02. A concept name never parses
+# ("us-gaap:Revenues"), but it is a code all the same.
 CODE_PREDICATES = frozenset({
     str(SEC_FILINGS.hasDocumentType),
     str(SEC_FILINGS.hasFileType),
@@ -154,6 +157,8 @@ CODE_PREDICATES = frozenset({
     str(SEC_FILINGS.hasTransactionFormType),
     str(PPI.hasGroupCode),
     str(PPI.hasItemCode),
+    str(SEC_CODES.hasItemNumber),
+    str(SEC_CODES.hasConceptName),
 })
 
 

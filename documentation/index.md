@@ -198,6 +198,7 @@ https://jefflevesque.com/ontology/noaa/         EmergencyAlert, AlertArea, Alert
 https://jefflevesque.com/ontology/market/
 https://jefflevesque.com/ontology/unified/      hasMonth, hasYear, measurementValue, …
 https://jefflevesque.com/ontology/temporal/     SourceMonth, SourceYear, SourceQuarter
+https://jefflevesque.com/ontology/sec/codes/    Form8KItem, XbrlConcept, hasItemNumber, hasConceptName
 https://jefflevesque.com/ontology/provenance/   derivedBy, route markers (never encoded)
 ```
 

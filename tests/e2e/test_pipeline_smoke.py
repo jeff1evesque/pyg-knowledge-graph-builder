@@ -1479,7 +1479,7 @@ def _source_families():
         ALERT, BLS_COMMON, BLS_ENRICHMENT, CAP, CPI, ECI, EMPSIT, JOLTS, LAUS,
         MARKET_ENRICHMENT, MARKET_QUOTES,
         METRO, NAMESPACE_PREFIXES, NOAA_ENRICHMENT, PPI, REALER,
-        SEC_COMMON, SEC_COMPANYFACTS, SEC_ENRICHMENT, SEC_FILINGS,
+        SEC_CODES, SEC_COMMON, SEC_COMPANYFACTS, SEC_ENRICHMENT, SEC_FILINGS,
         SOURCE_TEMPORAL, UNIFIED, WEATHER, WKYENG, XIMPIM,
     )
 
@@ -1487,7 +1487,9 @@ def _source_families():
     families = {
         "bls": (CPI, PPI, ECI, EMPSIT, JOLTS, LAUS, METRO, REALER, WKYENG,
                 XIMPIM, BLS_COMMON),
-        "sec": (SEC_FILINGS, SEC_COMMON, SEC_COMPANYFACTS),
+        # The SEC codes' types are ours, but an item or a concept is reached
+        # only from SEC's own filings and facts, so it is SEC's, not a hub.
+        "sec": (SEC_FILINGS, SEC_COMMON, SEC_COMPANYFACTS, SEC_CODES),
         "market": (MARKET_QUOTES,),
         "noaa": (CAP, WEATHER, ALERT),
         # Everything this pipeline mints itself. These are how sources REACH
@@ -2360,13 +2362,13 @@ SOURCE_DISTANCES = {
 }
 
 # What the scheduled run leaves out of its .pt, through PYG_EXCLUDE_NODE_TYPES in
-# its env.sh (bin/profiles/run-env.example.sh): NOAA weather, and the filings
-# feed's XBRL facts, whose numbers the .pt takes from the companyfacts snapshot
-# instead (#437). Named here only to check that leaving them out does not
-# reroute the pairs that remain.
+# its env.sh (bin/profiles/run-env.example.sh): NOAA weather, the filings feed's
+# XBRL facts, whose numbers the .pt takes from the companyfacts snapshot instead
+# (#437), and the concepts only those facts link to. Named here only to
+# check that leaving them out does not reroute the pairs that remain.
 PRODUCTION_EXCLUDED_NODE_TYPES = (
     "cap_Area", "cap_Geocode", "cap_Info", "weather_WeatherAlert",
-    "filings_XbrlFact", "filings_XbrlDimension",
+    "filings_XbrlFact", "filings_XbrlDimension", "sec_codes_XbrlConcept",
 )
 
 

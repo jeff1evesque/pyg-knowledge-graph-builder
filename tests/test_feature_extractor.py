@@ -1941,7 +1941,9 @@ def test_build_features_reports_its_numeric_predicates(spark):
     assert MARKET_CUSIP not in fx.numeric_predicates()
 
 
-from spark_jobs.utils.rdf_utils import PPI, SEC_ENRICHMENT, WEATHER  # noqa: E402
+from spark_jobs.utils.rdf_utils import (  # noqa: E402
+    PPI, SEC_CODES, SEC_ENRICHMENT, WEATHER,
+)
 from spark_jobs.utils.spark_rdf_utils import (  # noqa: E402
     CODE_PREDICATES,
     IDENTIFIER_PREDICATES,
@@ -1963,7 +1965,8 @@ ID_VALUES = {
     str(WEATHER.hasStateFIPS): ["01", "02", "04"],
 }
 
-# Every value a digit, so the majority rule alone makes each a number.
+# Every value a digit, so the majority rule alone makes each a number. The
+# concept name is the exception: no XBRL name parses, and it is a code anyway.
 CODE_VALUES = {
     str(SEC_FILINGS.hasDocumentType): ["4", "144", "4"],
     str(SEC_FILINGS.hasFileType): ["4", "144", "3"],
@@ -1971,6 +1974,10 @@ CODE_VALUES = {
     str(SEC_FILINGS.hasTransactionFormType): ["4", "5", "4"],
     str(PPI.hasGroupCode): ["01", "02", "05"],
     str(PPI.hasItemCode): ["1101", "11", "1102"],
+    str(SEC_CODES.hasItemNumber): ["2.02", "9.01", "5.02"],
+    str(SEC_CODES.hasConceptName): [
+        "us-gaap:Revenues", "dei:TradingSymbol", "ext:WidgetRevenue",
+    ],
 }
 
 

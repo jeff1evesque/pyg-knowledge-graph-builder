@@ -9,10 +9,11 @@ they answer, and [Using the tables with an LLM](llm.md) shows retrieval.
 
 They are not the `.pt`. A run's `hetero_data_<variant>.pt` is a PyTorch
 Geometric graph for training a graph neural network, built over every source
-except NOAA weather and the SEC filings' XBRL facts: numbers without names, in a
-42 GB pickle that is deleted with its run after 21 days. The tables cover every
-source, weather and XBRL facts included, and take a company's numbers from the
-SEC company facts history rather than from its daily snapshot.
+except NOAA weather and the SEC filings' XBRL facts and their concepts: numbers
+without names, in a 42 GB pickle that is deleted with its run after 21 days. The
+tables cover every source, weather and XBRL facts included, and take a
+company's numbers from the SEC company facts history rather than from its daily
+snapshot.
 [The tables and the `.pt`](#the-tables-and-the-pt) lists every difference.
 
 They are written by the enriching leg of a run
@@ -208,6 +209,27 @@ because it depends on the endpoints as well as the predicate: the same relation
 is `raw` from a source-typed subject and `enrichment` from one this pipeline
 minted. Its three values are `raw`, `enrichment` and `unification`.
 
+**8-K items and XBRL concepts.** Upstream links each 8-K to the items it
+reports, and each XBRL fact to the concept it measures, without typing the item
+or the concept. The builder types both, so each link is an edge:
+
+| `src_type` | `relation` | `dst_type` |
+|---|---|---|
+| `filings_SECFiling` | `filings_hasForm8KItem` | `sec_codes_Form8KItem` |
+| `filings_XbrlFact` | `filings_hasConcept` | `sec_codes_XbrlConcept` |
+
+On 2026-10-22 the filings stated 708 item links, from 302 8-K filings to 19
+items, and 95,090 concept links, to 6,574 concepts. Both edge types are `raw`: the
+filings state the links, and only the types come from the builder. The types
+have a vocabulary of their own, `sec_codes`, because a type from
+`sec_enrichment` would make both links `enrichment`. A day built before the
+builder typed them has neither the edges nor the nodes.
+
+A few facts' values become edges too. An extensible-enumeration fact's value
+names a concept, and upstream writes it as that concept's URI in text, so it
+matches the concept's node: on 2026-10-22, 133 facts linked to a concept
+through `filings_XbrlFact --filings_hasValue--> sec_codes_XbrlConcept`.
+
 ### `facts/`
 
 `(node_type, uri, predicate, predicate_name, value, is_numeric)` — every literal
@@ -221,6 +243,35 @@ table with no code change.
 `predicate` is the full URI, which joins to `ontology_schema.json`;
 `predicate_name` is the short name a query is written against. `is_numeric` is
 per value: whether that value parses as a finite number.
+
+**8-K items and XBRL concepts.** An item node carries its number in
+`sec_codes_hasItemNumber`, and a concept node its name in
+`sec_codes_hasConceptName`. Each also has an `rdfs_label`: `Item 2.02` for an
+item, and the name again for a concept. Both are codes, so `is_numeric` is
+false for `2.02` as it is for `us-gaap:Revenues`.
+
+An item number is the SEC's own label for the kind of event an 8-K reports:
+
+| Item | Meaning |
+|---|---|
+| 1.01 | entered a major agreement |
+| 2.02 | results of operations: the quarterly or yearly earnings release |
+| 5.02 | a director or officer left or joined, or an officer's pay changed |
+| 7.01 | information shared under Regulation FD, often an investor presentation |
+| 8.01 | other events |
+| 9.01 | financial statements and exhibits attached |
+
+A concept's name is `prefix:Name` without the taxonomy's year, the form an XBRL
+dimension's axis and member text already uses. A standard taxonomy keeps its
+usual prefix, read off the URI: `us-gaap`, `dei`, `srt`, `ecd`, `ffd`, `oef`,
+`ifrs-full` and so on. There is one node per concept URI, so
+`http://fasb.org/us-gaap/2025#Revenues` and
+`http://fasb.org/us-gaap/2026#Revenues` are two nodes, both named
+`us-gaap:Revenues`. A company's own concepts are all `ext:Name`, whichever
+company defined them, so one `ext:` name can stand for two companies'
+different concepts. On 2026-10-22 the 6,574 concepts had 6,203 names: 3,127
+standard ones, 305 of them under more than one taxonomy year, and 3,076 `ext:`
+ones.
 
 ### `entities/`
 
@@ -412,8 +463,9 @@ is here, so the sections above describe the tables alone.
   are the same data in shapes something can query, about 2.4 GB a day against
   94.9 GB for the run.
 - **Coverage.** A run's `.pt`, and its `node_index/`, hold only the node types
-  the run builds the `.pt` over, and the scheduled run leaves out NOAA weather
-  and the SEC filings' XBRL facts. The tables ignore that setting and cover
+  the run builds the `.pt` over, and the scheduled run leaves out NOAA weather,
+  the SEC filings' XBRL facts and the concepts they measure, which only the
+  facts link to. The tables ignore that setting and cover
   every source. NOAA is 0.05% of the nodes on 2026-09-09, shares nothing between
   days and has no edge to market, so it earns little in a graph neural network
   and still answers state-by-month questions in a table.
@@ -440,8 +492,9 @@ is here, so the sections above describe the tables alone.
   exceptions are IDs and codes, listed in `spark_jobs/utils/spark_rdf_utils.py`.
   An ID, such as a CUSIP, a CIK or a ZIP code, is never a number in either
   table, and the `.pt` keeps its value out of the vector entirely. A code, such
-  as a form type or a PPI item code, is never a number either, but the `.pt`
-  encodes it as a label: Form 4 and Form 144 are two forms, not two amounts.
+  as a form type, a PPI item code, an 8-K item number or an XBRL concept name,
+  is never a number either, but the `.pt` encodes it as a label: Form 4 and
+  Form 144 are two forms, not two amounts.
 - **Splits and the company facts history.** `splits/` and `companyfacts/` are in
   no `.pt`, and not in `graph/`. They are read from their feeds rather than
   built from the triples, so a run's graph is the same whether or not it read
