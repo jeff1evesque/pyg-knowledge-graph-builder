@@ -20,6 +20,7 @@ from spark_jobs.sources import bls, market, noaa, sec
 from spark_jobs.sources.spec import RELATION_CATEGORIES, SourceSpec
 from spark_jobs.utils.namespaces import (
     GEOSPARQL,
+    SEC_CODES,
     SOURCE_BASE,
     SOURCE_TEMPORAL,
     UNIFIED,
@@ -34,12 +35,16 @@ from spark_jobs.utils.namespaces import (
 REGISTERED: Tuple[SourceSpec, ...] = (bls.SPEC, sec.SPEC, market.SPEC, noaa.SPEC)
 
 # Namespaces no single source owns, after every source's own: GeoSPARQL, which
-# any source may reuse, the pipeline's unified and temporal vocabularies, and
-# OWL and RDFS.
+# any source may reuse, the pipeline's unified and temporal vocabularies, the
+# types it gives the codes SEC filings link to, and OWL and RDFS. The SEC codes
+# are here rather than in SEC's spec because a spec's other namespaces are
+# upstream's vocabularies, and the drift check holds those to what upstream
+# emits.
 SHARED_NAMESPACES: Tuple[Tuple[str, str], ...] = (
     (str(GEOSPARQL), "geosparql"),
     (str(UNIFIED), "unified"),
     (str(SOURCE_TEMPORAL), "temporal"),
+    (str(SEC_CODES), "sec_codes"),
     (str(OWL), "owl"),
     (str(RDFS), "rdfs"),
 )
@@ -173,10 +178,10 @@ def source_of_type_uri(
 ) -> Optional[str]:
     """The source whose vocabulary a term comes from, or None.
 
-    None for the shared vocabularies — temporal, unified, OWL, RDFS,
-    GeoSPARQL — which belong to no source, and for a term under no registered
-    namespace at all. Both are answers rather than failures, and neither may be
-    attributed to a source by guessing.
+    None for the shared vocabularies — temporal, unified, the SEC codes, OWL,
+    RDFS, GeoSPARQL — which belong to no source, and for a term under no
+    registered namespace at all. Both are answers rather than failures, and
+    neither may be attributed to a source by guessing.
     """
     return _source_of(uri, _owned_namespaces(specs))
 
