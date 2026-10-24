@@ -37,6 +37,7 @@ from spark_jobs.utils.namespaces import (
     ONTOLOGY_BASE,
     PPI,
     REALER,
+    SEC_CODES,
     SEC_COMMON,
     SEC_COMPANYFACTS,
     SEC_ENRICHMENT,
@@ -80,17 +81,18 @@ TODAYS_NAMESPACE_PREFIXES = [
     (str(GEOSPARQL), "geosparql"),
     (str(UNIFIED), "unified"),
     (str(SOURCE_TEMPORAL), "temporal"),
+    (str(SEC_CODES), "sec_codes"),
     (str(OWL), "owl"),
     (str(RDFS), "rdfs"),
 ]
 
 # The 26 vocabularies that hold a frozen ontology-source slot, in the order
 # those slots were assigned: today's table without the companyfacts
-# vocabulary, registered after them (#434).
+# vocabulary (#434) and the SEC codes, both registered after them.
 TODAYS_SLOTTED_NAMESPACES = [
     (namespace, prefix)
     for namespace, prefix in TODAYS_NAMESPACE_PREFIXES
-    if namespace != str(SEC_COMPANYFACTS)
+    if namespace not in (str(SEC_COMPANYFACTS), str(SEC_CODES))
 ]
 
 # PROPERTY_MAPPINGS and CLASS_MAPPINGS as ontology_mapper.py wrote them out.
@@ -225,15 +227,18 @@ def test_the_ontology_source_slots_are_todays():
     ]
 
 
-def test_only_the_companyfacts_vocabulary_is_hashed_today():
-    """The one namespace registered after the 26 (#434)."""
-    assert rdf_utils.hashed_ontology_namespaces() == [str(SEC_COMPANYFACTS)]
+def test_only_the_companyfacts_vocabulary_and_the_sec_codes_are_hashed_today():
+    """The two namespaces registered after the 26: companyfacts (#434) and the
+    SEC codes."""
+    assert rdf_utils.hashed_ontology_namespaces() == [
+        str(SEC_COMPANYFACTS), str(SEC_CODES),
+    ]
 
 
 @pytest.mark.parametrize("where", ["first", "last"])
 def test_registering_a_source_moves_none_of_the_26_slots(where):
     """Slots used to be positions. A source registered first would have moved
-    all 26, and one registered last the five shared namespaces, which follow
+    all 26, and one registered last the shared namespaces, which follow
     every source's. Registered anywhere, it now moves none, and its own
     namespace is the only one hashed. What it hashes to takes Spark;
     test_feature_extractor pins it."""
@@ -245,7 +250,7 @@ def test_registering_a_source_moves_none_of_the_26_slots(where):
     table = sources.namespace_prefixes(specs)
 
     assert set(rdf_utils.hashed_ontology_namespaces(table)) == {
-        str(SEC_COMPANYFACTS), f"{ONTOLOGY_BASE}toy/",
+        str(SEC_COMPANYFACTS), str(SEC_CODES), f"{ONTOLOGY_BASE}toy/",
     }
 
     # Registering the toy moves positions in the table. It moves no slot,
@@ -535,7 +540,7 @@ def test_a_source_term_and_one_minted_from_it_name_the_same_source(source, term,
 
 @pytest.mark.parametrize("namespace", [ns for ns, _prefix in sources.SHARED_NAMESPACES])
 def test_a_term_from_a_shared_vocabulary_belongs_to_no_source(namespace):
-    """Temporal, unified, GeoSPARQL, OWL and RDFS are nobody's.
+    """Temporal, unified, the SEC codes, GeoSPARQL, OWL and RDFS are nobody's.
 
     temporal_SourceDay is in every graph whatever was read, so attributing it to
     a source would report a source that contributed nothing. None is the answer,
