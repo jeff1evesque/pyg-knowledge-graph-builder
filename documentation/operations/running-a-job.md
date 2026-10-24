@@ -315,7 +315,7 @@ touches one. `notebook/multi_experiment.ipynb` reads the list from the run's
 `env.sh`, comma-separated, and puts it on every assembly leg:
 
 ```bash
-export PYG_EXCLUDE_NODE_TYPES=cap_Area,cap_Geocode,cap_Info,weather_WeatherAlert,filings_XbrlFact,filings_XbrlDimension
+export PYG_EXCLUDE_NODE_TYPES=cap_Area,cap_Geocode,cap_Info,weather_WeatherAlert,filings_XbrlFact,filings_XbrlDimension,sec_codes_XbrlConcept
 ```
 
 It narrows the `.pt` and nothing else. The
@@ -345,9 +345,11 @@ event type, so the decision is worth measuring again if that window changes.
 [SEC company facts snapshot](../reference/sources.md#sec-company-facts) instead,
 which has every company's latest numbers every day, one property per concept and
 period length. The XBRL facts put every number on one predicate, and reach a
-`.pt` only on the day the company files. Everything else from the filings feed
-stays in the `.pt`: filings, issuers, 8-K items, insider transactions and
-acceptance times. The query tables keep the XBRL facts too.
+`.pt` only on the day the company files. It leaves out the concepts they measure
+as well, `sec_codes_XbrlConcept`: only the facts link to them, so without the
+facts they would sit in the `.pt` with no edge. Everything else from the filings
+feed stays in the `.pt`: filings, issuers, 8-K items, insider transactions and
+acceptance times. The query tables keep the XBRL facts and their concepts too.
 
 ### Option rows store only the positions that vary
 
