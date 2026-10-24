@@ -216,3 +216,14 @@ UNIFIED = Namespace(f"{ONTOLOGY_BASE}unified/")
 # base with the enrichment namespaces must not start classifying these edges
 # as pipeline-inferred; see the origin test that pins it.
 SOURCE_TEMPORAL = Namespace(f"{ONTOLOGY_BASE}temporal/")
+
+# Types for the codes SEC filings link to but never type: an 8-K's item numbers
+# (Form8KItem_2.02) and the XBRL concept a fact measures (us-gaap/2026#Revenues).
+# Untyped, they were never nodes, so edge resolution dropped both links. The
+# SEC linker types them (see SECIntraSourceLinker._type_linked_codes).
+#
+# Not under SEC_ENRICHMENT, for SOURCE_TEMPORAL's reason: a filing's link to its
+# items is an observed source fact, and only the type is ours. Not in the
+# filings vocabulary either: that is upstream's, and the drift check would
+# report these terms as ones upstream never emits.
+SEC_CODES = Namespace(f"{ONTOLOGY_BASE}sec/codes/")
