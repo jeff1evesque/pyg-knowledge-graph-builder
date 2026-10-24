@@ -28,8 +28,10 @@
 #   not read
 #   bring MemFree up to PYG_MEMFREE_GATE_GB on every node, when that is set
 #   bin/run_cluster_notebook.sh --data-date <day> <run-dir>, which waits out a stall
-#   capture instead of failing the night; the log names each capture
-#   bin/publish_run.py <run-dir> --upload
+#   capture instead of failing the night; the log names each capture. Meanwhile, once
+#   the leg that writes the day's tables has finished, bin/publish_run.py <run-dir>
+#   --upload-tables sends them, while the graph is still being built
+#   bin/publish_run.py <run-dir> --upload, which skips tables already sent
 #   bin/publish_run.py <run-dir> --archive <root> --keep-days <N>, when an archive is set
 #   remove the store's days past the newest PYG_SCHEDULE_SOURCE_STORE_DAYS, when a store
 #   is set
@@ -87,7 +89,8 @@
 #   PYG_EXPECTED_WORKERS            optional. ALIVE workers on an idle cluster;
 #                                   default, the number of PYG_STAGE_NODES.
 #   PYG_SCHEDULE_IDLE_WAIT_SECONDS  optional. How long to wait for idle; default 600.
-#   PYG_SCHEDULE_RETRY_SECONDS      optional. Pause between tries; default 60.
+#   PYG_SCHEDULE_RETRY_SECONDS      optional. Pause between tries, and between looks
+#                                   for the day's tables during the run; default 60.
 #   PYG_SCHEDULE_ARCHIVE_ROOT       optional. A folder on a local drive that keeps each
 #                                   day's graphs and tables as real files, in the
 #                                   published layout (bin/publish_run.py --archive).
@@ -110,7 +113,7 @@
 # EXIT CODES
 #   0  published (and archived), then pruned
 #   1  the staging, the run, the publish or the archive failed; the run stays, nothing
-#      is pruned
+#      is pruned. Tables that went up before the failure stay published
 #   2  refused before the run started: a setting, a dirty checkout, sources that
 #      could not be listed, a busy cluster, or memory that would not come free
 #   3  skipped: a source is not there, because upstream is late or the day has
@@ -693,11 +696,68 @@ if [[ -n "${PYG_MEMFREE_GATE_GB:-}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# The run, then the publish. Either failing leaves everything where it is.
+# The run, then the publish. Either failing leaves everything where it is, except
+# the day's tables: they go up as soon as the leg that writes them has finished,
+# while the graph is built, so they wait neither for the build nor on it. #473
 # ---------------------------------------------------------------------------
+# Whether that leg has finished: its job manifest, written after the tables, records
+# tables_started and tables_finished. bin/publish_run.py --upload-tables asks the same.
+tables_written() {
+  python3 - "$RD/run-config.txt" <<'PY'
+import glob
+import json
+import sys
+
+work = ""
+try:
+    with open(sys.argv[1]) as fh:
+        for line in fh:
+            key, _, value = line.partition(":")
+            if key.strip() == "work dir":
+                work = value.strip()
+except OSError:
+    pass
+for path in glob.glob(f"{work}/manifests/year=*/month=*/*.json") if work else []:
+    try:
+        with open(path) as fh:
+            result = json.load(fh).get("result") or {}
+        if result.get("tables_started") and result.get("tables_finished"):
+            sys.exit(0)
+    except (OSError, ValueError, AttributeError):
+        continue
+sys.exit(1)
+PY
+}
+
+# Its exit code once tried. A failure fails nothing yet: the publish after the run
+# sends the tables when their day has no marker.
+TABLES_RC=""
+publish_tables() {
+  log "the day's tables are written; publishing them while the run goes on. See $RD/publish.log"
+  python3 "$REPO/bin/publish_run.py" "$RD" --upload-tables > "$RD/publish-tables.out" 2>&1
+  TABLES_RC=$?
+  if [[ "$TABLES_RC" == "0" ]]; then
+    log "the day's tables are published"
+  else
+    log "publishing the day's tables exited $TABLES_RC; the publish after the run tries again. See $RD/publish.log"
+  fi
+}
+
 log "running; see $RD/run.log"
-"$REPO/bin/run_cluster_notebook.sh" --data-date "$DATA_DATE" "$RD" > "$RD/launcher.log" 2>&1
+"$REPO/bin/run_cluster_notebook.sh" --data-date "$DATA_DATE" "$RD" > "$RD/launcher.log" 2>&1 &
+launcher=$!
+while kill -0 "$launcher" 2>/dev/null; do
+  if [[ -z "$TABLES_RC" ]] && tables_written; then
+    publish_tables
+  fi
+  sleep "$RETRY"
+done
+wait "$launcher"
 launcher_rc=$?
+# The leg may have finished after the last look, just before the run ended.
+if [[ -z "$TABLES_RC" ]] && tables_written; then
+  publish_tables
+fi
 # A night that recovered from a stall publishes like any other, so this line is where
 # its log says a stall happened. #467
 if [[ -s "$RD/stalls-captured" ]]; then
@@ -706,8 +766,11 @@ if [[ -s "$RD/stalls-captured" ]]; then
   done < "$RD/stalls-captured"
 fi
 run_rc="$(cat "$RD/run.done" 2>/dev/null || echo missing)"
-[[ "$run_rc" == "0" ]] \
-  || fail "the run did not finish cleanly (launcher rc=$launcher_rc, run.done=$run_rc), so it is not published. See $RD/outcome.txt"
+if [[ "$run_rc" != "0" ]]; then
+  tables_note=""
+  [[ "$TABLES_RC" == "0" ]] && tables_note=" The day's tables are published all the same."
+  fail "the run did not finish cleanly (launcher rc=$launcher_rc, run.done=$run_rc), so it is not published.$tables_note See $RD/outcome.txt"
+fi
 log "the run finished"
 
 # How complete the day's market data was, as the job recorded it in its dataset.json.
