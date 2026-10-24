@@ -76,11 +76,14 @@ whatever a second rule said.
 
 `bin/publish_run.py` sends them there, with its own sync and its own guard;
 see [Publishing a finished run](../operations/testing.md#publishing-a-finished-run).
-A day that already has its marker is refused: the destination takes writes and
-listings but not deletes, so a rewritten day whose part-file count went down
-would leave the old parts behind and a reader would see their rows twice. A day
-whose publish was interrupted has no marker, and running the same command again
-finishes it, including when the run folder itself had already gone up.
+A [scheduled run](../operations/running-a-job.md#scheduled-runs) sends them as soon
+as they are written, while its graph is still being built. A day that already has
+its marker is never sent again: the destination takes writes and listings but not
+deletes, so a rewritten day whose part-file count went down would leave the old
+parts behind and a reader would see their rows twice. A second run of the day skips
+its tables, so that day's tables and `.pt` come from different runs. A day whose
+publish was interrupted has no marker, and running the same command again finishes
+it, including when the run folder itself had already gone up.
 
 The run's own `index.json` names the tables and their root, so a consumer
 holding a run can find them.
