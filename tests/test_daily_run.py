@@ -77,6 +77,19 @@ if [ -n "${FAKE_DATASET_JSON:-}" ]; then
   mkdir -p "$enriched" && printf "%s" "$FAKE_DATASET_JSON" > "$enriched/dataset.json"
 fi
 [ -z "${FAKE_STALLS_CAPTURED:-}" ] || printf "%s\\n" "$FAKE_STALLS_CAPTURED" > "$rd/stalls-captured"
+if [ -n "${FAKE_TABLES_WRITTEN:-}" ]; then
+  # The tables leg's job manifest, written after the tables. Then the build leg, which
+  # goes on until the day's tables were tried, or 20 seconds pass.
+  manifests="$PYG_WORK_DIR/manifests/year=$PYG_DATA_YEAR/month=$PYG_DATA_MONTH"
+  mkdir -p "$manifests"
+  printf '{"result": {"tables_started": "a", "tables_finished": "b"}}' \\
+    > "$manifests/enrichment_only_1.json"
+  for _ in $(seq 200); do
+    [ -e "$rd/tables-tried" ] && break
+    sleep 0.1
+  done
+  [ -e "$rd/tables-tried" ] && echo yes > "$FAKE_CALLS/tables-tried-during-run.txt"
+fi
 echo "${FAKE_RUN_RC:-0}" > "$rd/run.done"
 '''
 
@@ -114,6 +127,9 @@ if mode == "--upload":
     if rc == 0:
         (rd / "listed").touch()
     sys.exit(rc)
+if mode == "--upload-tables":
+    (rd / "tables-tried").touch()
+    sys.exit(int(os.environ.get("FAKE_TABLES_RC", "0")))
 if mode == "--archive":
     with open(os.path.join(os.environ["FAKE_CALLS"], "archive.txt"), "a") as fh:
         fh.write(" ".join(sys.argv[2:]) + "\\n")
@@ -634,6 +650,55 @@ def test_a_run_that_did_not_finish_is_not_published(schedule):
 
     assert s.run(FAKE_RUN_RC="1").returncode == 1
     assert s.recorded("publish") == ""
+
+
+# --------------------------------------------------------------------------- #
+# The day's tables go up while the graph is built. #473
+# --------------------------------------------------------------------------- #
+
+def test_the_tables_go_up_before_the_build_leg_ends(schedule):
+    """The tables leg's manifest says they are written, and the launcher is still
+    running the build leg when they are sent."""
+    s = schedule()
+    s.add_sources("2026-09-30")
+
+    r = s.run(FAKE_TABLES_WRITTEN="1")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert s.recorded("tables-tried-during-run") == "yes\n"
+    assert s.recorded("publish") == f"{RUN_ID} --upload-tables\n{RUN_ID} --upload\n"
+    assert "the day's tables are published\n" in s.log()
+
+
+def test_a_run_whose_legs_record_no_tables_sends_none_early(schedule):
+    s = schedule()
+    s.add_sources("2026-09-30")
+
+    assert s.run().returncode == 0
+    assert s.recorded("publish") == f"{RUN_ID} --upload\n"
+
+
+def test_a_build_that_fails_after_the_tables_went_up_leaves_them_published(schedule):
+    """The night still fails, and the run stays, as before. The tables stay up."""
+    s = schedule()
+    s.add_sources("2026-09-30")
+
+    r = s.run(FAKE_TABLES_WRITTEN="1", FAKE_RUN_RC="1")
+    assert r.returncode == 1
+    assert s.recorded("publish") == f"{RUN_ID} --upload-tables\n"
+    assert ("so it is not published. The day's tables are published all the same."
+            in s.log())
+    assert (s.work_root / RUN_ID).is_dir()
+
+
+def test_a_failed_tables_publish_is_tried_again_after_the_run(schedule):
+    """bin/publish_run.py --upload sends the tables when their day has no marker."""
+    s = schedule()
+    s.add_sources("2026-09-30")
+
+    r = s.run(FAKE_TABLES_WRITTEN="1", FAKE_TABLES_RC="1")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert s.recorded("publish") == f"{RUN_ID} --upload-tables\n{RUN_ID} --upload\n"
+    assert "exited 1; the publish after the run tries again" in s.log()
 
 
 # --------------------------------------------------------------------------- #
