@@ -15,15 +15,15 @@ Enrichment steps:
 2. Unify person entities (by CIK across datasets)
 3. Link temporal sequences (chronological ordering of filings by owner and by
    issuer, and of the transactions an ownership filing reports)
-4. Apply sector patterns (keyword matching against URIs and labels)
-5. Apply violation patterns (keyword matching + cross-dataset linking)
+4. Apply violation patterns (keyword matching + cross-dataset linking)
+5. Type the 8-K items and XBRL concepts filings link to, each with its code
 
 Cross-dataset correlations were removed with the datasets they correlated: all
 26 in KNOWN_CORRELATIONS paired filings with administrative proceedings,
 litigation or trading suspensions, and none paired filings with itself.
 """
 from pyspark import StorageLevel
-from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import Column, DataFrame, SparkSession
 from pyspark.sql import functions as F
 from functools import reduce
 from typing import List, Optional, Sequence, Set, Union
@@ -31,7 +31,7 @@ from typing import List, Optional, Sequence, Set, Union
 from rdflib.namespace import RDF, RDFS, OWL
 
 from spark_jobs.utils.rdf_utils import (
-    SEC_ENRICHMENT, SEC_FILINGS, SEC_COMMON,
+    SEC_CODES, SEC_ENRICHMENT, SEC_FILINGS, SEC_COMMON,
     UNIFIED,
     identifier_namespace,
 )
@@ -175,6 +175,15 @@ _UNIFIED_PERSON_TYPE = str(SEC_ENRICHMENT.UnifiedPerson)
 _ECONOMIC_SECTOR_TYPE = str(SEC_ENRICHMENT.EconomicSector)
 _VIOLATION_TYPE_TYPE = str(SEC_ENRICHMENT.ViolationType)
 
+# The codes filings link to without typing them, and the type and code each
+# gets from _type_linked_codes.
+_FILINGS_HAS_FORM8K_ITEM = str(SEC_FILINGS.hasForm8KItem)
+_FILINGS_HAS_CONCEPT = str(SEC_FILINGS.hasConcept)
+_FORM8K_ITEM_TYPE = str(SEC_CODES.Form8KItem)
+_XBRL_CONCEPT_TYPE = str(SEC_CODES.XbrlConcept)
+_HAS_ITEM_NUMBER = str(SEC_CODES.hasItemNumber)
+_HAS_CONCEPT_NAME = str(SEC_CODES.hasConceptName)
+
 # Dataset IDENTIFIER map. Every consumer matches an ENTITY uri -- the sector
 # and correlation builders find entities by namespace + keyword -- so these are
 # the id/ namespaces, not the term ones. See identifier_namespace() in
@@ -193,6 +202,49 @@ def normalize_keyword_for_uri_matching(keyword: str) -> str:
     normalized = normalized.replace('(', '').replace(')', '')
     normalized = normalized.replace('-', '')
     return normalized
+
+
+# The XBRL taxonomies FASB, the SEC and the IFRS Foundation publish, by the
+# shape of their concept URIs. Each pattern captures the taxonomy's usual
+# prefix and the concept's name, and skips the year: FASB and the SEC put the
+# prefix before it (us-gaap/2026, ffd/2025q4), the IFRS Foundation after its
+# date (taxonomy/2025-03-27/ifrs-full). These are the prefixes the dimensions'
+# axis and member text already uses. A concept under any other URI is a
+# company's own, written ext:Name.
+_STANDARD_TAXONOMY_URIS = (
+    r"^https?://(?:fasb\.org|xbrl\.sec\.gov)/([^/#]+)/[^/#]+#(.+)$",
+    r"^https?://xbrl\.ifrs\.org/taxonomy/[^/#]+/([^/#]+)#(.+)$",
+)
+_COMPANY_CONCEPT_PREFIX = "ext"
+
+
+def _uri_local_name(uri: Column) -> Column:
+    """What follows a URI's last / or #, or "" when nothing does."""
+    return F.regexp_extract(uri, r"[#/]([^#/]+)$", 1)
+
+
+def _item_number(uri: Column) -> Column:
+    """An 8-K item's number, read off its URI: Form8KItem_2.02 is "2.02"."""
+    number = F.regexp_replace(_uri_local_name(uri), r"^Form8KItem_", "")
+    return F.when(F.length(number) > 0, number)
+
+
+def _concept_name(uri: Column) -> Column:
+    """An XBRL concept's name, read off its URI: us-gaap/2026#Revenues is
+    "us-gaap:Revenues", and a company's own concept is "ext:<Name>"."""
+    name = F.concat(
+        F.lit(f"{_COMPANY_CONCEPT_PREFIX}:"), _uri_local_name(uri)
+    )
+    for pattern in reversed(_STANDARD_TAXONOMY_URIS):
+        name = F.when(
+            uri.rlike(pattern),
+            F.concat(
+                F.regexp_extract(uri, pattern, 1),
+                F.lit(":"),
+                F.regexp_extract(uri, pattern, 2),
+            ),
+        ).otherwise(name)
+    return F.when(F.length(_uri_local_name(uri)) > 0, name)
 
 
 class SECIntraSourceLinker:
@@ -243,8 +295,8 @@ class SECIntraSourceLinker:
 
         new_dfs: List[DataFrame] = []
 
-        # Four steps, not six. The old numbering announced "[Step 4/6]
-        # Applying sector patterns" and "[Step 6/6] Applying known
+        # Every header names a step that runs. The old numbering announced
+        # "[Step 4/6] Applying sector patterns" and "[Step 6/6] Applying known
         # correlations" and then called nothing -- there are no such methods
         # here. Two headers over no work is the same reporting problem as a
         # step that returns nothing quietly (#350).
@@ -253,20 +305,24 @@ class SECIntraSourceLinker:
         # instead, on the SIC code upstream states on the filing.
 
         # Step 1: Unify company entities
-        logger.info("\n[Step 1/4] Unifying company entities...")
-        self._append(new_dfs, self._unify_company_entities(), "[Step 1/4]")
+        logger.info("\n[Step 1/5] Unifying company entities...")
+        self._append(new_dfs, self._unify_company_entities(), "[Step 1/5]")
 
         # Step 2: Unify person entities
-        logger.info("\n[Step 2/4] Unifying person entities...")
-        self._append(new_dfs, self._unify_person_entities(), "[Step 2/4]")
+        logger.info("\n[Step 2/5] Unifying person entities...")
+        self._append(new_dfs, self._unify_person_entities(), "[Step 2/5]")
 
         # Step 3: Link temporal sequences
-        logger.info("\n[Step 3/4] Linking temporal sequences...")
-        self._append(new_dfs, self._link_temporal_sequences(), "[Step 3/4]")
+        logger.info("\n[Step 3/5] Linking temporal sequences...")
+        self._append(new_dfs, self._link_temporal_sequences(), "[Step 3/5]")
 
         # Step 4: Apply violation patterns
-        logger.info("\n[Step 4/4] Applying violation patterns...")
-        self._append(new_dfs, self._apply_violation_patterns(), "[Step 4/4]")
+        logger.info("\n[Step 4/5] Applying violation patterns...")
+        self._append(new_dfs, self._apply_violation_patterns(), "[Step 4/5]")
+
+        # Step 5: Type the codes filings link to
+        logger.info("\n[Step 5/5] Typing 8-K items and XBRL concepts...")
+        self._append(new_dfs, self._type_linked_codes(), "[Step 5/5]")
 
         if not new_dfs:
             self._sec_triples.unpersist()
@@ -281,7 +337,7 @@ class SECIntraSourceLinker:
         all_new = all_new.persist(StorageLevel.DISK_ONLY)
         total = all_new.count()
 
-        # Unpersist after the count, not before it. The four steps only build
+        # Unpersist after the count, not before it. The five steps only build
         # lazy frames, so this count is the first thing that reads them;
         # dropping the cache above it meant the count rebuilt the subset from
         # the source frame instead of reading what we had just cached. #380
@@ -1077,5 +1133,86 @@ class SECIntraSourceLinker:
         return result
 
     # ================================================================
-    # Step 6: Known correlations
+    # Step 5: Type the codes filings link to
     # ================================================================
+
+    def _type_linked_codes(self) -> Optional[DataFrame]:
+        """Type the 8-K items and XBRL concepts filings link to.
+
+        Upstream links each 8-K to its item numbers and each XBRL fact to the
+        concept it measures, and types neither:
+
+            filing  filings:hasForm8KItem  .../Form8KItem_2.02
+            fact    filings:hasConcept     http://fasb.org/us-gaap/2026#Revenues
+
+        node_mapper only makes nodes of typed URIs, so both links were dropped
+        when edges were resolved: 708 item links and 95,090 concept links on
+        2026-10-22. This is the temporal unifier's fix
+        (_create_source_temporal_types), for these two.
+
+        Each distinct object of either predicate gets three triples:
+
+            .../Form8KItem_2.02  rdf:type                 sec_codes:Form8KItem
+            .../Form8KItem_2.02  sec_codes:hasItemNumber  "2.02"
+            .../Form8KItem_2.02  rdfs:label               "Item 2.02"
+
+            us-gaap/2026#Revenues  rdf:type                  sec_codes:XbrlConcept
+            us-gaap/2026#Revenues  sec_codes:hasConceptName  "us-gaap:Revenues"
+            us-gaap/2026#Revenues  rdfs:label                "us-gaap:Revenues"
+
+        The code is what tells two nodes of one type apart in the .pt, where
+        rdfs:label is not a feature; the label is for the query tables. A
+        concept's name leaves out the taxonomy year, so us-gaap/2025#Revenues
+        and us-gaap/2026#Revenues stay two nodes with the same name. No other
+        predicate's objects are typed here.
+        """
+        if 'filings' not in self.available_datasets:
+            return None
+
+        def linked(predicate: str) -> DataFrame:
+            return (
+                self._sec_triples
+                .filter(F.col("predicate") == predicate)
+                .filter(F.col("object").rlike(r"^https?://"))
+                .select(F.col("object").alias("subject"))
+                .distinct()
+            )
+
+        items = (
+            linked(_FILINGS_HAS_FORM8K_ITEM)
+            .withColumn("code", _item_number(F.col("subject")))
+            .withColumn("type", F.lit(_FORM8K_ITEM_TYPE))
+            .withColumn("code_predicate", F.lit(_HAS_ITEM_NUMBER))
+            .withColumn("label", F.concat(F.lit("Item "), F.col("code")))
+        )
+        concepts = (
+            linked(_FILINGS_HAS_CONCEPT)
+            .withColumn("code", _concept_name(F.col("subject")))
+            .withColumn("type", F.lit(_XBRL_CONCEPT_TYPE))
+            .withColumn("code_predicate", F.lit(_HAS_CONCEPT_NAME))
+            .withColumn("label", F.col("code"))
+        )
+        nodes = items.unionByName(concepts).filter(F.col("code").isNotNull())
+
+        if nodes.head(1) == []:
+            return None
+
+        result = (
+            nodes.select(
+                "subject",
+                F.lit(_RDF_TYPE).alias("predicate"),
+                F.col("type").alias("object"),
+            )
+            .unionAll(nodes.select(
+                "subject",
+                F.col("code_predicate").alias("predicate"),
+                F.col("code").alias("object"),
+            ))
+            .unionAll(nodes.select(
+                "subject",
+                F.lit(_RDFS_LABEL).alias("predicate"),
+                F.col("label").alias("object"),
+            ))
+        )
+        logger.info("  8-K item and XBRL concept triples prepared (lazy)")
+        return result
