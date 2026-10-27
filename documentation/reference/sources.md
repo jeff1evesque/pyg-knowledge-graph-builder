@@ -248,7 +248,9 @@ Stock splits are read as well, but not as a source. The split feed is plain
 Parquet, read directly into the [`splits/`](tables.md#splits) query table the way
 the constituents list is read, so it never enters the triples or the `.pt`. The
 SEC company facts history is read the same way, into
-[`companyfacts/`](tables.md#companyfacts).
+[`companyfacts/`](tables.md#companyfacts), and so is the one-minute quote feed,
+the index constituents' quotes for every minute of the trading day, into
+[`minute_quotes/`](tables.md#minute_quotes).
 
 > **Measured volume:** one four-source day loads **322.7M triples** and enriches
 > to **421.4M**. Market is 99.5% of that; BLS 1.3M, SEC 198K, NOAA 143K.
