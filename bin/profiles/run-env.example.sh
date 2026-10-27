@@ -57,6 +57,11 @@ export PYG_TIME_PERIOD=YYYY-MM
 # export PYG_COMPANYFACTS_HISTORY_BUCKET=BUCKET
 # export PYG_COMPANYFACTS_HISTORY_PREFIX=raw/source=sec/feed=companyfacts
 
+# The one-minute quote feed, for the minute_quotes/ query table, read the same way
+# from one folder per day, year=YYYY/month=MM/day=DD/, holding a file per minute.
+# export PYG_MINUTE_QUOTES_BUCKET=BUCKET
+# export PYG_MINUTE_QUOTES_PREFIX=PREFIX
+
 # Node types left out of the .pt. The query tables keep them. The scheduled run leaves
 # out NOAA weather, the filings feed's XBRL facts and the concepts they measure; see
 # running-a-job.md.
