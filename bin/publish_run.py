@@ -97,10 +97,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-# This script runs on the system python, so splits.py and companyfacts.py must
-# import with the standard library alone. tests/test_publish_run.py runs it with
-# no packages.
-from spark_jobs.graph import companyfacts, splits  # noqa: E402
+# This script runs on the system python, so splits.py, companyfacts.py and
+# minute_quotes.py must import with the standard library alone.
+# tests/test_publish_run.py runs it with no packages.
+from spark_jobs.graph import companyfacts, minute_quotes, splits  # noqa: E402
 
 CHECKSUMS = "checksums.json"
 INDEX = "index.json"
@@ -119,7 +119,11 @@ ARCHIVE_TABLES = "tables"
 RUN_ID_NAME = re.compile(r"\d{8}T\d{6}Z")
 # Tables read from a feed rather than built from the triples, and the feed's
 # name. A day's marker lists the feed among its sources when the day has the table.
-FEED_TABLES = {"splits": splits.FEED_NAME, "companyfacts": companyfacts.FEED_NAME}
+FEED_TABLES = {
+    "splits": splits.FEED_NAME,
+    "companyfacts": companyfacts.FEED_NAME,
+    "minute_quotes": minute_quotes.FEED_NAME,
+}
 # What a day's marker carries of the job's market coverage: the day's snapshots,
 # and the stocks and stocks with options in the thinnest of them. #452
 MARKET_COVERAGE_SUMMARY = ("snapshots", "stocks", "stocks_with_options")
