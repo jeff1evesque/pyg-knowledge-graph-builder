@@ -1,9 +1,10 @@
 # Query Tables
 
-The query tables are the part of a run meant for looking things up: eight Parquet
+The query tables are the part of a run meant for looking things up: nine Parquet
 tables and a triple store for each day, holding the enriched data's nodes,
-edges and values under their names and URIs, the day's stock splits, and the SEC
-numbers filed that day. SQL, SPARQL and an LLM's retrieval
+edges and values under their names and URIs, the day's stock splits, the SEC
+numbers filed that day, and the index constituents' quotes for every minute of
+the trading day. SQL, SPARQL and an LLM's retrieval
 step can all read them. [Questions the tables answer](questions.md) shows what
 they answer, and [Using the tables with an LLM](llm.md) shows retrieval.
 
@@ -31,6 +32,7 @@ on by default, and switched off with `--enable_query_tables false`.
 | `edge_types/` | one row per edge type | <0.01 GB |
 | `splits/` | the day's stock splits, one row per split | <0.01 GB |
 | `companyfacts/` | the SEC numbers filed that day, one row per number | <0.01 GB |
+| `minute_quotes/` | the index constituents' quotes, one row per stock per minute | ~0.01 GB, from a synthetic day |
 
 ## A day at a time, kept for a year
 
@@ -71,6 +73,7 @@ whatever a second rule said.
 ├── snapshots/day=2026-09-10/
 ├── splits/day=2026-09-10/
 ├── companyfacts/day=2026-09-10/
+├── minute_quotes/day=2026-09-10/
 └── graph/day=2026-09-10/
 ```
 
@@ -104,7 +107,7 @@ following as the contract:
 | `tables_started` | when the run began writing the day's tables, in UTC, as `YYYY-MM-DDTHH:MM:SSZ`. Present only when the run recorded it |
 | `tables_finished` | when the run had written the last of them, in the same form and on the same terms. A run writes the tables before it builds its `.pt`, so both come before the `.pt`'s [`build_timestamp`](outputs.md#which-date-is-which), and both come before `published` |
 | `published` | when the upload that finished the day started, in UTC, as `YYYY-MM-DDTHH:MM:SSZ`. It is not when the tables were written, which is `tables_finished`. The day became readable later, once that upload was checked and the marker went up |
-| `sources` | the name of every source whose data the day's tables hold, sorted. It has each source the run read, which for the four-source run is `bls`, `market`, `noaa` and `sec`, and `sec-companyfacts` beside `sec` when the run read the [SEC company facts snapshot](sources.md#sec-company-facts). It has `stock-split` when the day has a [`splits/`](#splits) partition, and `sec-companyfacts` when it has a [`companyfacts/`](#companyfacts) partition, even an empty one. Neither feed is a source of the graph, but their rows are in the tables. A feed read into a table of its own later is listed the same way, by its name |
+| `sources` | the name of every source whose data the day's tables hold, sorted. It has each source the run read, which for the four-source run is `bls`, `market`, `noaa` and `sec`, and `sec-companyfacts` beside `sec` when the run read the [SEC company facts snapshot](sources.md#sec-company-facts). It has `stock-split` when the day has a [`splits/`](#splits) partition, `sec-companyfacts` when it has a [`companyfacts/`](#companyfacts) partition, and `minute-quotes` when it has a [`minute_quotes/`](#minute_quotes) partition, even an empty one. None of these feeds is a source of the graph, but their rows are in the tables. A feed read into a table of its own later is listed the same way, by its name |
 | `market_coverage` | how complete the day's market data was: `snapshots`, how many the day has, and `stocks` and `stocks_with_options`, the stocks and the stocks with an option quoted in the thinnest of them. Counts, not a verdict: a partial day publishes like any other, and this is where it shows. Present only when the run read a market source and recorded its coverage. The run's [`graph_schema.json`](outputs.md#what-the-graph-is-made-of) has every snapshot's counts |
 | written | once and last, after every table of the day; never rewritten |
 
@@ -397,6 +400,55 @@ row of it is in `nodes/`, `edges/`, `graph/` or the `.pt`.
   `bls_enrichment_UnifiedDay`, which nothing else would point at: on 2026-10-05,
   213 of the 277 source days. A day a filing or a quote is dated to stays.
 
+### `minute_quotes/`
+
+`(ticker, capture_time, quote_time, trade_time, bid, ask, bid_size, ask_size,
+last, mark, open, high, low, prev_close, volume, net_change,
+net_percent_change)`, one row per stock per minute of the trading day, sorted by
+ticker, then minute. It is read from the upstream minute feed, which polls the
+index constituents' quotes once a minute and writes each poll as a Parquet
+file. It is not built from the triples, so no row of it is in `nodes/`,
+`edges/`, `graph/` or the `.pt`.
+[Questions the tables answer](questions.md#one-stock-minute-by-minute) has the
+queries.
+
+- **A full day is 391 minutes**, 9:30 AM to 4:00 PM Eastern, about 503 stocks
+  each: about 196,000 rows. No published day held the feed when this was
+  written, so the sizes here come from a synthetic day of that shape.
+- **Times are UTC, as text.** `capture_time` is the minute the poll was due.
+  `quote_time` and `trade_time` are the times of the stock's last quote and last
+  trade, which the feed gives in epoch milliseconds. All three read
+  `YYYY-MM-DDTHH:MM:SS.mmmZ`, as `snapshots/` writes `market_quotes_captureTime`,
+  so they compare as text. 10:31 AM Eastern is `14:31` UTC while daylight time is
+  on and `15:31` the rest of the year.
+- **`ticker` is spelled as in `snapshots/`.** Upper case, as
+  `market_quotes_symbol` spells it, so the two join on it.
+- **Prices are as quoted, and never adjusted**, as in `snapshots/`: `bid`, `ask`,
+  `last`, `mark`, and the day's `open`, `high` and `low`. `prev_close` is the
+  previous day's close, and `net_change` and `net_percent_change` are measured
+  against it.
+- **`volume` is the day's running total**, as the feed gives it. What traded in a
+  minute is the difference from the minute before:
+  `volume - lag(volume) OVER (PARTITION BY ticker, day ORDER BY capture_time)`.
+- **A day is the feed's folder for that date.** The feed dates its folders in
+  UTC, and the trading day falls inside one UTC date all year.
+- **One row per stock per minute.** A stock that appears twice in a minute is
+  kept once, from the first file in name order, and the run logs how many it
+  dropped. A minute the feed has no file for has no rows. A file that cannot be
+  read is left out and logged, and the rest of the day is kept.
+- **A day with no `minute_quotes/` partition was not read:** no location was
+  set, the day's folder held no files, the folder could not be listed, or no
+  file in it could be read. The run's log says which. An empty partition means
+  the files were read and held no rows.
+- **The feed's raw JSON is not kept.** It is the bulk of each file and answers
+  nothing a lookup asks.
+- **One file a day, in row groups of about 1 MB.** Each row group holds a run of
+  about 14 tickers, and its min and max let a reader after one ticker skip the
+  rest. On the synthetic day that was 37 row groups and 8.4 MB, against 7.1 MB
+  in one row group a reader would have to read whole.
+- **It starts on the first day a run reads the feed.** Days before the feed
+  began are not filled in.
+
 ### `graph/`
 
 The non-snapshot subgraph as a [pyoxigraph](https://pyoxigraph.readthedocs.io/)
@@ -498,10 +550,10 @@ is here, so the sections above describe the tables alone.
   as a form type, a PPI item code, an 8-K item number or an XBRL concept name,
   is never a number either, but the `.pt` encodes it as a label: Form 4 and
   Form 144 are two forms, not two amounts.
-- **Splits and the company facts history.** `splits/` and `companyfacts/` are in
-  no `.pt`, and not in `graph/`. They are read from their feeds rather than
-  built from the triples, so a run's graph is the same whether or not it read
-  them.
+- **Splits, the company facts history and the minute quotes.** `splits/`,
+  `companyfacts/` and `minute_quotes/` are in no `.pt`, and not in `graph/`.
+  They are read from their feeds rather than built from the triples, so a run's
+  graph is the same whether or not it read them.
 - **Feature vectors stay in the `.pt`.** The dense node feature matrix is
   38.16 GB for the dominant type, of which 183 of 1024 dimensions vary per row.
 - **Retention.** A run, with its `.pt`, is kept 21 days; each day of tables is
