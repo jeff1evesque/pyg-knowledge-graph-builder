@@ -654,6 +654,9 @@ def save_job_manifest(
             # The same for the companyfacts/ table.
             "companyfacts_history_bucket": config.companyfacts_history_bucket,
             "companyfacts_history_prefix": config.companyfacts_history_prefix,
+            # And for the minute_quotes/ table.
+            "minute_quotes_bucket": config.minute_quotes_bucket,
+            "minute_quotes_prefix": config.minute_quotes_prefix,
             "pyg_config": config.pyg_config,
             "parquet_partitions": config.parquet_partitions,
         },
