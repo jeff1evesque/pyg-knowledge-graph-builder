@@ -208,6 +208,8 @@ def _submit(**overrides):
         "SPLITS_PREFIX": "",
         "COMPANYFACTS_HISTORY_BUCKET": "",
         "COMPANYFACTS_HISTORY_PREFIX": "",
+        "MINUTE_QUOTES_BUCKET": "",
+        "MINUTE_QUOTES_PREFIX": "",
         "S3_ARCHIVE_BUCKET": "",
         "DATASET": "",
         "SOURCE_DATA_DAY": "",
@@ -315,6 +317,43 @@ def test_the_history_is_read_from_the_variables_env_sh_sets():
         'COMPANYFACTS_HISTORY_PREFIX = os.environ.get("PYG_COMPANYFACTS_HISTORY_PREFIX", "")'
         in src
     )
+
+
+# --------------------------------------------------------------------------- #
+# The one-minute quote feed (#479)
+# --------------------------------------------------------------------------- #
+
+MINUTES = {"MINUTE_QUOTES_BUCKET": "b", "MINUTE_QUOTES_PREFIX": "minute-quotes"}
+
+
+@pytest.mark.parametrize("mode", ["full", "enrichment_only"])
+def test_the_seed_leg_carries_the_minute_feed(mode):
+    cmd = _submit(**MINUTES)(mode=mode, dry_run=True)["cmd"]
+    assert cmd[cmd.index("--minute_quotes_bucket") + 1] == "b"
+    assert cmd[cmd.index("--minute_quotes_prefix") + 1] == "minute-quotes"
+
+
+def test_a_minute_feed_at_the_buckets_root_passes_no_prefix():
+    cmd = _submit(MINUTE_QUOTES_BUCKET="b")(mode="full", dry_run=True)["cmd"]
+    assert "--minute_quotes_bucket" in cmd
+    assert "--minute_quotes_prefix" not in cmd
+
+
+@pytest.mark.parametrize("mode", ["pyg_only", "parse_only"])
+def test_legs_that_write_no_tables_pass_no_minute_feed(mode):
+    cmd = _submit(**MINUTES)(mode=mode, dry_run=True)["cmd"]
+    assert "--minute_quotes_bucket" not in cmd
+
+
+def test_an_unset_minute_feed_passes_no_flag():
+    cmd = _submit()(mode="full", dry_run=True)["cmd"]
+    assert "--minute_quotes_bucket" not in cmd
+
+
+def test_the_minute_feed_is_read_from_the_variables_env_sh_sets():
+    src = _cell("cell-02")
+    assert 'MINUTE_QUOTES_BUCKET = os.environ.get("PYG_MINUTE_QUOTES_BUCKET", "")' in src
+    assert 'MINUTE_QUOTES_PREFIX = os.environ.get("PYG_MINUTE_QUOTES_PREFIX", "")' in src
 
 
 # --------------------------------------------------------------------------- #
