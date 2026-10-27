@@ -50,6 +50,8 @@ def _config(work_dir: str, mode: str = "enrichment_only") -> SimpleNamespace:
         stock_splits_prefix="",
         companyfacts_history_bucket="",
         companyfacts_history_prefix="",
+        minute_quotes_bucket="",
+        minute_quotes_prefix="",
         pyg_config={},
         parquet_partitions=2,
         archive_to_s3=False,
@@ -185,6 +187,20 @@ def test_manifest_records_where_the_company_facts_history_was_read_from(
     assert payload["config"]["companyfacts_history_prefix"] == (
         "raw/source=sec/feed=companyfacts"
     )
+
+
+def test_manifest_records_where_the_minute_quotes_were_read_from(spark, tmp_path):
+    """As for the splits: the location only, and query_tables says whether
+    minute_quotes/ was written for the day."""
+    work = tmp_path / "minute_quotes"
+    config = _config(str(work), mode="full")
+    config.minute_quotes_bucket = "b"
+    config.minute_quotes_prefix = "minute-quotes"
+    save_job_manifest(spark, None, config, {"mode": "full"}, 0.5)
+
+    payload = json.loads(open(_find_manifest(work), "rb").read())
+    assert payload["config"]["minute_quotes_bucket"] == "b"
+    assert payload["config"]["minute_quotes_prefix"] == "minute-quotes"
 
 
 @pytest.mark.parametrize("mode", ["pyg_only", "parse_only"])
