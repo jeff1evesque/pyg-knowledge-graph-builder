@@ -33,7 +33,7 @@ from datetime import date, datetime, timezone
 import pytest
 
 from companyfacts_feed import fact, history_object
-from minute_quote_feed import folder_client, minute_file, quote
+from minute_quote_feed import file_name, folder_client, minute_file, quote
 from spark_jobs.enrichment.temporal_unifier import (
     COVERS_DAY_PRED,
     OBSERVED_IN_PERIOD_PRED,
@@ -1252,8 +1252,9 @@ MINUTE_QUOTES_DTYPES = [
 ]
 
 
-def _minute(hh_mm):
-    return f"2026-09-12T{hh_mm}:00Z"
+def _minute_name(hh_mm):
+    """The name of DAY's minute feed file for ``hh_mm``, UTC."""
+    return file_name(f"2026-09-12T{hh_mm}:00Z")
 
 
 def _minute_paths(spark, tmp_path, files, bucket="b"):
@@ -1277,12 +1278,8 @@ def test_a_days_minute_quotes_are_one_row_per_stock_per_minute_sorted(
     spark, tmp_path,
 ):
     paths, config = _minute_paths(spark, tmp_path, {
-        "13-32.parquet": minute_file([
-            quote("MSFT", _minute("13:32")), quote("AAPL", _minute("13:32")),
-        ]),
-        "13-31.parquet": minute_file([
-            quote("MSFT", _minute("13:31")), quote("AAPL", _minute("13:31")),
-        ]),
+        _minute_name("13:32"): minute_file([quote("MSFT"), quote("AAPL")]),
+        _minute_name("13:31"): minute_file([quote("MSFT"), quote("AAPL")]),
     })
 
     assert paths["minute_quotes"] == table_path(
@@ -1317,9 +1314,7 @@ def test_minute_quotes_are_written_in_row_groups_a_ticker_read_can_skip(
     monkeypatch.setattr(tables, "MINUTE_QUOTES_ROW_GROUP_BYTES", 4096)
     tickers = [f"T{n:02d}" for n in range(40)]
     paths, _ = _minute_paths(spark, tmp_path, {
-        f"13-{minute}.parquet": minute_file([
-            quote(ticker, _minute(f"13:{minute}")) for ticker in tickers
-        ])
+        _minute_name(f"13:{minute}"): minute_file([quote(ticker) for ticker in tickers])
         for minute in range(31, 51)
     })
 
@@ -1345,8 +1340,8 @@ def test_no_minute_quotes_partition_when_the_feed_was_not_read(
 ):
     files = {
         "no files": {},
-        "unreadable": {"13-31.parquet": b"not parquet"},
-        "no bucket": {"13-31.parquet": minute_file([quote()])},
+        "unreadable": {_minute_name("13:31"): b"not parquet"},
+        "no bucket": {_minute_name("13:31"): minute_file([quote()])},
     }[case]
     paths, config = _minute_paths(
         spark, tmp_path, files, bucket="" if case == "no bucket" else "b"
@@ -1362,7 +1357,7 @@ def test_no_minute_quotes_partition_when_the_feed_was_not_read(
 def test_reading_the_minute_feed_changes_no_other_table(spark, tmp_path):
     """No node, edge or triple comes from the feed, so every other table and
     the store are the same with it as without it."""
-    files = {"13-31.parquet": minute_file([quote(), quote("MSFT")])}
+    files = {_minute_name("13:31"): minute_file([quote(), quote("MSFT")])}
     with_feed, _ = _minute_paths(spark, tmp_path / "with", files)
     without, _ = _minute_paths(spark, tmp_path / "without", files, bucket="")
 
