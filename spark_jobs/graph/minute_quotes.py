@@ -9,6 +9,12 @@ folder, ``<prefix>/year=YYYY/month=MM/day=DD/``: 391 files on a full day, about
 503 rows each. It is read on the driver, as the stock split feed is, and never
 becomes triples, so it changes nothing in the graph or the other tables.
 
+A file is named for the minute its poll was due, in UTC with dashes for the
+colons: ``2026-10-28T13-31-00Z.snappy.parquet``. No column holds that minute.
+The feed's capture_timestamp is when each call was answered, and a late or
+retried call is answered in the next minute, so a row's capture_time is its
+file's name.
+
 The folders are dated in UTC. The trading day, 9:30 to 16:00 Eastern, falls
 inside one UTC date all year, so a day's folder holds the whole trading day.
 
@@ -17,6 +23,7 @@ nothing a lookup asks.
 """
 import io
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -34,7 +41,19 @@ COLUMNS = (
     "prev_close", "volume", "net_change", "net_percent_change",
 )
 # The feed's name for a column, where it is not the column's own.
-FEED_NAMES: Dict[str, str] = {}
+FEED_NAMES: Dict[str, str] = {
+    "ticker": "symbol",
+    "bid": "bid_price",
+    "ask": "ask_price",
+    "last": "last_price",
+    "open": "open_price",
+    "high": "high_price",
+    "low": "low_price",
+    "prev_close": "close_price",
+    "volume": "total_volume",
+}
+# The columns read from each file: all but capture_time, the file's name.
+FILE_COLUMNS = tuple(column for column in COLUMNS if column != "capture_time")
 # Read as numbers: prices and changes as doubles, sizes and the day's running
 # volume as whole numbers.
 _DOUBLES = (
@@ -46,6 +65,8 @@ _LONGS = ("bid_size", "ask_size", "volume")
 _EPOCH_MS = ("quote_time", "trade_time")
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+# The minute at the start of a file's name.
+_FILE_MINUTE = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})Z\.")
 
 
 def day_folder(prefix: str, day: str) -> str:
@@ -56,21 +77,22 @@ def day_folder(prefix: str, day: str) -> str:
     return f"{prefix}/{name}" if prefix else name
 
 
-def iso_time(value) -> Optional[str]:
-    """A time as ``YYYY-MM-DDTHH:MM:SS.mmmZ`` in UTC, the way snapshots/ writes
-    its capture times, or None when it is not one. A time with no zone is
-    taken as UTC."""
-    try:
-        if isinstance(value, str):
-            value = datetime.fromisoformat(value.strip())
-        if not isinstance(value, datetime):
-            return None
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        value = value.astimezone(timezone.utc)
-    except (ValueError, OverflowError):
-        return None
+def iso_time(value: datetime) -> str:
+    """A UTC time as ``YYYY-MM-DDTHH:MM:SS.mmmZ``, the way snapshots/ writes its
+    capture times."""
     return f"{value:%Y-%m-%dT%H:%M:%S}.{value.microsecond // 1000:03d}Z"
+
+
+def file_minute(key: str) -> Optional[str]:
+    """The minute a file is named for, as ``iso_time`` writes a time, or None
+    when its name is not a minute."""
+    match = _FILE_MINUTE.match(key.rsplit("/", 1)[-1])
+    if not match:
+        return None
+    try:
+        return iso_time(datetime.strptime(match.group(1), "%Y-%m-%dT%H-%M-%S"))
+    except ValueError:
+        return None
 
 
 def epoch_ms_time(value: Optional[int]) -> Optional[str]:
@@ -110,8 +132,8 @@ def read_minute_quotes(
 
     None when the day was not read: no location set, no files in the day's
     folder, a folder that could not be listed, or no file that could be read.
-    Each None is logged. A file that cannot be read is left out and logged, and
-    the rest of the day is kept.
+    Each None is logged. A file that cannot be read, or is not named for a
+    minute, is left out and logged, and the rest of the day is kept.
     """
     # Imported here, not at the top, so bin/publish_run.py can import this
     # module on the system python with the standard library alone.
@@ -148,8 +170,8 @@ def read_minute_quotes(
         )
         return None
 
-    # The type each column is read as. capture_time keeps the feed's, a string
-    # or a timestamp, and iso_time reads either.
+    # The type each column is read as. The feed writes its text as large
+    # strings.
     types = {
         "ticker": pa.string(),
         **{column: pa.float64() for column in _DOUBLES},
@@ -159,22 +181,24 @@ def read_minute_quotes(
     unread: List[str] = []
     skipped = duplicates = 0
     for key in keys:
+        minute = file_minute(key)
+        if minute is None:
+            unread.append(f"{key}: not named for a minute")
+            continue
         # Everything about one file is inside the try, so a file upstream wrote
         # in another shape costs that minute and never the run.
         try:
             body = client.get_object(Bucket=bucket, Key=key)["Body"].read()
             read = pq.read_table(
                 io.BytesIO(body),
-                columns=[FEED_NAMES.get(column, column) for column in COLUMNS],
+                columns=[FEED_NAMES.get(column, column) for column in FILE_COLUMNS],
             )
             table = pa.table(
                 [
                     read[FEED_NAMES.get(column, column)].cast(types[column])
-                    if column in types
-                    else read[FEED_NAMES.get(column, column)]
-                    for column in COLUMNS
+                    for column in FILE_COLUMNS
                 ],
-                names=list(COLUMNS),
+                names=list(FILE_COLUMNS),
             )
             records = table.to_pylist()
         except (ClientError, BotoCoreError, pa.ArrowException, ValueError,
@@ -184,8 +208,7 @@ def read_minute_quotes(
 
         for record in records:
             ticker = (record["ticker"] or "").strip().upper()
-            minute = iso_time(record["capture_time"])
-            if not ticker or minute is None:
+            if not ticker:
                 skipped += 1
                 continue
             if (ticker, minute) in quotes:
@@ -206,8 +229,8 @@ def read_minute_quotes(
         return None
     if skipped:
         logger.warning(
-            f"{skipped} minute quote rows under {where} had no ticker or no "
-            f"capture_time, and were skipped"
+            f"{skipped} minute quote rows under {where} had no ticker, and "
+            f"were skipped"
         )
     if duplicates:
         logger.warning(
