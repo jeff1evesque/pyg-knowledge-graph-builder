@@ -407,16 +407,17 @@ last, mark, open, high, low, prev_close, volume, net_change,
 net_percent_change)`, one row per stock per minute of the trading day, sorted by
 ticker, then minute. It is read from the upstream minute feed, which polls the
 index constituents' quotes once a minute and writes each poll as a Parquet
-file. It is not built from the triples, so no row of it is in `nodes/`,
-`edges/`, `graph/` or the `.pt`.
+file named for its minute. It is not built from the triples, so no row of it is
+in `nodes/`, `edges/`, `graph/` or the `.pt`.
 [Questions the tables answer](questions.md#one-stock-minute-by-minute) has the
 queries.
 
 - **A full day is 391 minutes**, 9:30 AM to 4:00 PM Eastern, about 503 stocks
-  each: about 196,000 rows. No published day held the feed when this was
-  written, so the sizes here come from a synthetic day of that shape.
-- **Times are UTC, as text.** `capture_time` is the minute the poll was due.
-  `quote_time` and `trade_time` are the times of the stock's last quote and last
+  each: about 196,000 rows. An early-close day ends with the 12:59 PM minute,
+  210 minutes. No published day held the feed when this was written, so the
+  sizes here come from a synthetic day of that shape.
+- **Times are UTC, as text.** `capture_time` is the minute the poll was due,
+  taken from the name of that minute's file. `quote_time` and `trade_time` are the times of the stock's last quote and last
   trade, which the feed gives in epoch milliseconds. All three read
   `YYYY-MM-DDTHH:MM:SS.mmmZ`, as `snapshots/` writes `market_quotes_captureTime`,
   so they compare as text. 10:31 AM Eastern is `14:31` UTC while daylight time is
@@ -433,9 +434,11 @@ queries.
 - **A day is the feed's folder for that date.** The feed dates its folders in
   UTC, and the trading day falls inside one UTC date all year.
 - **One row per stock per minute.** A stock that appears twice in a minute is
-  kept once, from the first file in name order, and the run logs how many it
-  dropped. A minute the feed has no file for has no rows. A file that cannot be
-  read is left out and logged, and the rest of the day is kept.
+  kept once, the first time it is read, and the run logs how many it dropped. A
+  minute whose poll failed has no file and no rows, and a minute whose poll
+  partly failed has only some of the stocks. A file that cannot be read, or is
+  not named for a minute, is left out and logged, and the rest of the day is
+  kept.
 - **A day with no `minute_quotes/` partition was not read:** no location was
   set, the day's folder held no files, the folder could not be listed, or no
   file in it could be read. The run's log says which. An empty partition means
