@@ -77,6 +77,8 @@ When config is empty, sensible defaults are inferred from the data.
 | `--stock_splits_prefix` | No | `""` | Where the feed's `year=` folders sit in `--stock_splits_bucket`. Empty is the bucket's root |
 | `--companyfacts_history_bucket` | No | `""` | S3 bucket holding the SEC company facts history. The numbers filed on the run's day become the [`companyfacts/`](../reference/tables.md#companyfacts) query table. Unset, there is no `companyfacts/` table and nothing else changes; see [The company facts history](#the-company-facts-history) |
 | `--companyfacts_history_prefix` | No | `""` | Where the history's `YYYY.snappy.parquet` files sit in `--companyfacts_history_bucket`, such as `raw/source=sec/feed=companyfacts`. Empty is the bucket's root |
+| `--minute_quotes_bucket` | No | `""` | S3 bucket holding the one-minute quote feed. The day's files become the [`minute_quotes/`](../reference/tables.md#minute_quotes) query table. Unset, there is no `minute_quotes/` table and nothing else changes; see [The minute quote feed](#the-minute-quote-feed) |
+| `--minute_quotes_prefix` | No | `""` | Where the feed's `year=` folders sit in `--minute_quotes_bucket`. Empty is the bucket's root |
 
 Metadata files are always written when mode is `full` or `pyg_only`. Mode `enrichment_only` does not produce metadata files (no PyG graph is built in that mode).
 
@@ -179,6 +181,45 @@ the `.pt` as usual:
 The notebook passes the two flags to the seed leg from
 `PYG_COMPANYFACTS_HISTORY_BUCKET` and `PYG_COMPANYFACTS_HISTORY_PREFIX`, and
 `bin/daily_run.sh` does not list the history with the sources.
+
+### The minute quote feed
+
+The one-minute quote feed is not a source path either. Upstream polls the index
+constituents' quotes once a minute through the trading day and writes each poll
+as one Parquet file in the day's folder, 391 on a full day, named for the minute
+the poll was due in UTC, with dashes for the colons. A run reads every `.parquet`
+file directly in its day's folder on the driver:
+
+```
+<prefix>/year=YYYY/month=MM/day=DD/YYYY-MM-DDTHH-MM-SSZ.snappy.parquet
+```
+
+The folders are dated in UTC, and the trading day falls inside one UTC date all
+year, so the run reads the folder of the day it builds. It writes the rows to
+[`minute_quotes/`](../reference/tables.md#minute_quotes), one row per stock per
+minute, with each row's minute taken from its file's name, the feed's
+epoch-millisecond times turned into UTC times, and its raw JSON left out.
+
+Missing minute quotes never stop a run. In each of these cases the run logs why,
+writes no `minute_quotes/` partition for the day, and builds every other table
+and the `.pt` as usual:
+
+| Case | Logged as |
+|---|---|
+| no `--minute_quotes_bucket` | INFO |
+| no files in the day's folder | WARNING, naming the folder |
+| a folder that cannot be listed | WARNING, with the error |
+| no file in the folder that can be read | WARNING, naming the first file and its error |
+
+A file that cannot be read, lacks a column the table keeps, or is not named for a
+minute costs only its own rows: the run leaves it out, logs how many it left out
+and the first one's error, and keeps the rest of the day. A stock that appears
+twice in one minute is kept once, the first time it is read, and the run logs
+how many it dropped.
+
+The notebook passes the two flags to the seed leg from `PYG_MINUTE_QUOTES_BUCKET`
+and `PYG_MINUTE_QUOTES_PREFIX`, and `bin/daily_run.sh` does not list the feed
+with the sources, so a day is never skipped for want of it.
 
 Jobs are launched with `bin/submit_spark_job.sh`, which packages the code
 and submits to the Spark standalone master with the RAPIDS Accelerator

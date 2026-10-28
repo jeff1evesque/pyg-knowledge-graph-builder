@@ -306,6 +306,17 @@ def test_the_company_facts_historys_location_reaches_the_config():
     ) == ("", "")
 
 
+def test_the_minute_feeds_location_reaches_the_config():
+    c = _config(minute_quotes_bucket="b", minute_quotes_prefix="minute-quotes")
+    assert (c.minute_quotes_bucket, c.minute_quotes_prefix) == (
+        "b", "minute-quotes",
+    )
+
+    # Unset is no minute_quotes table, not a failure.
+    unset = _config()
+    assert (unset.minute_quotes_bucket, unset.minute_quotes_prefix) == ("", "")
+
+
 # ======================================================================
 # --source_data_day — stating the day the paths cannot
 # ======================================================================

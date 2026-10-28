@@ -301,6 +301,11 @@ class JobConfig:
             args.get("companyfacts_history_prefix", "") or ""
         )
 
+        # The one-minute quote feed, read on the driver into the minute_quotes/
+        # query table the same way. No bucket, no table.
+        self.minute_quotes_bucket = args.get("minute_quotes_bucket", "") or ""
+        self.minute_quotes_prefix = args.get("minute_quotes_prefix", "") or ""
+
         # Source path(s)/URI(s): a single value or a comma-separated list.
         # Each entry is a local directory or an s3a:// URI, and belongs to one
         # registered source. Whitespace around each entry is stripped.
@@ -767,6 +772,20 @@ def parse_args() -> JobConfig:
         default="",
         help="Where the history's year files sit in "
              "--companyfacts_history_bucket. Empty is the bucket's root",
+    )
+    parser.add_argument(
+        "--minute_quotes_bucket",
+        default="",
+        help="Bucket holding the one-minute quote feed, one Parquet file per "
+             "minute in <prefix>/year=YYYY/month=MM/day=DD/. The day's files "
+             "become the minute_quotes/ query table. Unset, there is no "
+             "minute_quotes table",
+    )
+    parser.add_argument(
+        "--minute_quotes_prefix",
+        default="",
+        help="Where the feed's year= folders sit in --minute_quotes_bucket. "
+             "Empty is the bucket's root",
     )
 
     parsed = parser.parse_args()

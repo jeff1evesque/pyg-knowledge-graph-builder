@@ -204,7 +204,7 @@ class Run:
 
     def add_feed_table(self, table: str, part: bytes = b"rows", day: str = DAY) -> set:
         """A partition of a table read from a feed, as the job writes it when it
-        read the feed: splits/ or companyfacts/.
+        read the feed: splits/, companyfacts/ or minute_quotes/.
 
         A day the feed listed nothing still gets one, with a part file holding
         only the schema.
@@ -578,7 +578,8 @@ def test_the_day_marker_names_the_day_the_run_and_when_it_was_published(run):
 # Every source the run read, and the split feed when the day has a splits/
 # partition. The feed never becomes a node, so a reader that works a day's
 # sources out from its node types never sees it (#432). The same for the
-# company facts history and companyfacts/ (#437).
+# company facts history and companyfacts/ (#437), and for the minute feed and
+# minute_quotes/ (#479).
 # --------------------------------------------------------------------------- #
 
 def _marker(run: Run) -> dict:
@@ -589,8 +590,9 @@ def test_the_day_marker_lists_the_runs_sources_sorted(run):
     run.set_recorded_dataset("", ["z", "a"])
     run.add_tables()
     run.add_splits()
+    run.add_feed_table("minute_quotes")
     assert run.publish("--upload").returncode == 0
-    assert _marker(run)["sources"] == ["a", "stock-split", "z"]
+    assert _marker(run)["sources"] == ["a", "minute-quotes", "stock-split", "z"]
 
 
 def test_the_day_marker_lists_the_companyfacts_feed_the_run_read(run):
@@ -637,6 +639,23 @@ def test_the_companyfacts_history_is_listed_when_the_day_has_its_partition(
     )
 
 
+@pytest.mark.parametrize("part,listed", [
+    (None, False),
+    (b"the schema", True),
+    (b"the schema and rows", True),
+], ids=["no partition", "empty partition", "partition with rows"])
+def test_the_minute_feed_is_listed_when_the_day_has_its_partition(run, part, listed):
+    """A day with no files in the feed's folder gets no partition, and its
+    marker does not name the feed."""
+    run.add_tables()
+    if part is not None:
+        run.add_feed_table("minute_quotes", part)
+    assert run.publish("--upload").returncode == 0
+    assert _marker(run)["sources"] == (
+        ["a", "b", "minute-quotes"] if listed else ["a", "b"]
+    )
+
+
 def test_a_run_that_read_both_companyfacts_feeds_lists_the_name_once(run):
     run.set_recorded_dataset("", ["sec", "sec-companyfacts"])
     run.add_tables()
@@ -646,13 +665,17 @@ def test_a_run_that_read_both_companyfacts_feeds_lists_the_name_once(run):
 
 
 def test_the_day_marker_keeps_its_other_fields(run):
-    expected = run.add_tables() | run.add_splits()
+    expected = (
+        run.add_tables() | run.add_splits() | run.add_feed_table("minute_quotes")
+    )
     assert run.publish("--upload").returncode == 0
     marker = _marker(run)
     assert set(marker) == {"day", "run_id", "tables_started", "tables_finished",
                            "published", "sources", "tables", "files"}
     assert (marker["day"], marker["run_id"]) == (DAY, RUN_ID)
-    assert marker["tables"] == ["edges", "facts", "graph", "nodes", "splits"]
+    assert marker["tables"] == [
+        "edges", "facts", "graph", "minute_quotes", "nodes", "splits",
+    ]
     assert marker["files"] == len(expected)
 
 
@@ -747,15 +770,18 @@ def test_two_legs_that_recorded_times_give_the_later_finish(run):
 
 def test_the_publisher_runs_on_a_python_with_no_packages(run):
     """The nightly runs it on the system python, which has no pyarrow. It
-    imports the feeds' names from spark_jobs/graph/splits.py and
-    spark_jobs/graph/companyfacts.py, so both have to load with the standard
-    library alone."""
+    imports the feeds' names from spark_jobs/graph/splits.py,
+    spark_jobs/graph/companyfacts.py and spark_jobs/graph/minute_quotes.py, so
+    all three have to load with the standard library alone."""
     run.add_tables()
     run.add_splits()
     run.add_feed_table("companyfacts")
+    run.add_feed_table("minute_quotes")
     r = run.publish("--upload", python_flags=["-S"])
     assert r.returncode == 0, r.stdout + r.stderr
-    assert _marker(run)["sources"] == ["a", "b", "sec-companyfacts", "stock-split"]
+    assert _marker(run)["sources"] == [
+        "a", "b", "minute-quotes", "sec-companyfacts", "stock-split",
+    ]
 
 
 def test_index_json_names_the_tables_and_where_they_went(run):

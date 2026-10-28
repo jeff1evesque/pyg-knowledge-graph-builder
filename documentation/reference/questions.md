@@ -18,7 +18,7 @@ A run publishes two different things. This page uses only the first.
 
 | | Query tables | PyG graph (`.pt`) |
 |---|---|---|
-| What it is | Eight Parquet tables and a triple store, `graph/`: the nodes, the edges between them, their values, the day's stock splits, and the SEC numbers filed that day | One PyTorch Geometric `HeteroData` file: a matrix of numbers per node type, and each edge as a pair of row numbers |
+| What it is | Nine Parquet tables and a triple store, `graph/`: the nodes, the edges between them, their values, the day's stock splits, the SEC numbers filed that day, and the index constituents' quotes for every minute of the trading day | One PyTorch Geometric `HeteroData` file: a matrix of numbers per node type, and each edge as a pair of row numbers |
 | What it is for | Looking things up and answering questions: SQL, SPARQL, or retrieval for an LLM | Training and running a graph neural network |
 | Names, text and dates | Yes. Every row carries a URI, and `facts/`, `entities/` and `snapshots/` carry the values | No. A row is a position, and `node_index/` says which entity it is |
 | Where | `<PYG_TABLES_ROOT>/<dataset>/<table>/day=YYYY-MM-DD/` | In the run's folder, as `<variant>/hetero_data_<variant>.pt` |
@@ -54,6 +54,7 @@ What one day's tables hold depends on the source:
 | SEC filings | the filings dated that day |
 | SEC company facts | the numbers filed that day, each once, in `companyfacts/` |
 | Market | that day's 19 snapshots, every 20 minutes from 9:40 AM to 3:40 PM ET |
+| Minute quotes | that day's quotes for the index constituents, every minute from 9:30 AM to 4:00 PM ET, in `minute_quotes/` |
 | NOAA | that day's weather alerts |
 | BLS | every series with its own history; most run from January 2026 to July or August |
 
@@ -431,7 +432,9 @@ What that makes askable on one day:
 What the clock does not buy:
 
 - **Anything finer than the snapshots.** They are 20 minutes apart, so two
-  filings inside one interval cannot be told apart.
+  filings inside one interval cannot be told apart. Stocks have a quote every
+  minute in `minute_quotes/`; see
+  [The minutes after a release](#the-minutes-after-a-release).
 - **Cause.** "The chain moved in the next snapshot" fits the filing moving it
   and both reacting to something else equally well.
 - **BLS.** BLS carries no clock time, so this is a filings-and-market question.
@@ -562,6 +565,180 @@ index. A split on a ticker `snapshots/` does not carry joins to nothing.
 day, so adjusting a price takes every `splits/` partition from the price's day
 to the end of the window. A day with no partition was not read, so an adjusted
 series cannot vouch for it.
+
+### One stock, minute by minute
+
+*What did AAPL's bid, ask and price do from 10:00 to 10:30 AM, and how much
+traded each minute?*
+
+Reads `minute_quotes/`.
+
+No published day held minute quotes when this question and the four after it
+were written, so they give no counts from the tables. Their queries were run
+in DuckDB against a synthetic day of the table's shape. `capture_time` is UTC,
+so the view adds `et`, the same time in Eastern, which all five use:
+
+```sql
+CREATE VIEW minutes AS
+SELECT *, timezone('America/New_York', capture_time::TIMESTAMPTZ) AS et
+FROM   read_parquet('<root>/minute_quotes/*/*.parquet', hive_partitioning = true);
+
+SELECT strftime(et, '%H:%M') AS minute, bid, ask, last,
+       volume - lag(volume) OVER (ORDER BY et) AS traded
+FROM   minutes
+WHERE  day = DATE '2026-10-28' AND ticker = 'AAPL'
+QUALIFY et::TIME BETWEEN TIME '10:00' AND TIME '10:30'
+ORDER  BY et;
+```
+
+`volume` is the day's running total, so what traded in a minute is the
+difference from the minute before. `QUALIFY` picks the 31 minutes after that
+difference is taken, so 10:00 gets its own from 9:59.
+
+**Days needed:** one.
+
+### Every stock at one minute
+
+*What were every stock's bid and ask at 10:31 AM?*
+
+Reads `minute_quotes/`, through the `minutes` view above.
+
+```sql
+SELECT ticker, bid, ask, last, mark
+FROM   minutes
+WHERE  day = DATE '2026-10-28' AND strftime(et, '%H:%M') = '10:31'
+ORDER  BY ticker;
+```
+
+A full day has a row for each of about 503 stocks at each minute. A stock the
+minute's poll did not return has no row for it.
+
+**Days needed:** one.
+
+### When a stock's spread was widest
+
+*At which minutes was AAPL's bid-ask spread widest for its price?*
+
+Reads `minute_quotes/`, through the `minutes` view.
+
+```sql
+SELECT strftime(et, '%H:%M') AS minute, bid, ask,
+       round((ask - bid) / ((ask + bid) / 2) * 10000, 1) AS spread_bp
+FROM   minutes
+WHERE  day = DATE '2026-10-28' AND ticker = 'AAPL' AND bid > 0 AND ask >= bid
+ORDER  BY spread_bp DESC, minute
+LIMIT  5;
+```
+
+The spread is in basis points of the midpoint, so stocks at different prices
+compare. For the widest spreads among every stock at one minute, such as
+3:55 PM, drop the ticker and keep the minute, as in the question before. A
+quote with no bid, or with its ask below its bid, is left out.
+
+**Days needed:** one.
+
+### The stocks most up five minutes after the open
+
+*Which stocks rose most from their opening price to 9:35 AM?*
+
+Reads `minute_quotes/`, through the `minutes` view.
+
+```sql
+SELECT ticker, open, last, round((last / open - 1) * 100, 2) AS pct_since_open
+FROM   minutes
+WHERE  day = DATE '2026-10-28' AND strftime(et, '%H:%M') = '09:35' AND open > 0
+ORDER  BY pct_since_open DESC
+LIMIT  10;
+```
+
+`open` is the day's opening price, as the 9:35 row carries it. The 9:30 row is
+the poll at the opening bell, which can come before a stock's first trade, so
+it is not the start. `net_percent_change` measures from the previous close
+instead, the overnight move included.
+
+**Days needed:** one.
+
+### The minutes after a release
+
+*How did each stock move in the 15 minutes after a 10:00 AM release, and what
+did a company's quote do after one of its filings?*
+
+Reads `minute_quotes/`, through the `minutes` view, and for a filing also
+`facts/`, `edges/` and `nodes/`.
+
+For a release at a known time, such as an economic report at 10:00, compare
+each stock's midpoint the minute before it with the minute you want:
+
+```sql
+SELECT ticker,
+       any_value(mark) FILTER (strftime(et, '%H:%M') = '09:59') AS at_0959,
+       any_value(mark) FILTER (strftime(et, '%H:%M') = '10:15') AS at_1015,
+       round((at_1015 / at_0959 - 1) * 100, 2) AS pct
+FROM   minutes
+WHERE  day = DATE '2026-10-28'
+GROUP  BY ticker
+ORDER  BY abs(pct) DESC
+LIMIT  10;
+```
+
+A filing carries its own release time. `filings_hasAcceptanceDateTime` in
+`facts/` is when EDGAR accepted it, to the second, and the `Issuer` it points at
+carries its ticker as `filings_hasIssuerTradingSymbol`. This lists a quoted
+company's minutes from the one before each of its filings to 15 after:
+
+```sql
+WITH accepted AS (
+  SELECT uri AS filing, value::TIMESTAMPTZ AS accepted
+  FROM   facts
+  WHERE  day = DATE '2026-10-28' AND predicate_name = 'filings_hasAcceptanceDateTime'
+), form AS (
+  SELECT uri AS filing, value AS form
+  FROM   facts
+  WHERE  day = DATE '2026-10-28' AND predicate_name = 'filings_hasSubmissionType'
+), ticker AS (
+  SELECT f.uri AS filing, s.value AS ticker
+  FROM   edges e
+  JOIN   nodes f ON f.day = e.day AND f.node_type = 'filings_SECFiling' AND f.node_id = e.src_id
+  JOIN   nodes i ON i.day = e.day AND i.node_type = 'filings_Issuer'    AND i.node_id = e.dst_id
+  JOIN   facts s ON s.day = e.day AND s.uri = i.uri
+              AND s.predicate_name = 'filings_hasIssuerTradingSymbol'
+  WHERE  e.day = DATE '2026-10-28' AND e.relation = 'filings_hasIssuer'
+)
+SELECT t.ticker, f.form,
+       strftime(timezone('America/New_York', a.accepted), '%H:%M:%S') AS accepted_et,
+       strftime(m.et, '%H:%M') AS minute, m.mark
+FROM   accepted a
+JOIN   form f USING (filing)
+JOIN   ticker t USING (filing)
+JOIN   minutes m ON m.day = DATE '2026-10-28' AND m.ticker = t.ticker
+             AND m.capture_time::TIMESTAMPTZ BETWEEN a.accepted - INTERVAL 1 MINUTE
+                                                 AND a.accepted + INTERVAL 15 MINUTE
+WHERE  f.form NOT IN ('424B2', 'FWP')
+ORDER  BY t.ticker, a.accepted, m.et;
+```
+
+Name the node types in the joins to `nodes/`, as above. Joined on
+`e.src_type` and `e.dst_type` instead, DuckDB cannot skip the day's quote
+nodes: on 2026-10-26 that version ran for minutes and used 98 GB of memory
+before it was stopped. This one took under a second on a local copy of the
+day.
+
+Most filings in market hours are routine. On 2026-10-26, 218 filings on
+companies in the index were accepted between 9:30 AM and 4:00 PM Eastern: 182
+424B2 and 11 FWP, prospectuses for notes a bank sells, 24 insider forms 3, 4 and
+144, and one PX14A6G. None was an 8-K. The query leaves the prospectuses out.
+
+What the minutes do not buy:
+
+- **Anything finer than a minute.** For a filing accepted at 11:03:11, the
+  11:03 row was polled before it and the 11:04 row is the first after.
+- **A share class's filings.** Filings spell a share class with a hyphen, such
+  as `UHAL-B`, and the quotes with a slash, as in `BRK/B`, so those filings
+  join to no minutes.
+- **Cause.** A move after a filing fits the filing moving it and both reacting
+  to something else equally well.
+
+**Days needed:** one per release day.
 
 ## What the tables do not answer
 

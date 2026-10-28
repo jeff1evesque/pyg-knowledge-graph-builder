@@ -6,7 +6,7 @@ about 95 GB, none of it filterable by ticker, by date or by meaning, and the
 graph's structure only recoverable by unpickling a 42 GB blob. These tables are
 the same data in shapes something can query, at roughly 2.5% of the size.
 
-Eight tables and a triple store:
+Nine tables and a triple store:
 
     nodes/        (node_type, node_id, uri)
     edges/        (src_type, src_id, relation, dst_type, dst_id)
@@ -17,6 +17,8 @@ Eight tables and a triple store:
     splits/       the day's stock splits, read from the split feed (splits.py)
     companyfacts/ the SEC numbers filed that day, read from the company facts
                   history (companyfacts.py)
+    minute_quotes/ the constituents' quotes, one row per stock per minute,
+                  read from the minute feed (minute_quotes.py)
     graph/        the non-snapshot subgraph as a triple store (graph_store.py)
 
 Three things about them are deliberate and easy to get wrong:
@@ -75,6 +77,7 @@ from pyspark.sql import functions as F
 from spark_jobs.graph.companyfacts import read_companyfacts
 from spark_jobs.graph.config import JobConfig
 from spark_jobs.graph.graph_store import write_graph_store
+from spark_jobs.graph.minute_quotes import read_minute_quotes
 from spark_jobs.graph.splits import read_splits
 from spark_jobs.pyg_builder.naming import (
     ALLOW_UNREGISTERED_NAMESPACES,
@@ -168,7 +171,15 @@ def table_path(root: str, table: str, day: str) -> str:
 _GPU_PARQUET_WRITE = "spark.rapids.sql.format.parquet.write.enabled"
 
 
-def _write(df: DataFrame, root: str, table: str, day: str) -> str:
+def _write(
+    df: DataFrame,
+    root: str,
+    table: str,
+    day: str,
+    options: Optional[Dict[str, str]] = None,
+) -> str:
+    """Write one day of one table. ``options`` are added to the Parquet
+    writer's."""
     path = table_path(root, table, day)
     conf = df.sparkSession.conf
     previous = conf.get(_GPU_PARQUET_WRITE, None)
@@ -179,6 +190,7 @@ def _write(df: DataFrame, root: str, table: str, day: str) -> str:
             .write
             .mode("overwrite")
             .option("compression", COMPRESSION)
+            .options(**(options or {}))
             .parquet(path)
         )
     finally:
@@ -868,6 +880,39 @@ def write_companyfacts(
     return _write(frame, root, "companyfacts", day)
 
 
+# In minute_quotes.COLUMNS order, which read_minute_quotes' rows follow.
+MINUTE_QUOTES_SCHEMA = (
+    "ticker string, capture_time string, quote_time string, "
+    "trade_time string, bid double, ask double, bid_size long, ask_size long, "
+    "last double, mark double, open double, high double, low double, "
+    "prev_close double, volume long, net_change double, "
+    "net_percent_change double"
+)
+
+# The Parquet writer's row group size for minute_quotes/. A full day is one
+# file, and in one row group a reader after one ticker reads all of it. At 1 MB
+# a synthetic full day had 37 row groups of about 14 stocks each, and took
+# 8.4 MB against 7.1 MB in one.
+MINUTE_QUOTES_ROW_GROUP_BYTES = 1024 * 1024
+
+
+def write_minute_quotes(
+    spark: SparkSession, rows: List[Tuple], root: str, day: str
+) -> str:
+    """The constituents' one-minute quotes, as ``read_minute_quotes`` returned
+    them: one row per stock per minute, sorted by ticker, then minute.
+
+    Written even when there are none, as ``splits/`` is. A day with no
+    partition is a day the feed was not read.
+    """
+    # One file, already sorted: about 196,000 rows on a full day.
+    frame = spark.createDataFrame(rows, MINUTE_QUOTES_SCHEMA).coalesce(1)
+    return _write(
+        frame, root, "minute_quotes", day,
+        {"parquet.block.size": str(MINUTE_QUOTES_ROW_GROUP_BYTES)},
+    )
+
+
 # ============================================
 # The whole set
 # ============================================
@@ -910,8 +955,8 @@ def write_query_tables(
     failure: the graph the run builds is unaffected either way. Otherwise the
     map's ``started`` and ``finished`` bracket the writes.
 
-    ``s3_client`` is for the split feed's and the company facts history's
-    reads, and tests pass a stub.
+    ``s3_client`` is for the reads of the split feed, the company facts
+    history and the minute feed, and tests pass a stub.
     """
     if not config.enable_query_tables:
         logger.info("Query tables disabled (--enable_query_tables false)")
@@ -1045,6 +1090,14 @@ def write_query_tables(
     )
     if facts is not None:
         written["companyfacts"] = write_companyfacts(spark, facts, root, day)
+
+    # The minute feed too. None means the day was not read, which
+    # read_minute_quotes has already logged.
+    minutes = read_minute_quotes(
+        config.minute_quotes_bucket, config.minute_quotes_prefix, day, s3_client
+    )
+    if minutes is not None:
+        written["minute_quotes"] = write_minute_quotes(spark, minutes, root, day)
     finished = _utc_stamp()
 
     logger.info(

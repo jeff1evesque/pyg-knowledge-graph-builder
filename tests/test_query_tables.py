@@ -21,6 +21,8 @@ about what must NOT reach them:
   * the companyfacts snapshot's facts reach no table, nor do the period days
     only they were dated to, and ``companyfacts/`` comes from the company facts
     history instead, on the same terms as ``splits/``
+  * ``minute_quotes/`` comes from the minute feed, one row per stock per
+    minute, sorted by ticker, and a day with no files gets no partition
 
 Tier 4: real Spark, small frames, no cluster.
 """
@@ -31,6 +33,7 @@ from datetime import date, datetime, timezone
 import pytest
 
 from companyfacts_feed import fact, history_object
+from minute_quote_feed import file_name, folder_client, minute_file, quote
 from spark_jobs.enrichment.temporal_unifier import (
     COVERS_DAY_PRED,
     OBSERVED_IN_PERIOD_PRED,
@@ -1231,6 +1234,141 @@ def test_reading_the_history_changes_no_other_table(spark, tmp_path):
             for paths in (with_history, without)
         ]
         assert compared[0] == compared[1], table
+
+
+# ======================================================================
+# minute_quotes/
+# ======================================================================
+
+MINUTE_PREFIX = "minute-quotes"
+MINUTE_FOLDER = f"{MINUTE_PREFIX}/year=2026/month=09/day=12/"
+MINUTE_QUOTES_DTYPES = [
+    ("ticker", "string"), ("capture_time", "string"), ("quote_time", "string"),
+    ("trade_time", "string"), ("bid", "double"), ("ask", "double"),
+    ("bid_size", "bigint"), ("ask_size", "bigint"), ("last", "double"),
+    ("mark", "double"), ("open", "double"), ("high", "double"),
+    ("low", "double"), ("prev_close", "double"), ("volume", "bigint"),
+    ("net_change", "double"), ("net_percent_change", "double"),
+]
+
+
+def _minute_name(hh_mm):
+    """The name of DAY's minute feed file for ``hh_mm``, UTC."""
+    return file_name(f"2026-09-12T{hh_mm}:00Z")
+
+
+def _minute_paths(spark, tmp_path, files, bucket="b"):
+    """The tables written for DAY, with the minute feed's folder holding
+    ``files``, {file name: body}."""
+    triples = spark.createDataFrame(
+        TRIPLES, "subject string, predicate string, object string"
+    )
+    client = folder_client(
+        {f"{MINUTE_FOLDER}{name}": body for name, body in files.items()}
+    )
+    config = _config(
+        tmp_path,
+        minute_quotes_bucket=bucket,
+        minute_quotes_prefix=MINUTE_PREFIX,
+    )
+    return write_query_tables(spark, triples, config, s3_client=client), config
+
+
+def test_a_days_minute_quotes_are_one_row_per_stock_per_minute_sorted(
+    spark, tmp_path,
+):
+    paths, config = _minute_paths(spark, tmp_path, {
+        _minute_name("13:32"): minute_file([quote("MSFT"), quote("AAPL")]),
+        _minute_name("13:31"): minute_file([quote("MSFT"), quote("AAPL")]),
+    })
+
+    assert paths["minute_quotes"] == table_path(
+        config.query_tables_path, "minute_quotes", DAY
+    )
+    table = spark.read.parquet(paths["minute_quotes"])
+    assert table.dtypes == MINUTE_QUOTES_DTYPES
+    assert [(row["ticker"], row["capture_time"]) for row in table.collect()] == [
+        ("AAPL", "2026-09-12T13:31:00.000Z"),
+        ("AAPL", "2026-09-12T13:32:00.000Z"),
+        ("MSFT", "2026-09-12T13:31:00.000Z"),
+        ("MSFT", "2026-09-12T13:32:00.000Z"),
+    ]
+    first = table.first()
+    assert (first["quote_time"], first["bid_size"], first["volume"]) == (
+        "2026-10-28T13:30:59.123Z", 300, 1234567,
+    )
+
+
+def test_minute_quotes_are_written_in_row_groups_a_ticker_read_can_skip(
+    spark, tmp_path, monkeypatch,
+):
+    """One file a day, cut into row groups by size. Sorted by ticker, each row
+    group holds a run of tickers, and its min and max let a reader after one
+    ticker skip the rest. The size is lowered here so a small day has several."""
+    import glob
+
+    import pyarrow.parquet as pq
+
+    from spark_jobs.graph import tables
+
+    monkeypatch.setattr(tables, "MINUTE_QUOTES_ROW_GROUP_BYTES", 4096)
+    tickers = [f"T{n:02d}" for n in range(40)]
+    paths, _ = _minute_paths(spark, tmp_path, {
+        _minute_name(f"13:{minute}"): minute_file([quote(ticker) for ticker in tickers])
+        for minute in range(31, 51)
+    })
+
+    (part,) = glob.glob(f"{paths['minute_quotes']}/*.parquet")
+    metadata = pq.ParquetFile(part).metadata
+    assert metadata.num_rows == 800
+    assert metadata.num_row_groups > 1
+    ranges = [
+        (group.column(0).statistics.min, group.column(0).statistics.max)
+        for group in (
+            metadata.row_group(i) for i in range(metadata.num_row_groups)
+        )
+    ]
+    assert all(low <= high for low, high in ranges)
+    assert all(
+        ranges[i][1] <= ranges[i + 1][0] for i in range(len(ranges) - 1)
+    ), ranges
+
+
+@pytest.mark.parametrize("case", ["no files", "unreadable", "no bucket"])
+def test_no_minute_quotes_partition_when_the_feed_was_not_read(
+    spark, tmp_path, case,
+):
+    files = {
+        "no files": {},
+        "unreadable": {_minute_name("13:31"): b"not parquet"},
+        "no bucket": {_minute_name("13:31"): minute_file([quote()])},
+    }[case]
+    paths, config = _minute_paths(
+        spark, tmp_path, files, bucket="" if case == "no bucket" else "b"
+    )
+
+    assert "minute_quotes" not in paths
+    assert not os.path.exists(
+        table_path(config.query_tables_path, "minute_quotes", DAY)
+    )
+    assert paths["nodes"], "the other tables are written all the same"
+
+
+def test_reading_the_minute_feed_changes_no_other_table(spark, tmp_path):
+    """No node, edge or triple comes from the feed, so every other table and
+    the store are the same with it as without it."""
+    files = {_minute_name("13:31"): minute_file([quote(), quote("MSFT")])}
+    with_feed, _ = _minute_paths(spark, tmp_path / "with", files)
+    without, _ = _minute_paths(spark, tmp_path / "without", files, bucket="")
+
+    assert set(with_feed) - set(without) == {"minute_quotes"}
+    for table in ("nodes", "edges", "edge_types", "facts", "entities", "snapshots"):
+        compared = [
+            sorted(map(str, spark.read.parquet(paths[table]).collect()))
+            for paths in (with_feed, without)
+        ]
+        assert compared[0] == compared[1], table
+    assert _store_triples(with_feed["graph"]) == _store_triples(without["graph"])
 
 
 # ======================================================================

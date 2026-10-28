@@ -17,6 +17,7 @@ The `.pt` has no part in this. It holds numbers without names; see
 | `facts/` | names, dates, amounts and codes on every non-market node | several rows per node |
 | `snapshots/` | option and equity quotes | 9.3 million rows a day: summarize before prompting |
 | `companyfacts/` | a company's reported numbers, by CIK, with `property` and `length` naming them plainly | a number is only on the day it was filed, so read the window's days |
+| `minute_quotes/` | a stock's bid, ask and price at a given minute of the trading day | about 196,000 rows a day: pick the tickers and minutes before prompting, and times are UTC |
 | `entities/` | finding a node by name, or embedding | mostly short names and labels |
 | `graph/` | multi-hop questions over one day, in SPARQL | one day at a time, and no market data |
 
