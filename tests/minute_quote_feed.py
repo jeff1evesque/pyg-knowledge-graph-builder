@@ -1,9 +1,10 @@
 """A stub S3 client serving the one-minute quote feed.
 
 Shared by tests/test_minute_quotes.py and tests/test_query_tables.py. The feed is
-one Parquet file per minute in a day's folder, with the raw JSON column the table
-leaves out. The reader lists the folder, then reads each file, so the stub
-serves both, two keys a page so a listing takes more than one.
+one Parquet file per minute in a day's folder, named for its minute, in the
+feed's own column names, which the reader maps to the table's. The reader lists
+the folder, then reads each file, so the stub serves both, two keys a page so a
+listing takes more than one.
 """
 import io
 from datetime import datetime, timedelta, timezone
@@ -12,25 +13,32 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
 
-from spark_jobs.graph import minute_quotes
-
-_TYPES = {
-    "ticker": pa.string(),
-    "capture_time": pa.string(),
-    "quote_time": pa.int64(),
-    "trade_time": pa.int64(),
-    "bid_size": pa.int64(),
-    "ask_size": pa.int64(),
-    "volume": pa.int64(),
-}
-# In the feed's names, which the reader maps to the table's.
-FEED_SCHEMA = pa.schema(
-    [
-        (minute_quotes.FEED_NAMES.get(column, column), _TYPES.get(column, pa.float64()))
-        for column in minute_quotes.COLUMNS
-    ]
-    + [("raw_json", pa.string())]
-)
+# A minute's file as upstream writes it, less columns no test needs: the quote
+# in the feed's names with its text as large strings, and beside it when each
+# call was answered, a column of nulls, and the raw JSON, none of which the
+# table keeps. Written out rather than built from the reader's name map, so a
+# wrong name in the map fails the tests.
+FEED_SCHEMA = pa.schema([
+    ("capture_timestamp", pa.large_string()),
+    ("symbol", pa.large_string()),
+    ("ask_price", pa.float64()),
+    ("ask_size", pa.int64()),
+    ("bid_price", pa.float64()),
+    ("bid_size", pa.int64()),
+    ("close_price", pa.float64()),
+    ("exchange_id", pa.null()),
+    ("high_price", pa.float64()),
+    ("last_price", pa.float64()),
+    ("low_price", pa.float64()),
+    ("mark", pa.float64()),
+    ("net_change", pa.float64()),
+    ("net_percent_change", pa.float64()),
+    ("open_price", pa.float64()),
+    ("quote_time", pa.int64()),
+    ("total_volume", pa.int64()),
+    ("trade_time", pa.int64()),
+    ("raw_json", pa.large_string()),
+])
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
@@ -40,26 +48,33 @@ def epoch_ms(text: str) -> int:
     return (datetime.fromisoformat(text) - _EPOCH) // timedelta(milliseconds=1)
 
 
-def quote(ticker="AAPL", minute="2026-10-28T13:31:00Z", **overrides):
-    """One stock's quote for one minute, in the table's names, unless overridden."""
+def file_name(minute="2026-10-28T13:31:00Z"):
+    """A minute's file name, as upstream names it: the minute the poll was due,
+    in UTC, with dashes for the colons."""
+    return f"{minute.replace(':', '-')}.snappy.parquet"
+
+
+def quote(symbol="AAPL", **overrides):
+    """One stock's quote, a row of a minute's file in the feed's names, unless
+    overridden."""
     row = {
-        "ticker": ticker,
-        "capture_time": minute,
-        "quote_time": epoch_ms("2026-10-28T13:30:59.123Z"),
-        "trade_time": epoch_ms("2026-10-28T13:30:58.004Z"),
-        "bid": 262.5,
-        "ask": 262.55,
-        "bid_size": 300,
+        "capture_timestamp": "2026-10-28T13:31:01.234Z",
+        "symbol": symbol,
+        "ask_price": 262.55,
         "ask_size": 200,
-        "last": 262.52,
+        "bid_price": 262.5,
+        "bid_size": 300,
+        "close_price": 259.58,
+        "high_price": 263.0,
+        "last_price": 262.52,
+        "low_price": 259.8,
         "mark": 262.525,
-        "open": 260.1,
-        "high": 263.0,
-        "low": 259.8,
-        "prev_close": 259.58,
-        "volume": 1234567,
         "net_change": 2.94,
         "net_percent_change": 1.1326,
+        "open_price": 260.1,
+        "quote_time": epoch_ms("2026-10-28T13:30:59.123Z"),
+        "total_volume": 1234567,
+        "trade_time": epoch_ms("2026-10-28T13:30:58.004Z"),
         "raw_json": '{"quote": "the bulk of the file"}',
     }
     row.update(overrides)
@@ -68,12 +83,8 @@ def quote(ticker="AAPL", minute="2026-10-28T13:31:00Z", **overrides):
 
 def minute_file(rows, schema=FEED_SCHEMA):
     """Parquet bytes for these rows, as upstream writes one minute's file."""
-    named = [
-        {minute_quotes.FEED_NAMES.get(name, name): value for name, value in row.items()}
-        for row in rows
-    ]
     table = pa.Table.from_pylist(
-        [{name: row.get(name) for name in schema.names} for row in named],
+        [{name: row.get(name) for name in schema.names} for row in rows],
         schema=schema,
     )
     sink = io.BytesIO()
