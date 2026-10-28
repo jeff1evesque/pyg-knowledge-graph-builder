@@ -186,18 +186,19 @@ The notebook passes the two flags to the seed leg from
 
 The one-minute quote feed is not a source path either. Upstream polls the index
 constituents' quotes once a minute through the trading day and writes each poll
-as one Parquet file in the day's folder, 391 on a full day, and a run reads every
-`.parquet` file directly in its day's folder on the driver:
+as one Parquet file in the day's folder, 391 on a full day, named for the minute
+the poll was due in UTC, with dashes for the colons. A run reads every `.parquet`
+file directly in its day's folder on the driver:
 
 ```
-<prefix>/year=YYYY/month=MM/day=DD/
+<prefix>/year=YYYY/month=MM/day=DD/YYYY-MM-DDTHH-MM-SSZ.snappy.parquet
 ```
 
 The folders are dated in UTC, and the trading day falls inside one UTC date all
 year, so the run reads the folder of the day it builds. It writes the rows to
 [`minute_quotes/`](../reference/tables.md#minute_quotes), one row per stock per
-minute, with the feed's epoch-millisecond times turned into UTC times and its
-raw JSON left out.
+minute, with each row's minute taken from its file's name, the feed's
+epoch-millisecond times turned into UTC times, and its raw JSON left out.
 
 Missing minute quotes never stop a run. In each of these cases the run logs why,
 writes no `minute_quotes/` partition for the day, and builds every other table
@@ -210,11 +211,11 @@ and the `.pt` as usual:
 | a folder that cannot be listed | WARNING, with the error |
 | no file in the folder that can be read | WARNING, naming the first file and its error |
 
-A file that cannot be read, or lacks a column the table keeps, costs only its
-minute: the run leaves it out, logs how many it left out and the first one's
-error, and keeps the rest of the day. A stock that appears twice in one minute
-is kept once, from the first file in name order, and the run logs how many it
-dropped.
+A file that cannot be read, lacks a column the table keeps, or is not named for a
+minute costs only its own rows: the run leaves it out, logs how many it left out
+and the first one's error, and keeps the rest of the day. A stock that appears
+twice in one minute is kept once, the first time it is read, and the run logs
+how many it dropped.
 
 The notebook passes the two flags to the seed leg from `PYG_MINUTE_QUOTES_BUCKET`
 and `PYG_MINUTE_QUOTES_PREFIX`, and `bin/daily_run.sh` does not list the feed
